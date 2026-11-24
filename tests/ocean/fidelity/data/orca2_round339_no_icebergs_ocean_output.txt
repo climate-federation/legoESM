@@ -1,0 +1,11 @@
+   nn_ice      =  1
+   ln_drgice_imp   =  F
+   ln_mxl0     =  T
+   nn_mxlice   =  0
+   nn_itend    =  10
+   sn_ice      = ice_cover_clim.nc
+
+ icb_nam : iceberg initialization through namberg namelist read
+ ~~~~~~~~
+
+    ==>>>   No icebergs used

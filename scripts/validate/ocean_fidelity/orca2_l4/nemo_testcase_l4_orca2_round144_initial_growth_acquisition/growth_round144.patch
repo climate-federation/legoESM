@@ -1,0 +1,19 @@
+--- stprk3.F90
++++ stprk3.F90
+@@ -24,0 +25 @@
++   USE l4_r144_growth, ONLY : r144_growth_entry, r144_growth_baro ! round-144 WRITE-only growth record
+@@ -210,0 +212,2 @@
++      CALL r144_growth_entry( kstp, ssh(ntsi:ntei,ntsj:ntej,Nbb), r3t(ntsi:ntei,ntsj:ntej,Nbb), &
++         & uu_b(ntsi:ntei,ntsj:ntej,Nbb), vv_b(ntsi:ntei,ntsj:ntej,Nbb) )
+@@ -214,0 +219,3 @@
++      CALL r144_growth_baro( kstp, ssh(ntsi:ntei,ntsj:ntej,Naa), r3t(ntsi:ntei,ntsj:ntej,Naa), &
++         & uu_b(ntsi:ntei,ntsj:ntej,Naa), vv_b(ntsi:ntei,ntsj:ntej,Naa), &
++         & un_adv(ntsi:ntei,ntsj:ntej), vn_adv(ntsi:ntei,ntsj:ntej) )
+--- traadv.F90
++++ traadv.F90
+@@ -24,0 +25 @@
++   USE l4_r144_growth, ONLY : r144_growth_stage1 ! round-144 WRITE-only growth record
+@@ -270,0 +272,3 @@
++         CALL r144_growth_stage1( kt, kstg, r3t(ntsi:ntei,ntsj:ntej,Kaa), &
++            & pFu(ntsi:ntei,ntsj:ntej,:), pFv(ntsi:ntei,ntsj:ntej,:), &
++            & pFw(ntsi:ntei,ntsj:ntej,:) )

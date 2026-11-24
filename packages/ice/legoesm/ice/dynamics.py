@@ -998,6 +998,45 @@ def si3_orca_cgrid_metrics(domain_cfg) -> SI3CGridMetrics:
     )
 
 
+def si3_orca2_cgrid_metrics(domain_cfg, fold) -> SI3CGridMetrics:
+    """ORCA2 T-pivot SI3 metrics from its own no-halo domain arrays.
+
+    ``iom_get(..., kfill=jpfillcopy)`` preserves the two closed-south metric
+    rows, while the north and cyclic halos use the same T-pivot LBC program as
+    SI3.  Metric values are scalars even at U/V points, so their fold sign is
+    always positive.
+    """
+
+    from legoesm.ice.si3_orca2_state import si3_lbc_lnk_orca2
+
+    halo = int(fold.nn_hls)
+    if halo != _SI3_REQUIRED_HALO:
+        raise ValueError("ORCA2 SI3 metrics require nn_hls=2")
+    out = {}
+    for name, point in _SI3_ORCA_METRIC_POINTS:
+        inner = jnp.asarray(domain_cfg[name], dtype=jnp.float64)
+        if inner.ndim != 2:
+            raise ValueError(f"ORCA2 metric {name} must be 2-D; got {inner.shape}")
+        value = jnp.pad(inner.T, halo)
+        value = si3_lbc_lnk_orca2(
+            value,
+            point,
+            1.0,
+            nn_hls=halo,
+            ldfull=fold.nfd_full_when_absent,
+        )
+        value = value.at[:, halo - 1].set(value[:, halo])
+        value = value.at[:, halo - 2].set(value[:, halo + 1])
+        out[name] = value
+    return SI3CGridMetrics(
+        **out,
+        area_t=out["e1t"] * out["e2t"],
+        area_u=out["e1u"] * out["e2u"],
+        area_v=out["e1v"] * out["e2v"],
+        area_f=out["e1f"] * out["e2f"],
+    )
+
+
 def _si3_config_halo(config: "SI3CGridAEVPConfig"):
     """Adapt the configured periodic/ORCA-F halo to the shared lbc_lnk call shape."""
 

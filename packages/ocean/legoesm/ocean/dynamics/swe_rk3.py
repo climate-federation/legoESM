@@ -31,7 +31,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
 from legoesm.ocean.eos import nemo_qco_r3t_ratio
 from legoesm.ocean.state import ENSVorticityConfig
 from legoesm.ocean.vertical import (
-    nemo_ldf_reference_e3f,
+    OceanPartialCellCoordinate, nemo_ldf_reference_e3f,
     nemo_qco_live_face_geometry_from_operands,
     nemo_qco_live_vorticity_e3f_cgrid,
     nemo_qco_resolved_mesh_operands,
@@ -302,6 +302,9 @@ def swe_rk3_stage(entry, before_entry, dt, stage, grid, z_coord, land_mask,
     # dom_qco_r3c output ratios use the shared, unfloored QCO builders.
     r3t_after = nemo_qco_r3t_ratio(
         z_coord, ssh_after, jnp.asarray(ops.e3t_0[..., 0]) * mask,
+        linear_free_surface=(
+            False if isinstance(z_coord, OceanPartialCellCoordinate)
+            else z_coord.linear_free_surface),
         evaluation="nemo_reciprocal")
     face_after = nemo_qco_live_face_geometry_from_operands(
         ssh_after, ops.e3u_0, ops.e3v_0, ops.umask3, ops.vmask3,
@@ -344,6 +347,9 @@ def _entry_from_state(state, stress_before, stress_now, grid, z_coord, config):
         z_coord, grid, umask3, vmask3, dtype, 1)
     r3t = nemo_qco_r3t_ratio(
         z_coord, state.eta.data, jnp.asarray(ops.e3t_0[..., 0]) * mask,
+        linear_free_surface=(
+            False if isinstance(z_coord, OceanPartialCellCoordinate)
+            else z_coord.linear_free_surface),
         evaluation="nemo_reciprocal")
     face = nemo_qco_live_face_geometry_from_operands(
         state.eta.data, ops.e3u_0, ops.e3v_0, ops.umask3, ops.vmask3,

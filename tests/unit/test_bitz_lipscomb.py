@@ -15,6 +15,10 @@ node), ahead of its prognostic-state integration:
 from __future__ import annotations
 
 
+import importlib.util
+import json
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -624,3 +628,149 @@ def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
     np.testing.assert_array_equal(
         np.asarray(age_gradient), np.asarray([1.0], dtype=np.float32),
     )
+def test_si3_column_step_full_gradient_sweep_matches_main_or_lane_difference():
+    """All exit/input leaf pairs match the reviewed main/FD oracle, eager/JIT."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_lane_column_step_arrays,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    concentrations = (0.0, 1e-12, 5e-11, 1e-10, 2e-10, 0.5)
+    thicknesses = (0.0, 0.5)
+    qleads = (0.0, -40.0)
+
+    def vector(concentration, h_ice, qlead):
+        return jnp.asarray((
+            concentration, h_ice, 0.0, c.T0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 271.27, 34.7, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, qlead, 1.0,
+        ), dtype=jnp.float64)
+
+    cases = tuple(
+        (concentration, h_ice, qlead)
+        for concentration in concentrations
+        for h_ice in thicknesses
+        for qlead in qleads
+    )
+    vectors = jnp.stack([vector(*case) for case in cases])
+
+    def step(values):
+        scalar = lambda index: values[index:index + 1]
+        layers = lambda index: jnp.full((1, 3), values[index])
+        state = SI3ColumnArrays(
+            scalar(0), scalar(1), scalar(2), scalar(3), layers(4), layers(5),
+            scalar(6), layers(7), scalar(8),
+        )
+        forcing = SI3SurfaceForcing(
+            qns_ice=scalar(9), qsr_ice=scalar(10), dqns_ice=scalar(11),
+            qtr_ice_top=scalar(12), t_bottom=scalar(13), sss=scalar(14),
+            evaporation=scalar(15), snow_precipitation=scalar(16),
+            qprec_ice=scalar(17), qcn_ice_bottom=scalar(18),
+            qsb_ice_bottom=scalar(19), fhld=scalar(20), qlead=scalar(21),
+            frq_m=scalar(22), sst_m=None,
+        )
+        result = si3_lane_column_step_arrays(
+            state, forcing, 3600.0, c, si3=SI3ThermoConfig(),
+        ).exit
+        return jnp.stack([jnp.sum(leaf) for leaf in result])
+
+    fixture_path = (
+        Path(__file__).parents[1]
+        / "ice/fidelity/fixtures/si3_reverse_sweep_oracle.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    generator_path = (
+        Path(__file__).parents[2]
+        / "scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "si3_reverse_sweep_oracle", generator_path,
+    )
+    assert spec is not None and spec.loader is not None
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    oracle = generator.decode(fixture["target"])
+    methods = generator.decode(fixture["methods"])
+    steps = generator.decode(fixture["steps"])
+    refinement_steps = generator.decode(fixture["refinement_steps"])
+    fd_rounding_bound = generator.decode(fixture["fd_rounding_bound"])
+    excluded = generator.decode(fixture["excluded"])
+    assert (
+        oracle.shape == methods.shape == steps.shape
+        == refinement_steps.shape == fd_rounding_bound.shape
+        == excluded.shape == (24, 9, 23)
+    )
+    assert fixture["main_sha"] == generator.MAIN_SHA
+    assert fixture["lane_sha"] == generator.LANE_SHA
+    assert fixture["selection"] == generator.SELECTION_RULE
+    assert fixture["fd_rounding_bound_formula"] == generator.FD_ROUNDING_BOUND_FORMULA
+    assert bool(np.all(steps > 0.0))
+    assert bool(np.all(np.isfinite(fd_rounding_bound) & (fd_rounding_bound >= 0.0)))
+    assert np.array_equal(excluded, methods == 4)
+    assert bool(np.all(np.isfinite(oracle[~excluded])))
+    eager = jax.vmap(jax.jacrev(step))(vectors)
+    compiled = jax.jit(jax.vmap(jax.jacrev(step)))(vectors)
+    for mode, actual in (("eager", eager), ("jit", compiled)):
+        actual = np.asarray(actual)
+        assert bool(np.all(np.isfinite(actual))), mode
+        error = np.where(excluded, 0.0, np.abs(actual - oracle))
+        relative = np.where(
+            excluded,
+            0.0,
+            error
+            / np.maximum(
+                np.maximum(np.abs(actual), np.abs(oracle)),
+                np.finfo(np.float64).tiny,
+            ),
+        )
+        passed = excluded | (relative <= 1.0e-6) | (error <= fd_rounding_bound)
+        resolved_relative = np.where(error <= fd_rounding_bound, 0.0, relative)
+        for case, worst in zip(
+            cases, np.max(resolved_relative, axis=(1, 2)), strict=True
+        ):
+            print(
+                f"gradient-sweep {mode} conc={case[0]:.12g} "
+                f"h_ice={case[1]:.1f} qlead={case[2]:.1f} worst_rel={worst:.3e}"
+            )
+        assert bool(np.all(passed)), (
+            mode,
+            int(np.count_nonzero(~passed)),
+            np.unravel_index(
+                int(np.argmax(np.where(passed, -1.0, relative))), relative.shape,
+            ),
+        )
+
+
+def test_si3_reverse_sweep_generator_records_entry_provenance():
+    """The committed fixture records an independent source/stencil/step per entry."""
+    generator_path = (
+        Path(__file__).parents[2]
+        / "scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "si3_reverse_sweep_oracle_meta", generator_path,
+    )
+    assert spec is not None and spec.loader is not None
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    fixture_path = (
+        Path(__file__).parents[1]
+        / "ice/fidelity/fixtures/si3_reverse_sweep_oracle.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    methods = generator.decode(fixture["methods"])
+    steps = generator.decode(fixture["steps"])
+    refinement_steps = generator.decode(fixture["refinement_steps"])
+    fd_rounding_bound = generator.decode(fixture["fd_rounding_bound"])
+    excluded = generator.decode(fixture["excluded"])
+    assert set(np.unique(methods)).issubset(generator.METHOD_LEGEND)
+    assert bool(np.all(np.isfinite(steps) & (steps > 0.0)))
+    assert bool(np.all(np.isfinite(refinement_steps) & (refinement_steps > 0.0)))
+    assert bool(np.all(np.isfinite(fd_rounding_bound) & (fd_rounding_bound >= 0.0)))
+    assert np.array_equal(excluded, methods == 4)
+    assert len(fixture["excluded_nondifferentiable"]) == int(np.count_nonzero(excluded))
+    assert fixture["selection"] == generator.SELECTION_RULE
+    assert fixture["fd_rounding_bound_formula"] == generator.FD_ROUNDING_BOUND_FORMULA

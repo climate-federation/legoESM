@@ -45,6 +45,12 @@ def test_source_statement_is_the_measured_round94_boundary() -> None:
     assert statement["status"] == "HELD_BY_GYRE_2ULP_GATE"
 
 
+def test_materialization_arm_requires_unmasked_transport() -> None:
+    source = gate.Path(gate.__file__).read_text()
+    assert "external_mode_association and raw_reference_depth" in source
+    assert "and unmasked_v_transport" in source
+
+
 def test_boundary_association_arm_is_not_scoped_to_trace_models() -> None:
     source = gate.Path(
         gate.__file__).parents[4] / "packages/ocean/legoesm/ocean/dynamics" \

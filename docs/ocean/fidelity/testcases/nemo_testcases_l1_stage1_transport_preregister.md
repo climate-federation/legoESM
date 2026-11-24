@@ -52,14 +52,14 @@ touches the 3-D `Krhs`.  So NEMO's stage-1 3-D momentum RHS is
 
 `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py`:
 
-- `:4087-4093` — the step-entry `self.tendencies(...)` call.  It passes NO
+- `:4106-4112` — the step-entry `self.tendencies(...)` call.  It passes NO
   `momentum_flux_transport_velocity`, so the horizontal momentum advection uses
   the default `Q = h u(Kbb)`.  Its depth mean becomes `F_slow_{u,v}`, which
-  seeds the barotropic solve at `:4826`; the baroclinic remainder is
-  `du_dt_pert` (`:4211`).
-- `:5011-5017` — stage 1 steps with `du_dt_pert` (plus the Aimp vertical UP3
+  seeds the barotropic solve at `:4845`; the baroclinic remainder is
+  `du_dt_pert` (`:4230`).
+- `:5030-5036` — stage 1 steps with `du_dt_pert` (plus the Aimp vertical UP3
   `_vert0`, which is built from `_g0` and DOES carry the correction).
-- `:4439-4454` — stages 2 and 3 go through `_mom_pert_ws`, which passes
+- `:4458-4473` — stages 2 and 3 go through `_mom_pert_ws`, which passes
   `momentum_flux_transport_velocity = u_in + (Hu_avg/H_u - mean(u_in))`; that
   bracket is NEMO's `zub` term for term, and
   `_NEMOWSRK3TestHooks.momentum_transport_reconcile` defaults to `True`.

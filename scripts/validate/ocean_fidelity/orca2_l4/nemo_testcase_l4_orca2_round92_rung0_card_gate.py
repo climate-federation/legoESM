@@ -16,6 +16,7 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/oc
         sys.path.insert(0, str(package))
 
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    build_orca2_initial_ts,
     build_orca2_zps_card,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -51,12 +52,41 @@ def build_rung0_card(deck_root: Path):
         scheme="constant",
         constant=vertical.constant._replace(
             A_v=1.2e-4, K_v=1.2e-5, lat_dependent=False),
-        iwm=vertical.iwm._replace(enabled=False, require_forcing_maps=False),
-        ddm=vertical.ddm._replace(enabled=False),
+        # Round 313: the shipped card's literal IWM/DDM forms stated back to
+        # their previous values; constant mixing runs neither.
+        iwm=vertical.iwm._replace(enabled=False, require_forcing_maps=False,
+                                  form="generic", tsdiff=False),
+        ddm=vertical.ddm._replace(enabled=False, form="hybrid"),
         vmix_background_mode="additive",
+        # Decision 130: the shipped card's V1 TKE statements stay off on a
+        # card that does not run TKE (stated, not inherited).
+        tke=vertical.tke._replace(
+            nemo_bn2_source_rounded=False,
+            nemo_sh2_step_entry_ssh=False,
+            nemo_tke_solve_source_rounded=False,
+            nemo_sh2_fold_top_v=False,
+            nemo_tke_matrix_rhs_source_rounded=False,
+            nemo_sh2_r3_source_rounded=False,
+            nemo_sh2_r3_stored_reciprocal=False,
+            # Round 312 (D135): the shipped card's penetration, mixing-length
+            # and Langmuir forms, likewise stated at their pre-import values.
+            etau_mode="none",
+            etau_htau_mode="constant10m",
+            nemo_etau_wmask=False,
+            tke_htau_evaluation="jax_expression",
+            tke_etau_exponential_evaluation="jax_expression",
+            tke_mxl_raw_evaluation="factored",
+            nemo_mxl_terminal_e3t=False,
+            tke_langmuir_evaluation="vectorized",
+        ),
     )
     physics = model.physics._replace(
         vertical_mixing=vertical,
+        # Round 309: the step-entry EVD trigger needs the step-entry bn2
+        # bundle, which a constant-mixing card does not build (refuses).
+        convection=model.physics.convection._replace(
+            enhanced_diffusion=model.physics.convection.enhanced_diffusion._replace(
+                trigger_step_entry_bn2=False)),
         shortwave_penetration=None,
         mle=None,
     )
@@ -71,17 +101,42 @@ def build_rung0_card(deck_root: Path):
         bbl_aht_m2_s=0.0,
         runoff_depth_spread_m=0.0,
         runoff_depth_spread_map=None,
-        # zdfdrg.f90:274-277,540-547 resolves rn_Cd0*rn_Uc0=4e-4.
-        # The exact implicit composition is declared below, never guessed.
-        bottom_drag=model.bottom_drag._replace(
-            bottom_drag_scheme="legacy",
-            bottom_drag_r=4.0e-4,
-            bottom_drag_bg_velocity=0.0,
-        ),
-        zdf_drag_in_matrix=False,
-        barotropic_drag_substep=False,
+        # Decision 133: the shipped card's ln_lin implicit bundle and G7's
+        # bottom statements are inherited unchanged (zdfdrg.f90:276).
+        # G4's stage-3 heat/Kmm unit is certified on the forced ORCA2 path.
+        # Rung 0 has no heat/runoff/shortwave module, so B90 requires these
+        # forcing-path selectors to stay off here and on OMT-1..4.
+        rk3_stage3_heat_nemo_written=False,
+        rk3_stage3_tracer_nemo_stored_thickness=False,
+        # G5's stage-3 salt statement reads the recorded sfx (round 304).
+        rk3_stage3_salt_nemo_written=False,
+        # Round 323: the shipped card's L8 stage-3 Krhs walk (geothermal,
+        # damping, BBL in Krhs) stated off; this deck runs none of them
+        # (ln_trabbc = ln_tradmp = ln_trabbl = F).
+        rk3_stage3_tracer_krhs_nemo_order=False,
+        rk3_stage3_geothermal_nemo_written=False,
+        rk3_stage3_geothermal_after_ldf_nemo_order=False,
+        rk3_stage3_damping_after_geothermal_nemo_order=False,
+        rk3_stage3_l8_nemo_order=False,
+        # Round 325: L9's eddy-induced velocity stated off (ln_ldfeiv = F).
+        rk3_stage3_l9_eiv_nemo_order=False,
+        bbl_nemo_stage3_krhs=False,
+        bbl_nemo_pivot_ghost=False,
+    )
+    root = Path(deck_root)
+    temperature, salinity = build_orca2_initial_ts(
+        root / "data_1m_potential_temperature_nomask.nc",
+        root / "data_1m_salinity_nomask.nc",
+        np.asarray(shipped.recipe.z_coord.is_active, dtype=bool),
+        # The hierarchy rung-0 deck resolves ln_tsd_dmp=.false.; compiled
+        # dtatsd.f90:218-254 therefore skips the ORCA_R2 alteration block.
+        apply_hand_alterations=False,
     )
     state = shipped.recipe.initial_state._replace(
+        T=shipped.recipe.initial_state.T.replace(
+            data=jnp.asarray(temperature, dtype=jnp.float64)),
+        S=shipped.recipe.initial_state.S.replace(
+            data=jnp.asarray(salinity, dtype=jnp.float64)),
         eta=shipped.recipe.initial_state.eta.replace(
             data=jnp.zeros_like(shipped.recipe.initial_state.eta.data)),
         tke=None,
@@ -96,6 +151,7 @@ def build_rung0_card(deck_root: Path):
         physics_config=physics,
         initial_state=state,
         iwm_forcing=None,
+        tracer_damping=None,
     )
     # This is deliberately gate-local until the internal record admits.  The
     # shipped card and its six SI3 selectors remain untouched.
@@ -108,8 +164,13 @@ def build_rung0_card(deck_root: Path):
         bbl_aht_m2_s=0.0,
         bbl_gamma_s=0.0,
         surface_boundary_condition="nemo_flx_zero",
-        surface_input_operator="nemo_fld_read",
-        unmeasured_features=("linear_implicit_bottom_drag",),
+        # This explicit value distinguishes rung 0's resolved
+        # ln_tsd_dmp=.false. input path from the shipped card's live damping
+        # arm; it is card metadata, not a production model selector.
+        surface_input_operator="nemo_fld_read_no_tsd_dmp",
+        # NEMO's linear implicit drag is selected and measured (D133, round
+        # 305); without ice it is D122-measured, not ladder-certified.
+        unmeasured_features=(),
         icebergs_enabled=False,
         iceberg_inputs=(),
     )
@@ -118,6 +179,10 @@ def build_rung0_card(deck_root: Path):
 def validate_rung0_card(card, *, execution: bool = False) -> None:
     """Fail closed on every rung-0 hierarchy selector used by this probe."""
 
+    if execution and card.unmeasured_features:
+        raise ValueError(
+            "ORCA2-rung0-zps is not execution-ready; unresolved selected "
+            "arms: " + ", ".join(card.unmeasured_features))
     cfg = card.recipe.model_config
     vmix = cfg.physics.vertical_mixing
     selectors = (
@@ -137,12 +202,17 @@ def validate_rung0_card(card, *, execution: bool = False) -> None:
         cfg.runoff_depth_spread_m == 0.0,
         cfg.runoff_depth_spread_map is None,
         card.surface_boundary_condition == "nemo_flx_zero",
-        card.surface_input_operator == "nemo_fld_read",
-        card.unmeasured_features == ("linear_implicit_bottom_drag",),
-        cfg.bottom_drag.bottom_drag_scheme == "legacy",
-        cfg.bottom_drag.bottom_drag_r == 4.0e-4,
-        not cfg.zdf_drag_in_matrix,
-        not cfg.barotropic_drag_substep,
+        card.surface_input_operator == "nemo_fld_read_no_tsd_dmp",
+        card.unmeasured_features == (),
+        cfg.bottom_drag.bottom_drag_scheme == "nemo_linear",
+        (cfg.bottom_drag.bottom_drag_cd0, cfg.bottom_drag.bottom_drag_uc0)
+        == (1.0e-3, 0.4),
+        (cfg.bottom_drag.bottom_drag_r, cfg.bottom_drag.bottom_drag_bbl_thickness,
+         cfg.bottom_drag.bottom_drag_bg_velocity) == (0.0, 0.0, 0.0),
+        cfg.zdf_drag_in_matrix,
+        cfg.barotropic_drag_substep,
+        cfg.nemo_bottom_drag_written_statements,
+        not cfg.implicit_ice_ocean_top_drag,
     )
     require(all(selectors), "rung-0 card module exclusion or selector moved")
     require(all(getattr(card.recipe.initial_state, name) is None
@@ -151,10 +221,6 @@ def validate_rung0_card(card, *, execution: bool = False) -> None:
             "rung-0 card carries inactive TKE state")
     require(not np.any(np.asarray(card.recipe.initial_state.eta.data)),
             "rung-0 independent no-ice SSH is not zero")
-    if execution:
-        raise ValueError(
-            "ORCA2-rung0-zps is not execution-ready; unresolved selected "
-            "arms: linear_implicit_bottom_drag")
 
 
 def _payload(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
@@ -312,13 +378,7 @@ def run(deck_root: Path, record_root: Path, plant: str = "none") -> dict:
     validate_rung0_card(card)
     require(shipped.unmeasured_features[-1] == "si3_jpl5_layered_prather_state",
             "shipped ORCA2 sea-ice debt tuple moved")
-    try:
-        validate_rung0_card(card, execution=True)
-    except ValueError as error:
-        require(str(error).endswith("linear_implicit_bottom_drag"),
-                f"unexpected execution refusal: {error}")
-    else:  # pragma: no cover - the declared gap must remain fail-closed
-        raise GateError("rung-0 card no longer refuses its unbuilt drag")
+    validate_rung0_card(card, execution=True)
 
     entry = assemble_frame(
         record_root, 1, 0, plant_layout=plant == "frame-layout")

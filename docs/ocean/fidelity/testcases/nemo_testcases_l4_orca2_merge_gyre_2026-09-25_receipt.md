@@ -173,7 +173,7 @@ the merged file rather than by shifting by hand:
   Deltas run +4 to +544 in the step module, +7 and +36 in the stage module,
   +7 and +13 in the recipe, +8 in the vertical module.
 - **3 that are NOT rigid, each recorded with its reason.**
-  `ocean_model_latlon_cgrid.py:7540-7972` to `:7988-8421`, extent 433 to 434,
+  `ocean_model_latlon_cgrid.py:7559-7991` to `:8007-8440`, extent 433 to 434,
   because main inserted one line inside the cited span — the same exception
   the GYRE lane recorded, reproduced here.
   `nemo_testcase_l2_gyre_round54_tke_operands.py:225-239`, no line moved but

@@ -1,0 +1,29 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -86,1 +86,1 @@
+-   nn_ice      = 2         !  =0 no ice boundary condition
++   nn_ice      = 1         !  =0 no ice boundary condition
+@@ -95,6 +95,12 @@
+    ln_wave     = .false.   !  Activate coupling with wave  (T => fill namsbc_wave)
+ /
+ !-----------------------------------------------------------------------
++&namsbc_iif    !   Ice-IF : use observed ice cover                      (nn_ice = 1)
++!-----------------------------------------------------------------------
++   cn_dir      = './'
++   sn_ice      ='ice_cover_clim.nc', -12., 'ice_cover', .true., .true., 'yearly', '', '', ''
++/
++!-----------------------------------------------------------------------
+ &namsbc_blk    !   namsbc_blk  generic Bulk formula                     (ln_blk =T)
+ !-----------------------------------------------------------------------
+    !                    !  bulk algorithm :
+@@ -251,5 +257,6 @@
+ !-----------------------------------------------------------------------
+    ln_lin = .true.         !     linear  drag: Cd = Cd0 Uc0
++   ln_drgice_imp = .false. ! K0: no implicit ice-ocean top drag without SI3 state
+ /
+ !-----------------------------------------------------------------------
+ &nambbc        !   bottom temperature boundary condition                (default: OFF)
+@@ -416,1 +423,2 @@
+-      nn_mxlice = 2           ! type of scaling under sea-ice
++      ln_mxl0     = .true.    ! K0: retain surface mixing-length anchor
++      nn_mxlice = 0           ! type of scaling under sea-ice

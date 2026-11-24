@@ -95,6 +95,12 @@ def run(
     record_root: Path,
     *,
     plant: str = "none",
+    external_mode_association: bool = False,
+    final_mean_association: bool = False,
+    raw_reference_depth: bool = False,
+    unmasked_v_transport: bool = False,
+    materialize_v_transport: bool = False,
+    stage_observer=None,
 ) -> dict[str, object]:
     import jax
 
@@ -105,6 +111,11 @@ def run(
     )
 
     require(plant in PLANTS, f"unknown plant {plant}")
+    require(not materialize_v_transport
+            or (external_mode_association and raw_reference_depth
+                and unmasked_v_transport),
+            "V materialization arm requires boundary association, raw depth, "
+            "and unmasked transport")
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
     require(get_policy() == policy and bool(jax.config.jax_enable_x64),
@@ -118,7 +129,11 @@ def run(
             "rung-0 record did not admit exactly 80 shards")
     card = rung0.build_rung0_card(deck_root)
     rung0.validate_rung0_card(card)
-    require(card.unmeasured_features == ("linear_implicit_bottom_drag",),
+    reference_depth_override = (
+        rung0.ladder.build_reference_depth_override(card)
+        if raw_reference_depth else None
+    )
+    require(card.unmeasured_features == (),
             "rung-0 exact-input debt changed")
 
     entry = rung0.assemble_frame(record_root, 1, 0)
@@ -140,10 +155,21 @@ def run(
         card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_momentum_stage=stage,
-            expose_tracer_stage=stage),
+            expose_tracer_stage=stage,
+            barotropic_external_mode_association=external_mode_association,
+            barotropic_final_mean_association=final_mean_association,
+            barotropic_reference_face_depth_override=reference_depth_override,
+            barotropic_unmasked_v_transport=unmasked_v_transport,
+            barotropic_materialize_v_transport=materialize_v_transport),
     ) for stage in (1, 2))
     final_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            barotropic_external_mode_association=external_mode_association,
+            barotropic_final_mean_association=final_mean_association,
+            barotropic_reference_face_depth_override=reference_depth_override,
+            barotropic_unmasked_v_transport=unmasked_v_transport,
+            barotropic_materialize_v_transport=materialize_v_transport))
 
     checkpoints: list[dict[str, object]] = []
     first_non_bit: dict[str, object] | None = None
@@ -156,6 +182,12 @@ def run(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface,
         )) for model in stage_models)
         print(f"PROGRESS kt={kt} exposed stages 1-2", file=sys.stderr, flush=True)
+        if stage_observer is not None:
+            # Host-only fidelity observer.  The two states above are already
+            # device_get'ed completed outputs from separately compiled models;
+            # publishing them here cannot enter or perturb the final model's
+            # JAX graph.  The default remains None for every existing caller.
+            stage_observer(kt, state, stage_states)
         state_after = jax.device_get(final_model.step(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
         print(f"PROGRESS kt={kt} completed stage 3", file=sys.stderr, flush=True)
@@ -199,6 +231,13 @@ def run(
         },
         "card_case": card.case,
         "unmeasured_features": list(card.unmeasured_features),
+        "private_arm": {
+            "external_mode_association": external_mode_association,
+            "final_mean_association": final_mean_association,
+            "raw_reference_depth": raw_reference_depth,
+            "unmasked_v_transport": unmasked_v_transport,
+            "materialize_v_transport": materialize_v_transport,
+        },
         "entry_identity": entry_row,
         "checkpoint_count": len(checkpoints),
         "row_count": len(rows),
@@ -213,10 +252,24 @@ def main() -> int:
     parser.add_argument("--deck-root", type=Path, required=True)
     parser.add_argument("--record-root", type=Path, required=True)
     parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--external-mode-association", action="store_true")
+    parser.add_argument("--final-mean-association", action="store_true")
+    parser.add_argument("--raw-reference-depth", action="store_true")
+    parser.add_argument("--unmasked-v-transport", action="store_true")
+    parser.add_argument("--materialize-v-transport", action="store_true")
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
     try:
-        result = run(args.deck_root, args.record_root, plant=args.plant)
+        result = run(
+            args.deck_root,
+            args.record_root,
+            plant=args.plant,
+            external_mode_association=args.external_mode_association,
+            final_mean_association=args.final_mean_association,
+            raw_reference_depth=args.raw_reference_depth,
+            unmasked_v_transport=args.unmasked_v_transport,
+            materialize_v_transport=args.materialize_v_transport,
+        )
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, rung0.GateError, frames.GateError, OSError, ValueError) as error:
         if args.plant != "none":

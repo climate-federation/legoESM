@@ -469,6 +469,7 @@ def _production_surface_case():
         ff_f=jnp.ones(full_shape, dtype=jnp.float64),
         tmask_surface=jnp.ones(full_shape, dtype=jnp.float64),
         smask0=one,
+        use_conservative_temperature=False,
     )
     bulk_args = (
         6.0 * one,
@@ -544,6 +545,7 @@ def test_production_binding_and_existing_top_cell_runoff_path(monkeypatch):
         raw_bulk.qsr,
         raw_bulk.qns,
         nn_hls=1,
+        use_conservative_temperature=False,
     )
     np.testing.assert_array_equal(_bits(baseline.bulk.qsr), _bits(expected_s3.qsr))
     np.testing.assert_array_equal(_bits(baseline.bulk.qns), _bits(expected_s3.qns))

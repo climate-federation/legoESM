@@ -364,6 +364,9 @@ def test_orca2_card_states_the_config_tail_selectors():
         "vmix_eos_use_config_rho0": False,
     }
     assert {name: getattr(config, name) for name in expected_tail} == expected_tail
+    assert config.physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh is True
+    assert config.physics.shortwave_penetration.scheme == "nemo_qsr_rgb"
+    assert config.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch is True
 
 
 # --------------------------------------------------------------------------
@@ -513,6 +516,7 @@ def test_the_nemo_testcase_cards_still_require_the_carried_pair():
 
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_gyre_zco_card,
+        build_gyre_zco_lane_certified_card,
         validate_nemo_testcase_card,
     )
 

@@ -61,14 +61,14 @@ if NEMO does it we can transcribe it); it is enumeration effort on the join laye
 
 ### W2 RESULT (2026-08-06) — NOT a port; ONE surgical defect found (3rd form-stress suspect)
 Term-by-term matrix diff of NEMO `trazdf.F90:118-293` vs lego `_apply_implicit_vertical_mixing`
-(`ocean_model_latlon_cgrid.py:5424`) + `thickness_weighted_tracer_combine` (`:854-902`), both read.
+(`ocean_model_latlon_cgrid.py:5443`) + `thickness_weighted_tracer_combine` (`:854-902`), both read.
 - **`ah_wslp2` / GM-Redi vertical term concern RETRACTED**: not omitted — config-gated on
   `gm_redi.implicit_K33` (mirrors NEMO's `l_ldfslp`), threaded end-to-end. RHS content-identity,
   diagonal thickness (both Kaa), zero-flux BCs, timestep (rDt=2dt): all CONFIRMED IDENTICAL.
 - **REAL DEFECT (previously unnamed): the implicit flux-coefficient DIVISOR uses the wrong
   time-level thickness.** NEMO uses `e3w(Kmm)` (NOW/pre-solve interface, `trazdf.F90:219-220`);
   lego's default `dz_half = 0.5*(e3t(Kaa,k)+e3t(Kaa,k+1))` is built from the AFTER state
-  (`naa_expl.eta`, `:5523-5533`). Under moving z* these differ O(dη)/step, in the DIFFUSIVITY
+  (`naa_expl.eta`, `:5542-5552`). Under moving z* these differ O(dη)/step, in the DIFFUSIVITY
   NORMALISATION, at mid-depth interfaces — same class and order as the surface-placement defect
   and the `thickness_weighted_tracer_combine` fix, acting exactly where the density heave lives.
 - **Fix scope: SMALL, not a port.** The `implicit_vmix_dzw_slot` machinery (#428) already exists —

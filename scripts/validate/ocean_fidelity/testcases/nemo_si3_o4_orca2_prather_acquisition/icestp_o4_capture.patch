@@ -1,0 +1,8 @@
+--- icestp.F90
++++ icestp.F90
+@@ -217,2 +217,5 @@
+          !
++         ! O4_OBSERVER_BEGIN
++                                        CALL o4_capture_stage( 9, kt )
++         ! O4_OBSERVER_END
+          !------------------------!
