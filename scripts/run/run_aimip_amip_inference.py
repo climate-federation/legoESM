@@ -75,6 +75,24 @@ def _merged_cfg(suite_path: Path, variant: str = "classical") -> dict:
     return base
 
 
+def _check_restart_dycore_options(meta: dict, dyo: dict, restart) -> None:
+    """Refuse to resume a restart written under other dycore options.  A
+    restart without the field predates the options (= all off); a present
+    field must be a valid options record."""
+    from legoesm.ml.checkpoint_io import (
+        DYCORE_OPTION_KEYS, validate_dycore_options,
+    )
+    have = (validate_dycore_options(meta["dycore_options"])
+            if "dycore_options" in meta
+            else {k: False for k in DYCORE_OPTION_KEYS})
+    if have != validate_dycore_options(dyo):
+        raise SystemExit(
+            f"Restart {restart} was written with dycore options {have} but "
+            f"this run has {dyo}. Refusing to resume a trajectory run under "
+            "different dynamics — delete the restart (and its CSV) to start "
+            "fresh, or pass --restart-path elsewhere.")
+
+
 def _build_spec_cfg(cfg: dict):
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.campaign_driver import pressure_surface_flags
@@ -239,6 +257,12 @@ def main():
         cfg["aimip_convection"] = args.convection_scheme
         logger.info(f"convection override: {cfg['aimip_convection']}")
     spec_cfg = _build_spec_cfg(cfg)
+    # The trained checkpoint must have been trained with this run's dycore
+    # options (legacy checkpoint without a record = all off).
+    from legoesm.ml.checkpoint_io import check_dycore_record
+    from legoesm.training.neural_gcm_spectral import spectral_dycore_options
+    _dyo = spectral_dycore_options(spec_cfg.pe_config)
+    check_dycore_record(args.ckpt, _dyo, what="--ckpt")
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top)
     lat_w = np.asarray(grid.weights)
@@ -439,6 +463,7 @@ def main():
             # OLD — possibly runaway — trajectory burned the first sfno
             # stable-sanity run).
             "ckpt": str(args.ckpt),
+            "dycore_options": _dyo,
         }
         tmp_j = restart_json.with_suffix(".json.tmp")
         tmp_j.write_text(json.dumps(meta))
@@ -464,6 +489,7 @@ def main():
                 f"different model's trajectory — delete the restart (and its "
                 f"CSV) to start fresh, or pass --restart-path elsewhere."
             )
+        _check_restart_dycore_options(meta, _dyo, restart_eqx)
         # ``state`` currently holds the IC -> identical pytree structure, so it
         # is the deserialisation template.
         from legoesm.ml.checkpoint_io import load_checkpoint_or_fail

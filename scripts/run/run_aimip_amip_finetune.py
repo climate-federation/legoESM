@@ -195,6 +195,18 @@ def main():
         cfg["aimip_convection"] = args.convection_scheme
         logger.info(f"convection override: {cfg['aimip_convection']}")
     spec_cfg = _build_spec_cfg(cfg, args.first_year)
+    # --init-ckpt must have been trained with this run's dycore options
+    # (legacy checkpoint without a record = all off); every save records them.
+    from legoesm.ml.checkpoint_io import check_dycore_record
+    from legoesm.training.neural_gcm_spectral import spectral_dycore_options
+    _dyo = spectral_dycore_options(spec_cfg.pe_config)
+    check_dycore_record(args.init_ckpt, _dyo, what="--init-ckpt")
+    from legoesm.ml.checkpoint_io import checkpoint_path
+    if (checkpoint_path(args.out_ckpt) != args.out_ckpt   # as save_checkpoint
+            or args.out_ckpt.is_symlink()):
+        raise SystemExit(
+            f"--out-ckpt needs a file suffix and must not be a symlink, got "
+            f"{args.out_ckpt}")
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top)
     sigma_full = jnp.asarray(sigma.sigma_full)
@@ -507,7 +519,7 @@ def main():
             # save_checkpoint is itself atomic (tmp + rename) and writes the
             # knob record beside its own path, so it saves to _ck directly.
             _ck = args.out_ckpt.with_name(args.out_ckpt.stem + "_latest_raw.eqx")
-            save_checkpoint(params, _ck)
+            save_checkpoint(params, _ck, dycore_options=_dyo)
             # BEST-drift raw params across the whole fine-tune: a late-phase
             # divergence (colnn v3: 15d drift 4.2 -> 424 K^2) must not
             # overwrite the best stability state. Drift normalised by the
@@ -517,7 +529,8 @@ def main():
             if _drift_per_day < best_drift_per_day:
                 best_drift_per_day = _drift_per_day
                 _bk = args.out_ckpt.with_name(args.out_ckpt.stem + "_best_raw.eqx")
-                save_checkpoint(params_at_drift, _bk)  # the params that produced it
+                save_checkpoint(params_at_drift, _bk,  # the params that produced it
+                                dycore_options=_dyo)
                 logger.info(
                     f"  new BEST drift/day^2 {_drift_per_day:.4f} "
                     f"[K^2/d^2 @rd={rd}d] -> {_bk.name}"
@@ -538,8 +551,9 @@ def main():
             lambda e, p0: (e - d_t * p0) / (1.0 - d_t), ema_arrays, p0_arrays,
         )
     ema_params = eqx.combine(ema_arrays, static)
-    save_checkpoint(ema_params, args.out_ckpt)
-    save_checkpoint(params, args.out_ckpt.with_name(args.out_ckpt.stem + "_raw.eqx"))
+    save_checkpoint(ema_params, args.out_ckpt, dycore_options=_dyo)
+    save_checkpoint(params, args.out_ckpt.with_name(args.out_ckpt.stem + "_raw.eqx"),
+                    dycore_options=_dyo)
     logger.info(
         f"Wrote fine-tuned params (bias-corrected EMA over {ema_steps} steps): "
         f"{args.out_ckpt}"

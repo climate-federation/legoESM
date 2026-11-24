@@ -108,7 +108,7 @@ def _partial_manifest_path(out_dir):
 
 
 def _save_partial(out_dir, manifest, write_params, write_opt,
-                  write_record=None):
+                  write_record=None, before_params_replace=None):
     """Write one rolling mid-epoch checkpoint generation.
 
     The state files carry the epoch and step in their names and the manifest,
@@ -124,16 +124,23 @@ def _save_partial(out_dir, manifest, write_params, write_opt,
     tag = f"partial.e{int(manifest['epoch']):04d}.s{int(manifest['step']):06d}"
     names = {"params_file": tag + ".eqx", "opt_file": tag + ".opt.eqx"}
     pfile = os.path.join(out_dir, names["params_file"])
-    _atomic_write(pfile, write_params)
-    if write_record is not None:
-        write_record(pfile)
+    if before_params_replace is None:
+        _atomic_write(pfile, write_params)
+    else:
+        _atomic_write(pfile, write_params,
+                      before_replace=lambda tmp: before_params_replace(pfile, tmp))
     _atomic_write(os.path.join(out_dir, names["opt_file"]), write_opt)
     payload = _json.dumps({**manifest, **names})
     _atomic_write(_partial_manifest_path(out_dir),
                   lambda t: _pathlib.Path(t).write_text(payload))
-    keep = {*names.values(), tag + ".knobs.json"}
+    # records last: an uncommitted dycore record (before_params_replace) is
+    # refused until the whole generation is published
+    if write_record is not None:
+        write_record(pfile)
+    keep = {*names.values(), tag + ".knobs.json", tag + ".eqx.dycore.json"}
     for f in (glob.glob(os.path.join(out_dir, "partial.e*.eqx"))
-              + glob.glob(os.path.join(out_dir, "partial.e*.knobs.json"))):
+              + glob.glob(os.path.join(out_dir, "partial.e*.knobs.json"))
+              + glob.glob(os.path.join(out_dir, "partial.e*.dycore.json"))):
         if os.path.basename(f) not in keep:
             try:
                 os.remove(f)
@@ -571,8 +578,8 @@ def _read_probe_progress(out_dir, expect_fp, content):
 def _atomic_write(path, write_fn, before_replace=None):
     """Write via a temporary file and rename, so a job killed mid-write leaves
     the PREVIOUS checkpoint intact rather than a truncated one that resume
-    would happily load.  ``before_replace`` runs after a successful write,
-    just before the rename."""
+    would happily load.  ``before_replace(tmp)`` runs after a successful
+    write, just before the rename, with the temp file's path."""
     import os
     import socket
 
@@ -581,7 +588,7 @@ def _atomic_write(path, write_fn, before_replace=None):
     tmp = f"{path}.tmp.{socket.gethostname()}.{os.getpid()}"
     write_fn(tmp)
     if before_replace is not None:
-        before_replace()
+        before_replace(tmp)
     os.replace(tmp, path)
 
 
@@ -1286,6 +1293,14 @@ def _main(argv=None):
     # parameters; saved ones are honoured only if these still match.
     _probe_content = _sample_fingerprint(list(local) + [jax.device_get(
         jax.tree.leaves(eqx.filter(params, eqx.is_inexact_array)))])
+    # Dycore options of this run, recorded beside every params checkpoint and
+    # checked before any resume load (a legacy checkpoint = all off).
+    from legoesm.ml.checkpoint_io import (
+        load_checked, write_dycore_record,
+    )
+    from legoesm.training.campaign_driver import pressure_surface_flags
+    _dyo = pressure_surface_flags(yml, cfg.training_core,
+                                  where="WB campaign YAML")
     start_epoch, resumed_frozen = 0, None
     if cfg.resume:
         _ep = _latest_complete_checkpoint(cfg.out_dir)
@@ -1324,7 +1339,9 @@ def _main(argv=None):
         else:
             _pp, _op, _fp = _checkpoint_paths(cfg.out_dir, _ep)
             from legoesm.ml.checkpoint_io import deserialise_knob_aware
-            params = deserialise_knob_aware(_pp, params)
+            params = load_checked(
+                _pp, _dyo, lambda: deserialise_knob_aware(_pp, params),
+                what="epoch resume")
             _manifest = json.loads(open(_fp).read())
             _saved_fp = (_manifest.get("fingerprint")
                          if isinstance(_manifest, dict) else None)
@@ -1388,7 +1405,9 @@ def _main(argv=None):
                         "resume: the mid-epoch checkpoint's frozen set "
                         "differs from the epoch checkpoint's")
                 from legoesm.ml.checkpoint_io import deserialise_knob_aware
-                params = deserialise_knob_aware(_ppath, params)
+                params = load_checked(
+                    _ppath, _dyo, lambda: deserialise_knob_aware(_ppath, params),
+                    what="mid-epoch resume")
                 import zlib as _zlib
                 _partial_crc = (
                     _file_crc(_ppath), _file_crc(_partial_opt),
@@ -1747,10 +1766,13 @@ def _main(argv=None):
             from legoesm.ml.training import checkpoint_view
             # The stale record goes only once the new payload is written
             # (codex + GLM 2026-10-29: a failed write keeps old payload+record).
+            _dy_stamp = [None]   # phase-1 stamp of the dycore record
             _atomic_write(ppath, lambda t: eqx.tree_serialise_leaves(
                 t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
-                before_replace=lambda: knob_record_path(ppath).unlink(
-                    missing_ok=True))
+                before_replace=lambda tmp: (
+                    _dy_stamp.__setitem__(0, write_dycore_record(
+                        ppath, _dyo, payload=tmp, committed=False)),
+                    knob_record_path(ppath).unlink(missing_ok=True)))
             write_knob_record(eqx.combine(cur_arr, _static_h), ppath)
             _atomic_write(opath, lambda t: eqx.tree_serialise_leaves(
                 t, cur_opt_state))
@@ -1760,6 +1782,9 @@ def _main(argv=None):
                 json.dumps({"schema": _MANIFEST_SCHEMA,
                             "frozen": frozen_names,
                             "fingerprint": _fingerprint})))
+            # dycore commit last: until the epoch is fully published its
+            # record stays uncommitted (refused on resume)
+            write_dycore_record(ppath, _dyo, stamp=_dy_stamp[0])
 
     _every = int(cfg.checkpoint_every_steps)
 
@@ -1773,6 +1798,7 @@ def _main(argv=None):
             return
         from legoesm.ml.checkpoint_io import write_knob_record
         from legoesm.ml.training import checkpoint_view
+        _pdy_stamp = [None]   # phase-1 stamp of the partial's dycore record
         _save_partial(
             cfg.out_dir,
             {"schema": _MANIFEST_SCHEMA, "frozen": frozen_names,
@@ -1782,7 +1808,12 @@ def _main(argv=None):
             lambda t: eqx.tree_serialise_leaves(
                 t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
             lambda t: eqx.tree_serialise_leaves(t, cur_opt_state),
-            lambda p: write_knob_record(eqx.combine(cur_arr, _static_h), p))
+            lambda p: (write_knob_record(eqx.combine(cur_arr, _static_h), p),
+                       write_dycore_record(p, _dyo,   # commit
+                                           stamp=_pdy_stamp[0])),
+            # two-phase record: uncommitted, stamped from the temp payload
+            before_params_replace=lambda p, tmp: _pdy_stamp.__setitem__(
+                0, write_dycore_record(p, _dyo, payload=tmp, committed=False)))
 
     arr, opt_state, history = mpi_data_parallel_training_loop(
         loss_fn, arr, opt_state, optimizer, local, cfg.n_epochs, nproc,

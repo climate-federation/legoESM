@@ -622,9 +622,22 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
     vdir = outdir / variant
     vdir.mkdir(parents=True, exist_ok=True)
     ckpt = vdir / "params.eqx"
-    eqx.tree_serialise_leaves(str(ckpt), trained)
-    from legoesm.ml.checkpoint_io import write_knob_record
+    import os
+    from legoesm.ml.checkpoint_io import (
+        DYCORE_OPTION_KEYS, write_dycore_record, write_knob_record,
+    )
+    # payload via temp + rename under the two-phase dycore-record protocol
+    # (checkpoint_io.write_dycore_record): an interrupted save is refused
+    _tmp = ckpt.with_name(f"{ckpt.name}.tmp-{os.getpid()}")
+    _dyo = {k: getattr(config.dycore, k) for k in DYCORE_OPTION_KEYS}
+    try:
+        eqx.tree_serialise_leaves(str(_tmp), trained)
+        _stamp = write_dycore_record(ckpt, _dyo, payload=_tmp, committed=False)
+        os.replace(_tmp, ckpt)
+    finally:
+        _tmp.unlink(missing_ok=True)   # consumed by os.replace on success
     write_knob_record(trained, ckpt)
+    write_dycore_record(ckpt, _dyo, stamp=_stamp)   # commit
 
     return {
         "variant": variant,

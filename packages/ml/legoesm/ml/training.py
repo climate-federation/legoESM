@@ -419,6 +419,8 @@ def checkpoint_view(model):
 def save_checkpoint(
     model,
     path: str | Path,
+    *,
+    dycore_options: dict | None = None,
 ) -> None:
     """Save a model / pytree checkpoint **atomically**.
 
@@ -438,10 +440,27 @@ def save_checkpoint(
         Model / state to save.
     path : str or Path
         Destination file path for the checkpoint.
+    dycore_options : dict or None
+        The run's dycore options (``checkpoint_io.DYCORE_OPTION_KEYS`` ->
+        bool), written beside the checkpoint (``*.dycore.json``) for the
+        loaders' ``check_dycore_record``, under the two-phase protocol of
+        ``write_dycore_record``.  Needs ``path`` with its ``.eqx`` suffix
+        (the loaders resolve a suffix-less path to ``.eqx``).  None writes
+        no record (a stale one is replaced by the save's uncommitted fence,
+        then removed; reads as all off).
     """
-    from legoesm.ml.checkpoint_io import knob_record_path, write_knob_record
+    from legoesm.ml.checkpoint_io import (
+        checkpoint_path, fence_dycore_record, knob_record_path,
+        validate_dycore_options, write_dycore_record, write_knob_record,
+    )
 
     path = Path(path)
+    if dycore_options is not None:   # before anything is touched
+        dycore_options = validate_dycore_options(dycore_options)
+        if checkpoint_path(path) != path or path.is_symlink():
+            raise ValueError(
+                f"save_checkpoint(dycore_options=...) needs the .eqx path the "
+                f"loaders resolve (not a symlink), got {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
     # No stale record may pair with the new file: drop it once the new payload
@@ -453,9 +472,25 @@ def save_checkpoint(
     model = checkpoint_view(model)
     try:
         eqx.tree_serialise_leaves(str(tmp), model)
+        # phase 1: an uncommitted record stamped from tmp fences the rename
+        # (for a None save over a stale record: an all-off marker, removed
+        # in phase 2)
+        # (sidecar of the literal entry: a suffix-less path's never touches
+        # the separate ``.eqx`` file's)
+        # (a None save is fenced by a bare uncommitted marker, removed once
+        # the save is complete: it ends with no record = all off)
+        if dycore_options is not None:
+            stamp = write_dycore_record(path, dycore_options, payload=tmp,
+                                        committed=False)
+        else:
+            fence = fence_dycore_record(path)
         knob_record_path(path).unlink(missing_ok=True)
         os.replace(tmp, path)
         write_knob_record(live, path)
+        if dycore_options is not None:   # phase 2: commit
+            write_dycore_record(path, dycore_options, stamp=stamp)
+        else:
+            fence.unlink(missing_ok=True)
     finally:
         # ``os.replace`` consumes ``tmp`` on success; this only fires if
         # serialisation raised, cleaning up the partial temp file.

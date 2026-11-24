@@ -78,6 +78,18 @@ def pressure_surface_flags(cfg: dict, core: str, *, where: str) -> dict:
     return out
 
 
+def refuse_pressure_surface_flags(cfg: dict, *, where: str) -> None:
+    """For a driver that does not honour the pressure-surface options: refuse
+    either key whenever it is present (any value), so a deck naming one cannot
+    run silently without it."""
+    bad = {k: cfg[k] for k in PRESSURE_SURFACE_FLAGS.values() if k in cfg}
+    if bad:
+        raise ValueError(
+            f"{where}: {sorted(bad)} = {bad} is not supported by this driver "
+            "(it builds its own dycore config and would silently run without "
+            "it). Remove the key(s), or use run_aimip.py.")
+
+
 def validate_training_core(core: str) -> str:
     """Dispatch-hardened training-core selection.
 
