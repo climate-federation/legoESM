@@ -2376,6 +2376,43 @@ def cam_pi_B_dT_dp(
     return p_s[..., None] * (below + above) / (2.0 * dp)
 
 
+def local_quadratic_dT_dp(
+    T: jax.Array,
+    p_full: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """``(dT/dp, d2T/dp2)`` at the full levels, shape ``(..., nlev)`` each,
+    from the quadratic in ``p`` through three adjacent levels of the column
+    (levels ``j-1, j, j+1`` with ``j = clip(k, 1, nlev-2)``: centred in the
+    interior, the nearest three-level stencil at the top and bottom).
+
+    Exact for any ``T`` quadratic in ``p`` on a nonuniform grid (pressure
+    differences only, no squared pressures: fp32-safe).  Needs ``nlev >= 3``
+    and strictly monotonic ``p_full``.
+    """
+    nlev = T.shape[-1]
+    if nlev < 3:
+        raise ValueError(f"local_quadratic_dT_dp needs nlev >= 3, got {nlev}")
+    if p_full.shape[-1] != nlev:
+        raise ValueError(
+            f"local_quadratic_dT_dp: p_full has {p_full.shape[-1]} levels, "
+            f"T has {nlev}")
+    h = p_full[..., 1:] - p_full[..., :-1]                 # (.., nlev-1)
+    slope = (T[..., 1:] - T[..., :-1]) / h                 # interface k+1/2
+    # stencil centres j = 1 .. nlev-2: the quadratic's derivatives at p_j
+    hm, hp = h[..., :-1], h[..., 1:]
+    sm, sp = slope[..., :-1], slope[..., 1:]
+    Tpp_c = 2.0 * (sp - sm) / (hm + hp)
+    Tp_c = (hp * sm + hm * sp) / (hm + hp)
+    # every level k uses the stencil centred at j = clip(k, 1, nlev-2); the
+    # quadratic's slope moves linearly: T_p(p_k) = T_p(p_j) + T_pp (p_k - p_j)
+    Tpp = jnp.concatenate([Tpp_c[..., :1], Tpp_c, Tpp_c[..., -1:]], axis=-1)
+    Tp = jnp.concatenate([
+        Tp_c[..., :1] - Tpp_c[..., :1] * h[..., :1],
+        Tp_c,
+        Tp_c[..., -1:] + Tpp_c[..., -1:] * h[..., -1:]], axis=-1)
+    return Tp, Tpp
+
+
 def compute_geopotential_hybrid(
     T: jax.Array,
     p_s: jax.Array,

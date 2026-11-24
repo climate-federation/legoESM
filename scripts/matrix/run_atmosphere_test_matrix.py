@@ -4637,7 +4637,14 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             spectral_filter_order=8,
             spectral_filter_strength=0.01,
             fix_mass=True, anchor_mass_to_initial=True,
+            # Opt-in T damping on pressure surfaces: the rest_state_topo row
+            # ONLY (user decision 2026-11-24; enabled after it passed the
+            # resting-terrain validation, T21-T85).  Recorded in the notes.
+            T_damping_pressure_surfaces=_rest,
         )
+        _spec_tdamp_note = ("T filter/hyperdiffusion on pressure surfaces: "
+                            + ("on" if pe_config.T_damping_pressure_surfaces
+                               else "off"))
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -4733,6 +4740,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         notes = f"{notes}; {_duo_note}"
     elif tc.grid_type == "latlon":
         notes = f"{notes}; {_LATLON_A_H_PRESSURE_SURFACES_NOTE}"
+    elif tc.grid_type == "spectral":
+        notes = f"{notes}; {_spec_tdamp_note}"
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
