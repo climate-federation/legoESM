@@ -1807,7 +1807,7 @@ class TestLESSubgridClosureGrad:
             2.0 * (S[0] ** 2 + S[1] ** 2 + S[2] ** 2)
             + 4.0 * (S[3] ** 2 + S[4] ** 2 + S[5] ** 2)
         )
-        # ``lasd_cs2`` reshapes ``delta`` to (1, 1, nz): it is a PER-LEVEL
+        # ``lasd_cs2`` takes ``delta`` of shape (nz,): it is a PER-LEVEL
         # filter width, not a scalar.
         delta = jnp.full((nz,), 10.0)
 

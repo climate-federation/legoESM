@@ -30,6 +30,7 @@ from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
 from legoesm.atmosphere.dynamics.crm.rce_mpi import (
     _plane_volume_weight_mpi,
     compute_dry_mass_plane_mpi,
+    compute_rho_prime_mass_plane_mpi,
     fix_mass_nonhydrostatic_plane_mpi,
 )
 from legoesm.grids.plane import create_plane_grid
@@ -85,7 +86,9 @@ def test_fix_mass_single_rank_bit_equiv():
         state_perturbed, target, grid, hc, tm,
     )
     mpi_out = fix_mass_nonhydrostatic_plane_mpi(
-        state_perturbed, target, grid, hc, tm, layout, mask,
+        state_perturbed,
+        compute_rho_prime_mass_plane_mpi(state, grid, hc, tm, layout, mask),
+        grid, hc, tm, layout, mask,
     )
     np.testing.assert_allclose(
         np.asarray(mpi_out.rho_prime.data),
@@ -105,7 +108,9 @@ def test_fix_mass_restores_target_mass_single_rank():
         ),
     )
     fixed = fix_mass_nonhydrostatic_plane_mpi(
-        perturbed, target, grid, hc, tm, layout, mask,
+        perturbed,
+        compute_rho_prime_mass_plane_mpi(state, grid, hc, tm, layout, mask),
+        grid, hc, tm, layout, mask,
     )
     restored_mass = compute_dry_mass_plane_mpi(
         fixed, grid, hc, tm, layout, mask,
@@ -129,7 +134,6 @@ def test_fix_mass_correction_is_spatially_uniform():
     the fixer's defining property (preserves all rho' gradients used
     in the slow tendency)."""
     grid, hc, tm, state, layout, mask = _setup()
-    target = compute_dry_mass_plane(state, grid, hc, tm)
     rng = jax.random.PRNGKey(7)
     perturbed_data = state.rho_prime.data + 1e-3 * jax.random.normal(
         rng, state.rho_prime.data.shape,
@@ -138,7 +142,9 @@ def test_fix_mass_correction_is_spatially_uniform():
         rho_prime=state.rho_prime.replace(data=perturbed_data),
     )
     fixed = fix_mass_nonhydrostatic_plane_mpi(
-        perturbed, target, grid, hc, tm, layout, mask,
+        perturbed,
+        compute_rho_prime_mass_plane_mpi(state, grid, hc, tm, layout, mask),
+        grid, hc, tm, layout, mask,
     )
     delta = fixed.rho_prime.data - perturbed.rho_prime.data
     assert float(jnp.std(delta)) < 1e-13 * float(jnp.max(jnp.abs(delta)) + 1e-30)

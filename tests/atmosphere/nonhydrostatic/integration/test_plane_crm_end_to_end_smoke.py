@@ -1126,7 +1126,7 @@ def test_plane_crm_driver_rejects_nan_inf_numeric_args(
         "--nx", "12", "--ny", "12", "--nlev", "20",
         "--dx", "2000.0", "--dt", "5.0",
         "--days", "0.0005",
-        "--no-radiation",
+        "--no-radiation", "--semi-implicit-acoustic",
         flag, value,
         "--output", str(tmp_path / f"rce_bad_{flag.strip('-')}"),
     ]
@@ -1213,7 +1213,7 @@ def test_plane_crm_driver_rejects_nan_rad_interval_with_clean_exit(tmp_path):
         sys.executable, str(DRIVER),
         "--nx", "12", "--ny", "12", "--nlev", "20",
         "--dx", "2000.0", "--dt", "5.0",
-        "--days", "0.0005",
+        "--days", "0.0005", "--semi-implicit-acoustic",
         "--rad-call-interval-s", "nan",
         "--output", str(tmp_path / "rce_nan"),
     ]

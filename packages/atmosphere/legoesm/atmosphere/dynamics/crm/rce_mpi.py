@@ -329,6 +329,26 @@ def compute_dry_mass_plane_mpi(
     return global_sum_mpi(local_mass)
 
 
+def _owned_column_weight(grid, terrain_metric, owned_mask):
+    """``J * area_T * owned_mask`` as ``(ny, nx, 1)``: the per-column weight
+    of every owned-cell plane integral below."""
+    return (terrain_metric.jacobian * grid.area_T * owned_mask)[:, :, None]
+
+
+def compute_rho_prime_mass_plane_mpi(
+    state, grid, height_coord, terrain_metric, layout, owned_mask,
+) -> jax.Array:
+    """Global ``sum_owned(rho' * J * area_T * dz)`` — the anomaly part of
+    :func:`compute_dry_mass_plane_mpi`, without the ~1e14 ``rho_ref``
+    background whose rounding swamps it in float32."""
+    _validate_layout(layout)
+    from legoesm.parallel.reductions import global_sum_mpi
+
+    weight_horizontal = _owned_column_weight(grid, terrain_metric, owned_mask)
+    local = jnp.sum(state.rho_prime.data * weight_horizontal * height_coord.dz)
+    return local if layout.n_ranks == 1 else global_sum_mpi(local)
+
+
 def _plane_volume_weight_mpi(
     grid, height_coord, terrain_metric, layout, owned_mask,
 ) -> jax.Array:
@@ -346,47 +366,46 @@ def _plane_volume_weight_mpi(
         return jnp.sum(weight_horizontal * height_coord.dz)
     from legoesm.parallel.reductions import global_sum_mpi
 
-    weight_horizontal = (
-        terrain_metric.jacobian * grid.area_T * owned_mask
-    )[:, :, None]
+    weight_horizontal = _owned_column_weight(grid, terrain_metric, owned_mask)
     local_volume = jnp.sum(weight_horizontal * height_coord.dz)
     return global_sum_mpi(local_volume)
 
 
 def fix_mass_nonhydrostatic_plane_mpi(
-    state, target_mass, grid, height_coord, terrain_metric,
+    state, target_anomaly, grid, height_coord, terrain_metric,
     layout, owned_mask,
 ):
-    """MPI-aware dry-mass fixer (R7).
+    """MPI-aware dry-mass fixer (R7), anomaly form.
 
     Uniform additive correction to ``rho_prime``:
 
-        delta = (target_mass - current_global) / global_volume_weight
-        rho_prime' = rho_prime + delta
+        delta = (target_anomaly - A) / V,   rho_prime' = rho_prime + delta
 
-    where ``current_global`` and ``global_volume_weight`` are both
-    ``global_sum_mpi`` reductions. Every rank applies the same
-    ``delta`` so the resulting global mass exactly matches
-    ``target_mass`` to round-off.
+    with ``A`` = :func:`compute_rho_prime_mass_plane_mpi` (global
+    ``sum_owned(rho' J area_T dz)``) and ``V`` the global owned volume, both
+    ``global_sum_mpi`` reductions, so every rank applies the same ``delta``.
+    ``target_anomaly`` is the anchor's rho' integral, NOT the total dry mass:
+    differencing two ~1e14 totals (the former form) left a float32 dry-mass
+    jitter of up to ~6e-7 relative per step; this form closes to round-off.
 
-    Mirrors the serial :func:`fix_mass_nonhydrostatic_plane` — AD-safe
-    (pure additive correction, no clip, no branch on traced values).
-
-    Single-rank short-circuits to the serial fixer.
+    AD-safe (pure additive correction, no clip, no branch on traced values).
+    Single-rank short-circuits to the serial fixer in the same anomaly form.
     """
     _validate_layout(layout)
     if layout.n_ranks == 1:
         return fix_mass_nonhydrostatic_plane(
-            state, target_mass, grid, height_coord, terrain_metric,
+            state, target_anomaly, grid, height_coord, terrain_metric,
+            background_mass=jnp.zeros((), state.rho_prime.data.dtype),
         )
-    current_mass = compute_dry_mass_plane_mpi(
-        state, grid, height_coord, terrain_metric, layout, owned_mask,
-    )
-    volume = _plane_volume_weight_mpi(
-        grid, height_coord, terrain_metric, layout, owned_mask,
-    )
-    delta = (target_mass - current_mass) / volume
-    new_rho_p = state.rho_prime.data + delta
-    return state._replace(
-        rho_prime=state.rho_prime.replace(data=new_rho_p),
-    )
+    from legoesm.parallel.reductions import global_sum_mpi
+
+    # A and V in ONE allreduce (same per-rank partial sums as
+    # compute_rho_prime_mass_plane_mpi / _plane_volume_weight_mpi).
+    w_col = _owned_column_weight(grid, terrain_metric, owned_mask)
+    current, volume = global_sum_mpi(jnp.stack([
+        jnp.sum(state.rho_prime.data * w_col * height_coord.dz),
+        jnp.sum(w_col * height_coord.dz),
+    ]))
+    return state._replace(rho_prime=state.rho_prime.replace(
+        data=state.rho_prime.data + (target_anomaly - current) / volume))
+

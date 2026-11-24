@@ -14,9 +14,9 @@ Differences from :mod:`legoesm.parallel.latlon_mpi`:
 AD safety
 ---------
 Every ``sendrecv`` call goes through ``get_sendrecv_vjp`` from
-:mod:`legoesm.parallel.halo_exchange` (existing ``@jax.custom_vjp``
-wrapper that swaps source / dest in the backward pass per
-``CLAUDE.md`` "MPI AD compat" rule). ``allreduce(SUM)`` reductions
+:mod:`legoesm.parallel.halo_exchange` (a linear primitive whose
+transpose swaps source / dest and whose JVP is the same sendrecv, so
+forward and reverse AD work at every order). ``allreduce(SUM)`` reductions
 inherit AD via ``global_sum_mpi`` (same module).
 
 Single-rank fallback
@@ -269,23 +269,22 @@ def exchange_halo_plane_yxz(
     if layout.n_ranks == 1:
         return jnp.pad(field_yxz, pad_widths, mode="wrap")
 
-    # Multi-rank path. Each axis (y, x) handled INDEPENDENTLY:
-    #   * n_ranks_axis == 1 → local periodic wrap on that axis (no
-    #     MPI). Codex review 2026-05-24: previously the multi-rank
-    #     path always issued sendrecv even when the periodic
-    #     neighbour was the current rank. That triggered two
-    #     self-sendrecv on the same tag base with identical
-    #     `(source, dest)` for both directions — MPI matched the
-    #     messages arbitrarily and filled the east halo with the
-    #     east boundary (instead of the west) or vice versa.
-    #   * n_ranks_axis >  1 → mpi4jax sendrecv with the periodic
-    #     neighbour rank.
-    # NS stage always runs first; the EW stage operates on the
-    # NS-padded array so the four corners arrive via two-axis
-    # composition regardless of which axis used MPI vs local wrap.
+    # Multi-rank path: N/S stage first, then E/W on the N/S-padded array so
+    # the four corners arrive via two-axis composition. Each stage is a
+    # directional ring shift with one tag per direction, which is what makes
+    # a self-exchange (single rank on that axis) correct; an earlier version
+    # shared one tag for both directions and misfilled self-exchanged halos.
     h = layout.halo
 
-    if layout.n_ranks_y > 1 or layout.n_ranks_x > 1:
+    # Once any axis exchanges over MPI, BOTH axes do: an axis with a single
+    # rank then sends to itself (correct: the ring shift below uses one tag
+    # per direction). Measured 2026-11-20 on Derecho, 64x64x64 fp32 tile,
+    # production deck: a local wrap on the single-rank axis made the jitted
+    # step ~6% slower (1x2: 1125 -> 1058 ms/step, 1x4: 1136 -> 1071) with
+    # bit-identical results. Only the fake-multi-rank 1x1 layout (no MPI
+    # axis at all) keeps the local wrap.
+    use_mpi = layout.n_ranks_y > 1 or layout.n_ranks_x > 1
+    if use_mpi:
         try:
             import mpi4jax
             from mpi4py import MPI
@@ -311,9 +310,7 @@ def exchange_halo_plane_yxz(
     _TAG_EW = 2_000
 
     # ----- Stage 1: N/S along the y axis -----
-    if layout.n_ranks_y == 1:
-        # Local periodic wrap on y; MPI would self-deadlock or
-        # silently misfill halos for the single-rank-on-y case.
+    if not use_mpi:
         ns_padded = jnp.pad(
             field_yxz,
             [(h, h), (0, 0)] + [(0, 0)] * (field_yxz.ndim - 2),
@@ -354,7 +351,7 @@ def exchange_halo_plane_yxz(
     # ----- Stage 2: E/W of the NS-padded array -----
     # ns_padded already carries the NS halo rows, so E/W slabs of
     # ns_padded contain the four corner cells of the periodic halo.
-    if layout.n_ranks_x == 1:
+    if not use_mpi:
         padded = jnp.pad(
             ns_padded,
             [(0, 0), (h, h)] + [(0, 0)] * (ns_padded.ndim - 2),
