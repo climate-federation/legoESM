@@ -15,7 +15,7 @@
 #
 # Every run setting is an explicit variable recorded in the job log:
 #   RANKS       rank counts to run in this job (each <= nodes*128)
-#   MODELS      "crm les"          PRECISIONS "float32 float64"
+#   MODELS      "crm les"          PRECISIONS "float32 float64 mixed"
 #   MODES       "strong weak"      BOUNDS     1 = run the bound probes first
 #   Column physics is timed (separately) on CRM WEAK runs only: its cost per
 #   rank depends only on the tile, and strong-mode 1-rank tiles are 512^2.
@@ -40,12 +40,12 @@ set -uo pipefail
 : "${REPO:=${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/../../.." && pwd)}}"
 : "${RANKS:=1 2 4 8 16 32 64 128}"
 : "${MODELS:=crm les}"
-: "${PRECISIONS:=float32 float64}"
+: "${PRECISIONS:=float32 float64 mixed}"
 : "${MODES:=strong weak}"
 : "${BOUNDS:=1}"
 : "${CRM_EXTRA:=}"
 : "${TIME_PHYSICS:=1}"  # 0 = weak runs time the dycore only (physics/rank is tile-only)
-: "${PPN_MAX:=128}"   # ranks per node cap (fp64 64x64x64 tiles need ~5.2 GB/rank)
+: "${PPN_MAX:=128}"   # ranks per node cap (fp64/mixed 64x64x64 tiles need ~5.2 GB/rank)
 : "${LES_DECOMPS:=auto}"
 : "${STRONG_NX:=512}" "${WEAK_NX:=64}" "${CRM_NLEV:=64}" "${LES_NZ:=128}"
 : "${WARMUP:=3}" "${TIME_STEPS:=5}" "${WINDOWS:=3}"
@@ -137,6 +137,8 @@ for N in $RANKS; do
                 "${COMMON[@]}" --nlev "$CRM_NLEV" --semi-implicit $PHYS $CRM_EXTRA \
                 --output "$OUT/crm.jsonl" || { echo "FAILED crm $MODE $PREC n=$N"; rc_all=1; } ;;
           les)
+            # mixed precision is a CRM mode only
+            [ "$PREC" = mixed ] && continue
             for DEC in $LES_DECOMPS; do
             run "$N" "$PPN" scripts/bench/bench_spectral_les_dd_scaling.py \
                 "${COMMON[@]}" --nz "$LES_NZ" --decomp "$DEC" \

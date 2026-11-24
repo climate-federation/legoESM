@@ -566,13 +566,36 @@ unimplemented or unvalidated.
 
 ## Derecho CPU, 1–4 nodes (2026-11-20 → 11-23): CRM weak + strong, fp32 / mixed / fp64
 
-> **Status.** Every CRM number in this section was measured before main's
-> mass-conserving tracer transport (#2641) landed, so they time the previous
-> tracer advection. The **mixed** columns time a mode that is NOT in this
-> code: it is being rebuilt on the conserving transport in PR #2684, and its
-> numbers here are PENDING re-measurement there. The fp32 / fp64 columns are
-> the pre-#2641 code as well; re-timing them on the current transport is
-> part of the same follow-up.
+> **Status.** Every number in the tables of this section was measured
+> before main's mass-conserving tracer transport (#2641) landed. The mixed
+> mode has since been rebuilt on that transport (PR #2684) and re-timed at
+> 1 node; see "Mixed precision on the conserving transport" below. The
+> fp32 / fp64 columns were not re-timed (vote: not needed for the mixed
+> efficiency, which is measured against its own packed control).
+
+### Mixed precision on the conserving transport (#2684, 1 node, 2026-11-24)
+
+Same bench, deck and ladder as below (weak 64×64×64 per rank, dycore only,
+`TIME_PHYSICS=0`), commit b3880b3a06; packed control at the same ranks per
+node, median over copies.
+
+| ranks/node | mixed halo ms/step | packed ms/step | efficiency | pre-#2641 mixed efficiency |
+|---|---|---|---|---|
+| 32 | 2174 | 1796 | 83 % | 83 % |
+| 64 | 3330 | 2559 | 77 % | 74 % |
+| 128 | 6210 | 5622 | 91 % | 87 % |
+
+Absolute times are 31–37 % above the pre-#2641 mixed rows (packed control
++34–42 %): the step now carries the tracers in fp64 through every RK stage
+and adds #2641's per-stage conservative tracer update. Efficiency against
+the packed ceiling is unchanged or better. The fp32 / fp64 modes were not
+re-timed, so the #2641 share of the slowdown is not separated here.
+
+Accuracy after 1 h of the RCEMIP1 deck (64×64×64, 1 rank) against a fresh
+fp64 run on the same transport (validator `scripts/validate/crm_mixed_precision_accuracy.py`,
+both budgets in fp64 geometry): relative RMS theta' 3.7e-6, rho' 1.9e-5,
+u 3.3e-5, v 3.9e-5, w 9.1e-5 (bars 1e-4 / 1e-3); total water -3.0e-8,
+dry mass 1.1e-12 (bars 4e-8, 1e-11). PASS.
 
 Plane CRM `step_halo`, RCEMIP1 production deck (`scripts/run/run_rcemip1_crm.sh`
 numerics, nlev 64, semi-implicit, substepped horizontal acoustics, Morrison),

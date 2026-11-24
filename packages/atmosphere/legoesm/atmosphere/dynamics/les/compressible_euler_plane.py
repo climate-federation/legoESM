@@ -361,6 +361,44 @@ def _plane_background_mass(
     )
 
 
+def _cast_like(tree, like):
+    """Cast each array leaf of ``tree`` to the dtype of the matching leaf of ``like``."""
+    return jax.tree.map(
+        lambda a, b: a if a.dtype == b.dtype else a.astype(b.dtype), tree, like)
+
+
+def _to_fp64(tree):
+    """Float leaves of ``tree`` in fp64 (mixed-precision mode needs x64 on)."""
+    return jax.tree.map(
+        lambda a: a.astype(jnp.float64)
+        if hasattr(a, "dtype") and jnp.issubdtype(a.dtype, jnp.floating) else a, tree)
+
+
+def _acoustic_fp64(acoustic_update_fn):
+    """Mixed precision: acoustic substeps on fp64 copies of the state and slow
+    tendency, result stored back in the state's dtypes. fp32 acoustics miss the
+    1 h RCEMIP1 acceptance (w 4.6e-3, rho' 1.7e-4 vs fp64); fp64 passes."""
+    def wrapped(state, slow_tend, *rest):
+        out = acoustic_update_fn(_to_fp64(state), _to_fp64(slow_tend), *rest)
+        if isinstance(out, PlaneNonHydrostaticState):
+            return _cast_like(out, state)
+        # (state, (Fx, Fy)): the time-integrated mass fluxes stay fp64, they
+        # carry the tracers in the conservative stage update.
+        return _cast_like(out[0], state), out[1]
+    return wrapped
+
+
+def _fix_mass_fp64(fixer):
+    """Run a dry-mass fixer on fp64 copies of the state and target; return the
+    state in its own storage dtypes. The global sums are the fp32 weak point:
+    an fp32 total carries ~1e-6 relative error, re-injected every step."""
+    def wrapped(state, target, *rest, **kw):
+        # geometry too, so the volume and background sums accumulate in fp64
+        return _cast_like(fixer(_to_fp64(state), _to_fp64(target),
+                                *_to_fp64(rest), **kw), state)
+    return wrapped
+
+
 def fix_mass_nonhydrostatic_plane(
     state: PlaneNonHydrostaticState,
     target_mass: jax.Array,
@@ -2400,7 +2438,9 @@ def plane_compressible_euler_slow_tendencies(
         dtracers_dt = jnp.zeros_like(tracers)
         if tracer_sgs_tend is not None:
             # Both SGS operators conserve sum(rho_ref * tend * dV).
-            rho_raw = (rho_0 + rho_p)[..., None]
+            # The density the stage update multiplies back by (fp64 in
+            # mixed precision), so the SGS mass flux cancels exactly.
+            rho_raw = plane_total_density(state, height_coord)[..., None]
             tracer_sgs_tend = tracer_sgs_tend * rho_0[:, None] / rho_raw
     elif tracers.shape[-1] > 0:
         def _tracer_tend_one(q):
@@ -2885,9 +2925,9 @@ def plane_conservative_tracer_stage(
                      in_axes=-1, out_axes=-1)(tx, ty)
     gq = g_flux * _tracer_vertical_face_value(q_e, g_flux, v_scheme)
     gain_z = (gq[..., 1:, :] - gq[..., :-1, :]) / dz[:, None]
-    rho_b = (rho_0 + base.rho_prime.data)[..., None]
-    rho_e = (rho_0 + eval_state.rho_prime.data)[..., None]
-    rho_o = (rho_0 + out.rho_prime.data)[..., None]
+    rho_b = plane_total_density(base, height_coord)[..., None]
+    rho_e = plane_total_density(eval_state, height_coord)[..., None]
+    rho_o = plane_total_density(out, height_coord)[..., None]
     mq = (rho_b * base.tracers.data - div_h + gain_z
           + dt_eff * rho_e * slow_tend.tracers.data)
     return out._replace(tracers=out.tracers.replace(data=mq / rho_o))
@@ -3062,9 +3102,19 @@ def plane_acoustic_substeps_si_horizontal_halo(
 # --------------------------------------------------------------------- #
 
 
+def plane_total_density(state, height_coord):
+    """``rho_ref + rho'`` summed in the widest of the two and the tracers'
+    dtype: mixed precision (fp32 storage, fp64 tracers inside the step) gets
+    the fp64 density that ``rho*q`` is measured with; otherwise this is
+    exactly the plain sum."""
+    rho_p = state.rho_prime.data
+    dt = jnp.result_type(height_coord.rho_ref, rho_p, state.tracers.data)
+    return height_coord.rho_ref.astype(dt) + rho_p.astype(dt)
+
+
 def _hold_tracer_mass(state, rho_before, height_coord):
     """Rescale ``q`` so a density-only mass fix leaves ``rho*q`` unchanged."""
-    rho_after = height_coord.rho_ref + state.rho_prime.data
+    rho_after = plane_total_density(state, height_coord)
     return state._replace(tracers=state.tracers.replace(
         data=state.tracers.data * (rho_before / rho_after)[..., None]))
 
@@ -3264,6 +3314,9 @@ class PlaneCompressibleEulerModel:
         if config is None:
             config = CompressibleEulerConfig()
         validate_plane_config(config)
+        if config.mixed_precision and not jax.config.jax_enable_x64:
+            raise ValueError("mixed_precision needs jax_enable_x64=True: its fp64 "
+                             "acoustic substeps and fixer sums would silently run fp32")
         self.grid = grid
         self.height_coord = height_coord
         self.terrain_metric = terrain_metric
@@ -3282,7 +3335,11 @@ class PlaneCompressibleEulerModel:
         # feature-gate Python `if`, not jnp.where). The fixer itself
         # tolerates None (computes inline), so this never traps.
         self._background_mass: jax.Array | None = (
-            _plane_background_mass(grid, height_coord, terrain_metric)
+            _plane_weighted_mass_sum(
+                height_coord.rho_ref.astype(jnp.float64), grid, height_coord,
+                terrain_metric)
+            if config.fix_mass and config.mixed_precision
+            else _plane_background_mass(grid, height_coord, terrain_metric)
             if config.fix_mass else None
         )
 
@@ -3314,9 +3371,11 @@ class PlaneCompressibleEulerModel:
         """
         if self.config.fix_mass:
             self._target_mass = compute_dry_mass_plane(
-                state, self.grid, self.height_coord, self.terrain_metric,
+                _to_fp64(state) if self.config.mixed_precision else state,
+                self.grid, self.height_coord, self.terrain_metric,
             )
-            self._cache_target_anomaly(state)
+            self._cache_target_anomaly(
+                _to_fp64(state) if self.config.mixed_precision else state)
 
     def _cache_target_anomaly(self, state) -> None:
         """Cache the anchor's rho' integral next to the total it belongs to.
@@ -3377,15 +3436,16 @@ class PlaneCompressibleEulerModel:
         # make_physics fn rather than silently reseed (#405/#413).
         refuse_unthreaded_stateful_physics(
             physics_fn, None, where="NH plane step()")
+        mass_state = _to_fp64(state) if self.config.mixed_precision else state
         if self.config.fix_mass and self.config.anchor_mass_to_initial:
             if self._target_mass is None:
                 self._target_mass = compute_dry_mass_plane(
-                    state, self.grid, self.height_coord, self.terrain_metric,
+                    mass_state, self.grid, self.height_coord, self.terrain_metric,
                 )
-                self._cache_target_anomaly(state)
+                self._cache_target_anomaly(mass_state)
         target = None
         if self.config.fix_mass:
-            target = self._fixer_target(self._target_mass, state)
+            target = self._fixer_target(self._target_mass, mass_state)
         return self._step_jit(state, dt, target, physics_fn)
 
     def step_halo(
@@ -3469,6 +3529,7 @@ class PlaneCompressibleEulerModel:
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
             outer_integrator=self.config.outer_integrator,
+            rounding_safe_combinations=self.config.mixed_precision,
         )
 
         conservative = state_local.tracers.data.shape[-1] > 0
@@ -3537,16 +3598,16 @@ class PlaneCompressibleEulerModel:
             float(dt), self.config.n_acoustic_substeps,
             bool(self.config.semi_implicit_acoustic),
             bool(substep_horiz), id(f_pad_cached), conservative,
+            bool(self.config.mixed_precision),
         )
         tracer_mass = (self._tracer_mass_hooks(layout) if conservative
                        else None)
         if (getattr(self, "_jit_halo_core", None) is None
                 or getattr(self, "_jit_halo_key", None) != _jit_key):
             def _halo_core(s):
-                return split_explicit_step(
+                return self._split_step(
                     s, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-                    tracer_mass=tracer_mass,
-                )
+                    tracer_mass)
             self._jit_halo_core = jax.jit(_halo_core)
             self._jit_halo_key = _jit_key
         stepped = self._jit_halo_core(state_local)
@@ -3560,6 +3621,8 @@ class PlaneCompressibleEulerModel:
                 compute_rho_prime_mass_plane_mpi,
                 fix_mass_nonhydrostatic_plane_mpi,
             )
+            mass_state = (_to_fp64(state_local) if self.config.mixed_precision
+                          else state_local)
             mass_args = (self.grid, self.height_coord, self.terrain_metric,
                          layout, owned_mask)
             if self.config.anchor_mass_to_initial:
@@ -3567,10 +3630,10 @@ class PlaneCompressibleEulerModel:
                     # Initial reduction across all ranks so every rank
                     # captures the same anchor (total + its rho' anomaly).
                     self._target_mass = compute_dry_mass_plane_mpi(
-                        state_local, *mass_args)
+                        mass_state, *mass_args)
                     self._target_anomaly = (
                         self._target_mass,
-                        compute_rho_prime_mass_plane_mpi(state_local, *mass_args))
+                        compute_rho_prime_mass_plane_mpi(mass_state, *mass_args))
             target = self._target_mass
             # Anomaly-form target, as in ``_fixer_target`` (serial): no
             # target holds the pre-step mass; a caller-replaced
@@ -3580,30 +3643,54 @@ class PlaneCompressibleEulerModel:
             cached = getattr(self, "_target_anomaly", None)
             if target is None:
                 target = compute_rho_prime_mass_plane_mpi(
-                    state_local, *mass_args)
+                    mass_state, *mass_args)
             elif cached is not None and cached[0] is target:
                 target = cached[1]
             else:
-                rest = state_local._replace(rho_prime=state_local.rho_prime.replace(
-                    data=jnp.zeros_like(state_local.rho_prime.data)))
+                rest = mass_state._replace(rho_prime=mass_state.rho_prime.replace(
+                    data=jnp.zeros_like(mass_state.rho_prime.data)))
                 total = target
                 target = total - compute_dry_mass_plane_mpi(rest, *mass_args)
                 if not isinstance(target, jax.core.Tracer):
                     self._target_anomaly = (total, target)  # convert once
-            rho_before = self.height_coord.rho_ref + stepped.rho_prime.data
-            stepped = fix_mass_nonhydrostatic_plane_mpi(
+            mpi_fixer = (_fix_mass_fp64(fix_mass_nonhydrostatic_plane_mpi)
+                         if self.config.mixed_precision
+                         else fix_mass_nonhydrostatic_plane_mpi)
+            rho_before = plane_total_density(stepped, self.height_coord)
+            stepped = mpi_fixer(
                 stepped, target, self.grid, self.height_coord,
                 self.terrain_metric, layout, owned_mask,
             )
             if conservative:
                 stepped = _hold_tracer_mass(stepped, rho_before, self.height_coord)
-        return stepped
+        # Mixed precision: the step carried tracers in fp64; store them (and
+        # every other leaf) in the state's own dtypes once, here.
+        return (_cast_like(stepped, state_local) if self.config.mixed_precision
+                else stepped)
+
+    def _split_step(self, state, slow_tendency_fn, acoustic_update_fn, dt,
+                    se_config, tracer_mass):
+        """``split_explicit_step``; mixed precision runs it with the tracers
+        promoted to fp64 for the whole step (all RK stages, conservative
+        transport and blends), fp64 acoustic substeps, and slow tendencies
+        stored in the state's dtypes. The caller casts the result back to the
+        storage dtypes after the dry-mass fixer, so tracers are rounded to
+        fp32 once per step."""
+        if not self.config.mixed_precision:
+            return split_explicit_step(
+                state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+                tracer_mass=tracer_mass)
+        state = state._replace(tracers=state.tracers.replace(
+            data=state.tracers.data.astype(jnp.float64)))
+        return split_explicit_step(
+            state, lambda x: _cast_like(slow_tendency_fn(x), x),
+            _acoustic_fp64(acoustic_update_fn), dt, se_config,
+            tracer_mass=tracer_mass)
 
     def _tracer_mass_hooks(self, layout=None) -> TracerMassHooks:
         """Conservative tracer transport for the split-explicit step (#2641)."""
-        rho_ref = self.height_coord.rho_ref
         return TracerMassHooks(
-            density=lambda s: rho_ref + s.rho_prime.data,
+            density=lambda s: plane_total_density(s, self.height_coord),
             tracers=lambda s: s.tracers.data,
             with_tracers=lambda s, q: s._replace(
                 tracers=s.tracers.replace(data=q)),
@@ -3628,6 +3715,7 @@ class PlaneCompressibleEulerModel:
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
             outer_integrator=self.config.outer_integrator,
+            rounding_safe_combinations=self.config.mixed_precision,
         )
         conservative = state.tracers.data.shape[-1] > 0
 
@@ -3701,21 +3789,24 @@ class PlaneCompressibleEulerModel:
                 )
 
         tracer_mass = self._tracer_mass_hooks() if conservative else None
-        state_new = split_explicit_step(
+        state_new = self._split_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-            tracer_mass=tracer_mass,
-        )
+            tracer_mass)
 
         if self.config.fix_mass and target_mass is not None:
-            rho_before = self.height_coord.rho_ref + state_new.rho_prime.data
-            state_new = fix_mass_nonhydrostatic_plane(
+            # ``target_mass`` is already the anomaly target (see
+            # ``_fixer_target``): delta = (target - sum(rho' w)) / V.
+            fixer = (_fix_mass_fp64(fix_mass_nonhydrostatic_plane)
+                     if self.config.mixed_precision
+                     else fix_mass_nonhydrostatic_plane)
+            rho_before = plane_total_density(state_new, self.height_coord)
+            state_new = fixer(
                 state_new, target_mass, self.grid, self.height_coord,
                 self.terrain_metric,
-                # ``target_mass`` is already the anomaly target (see
-                # ``_fixer_target``): delta = (target - sum(rho' w)) / V.
                 background_mass=jnp.zeros((), target_mass.dtype),
             )
             if conservative:
                 state_new = _hold_tracer_mass(
                     state_new, rho_before, self.height_coord)
-        return state_new
+        return (_cast_like(state_new, state) if self.config.mixed_precision
+                else state_new)

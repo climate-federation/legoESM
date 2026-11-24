@@ -55,6 +55,11 @@ class SplitExplicitConfig(NamedTuple):
     """Configuration for split-explicit time integration."""
     n_substeps: int = 6
     outer_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
+    # fp32-storage-safe SSP-RK3: stage combinations in increment form
+    # x + b*(y - x) (tracers too, as rho*q under conservative transport), so
+    # small increments are not rounded away against the stored value. Equal
+    # in exact arithmetic.
+    rounding_safe_combinations: bool = False
 
 
 def select_n_outer_split(
@@ -231,6 +236,10 @@ def split_explicit_step(
         State after one time step.
     """
     integrator = config.outer_integrator.lower()
+    if config.rounding_safe_combinations and integrator not in ("ssp_rk3", "ssp3", "rk3"):
+        raise ValueError(
+            "rounding_safe_combinations is implemented for ssp_rk3 only; "
+            f"got outer_integrator={config.outer_integrator!r}.")
     if integrator in ("ssp_rk3", "ssp3", "rk3"):
         return _split_explicit_ssp_rk3(
             state, slow_tendency_fn, acoustic_update_fn, dt, config,
@@ -277,14 +286,21 @@ def _split_explicit_ssp_rk3(
     k1_stepped = _rk_stage_with_acoustics(
         k1, tend_1, dt, 1.0, acoustic_update_fn, config, k1, tracer_mass,
     )
-    k2 = _blend(state, k1_stepped, 0.75, 0.25, tracer_mass)
+    k2 = _blend(state, k1_stepped, 0.75, 0.25, tracer_mass,
+               config.rounding_safe_combinations)
 
     # Stage 3: k3 = 1/3 * state + 2/3 * (k2 + dt * F(k2) + acoustic)
     tend_2 = slow_tendency_fn(k2)
     k2_stepped = _rk_stage_with_acoustics(
         k2, tend_2, dt, 1.0, acoustic_update_fn, config, k2, tracer_mass,
     )
-    return _blend(state, k2_stepped, 1.0 / 3.0, 2.0 / 3.0, tracer_mass)
+    return _blend(state, k2_stepped, 1.0 / 3.0, 2.0 / 3.0, tracer_mass,
+                  config.rounding_safe_combinations)
+
+
+def _increment_combination(x, y, b):
+    """``x + b*(y - x)``: equals ``(1-b)*x + b*y``, rounding only the increment."""
+    return jax.tree.map(lambda xi, yi: xi + b * (yi - xi), x, y)
 
 
 def _split_explicit_ssp_rk54(
@@ -382,14 +398,29 @@ def _split_explicit_ssp_rk34(
     )
 
 
-def _blend(x, y, a, b, tracer_mass):
-    """``a*x + b*y``; with ``tracer_mass`` the tracers blend as ``rho*q``."""
-    out = _pytree_linear_combination(x, y, a, b)
+def _blend(x, y, a, b, tracer_mass, increment=False):
+    """``a*x + b*y``; with ``tracer_mass`` the tracers blend as ``rho*q``.
+
+    ``increment`` (``rounding_safe_combinations``, needs ``a + b == 1``):
+    ``x + b*(y - x)``, which rounds only the increment in low-precision
+    storage; equal to ``a*x + b*y`` in exact arithmetic.
+    """
+    if increment:
+        if abs(a + b - 1.0) > 1e-12:
+            raise ValueError(f"increment-form blend needs a + b == 1, got {a} + {b}")
+        out = _increment_combination(x, y, b)
+    else:
+        out = _pytree_linear_combination(x, y, a, b)
     if tracer_mass is None:
         return out
     tm = tracer_mass
-    mq = (a * tm.density(x)[..., None] * tm.tracers(x)
-          + b * tm.density(y)[..., None] * tm.tracers(y))
+    if increment:
+        mx = tm.density(x)[..., None] * tm.tracers(x)
+        my = tm.density(y)[..., None] * tm.tracers(y)
+        mq = mx + b * (my - mx)
+    else:
+        mq = (a * tm.density(x)[..., None] * tm.tracers(x)
+              + b * tm.density(y)[..., None] * tm.tracers(y))
     return tm.with_tracers(out, mq / tm.density(out)[..., None])
 
 
