@@ -5712,12 +5712,15 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
 
+        # Orography is band-limited to the model's active band; pass the
+        # SAME fraction the SpectralNHConfig below uses (its default).
+        _df = SpectralNHConfig._field_defaults["dealiasing_fraction"]
         if test_case == "tc1":
             state, hcoord, tmetric = dcmip25_tc1_init_spectral(
-                grid, n_levels=nlev)
+                grid, n_levels=nlev, dealiasing_fraction=_df)
         elif test_case == "tc2a":
             state, hcoord, tmetric = dcmip25_tc2_init_spectral(
-                grid, n_levels=nlev, subcase="a")
+                grid, n_levels=nlev, subcase="a", dealiasing_fraction=_df)
         elif test_case == "tc3":
             state, hcoord, tmetric = dcmip25_tc3_init_spectral(
                 grid, n_levels=nlev)
@@ -5797,6 +5800,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             # iter-9: opt into anchored mass fixer (parallel to cube/ico
             # NH in iter-7/8).
             fix_mass=True, anchor_mass_to_initial=True,
+            dealiasing_fraction=_df,
         )
         # Use the small-Earth grid for tc2/tc3
         if sef != 1.0:

@@ -63,6 +63,7 @@ from legoesm.grids.gaussian import (
     GaussianGrid,
     create_gaussian_grid,
     sh_analysis,
+    sh_synthesis,
     sh_analysis_3d,
     sh_synthesis_3d,
     sh_analysis_oc2_3d,
@@ -1071,6 +1072,59 @@ class SpectralCompressibleEulerModel:
         # iter-9: lazy fp64 dry-mass snapshot for anchor-to-initial.
         self._target_mass = None
 
+        # State-truncation mask for the Orszag 2/3 rule (the band-limit
+        # contract of the spectral SW / PE / tracer twins).  The slow
+        # TENDENCIES are masked in ``spectral_nh_slow_tendencies``, which
+        # FREEZES (does not remove) upper-third modes of the state: initial
+        # content (e.g. the under-resolved TC3 warm bubble) and the
+        # upper-band power the grid-space acoustic update and vertical
+        # tracer transport put back every stage.  Those frozen modes are
+        # neither advected, diffused nor given a horizontal pressure
+        # gradient, yet the vertical acoustic columns keep acting on them.
+        # Truncating the incoming state and every acoustic-update output
+        # enforces the band-limit at every stage;
+        # exact no-op for band-limited states, and the n=0 row (global
+        # mass / tracer integrals) is never touched.
+        self._dealias_state = None
+        if self.config.dealiasing_fraction > 0.0:
+            self._dealias_state = dealiasing_mask(
+                self.grid, self.config.dealiasing_fraction,
+            )
+            # The terrain must lie in the same band: J = (H - z_s)/H weights
+            # every mass prognostic, so off-band orography would let the
+            # truncation imprint the terrain on a uniform tracer (1.2e-2 at
+            # TC2a T21).  Grid-space check, so terrain the transform cannot
+            # represent at all (n > n_max) is refused too.  Build orography
+            # with :func:`band_limited_orography`.  Checked on the Jacobian
+            # the solver consumes: max over points of |J - P(J)| / J (the
+            # uniform-tracer error it would cause), tolerance max(1e-10,
+            # 10 * dtype eps); the fp64 projection's own round-off in z_s is
+            # <= 6.5e-13 relative (TC1/TC2a, T21-T85).
+            J = terrain_metric.jacobian
+            if self._use_cpu_for_spectral:     # same device as self.grid
+                J = jax.device_put(J, self._cpu_device)
+            if J.dtype not in (jnp.float32, jnp.float64):
+                raise ValueError(
+                    f"spectral NH terrain Jacobian must be float32/float64, "
+                    f"got {J.dtype}")
+            if not bool(jnp.all(jnp.isfinite(J))):
+                raise ValueError("spectral NH terrain Jacobian is not finite")
+            _jmin = float(jnp.min(J))
+            if not _jmin > 0.0:
+                raise ValueError(
+                    f"spectral NH terrain gives min J = {_jmin} (needs "
+                    "z_s < H everywhere)")
+            _off = float(jnp.max(jnp.abs(J - band_limited_orography(
+                self.grid, J, self.config.dealiasing_fraction)) / J))
+            _tol = max(1e-10, 10.0 * float(jnp.finfo(J.dtype).eps))
+            if not _off <= _tol:
+                raise ValueError(
+                    "spectral NH terrain is not band-limited to the active "
+                    f"band (dealiasing_fraction="
+                    f"{self.config.dealiasing_fraction}): relative Jacobian "
+                    f"error {_off:.3e} > {_tol:.1e}.  Build "
+                    "z_s with band_limited_orography(grid, z_s, fraction).")
+
         # Warn if de-aliasing is off — the NH slow tendencies are
         # quadratic/cubic and alias without the Orszag 2/3 truncation.
         # This is the PRIMARY stabiliser (hyperdiff_coeff defaults to 0).
@@ -1126,6 +1180,32 @@ class SpectralCompressibleEulerModel:
         return jnp.einsum(
             "ijkt,ijk,ij->t", jrq.astype(acc), w.astype(acc),
             self.grid.grid_area.astype(acc),
+        )
+
+    def _apply_state_truncation(self, state):
+        """Truncate the prognostic state to the de-aliased 2/3 band.
+
+        Multiplies vor/div/w/theta'/J*rho' and the tracer densities by the
+        0/1 dealiasing mask -- the SAME fields whose slow tendencies are
+        masked in :func:`spectral_nh_slow_tendencies`.  ``phis_hat`` is
+        static forcing and is never truncated.  No-op when
+        ``dealiasing_fraction == 0``.
+        """
+        if self._dealias_state is None:
+            return state
+        m = self._dealias_state
+
+        def _cut(f):
+            return f.replace(data=f.data * m.reshape(
+                (-1,) + (1,) * (f.data.ndim - 1)).astype(f.data.dtype))
+
+        return state._replace(
+            vor_hat=_cut(state.vor_hat),
+            div_hat=_cut(state.div_hat),
+            w_hat=_cut(state.w_hat),
+            theta_prime_hat=_cut(state.theta_prime_hat),
+            rho_prime_hat=_cut(state.rho_prime_hat),
+            tracers_hat=_cut(state.tracers_hat),
         )
 
     def _apply_mass_fixer(self, state, target_mass=None):
@@ -1273,7 +1353,10 @@ class SpectralCompressibleEulerModel:
             theta_p_new_hat = theta_rho_w_new_hat[..., :nlev_a]
             rho_p_new_hat = theta_rho_w_new_hat[..., nlev_a:2 * nlev_a]
             w_new_hat = theta_rho_w_new_hat[..., 2 * nlev_a:]
-            return SpectralNHState(
+            # The grid-space vertical update re-creates upper-band power in
+            # w/theta'/J rho'/tracers; project back to the active band so
+            # every stage (not only the step's end) stays band-limited.
+            return self._apply_state_truncation(SpectralNHState(
                 vor_hat=s.vor_hat,
                 div_hat=s.div_hat,
                 w_hat=s.w_hat.replace(data=w_new_hat),
@@ -1285,7 +1368,7 @@ class SpectralCompressibleEulerModel:
                 ),
                 phis_hat=s.phis_hat,
                 tracers_hat=s.tracers_hat.replace(data=tr_hat_new),
-            )
+            ))
 
         return slow_tendency_fn, acoustic_update_fn
 
@@ -1322,9 +1405,14 @@ class SpectralCompressibleEulerModel:
         )
         slow_tendency_fn, acoustic_update_fn = self._build_se_functions(
             physics_fn)
-
+        # 2/3-rule STATE truncation (see __init__) of the incoming state
+        # (IC / restart upper band); the stages then stay in the band
+        # (masked slow tendencies, truncated acoustic update), so the
+        # returned state is band-limited.  n=0 is kept: masses unchanged.
+        # Applied on the execution device (the mask lives with self.grid).
         if self._use_cpu_for_spectral:
-            state_cpu = jax.device_put(state, self._cpu_device)
+            state_cpu = self._apply_state_truncation(
+                jax.device_put(state, self._cpu_device))
             result_cpu = split_explicit_step(
                 state_cpu, slow_tendency_fn, acoustic_update_fn,
                 dt, se_config,
@@ -1332,7 +1420,8 @@ class SpectralCompressibleEulerModel:
             state_new = jax.device_put(result_cpu, self._default_device)
         else:
             state_new = split_explicit_step(
-                state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+                self._apply_state_truncation(state), slow_tendency_fn,
+                acoustic_update_fn, dt, se_config,
             )
 
         # iter-9: anchored dry-mass fixer.  ``_target_mass`` is None
@@ -1364,7 +1453,8 @@ class SpectralCompressibleEulerModel:
         )
         slow_tendency_fn, acoustic_update_fn = self._build_se_functions()
         state_new = split_explicit_step(
-            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+            self._apply_state_truncation(state), slow_tendency_fn,
+            acoustic_update_fn, dt, se_config,
         )
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
@@ -1428,10 +1518,35 @@ class SpectralCompressibleEulerModel:
 # Initialization helpers
 # =============================================================================
 
+def band_limited_orography(grid: GaussianGrid, z_s: jax.Array,
+                           dealiasing_fraction: float) -> jax.Array:
+    """Project grid orography onto the model's ACTIVE spectral band.
+
+    The model truncates its prognostic state to the Orszag band
+    ``n <= floor(dealiasing_fraction * n_max)`` after every step
+    (:meth:`SpectralCompressibleEulerModel._apply_state_truncation`).  The
+    terrain enters through ``J = (H - z_s)/H`` (linear in ``z_s``), which
+    weights every mass prognostic (``J rho'``, ``J rho q``); an orography
+    with power above the band would make ``J * rho_ref * q0`` (a uniform
+    tracer) not band-limited, so the state truncation would imprint the
+    terrain on the recovered mixing ratio.  Truncating ``z_s`` to the same
+    band keeps ``J``, ``phis`` and the J-weighted prognostics consistent
+    (standard spectral-model practice: orography at model resolution).
+    ``dealiasing_fraction <= 0`` (no state truncation) returns ``z_s``
+    unchanged (the former terrain of that configuration).
+    """
+    if dealiasing_fraction <= 0.0:
+        return z_s
+    mask = dealiasing_mask(grid, dealiasing_fraction)
+    z_hat = sh_analysis(grid, z_s.astype(jnp.float64)) * mask
+    return sh_synthesis(grid, z_hat)
+
+
 def dcmip25_tc1_init_spectral(
     grid: GaussianGrid,
     n_levels: int = 88,
     params: dict | None = None,
+    dealiasing_fraction: float = SpectralNHConfig._field_defaults["dealiasing_fraction"],
 ) -> tuple['SpectralNHState', HeightCoordinate, 'TerrainMetric']:
     """Initialize DCMIP-2025 TC1 (gravity waves) on Gaussian grid.
 
@@ -1447,6 +1562,10 @@ def dcmip25_tc1_init_spectral(
         Number of vertical levels.
     params : dict, optional
         Override default parameters (see dcmip2025.test_case_1.TC1_PARAMS).
+    dealiasing_fraction : float
+        Active spectral band of the model the state is built for; the
+        orography is truncated to it (:func:`band_limited_orography`).
+        Must equal the model's ``SpectralNHConfig.dealiasing_fraction``.
 
     Returns
     -------
@@ -1493,6 +1612,9 @@ def dcmip25_tc1_init_spectral(
     angular_dist = 2.0 * jnp.arcsin(jnp.sqrt(jnp.clip(a_hav, 0.0, 1.0)))
     dist = angular_dist * grid.radius
     z_s = h0 * jnp.exp(-(dist / halfwidth) ** 2)
+    # Orography at the model's active band (see band_limited_orography);
+    # ``dealiasing_fraction`` must equal the model config's.
+    z_s = band_limited_orography(grid, z_s, dealiasing_fraction)
 
     # Terrain metric
     terrain_metric = compute_terrain_metric(z_s, height_coord)
@@ -1611,6 +1733,7 @@ def dcmip25_tc2_init_spectral(
     n_levels: int = 48,
     subcase: str = "a",
     params: dict | None = None,
+    dealiasing_fraction: float = SpectralNHConfig._field_defaults["dealiasing_fraction"],
 ) -> tuple['SpectralNHState', HeightCoordinate, 'TerrainMetric']:
     """Initialize DCMIP-2025 TC2 (mountain flow) on Gaussian grid.
 
@@ -1627,6 +1750,10 @@ def dcmip25_tc2_init_spectral(
         "a" for gap flow, "b" for vortex shedding.
     params : dict, optional
         Override default parameters.
+    dealiasing_fraction : float
+        Active spectral band of the model the state is built for; the
+        orography is truncated to it (:func:`band_limited_orography`).
+        Must equal the model's ``SpectralNHConfig.dealiasing_fraction``.
     """
     from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (
         isothermal_theta_ref,
@@ -1671,6 +1798,9 @@ def dcmip25_tc2_init_spectral(
         z_s = p["mountain_h0"] * jnp.exp(-(dist / p["mountain_d"]) ** 2)
     else:
         raise ValueError(f"Unknown subcase: {subcase!r}")
+    # Orography at the model's active band (see band_limited_orography);
+    # ``dealiasing_fraction`` must equal the model config's.
+    z_s = band_limited_orography(small_grid, z_s, dealiasing_fraction)
 
     terrain_metric = compute_terrain_metric(z_s, height_coord)
 

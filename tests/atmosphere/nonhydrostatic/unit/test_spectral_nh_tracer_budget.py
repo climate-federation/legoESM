@@ -231,9 +231,9 @@ def test_horizontal_tracer_tendency_manufactured_solid_body():
 
 def test_tc2a_terrain_dry_and_tracer_mass_close_without_fixer():
     """Rule 0 over terrain (TC2a, J 0.93-1.0), mass fixer OFF: dry mass and
-    tracer mass both close to round-off; a uniform q is represented to the
-    projection of J*rho_ref*q0 (3.8e-3) and drifts only boundedly from that
-    projected initial field.
+    tracer mass both close to round-off; a uniform q stays uniform to
+    round-off (the orography, hence J, is band-limited to the model's active
+    2/3 band, so J*rho_ref*q0 survives the per-step state truncation).
 
     Before the J-weighted prognostics (J rho', J rho q) the grid-space 1/J
     ahead of the spectral projection broke the J-weighted integral: dry and
@@ -271,14 +271,14 @@ def test_tc2a_terrain_dry_and_tracer_mass_close_without_fixer():
     dry = float(model.compute_dry_mass(end)) / m0 - 1.0
     assert abs(dry) < 1e-13, f"terrain dry-mass residual {dry:.3e}"
     assert abs(rel) < 1e-13, f"terrain tracer residual {rel:.3e}"
-    # Uniform q over terrain: J*rho_ref*q0 is not band-limited (J is the
-    # untruncated grid terrain), so its T21 projection already makes the
-    # recovered q non-uniform by 3.8e-3 at t=0 (a representation error of
-    # the J-weighted prognostic, not transport).  Transport then keeps that
-    # q nearly fixed: measured max|q_end/q_start - 1| = 7.8e-7 in 5 steps.
+    # Uniform q over terrain: J (from the band-limited orography) times the
+    # horizontally uniform rho_ref*q0 lies in the active band, so the
+    # recovered q is uniform at t=0 and after 5 steps.  Measured: 1.8e-13 /
+    # 8.8e-13.  With the untruncated grid terrain (before) it was 3.8e-3 at
+    # t=0, and 1.2e-2 once the state is truncated to the 2/3 band.
     def _q(s):
         rho = hc.rho_ref + sh_synthesis_3d(g, s.rho_prime_hat.data) / J[..., None]
         return sh_synthesis_3d(g, s.tracers_hat.data[..., 0]) / J[..., None] / rho
     q_start, q_end = _q(state), _q(end)
-    assert float(jnp.max(jnp.abs(q_start / q0 - 1.0))) < 5e-3
-    assert float(jnp.max(jnp.abs(q_end / q_start - 1.0))) < 5e-6
+    assert float(jnp.max(jnp.abs(q_start / q0 - 1.0))) < 1e-10
+    assert float(jnp.max(jnp.abs(q_end / q0 - 1.0))) < 1e-10
