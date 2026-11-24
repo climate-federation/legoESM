@@ -1288,13 +1288,35 @@ def _biharmonic_visc_latlon(n_lat: int, efold_hours: float = 9.0) -> float:
     return dy ** 4 / (64.0 * efold_hours * 3600.0)
 
 
-def _laplacian_visc_ico(mesh, frac: float = 0.1) -> float:
-    """Laplacian viscosity A_h = frac * c_gw * dx for icosahedral grid."""
-    import math
-    from legoesm import constants
-    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
-    c_gw = math.sqrt(constants.R_d * 300.0)
-    return frac * c_gw * dx_mean
+def _mpas_hydro_config(mesh, sigma):
+    """Icosahedral hydrostatic matrix dycore config (HS, dycore rows, AMIP).
+
+    MPAS-A Registry defaults (v8.4.2, ``nhyd_model``):
+    ``config_h_mom_eddy_visc2 = 0`` -- no constant del2 (the former
+    ``0.1*c_gw*dx`` = 6.5e6 m^2/s at ico5 was a 2026-03 cube CD-grid stability
+    heuristic, not MPAS; it decayed the steady JW jet 27.8 -> 24.8 m/s in 2 d
+    and cut RH 6-0 / MR 5-0 to 103 / 26 m/s vs 142 / 36 without it);
+    del4 ~ ``config_visc4_2dsmag*dx^3`` (0.05 m/s: 5.5e14 m^4/s at ico5 vs
+    ``_hyperdiff_ico`` 4.3e14).  Vertical theta
+    transport in conservative flux form (MPAS-A transports rho*theta in flux
+    form): ``sb``.  The model default ``upwind`` advective theta diffuses theta
+    down the steep upper-level theta gradient: +50 K mean warming of the top
+    layers in 2 d of adiabatic RH 6-0 on CAM6 L32 (+29 K on analytic L40).
+    ponytail: MPAS-A's flow-dependent 2-D Smagorinsky del2
+    (``config_smagorinsky_coef = 0.125``) and 3rd-order vertical flux
+    (``config_coef_3rd_order``) are not ported; ceiling = flux-form 2nd order,
+    no deformation-dependent del2.
+    """
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        MPASPrimitiveEquationConfig)
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+    # sb is hybrid-only (the model refuses it on sigma); sigma rows keep the
+    # model default, exactly as before
+    hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
+    return MPASPrimitiveEquationConfig(
+        nu_del4=_hyperdiff_ico(mesh), fix_mass=True,
+        anchor_mass_to_initial=True, time_integrator=_mpas_integrator(),
+        vert_advection_scheme="sb" if hybrid else "upwind")
 
 
 # ---------------------------------------------------------------------------
@@ -2440,16 +2462,18 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         im = None
 
         for ax, step, section in zip(axes_arr, valid_steps, sections):
-            im = ax.imshow(
-                section.T, origin="lower", aspect="auto", cmap="RdBu_r",
-                vmin=vmin, vmax=vmax,
-                extent=[axis_vals[0], axis_vals[-1],
-                        float(levels[0]), float(levels[-1])])
+            # true level coordinates, model top (level 0) at the top: the
+            # former imshow(origin="lower") drew level 0 at the BOTTOM on an
+            # evenly spaced axis labelled in sigma
+            im = ax.pcolormesh(
+                axis_vals, np.asarray(levels, dtype=np.float64), section.T,
+                shading="nearest", cmap="RdBu_r", vmin=vmin, vmax=vmax)
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             ax.set_xlabel(xlabel)
 
         axes_arr[0].set_ylabel(level_label)
+        axes_arr[0].invert_yaxis()   # sharey: all panels
         fig.suptitle(
             f"{case_name} — {field_3d_key} cross-sections", fontsize=11)
         fig.tight_layout(rect=[0.0, 0.0, 0.90, 0.95])
@@ -4184,11 +4208,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         mesh = create_voronoi_mesh(level)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 200.0
-        ah = _laplacian_visc_ico(mesh)
-        config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True,
-            time_integrator=_mpas_integrator())
+        config = _mpas_hydro_config(mesh, sigma)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -4645,11 +4665,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         mesh = create_voronoi_mesh(level, **_vor_kwargs)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 200.0
-        ah = _laplacian_visc_ico(mesh)
-        config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True,
-            time_integrator=_mpas_integrator())
+        config = _mpas_hydro_config(mesh, sigma)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -4836,7 +4852,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         diag=diag)  # iter-99: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir,
-        f"Baroclinic {tc.resolution} {tc.vertical_coord}",
+        f"{tc.case} {tc.resolution} {tc.vertical_coord}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=[
             ("u", "Zonal wind u (m/s)", "RdBu_r"),
@@ -5231,11 +5247,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         mesh = create_voronoi_mesh(level)
         sigma = _create_vertical(nlev, "hybrid")  # AMIP: hybrid only
         dt = 200.0
-        ah = _laplacian_visc_ico(mesh)
-        config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True,
-            time_integrator=_mpas_integrator())
+        config = _mpas_hydro_config(mesh, sigma)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
         grid = mesh
