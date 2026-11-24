@@ -5825,14 +5825,40 @@ def _make_kessler_nh_grid_fn(height_coord, dt_phys):
     return grid_fn
 
 
+def _tc3_bubble_box(lat, lon, radius):
+    """Mask of the DCMIP-2025 TC3 bubble region on the radius-``radius``
+    sphere (``lat``/``lon`` in radians, broadcastable).
+
+    A box around the line of warm bubbles (TC3_PARAMS: centred on
+    ``bubble_lon`` and the equator): |x| <= 5 bubble half-widths across the
+    line (room for the ~7 km shear advection of 4 min) and |y| <= the line's
+    half-length plus 2 half-widths along it.  The row's ``|w|_bubble``
+    metric is the column-max |w| inside this box -- the convective signal,
+    which the global |w|_max can miss when the large-scale flow is not in
+    balance (the former unbalanced spectral TC3 IC peaked at the POLES).
+    Returns ``(mask, (half_x, half_y))``.
+    """
+    from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import TC3_PARAMS
+    p = TC3_PARAMS
+    dlon = np.mod(np.asarray(lon) - p["bubble_lon"] + np.pi, 2 * np.pi) - np.pi
+    x = dlon * radius * np.cos(lat)
+    y = np.asarray(lat) * radius
+    half_x = 5.0 * p["bubble_rh"]
+    half_y = (p["n_bubbles"] // 2) * p["bubble_spacing"] + 2.0 * p["bubble_rh"]
+    return (np.abs(x) <= half_x) & (np.abs(y) <= half_y), (half_x, half_y)
+
+
 def _make_kessler_spectral_nh_physics_fn(height_coord, dt_phys):
     """Kessler physics_fn for the spectral NH dycore.
 
-    Synthesizes theta', rho' and the (q_v, q_c, q_r) tracers to the
-    Gaussian grid, runs the shared grid-space Kessler core
-    (:func:`_make_kessler_nh_grid_fn`), and analyses the theta' and tracer
-    tendencies back to spectral space.  All other tendencies are zero,
-    exactly as in the grid-point wrapper.
+    Synthesizes theta' and the J-weighted J*rho', J*rho*(q_v, q_c, q_r) to
+    the Gaussian grid, divides by J (and by rho for the mixing ratios),
+    runs the shared grid-space Kessler core
+    (:func:`_make_kessler_nh_grid_fn`) directly on those grid fields, and
+    analyses theta' and the prognostic tracer tendencies
+    ``J * rho * dq/dt`` (rho is unchanged by the physics) back to spectral
+    space.  All other tendencies are zero, exactly as in the grid-point
+    wrapper.
     """
     from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
 
@@ -5841,11 +5867,22 @@ def _make_kessler_spectral_nh_physics_fn(height_coord, dt_phys):
     def physics_fn(state, grid, hcoord, tmetric):
         n_sh, nlev, n_tr = state.tracers_hat.data.shape
         theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
-        rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data)
-        tr = sh_synthesis_3d(
+        J = tmetric.jacobian
+        rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data) / J[..., None]
+        rq = sh_synthesis_3d(
             grid, state.tracers_hat.data.reshape(n_sh, nlev * n_tr),
-        ).reshape(grid.n_lat, grid.n_lon, nlev, n_tr)
-        dtheta_dt, dtracers = grid_fn(theta_p, rho_p, tr)
+        ).reshape(grid.n_lat, grid.n_lon, nlev, n_tr) / J[..., None, None]
+        from legoesm.atmosphere.physics.thermodynamics import (
+            sanitize_theta_rho,
+        )
+        _, rho = sanitize_theta_rho(
+            hcoord.theta_ref + theta_p, hcoord.rho_ref + rho_p)
+        rho = rho[..., None]
+        dtheta_dt, dq_dt = grid_fn(theta_p, rho_p, rq / rho)
+        # Tracer-mass tendency with the PROGNOSTIC density (J rho_ref +
+        # J rho', what the budget integrates); sanitized rho only forms q.
+        dtracers = J[..., None, None] * (
+            hcoord.rho_ref + rho_p)[..., None] * dq_dt
         dtheta_hat = sh_analysis_3d(grid, dtheta_dt)
         dtr_hat = sh_analysis_3d(
             grid, dtracers.reshape(grid.n_lat, grid.n_lon, nlev * n_tr),
@@ -5859,11 +5896,17 @@ def _make_kessler_spectral_nh_physics_fn(height_coord, dt_phys):
             div_hat=_zero(state.div_hat),
             w_hat=_zero(state.w_hat),
             theta_prime_hat=state.theta_prime_hat.replace(data=dtheta_hat),
-            rho_prime_hat=_zero(state.rho_prime_hat),
+            rho_prime_hat=_zero(state.rho_prime_hat).replace(units="kg/m^3/s"),
             phis_hat=_zero(state.phis_hat),
-            tracers_hat=state.tracers_hat.replace(data=dtr_hat),
+            tracers_hat=state.tracers_hat.replace(data=dtr_hat,
+                                                  units="kg/m^3/s"),
         )
 
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
+        tag_tracer_tendency_encoding,
+    )
+    # Returns d(J rho q)/dt: declare it (checked by the dycore's step()).
+    physics_fn = tag_tracer_tendency_encoding(physics_fn)
     return physics_fn
 
 
@@ -6005,6 +6048,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
         lon_edge = np.asarray(mesh.lonEdge, dtype=np.float64) * 180 / np.pi
         lat_edge = np.asarray(mesh.latEdge, dtype=np.float64) * 180 / np.pi
+        _bubble_mask = (_tc3_bubble_box(
+            np.asarray(mesh.latCell, dtype=np.float64),
+            np.asarray(mesh.lonCell, dtype=np.float64),
+            float(mesh.radius))[0] if test_case == "tc3" else None)
 
         if test_case == "tc3":
             from legoesm.core.state import MPASNonHydrostaticTendencies
@@ -6030,7 +6077,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             # iter-8: track total dry mass alongside |w|_max (parallel
             # to iter-7's cube NH scalar_fn extension).
             from legoesm.core.conservation import compute_nh_dry_mass_mpas
-            return {
+            out = {
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
                 "mean_theta_prime": _area_weighted_mean(
                     s.theta_prime.data, mesh.areaCell),
@@ -6039,6 +6086,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 "mass":             float(compute_nh_dry_mass_mpas(
                     s.rho_prime.data, hcoord, tmetric, mesh)),
             }
+            if _bubble_mask is not None and _bubble_mask.any():
+                w_col = jnp.max(jnp.abs(s.w.data), axis=-1)   # on device
+                out["max_abs_w_bubble"] = float(jnp.max(
+                    jnp.where(_bubble_mask, w_col, 0.0)))
+            return out
 
         def extract_fn(s):
             # u is on edges (nEdges, nlev) — use edge coordinates
@@ -6057,6 +6109,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 w_ll = np.full((181, 360), np.nan)
             return {
                 "u": u_ll, "w_mid": w_ll,
+                # native per-cell column-max |w| (bubble-region plots)
+                "w_colmax": np.abs(w_arr).max(axis=-1),
                 "theta_prime_3d": np.asarray(
                     s.theta_prime.data, dtype=np.float64),
                 "rho_prime_3d": np.asarray(
@@ -6088,12 +6142,15 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
 
+        # Orography is band-limited to the model's active band; pass the
+        # SAME fraction the SpectralNHConfig below uses (its default).
+        _df = SpectralNHConfig._field_defaults["dealiasing_fraction"]
         if test_case == "tc1":
             state, hcoord, tmetric = dcmip25_tc1_init_spectral(
-                grid, n_levels=nlev)
+                grid, n_levels=nlev, dealiasing_fraction=_df)
         elif test_case == "tc2a":
             state, hcoord, tmetric = dcmip25_tc2_init_spectral(
-                grid, n_levels=nlev, subcase="a")
+                grid, n_levels=nlev, subcase="a", dealiasing_fraction=_df)
         elif test_case == "tc3":
             state, hcoord, tmetric = dcmip25_tc3_init_spectral(
                 grid, n_levels=nlev)
@@ -6112,11 +6169,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             TC2_PARAMS as _TC2_P, TC3_PARAMS as _TC3_P,
         )
         if test_case == "tc2a":
-            sef = 20.0
+            sef = float(_TC2_P["small_earth_factor"])
             _rotating = bool(_TC2_P.get("rotating", True))
             sponge_w, sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
         elif test_case == "tc3":
-            sef = 60.0
+            sef = float(_TC3_P["small_earth_factor"])
             _rotating = bool(_TC3_P.get("rotating", True))
             sponge_w, sponge_c = 8000.0, 0.15
         else:
@@ -6124,11 +6181,35 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             _rotating = True
             sponge_w, sponge_c = 10000.0, 0.05
 
+        # TC3 resolution note (2026-11-24 diagnosis): the warm bubbles are
+        # 10 km wide on this radius/60 planet, which this core under-resolves
+        # (nominal shortest wavelength 2*pi*a/N: T42 16 km, T85 7.8 km; the
+        # slow horizontal tendencies are further masked to
+        # n <= floor(2N/3): 24 / 12 km).  An offline dry Boussinesq initial
+        # vertical acceleration of the bubbles low-passed at
+        # 2*pi*a/floor(2N/3) is 0.0007 (T42) / 0.0038 (T85) m/s^2 vs 0.027
+        # unfiltered; times 240 s that is 0.17 / 0.9 m/s, the same scale as
+        # (but below) the model's |w| at 4 min (T42 0.23, T85 1.44 m/s).
+        # Horizontal under-resolution is the leading explanation; the
+        # tested damping and acoustic controls have small effects at T42
+        # (hyperdiffusion off, sponge off, explicit acoustics, 2x substeps:
+        # each < 7 % on |w|), while halving dt moves it -16 %
+        # (timestep convergence not established).  A separate, resolved
+        # test (one 40 km x 8 km bubble, dry) gives spectral T42 1.60 vs
+        # MPAS ico5 1.45 m/s at 120 s.  Not measured: the share of the 2/3
+        # mask vs the nominal truncation, and the resolution at which
+        # spectral matches MPAS on the standard bubbles.
         _dt_scale_sp = 3.0 if test_case == "tc3" else 6.0
         dt = max(0.25 if test_case == "tc3" else 0.5,
                  _dt_scale_sp * (21.0 / n_max))
         # TC2/TC3 need more acoustic substeps and stronger diffusion.
-        _base_hd = 2.338e15 * (21.0 / n_max) ** 4
+        # The del-4 coefficient scales as length^4: the Earth-radius value
+        # 2.338e15 m^4/s (T21) is divided by X^4 on the radius/X small
+        # planet so the damping RATE at a given wavenumber n is the same as
+        # on the full Earth (DCMIP small-planet convention; MPAS gets this
+        # automatically from nu_del4 ~ dx_mean^4).  Unscaled, the TC3
+        # (X=60) rate*dt at n=21 was ~94 -> non-finite from step 2.
+        _base_hd = 2.338e15 * (21.0 / n_max) ** 4 / sef ** 4
         if test_case == "tc2a":
             _n_acoustic_sp = 20
             _hd_sp = _base_hd * 4.0
@@ -6149,6 +6230,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             # iter-9: opt into anchored mass fixer (parallel to cube/ico
             # NH in iter-7/8).
             fix_mass=True, anchor_mass_to_initial=True,
+            dealiasing_fraction=_df,
         )
         # Use the small-Earth grid for tc2/tc3
         if sef != 1.0:
@@ -6157,6 +6239,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 n_max, radius=_c.R_earth / sef)
         model = SpectralCompressibleEulerModel(
             grid, hcoord, tmetric, nh_config)
+
+        _bubble_mask = (_tc3_bubble_box(
+            np.asarray(grid.lat, dtype=np.float64)[:, None],
+            np.asarray(grid.lon2d, dtype=np.float64),
+            float(grid.radius))[0] if test_case == "tc3" else None)
 
         if test_case == "tc3":
             # Same Kessler warm-rain physics as the MPAS arm, evaluated at
@@ -6178,22 +6265,27 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             w = sh_synthesis_3d(grid, s.w_hat.data)
             theta_p = sh_synthesis_3d(grid, s.theta_prime_hat.data)
-            rho_p = sh_synthesis_3d(grid, s.rho_prime_hat.data)
+            # rho_prime_hat is the J-weighted J*rho' (spectral_nh docstring).
+            jrho_p = sh_synthesis_3d(grid, s.rho_prime_hat.data)
+            rho_p = jrho_p / tmetric.jacobian[..., None]
             # iter-9: report dry mass alongside |w|_max for spectral NH
             # (parallel to iter-7 cube / iter-8 ico instrumentation).
-            rho_total = hcoord.rho_ref + rho_p
             col_mass = jnp.sum(
-                tmetric.jacobian[..., None]
-                * rho_total
+                (tmetric.jacobian[..., None] * hcoord.rho_ref + jrho_p)
                 * hcoord.dz[None, None, :],
                 axis=-1,
             )
-            return {
+            out = {
                 "max_abs_w": float(jnp.max(jnp.abs(w))),
                 "mean_theta_prime": _area_weighted_mean(theta_p, grid.grid_area),
                 "mean_rho_prime":   _area_weighted_mean(rho_p,   grid.grid_area),
                 "mass": _area_weighted_sum(col_mass, grid.grid_area),
             }
+            if _bubble_mask is not None and _bubble_mask.any():
+                w_col = jnp.max(jnp.abs(w), axis=-1)          # on device
+                out["max_abs_w_bubble"] = float(jnp.max(
+                    jnp.where(_bubble_mask, w_col, 0.0)))
+            return out
 
         def extract_fn(s):
             from legoesm.grids.gaussian import uv_from_vordiv_3d
@@ -6213,12 +6305,15 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 "u": u_sfc,
                 "v": v_sfc,
                 "w_mid": np.asarray(w[..., w_idx], dtype=np.float64),
+                "w_colmax": np.asarray(jnp.max(jnp.abs(w), axis=-1),
+                                       dtype=np.float64),
                 "wind_speed": np.sqrt(u_sfc ** 2 + v_sfc ** 2),
                 "theta_prime_3d": np.asarray(
                     sh_synthesis_3d(grid, s.theta_prime_hat.data),
                     dtype=np.float64),
                 "rho_prime_3d": np.asarray(
-                    sh_synthesis_3d(grid, s.rho_prime_hat.data),
+                    sh_synthesis_3d(grid, s.rho_prime_hat.data)
+                    / tmetric.jacobian[..., None],
                     dtype=np.float64),
             }
 
@@ -6254,6 +6349,16 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             w_max = float("nan")
     else:
         w_max = float("nan")
+    # TC3: column-max |w| inside the bubble box (convective signal), kept
+    # next to the global max (see ``_tc3_bubble_box``).
+    _w_bub = (scalar_fn(state).get("max_abs_w_bubble")
+              if ok and test_case == "tc3" else None)
+    if _w_bub is not None:
+        _bub_note = f", |w|_bubble={_w_bub:.4f} m/s"
+    elif ok and test_case == "tc3":
+        _bub_note = ", |w|_bubble=N/A (no column centre in the bubble box)"
+    else:
+        _bub_note = ""
     # iter-10: surface mass drift in the NH notes line (parallel to the
     # SW / hydro runners).  ``diag`` is the dict accumulated from
     # ``scalar_fn``; iter-7..9 added ``"mass"`` to every NH grid path.
@@ -6261,8 +6366,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
     if _mass_series and len(_mass_series) >= 2:
         mass_drift = _compute_drift(_mass_series)
         notes = (
-            f"|w|_max={w_max:.4f} m/s, mass_drift={mass_drift:.2e}, "
-            f"dt={dt:.2f}s"
+            f"|w|_max={w_max:.4f} m/s{_bub_note}, "
+            f"mass_drift={mass_drift:.2e}, dt={dt:.2f}s"
         )
         # iter-25/26: NH PASS gate on mass drift.  With iter-7/8/9
         # fixers active every measured case sits at exact 0 or fp64
@@ -6277,7 +6382,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             n_samples=len(_mass_series),
         )
     else:
-        notes = f"|w|_max={w_max:.4f} m/s, dt={dt:.2f}s"
+        notes = f"|w|_max={w_max:.4f} m/s{_bub_note}, dt={dt:.2f}s"
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,

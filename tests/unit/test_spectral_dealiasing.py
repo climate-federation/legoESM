@@ -48,7 +48,9 @@ from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
     spectral_to_grid,
 )
 from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
+    SpectralCompressibleEulerModel,
     SpectralNHConfig,
+    band_limited_orography,
     spectral_nh_slow_tendencies,
     nh_rest_state_spectral,
 )
@@ -332,6 +334,133 @@ class TestAliasingStabilityNH:
             np.asarray(t_off.tracers_hat.data * r3),
             rtol=0, atol=0,
         )
+
+    def test_model_step_truncates_state_band(self, grid_t21):
+        """Band-limit contract (SW / PE twins): masked tendencies alone
+        FREEZE upper-third state modes, so ``step`` must truncate the state.
+        The truncation keeps the retained band and the n=0 row (global dry
+        mass / tracer integrals) bit-for-bit and is a no-op when disabled."""
+        grid = grid_t21
+        hc = create_height_coordinate(8, 30000.0)
+        tm = compute_terrain_metric(jnp.zeros((grid.n_lat, grid.n_lon)), hc)
+        state = self._rough_nh_state(grid, hc)
+        w = np.zeros(state.w_hat.data.shape, dtype=complex)
+        w[:, 1:-1] = 1e-2 / (1.0 + np.asarray(grid.ls))[:, None]
+        w[np.asarray(grid.ms) != 0, 1:-1] *= (1 + 1j)
+        state = state._replace(w_hat=state.w_hat.replace(data=jnp.asarray(w)))
+        high = _high_band_mask(grid)
+        retained = np.asarray(dealiasing_mask(grid, _FRACTION)) > 0
+        names = ("vor_hat", "div_hat", "w_hat", "theta_prime_hat",
+                 "rho_prime_hat", "tracers_hat")
+        for name in names:                                  # non-vacuous
+            assert _energy(getattr(state, name).data, high) > 0.0, name
+
+        cfg = SpectralNHConfig(hyperdiff_coeff=0.0, sponge_coeff=0.0,
+                               n_acoustic_substeps=4,
+                               semi_implicit_acoustic=True,
+                               dealiasing_fraction=_FRACTION)
+        model = SpectralCompressibleEulerModel(grid, hc, tm, cfg)
+        cut = model._apply_state_truncation(state)
+        for name in names:
+            a = np.asarray(getattr(state, name).data)
+            b = np.asarray(getattr(cut, name).data)
+            assert _energy(b, high) == 0.0, name
+            np.testing.assert_array_equal(b[retained], a[retained])
+        for stepped in (model.step(state, 0.5),
+                        model._step_on_cpu(state, 0.5, None)):
+            for name in names:
+                d = getattr(stepped, name).data
+                assert bool(jnp.all(jnp.isfinite(d))), name
+                assert _energy(d, high) == 0.0, (
+                    f"{name}: upper band survived step")
+
+        # Every stage stays in the band: the acoustic update's output is
+        # truncated, and an off-band input steps exactly like its truncation.
+        _, acoustic = model._build_se_functions()
+        out = acoustic(cut, None, 0.1, 4, None)
+        for name in names:
+            assert _energy(getattr(out, name).data, high) == 0.0, name
+        a = model.step(state, 0.5)
+        b = model.step(cut, 0.5)
+        for name in names:
+            np.testing.assert_array_equal(np.asarray(getattr(a, name).data),
+                                          np.asarray(getattr(b, name).data))
+
+        off = SpectralCompressibleEulerModel(
+            grid, hc, tm, cfg._replace(dealiasing_fraction=0.0))
+        same = off._apply_state_truncation(state)
+        for name in names:
+            assert getattr(same, name) is getattr(state, name)
+
+    def test_model_refuses_off_band_terrain(self, grid_t21):
+        """Terrain must lie in the active band (J weights the mass
+        prognostics): refused above the band AND above n_max (grid spike);
+        accepted once projected with band_limited_orography."""
+        grid = grid_t21
+        hc = create_height_coordinate(8, 30000.0)
+        cfg = SpectralNHConfig(dealiasing_fraction=_FRACTION)
+        lat = np.asarray(grid.lat)[:, None]
+        lon = np.asarray(grid.lon2d)
+        smooth = 1000.0 * np.exp(-((lat / 0.3) ** 2 + ((lon - np.pi) / 0.3) ** 2))
+        spike = np.zeros_like(smooth)
+        spike[grid.n_lat // 2, grid.n_lon // 2] = 500.0
+        for z in (smooth, spike):
+            tm = compute_terrain_metric(jnp.asarray(z), hc)
+            with pytest.raises(ValueError, match="band-limited"):
+                SpectralCompressibleEulerModel(grid, hc, tm, cfg)
+            zb = band_limited_orography(grid, jnp.asarray(z), _FRACTION)
+            for zz in (zb, zb.astype(jnp.float32)):   # fp32-stored terrain too
+                SpectralCompressibleEulerModel(
+                    grid, hc, compute_terrain_metric(zz, hc), cfg)
+            with pytest.raises(ValueError, match="band-limited"):
+                SpectralCompressibleEulerModel(grid, hc, compute_terrain_metric(
+                    jnp.asarray(z, dtype=jnp.float32), hc), cfg)
+        with pytest.raises(ValueError, match="float32/float64"):
+            SpectralCompressibleEulerModel(grid, hc, compute_terrain_metric(
+                jnp.asarray(smooth, dtype=jnp.float16), hc), cfg)
+        # fp32: a 1000 m plateau plus a 0.1 m excluded harmonic is refused
+        # (it would put ~3e-6 on a uniform tracer, above fp32 tolerance).
+        ls = np.asarray(grid.ls)
+        k = int(np.flatnonzero((ls == grid.n_max) & (np.asarray(grid.ms) == 0))[0])
+        h = np.zeros(grid.n_sh, dtype=complex); h[k] = 1.0
+        harm = np.asarray(sh_synthesis(grid, jnp.asarray(h)))
+        z32 = (1000.0 + 0.1 * harm / np.abs(harm).max()).astype(np.float32)
+        with pytest.raises(ValueError, match="band-limited"):
+            SpectralCompressibleEulerModel(grid, hc, compute_terrain_metric(
+                jnp.asarray(z32), hc), cfg)
+        with pytest.raises(ValueError, match="min J"):
+            SpectralCompressibleEulerModel(grid, hc, compute_terrain_metric(
+                jnp.full_like(jnp.asarray(smooth), 40000.0), hc), cfg)
+        # The check reads the Jacobian the solver uses, not z_s.
+        tm_ok = compute_terrain_metric(
+            band_limited_orography(grid, jnp.asarray(smooth), _FRACTION), hc)
+        with pytest.raises(ValueError, match="band-limited"):
+            SpectralCompressibleEulerModel(grid, hc, tm_ok._replace(
+                jacobian=compute_terrain_metric(
+                    jnp.asarray(smooth), hc).jacobian), cfg)
+        bad = compute_terrain_metric(jnp.asarray(smooth * np.nan), hc)
+        with pytest.raises(ValueError, match="not finite"):
+            SpectralCompressibleEulerModel(grid, hc, bad, cfg)
+        # Truncation off: the orography is left as given.
+        z0 = jnp.asarray(spike)
+        assert band_limited_orography(grid, z0, 0.0) is z0
+        # End-to-end opt-out: init and model both at fraction 0 keep the
+        # raw benchmark terrain (no projection anywhere).
+        from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
+            dcmip25_tc2_init_spectral)
+        from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import TC2_PARAMS
+        x = float(TC2_PARAMS["small_earth_factor"])
+        _, hc2, tm0 = dcmip25_tc2_init_spectral(
+            grid, n_levels=4, dealiasing_fraction=0.0)
+        _, _, tm1 = dcmip25_tc2_init_spectral(grid, n_levels=4)
+        assert float(jnp.max(jnp.abs(tm0.z_s - tm1.z_s))) > 1.0
+        from legoesm import constants as c
+        g2 = create_gaussian_grid(grid.n_max, radius=c.R_earth / x)
+        SpectralCompressibleEulerModel(g2, hc2, tm0, SpectralNHConfig(
+            small_earth_factor=x, dealiasing_fraction=0.0))
+        with pytest.raises(ValueError, match="band-limited"):
+            SpectralCompressibleEulerModel(g2, hc2, tm0, SpectralNHConfig(
+                small_earth_factor=x))
 
 
 # ---------------------------------------------------------------------------
