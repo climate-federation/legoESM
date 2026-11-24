@@ -96,3 +96,30 @@ def test_physics_fn_evaluated_at_every_rk_stage(tc3):
     plain = _leaves(model.step(state, _DT))
     for a, b in zip(plain, _leaves(out)):
         np.testing.assert_array_equal(a, b)
+
+
+def test_kessler_adapter_returns_tracer_density_tendency(tc3):
+    """tracers_hat is rho*q: the adapter must hand Kessler q = (rho q)/rho
+    and return rho * dq/dt (rho varies 1.2 -> 0.09 kg/m^3 with height, so a
+    missing conversion is a factor-of-ten error, not a rounding one)."""
+    from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
+    from scripts.matrix.run_atmosphere_test_matrix import (
+        _make_kessler_nh_grid_fn,
+    )
+    model, state, hcoord = tc3
+    g = model.grid
+    n_sh, nlev, n_tr = state.tracers_hat.data.shape
+    tend = _make_kessler_spectral_nh_physics_fn(hcoord, _DT)(
+        state, g, model.height_coord, model.terrain_metric)
+    theta_p = sh_synthesis_3d(g, state.theta_prime_hat.data)
+    rho_p = sh_synthesis_3d(g, state.rho_prime_hat.data)
+    rho = (hcoord.rho_ref + rho_p)[..., None]
+    rq = sh_synthesis_3d(g, state.tracers_hat.data.reshape(n_sh, nlev * n_tr)
+                         ).reshape(g.n_lat, g.n_lon, nlev, n_tr)
+    _, dq = _make_kessler_nh_grid_fn(hcoord, _DT)(theta_p, rho_p, rq / rho)
+    expect = sh_analysis_3d(g, (rho * dq).reshape(g.n_lat, g.n_lon, nlev * n_tr)
+                            ).reshape(n_sh, nlev, n_tr)
+    assert float(jnp.max(jnp.abs(expect))) > 0.0
+    np.testing.assert_allclose(np.asarray(tend.tracers_hat.data),
+                               np.asarray(expect), rtol=0, atol=1e-18)
+    assert float(rho.max() / rho.min()) > 5.0

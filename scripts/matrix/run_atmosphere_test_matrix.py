@@ -5398,11 +5398,12 @@ def _make_kessler_nh_grid_fn(height_coord, dt_phys):
 def _make_kessler_spectral_nh_physics_fn(height_coord, dt_phys):
     """Kessler physics_fn for the spectral NH dycore.
 
-    Synthesizes theta', rho' and the (q_v, q_c, q_r) tracers to the
-    Gaussian grid, runs the shared grid-space Kessler core
-    (:func:`_make_kessler_nh_grid_fn`), and analyses the theta' and tracer
-    tendencies back to spectral space.  All other tendencies are zero,
-    exactly as in the grid-point wrapper.
+    Synthesizes theta', rho' and the tracer densities rho*(q_v, q_c, q_r)
+    to the Gaussian grid, divides by rho for the mixing ratios, runs the
+    shared grid-space Kessler core (:func:`_make_kessler_nh_grid_fn`), and
+    analyses theta' and the tracer-DENSITY tendencies ``rho * dq/dt`` (rho
+    is unchanged by the physics) back to spectral space.  All other
+    tendencies are zero, exactly as in the grid-point wrapper.
     """
     from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
 
@@ -5412,10 +5413,17 @@ def _make_kessler_spectral_nh_physics_fn(height_coord, dt_phys):
         n_sh, nlev, n_tr = state.tracers_hat.data.shape
         theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
         rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data)
-        tr = sh_synthesis_3d(
+        rq = sh_synthesis_3d(
             grid, state.tracers_hat.data.reshape(n_sh, nlev * n_tr),
         ).reshape(grid.n_lat, grid.n_lon, nlev, n_tr)
-        dtheta_dt, dtracers = grid_fn(theta_p, rho_p, tr)
+        from legoesm.atmosphere.physics.thermodynamics import (
+            sanitize_theta_rho,
+        )
+        _, rho = sanitize_theta_rho(
+            hcoord.theta_ref + theta_p, hcoord.rho_ref + rho_p)
+        rho = rho[..., None]
+        dtheta_dt, dq_dt = grid_fn(theta_p, rho_p, rq / rho)
+        dtracers = rho * dq_dt
         dtheta_hat = sh_analysis_3d(grid, dtheta_dt)
         dtr_hat = sh_analysis_3d(
             grid, dtracers.reshape(grid.n_lat, grid.n_lon, nlev * n_tr),
@@ -5682,11 +5690,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             TC2_PARAMS as _TC2_P, TC3_PARAMS as _TC3_P,
         )
         if test_case == "tc2a":
-            sef = 20.0
+            sef = float(_TC2_P["small_earth_factor"])
             _rotating = bool(_TC2_P.get("rotating", True))
             sponge_w, sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
         elif test_case == "tc3":
-            sef = 60.0
+            sef = float(_TC3_P["small_earth_factor"])
             _rotating = bool(_TC3_P.get("rotating", True))
             sponge_w, sponge_c = 8000.0, 0.15
         else:
@@ -5698,7 +5706,13 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         dt = max(0.25 if test_case == "tc3" else 0.5,
                  _dt_scale_sp * (21.0 / n_max))
         # TC2/TC3 need more acoustic substeps and stronger diffusion.
-        _base_hd = 2.338e15 * (21.0 / n_max) ** 4
+        # The del-4 coefficient scales as length^4: the Earth-radius value
+        # 2.338e15 m^4/s (T21) is divided by X^4 on the radius/X small
+        # planet so the damping RATE at a given wavenumber n is the same as
+        # on the full Earth (DCMIP small-planet convention; MPAS gets this
+        # automatically from nu_del4 ~ dx_mean^4).  Unscaled, the TC3
+        # (X=60) rate*dt at n=21 was ~94 -> non-finite from step 2.
+        _base_hd = 2.338e15 * (21.0 / n_max) ** 4 / sef ** 4
         if test_case == "tc2a":
             _n_acoustic_sp = 20
             _hd_sp = _base_hd * 4.0

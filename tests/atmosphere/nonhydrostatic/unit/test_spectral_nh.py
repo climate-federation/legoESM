@@ -214,7 +214,7 @@ class TestSpectralNHAcoustic:
         theta_p = jnp.zeros(shape_3d, dtype=jnp.float64)
         rho_p = jnp.zeros(shape_3d, dtype=jnp.float64)
 
-        w_new, theta_new, rho_new = _acoustic_substeps_grid(
+        w_new, theta_new, rho_new, _ = _acoustic_substeps_grid(
             w, theta_p, rho_p, 1.0, 4,
             height_coord, terrain_metric, config,
         )
@@ -232,7 +232,7 @@ class TestSpectralNHAcoustic:
         theta_p = jnp.zeros((grid.n_lat, grid.n_lon, nlev), dtype=jnp.float64)
         rho_p = jnp.zeros((grid.n_lat, grid.n_lon, nlev), dtype=jnp.float64)
 
-        w_new, theta_new, rho_new = _acoustic_substeps_grid(
+        w_new, theta_new, rho_new, _ = _acoustic_substeps_grid(
             w, theta_p, rho_p, 1.0, 10,
             height_coord, terrain_metric, config,
         )
@@ -260,7 +260,7 @@ class TestSpectralNHAcoustic:
         rho_p_grid = sh_synthesis_3d(grid, rho_p_hat)
 
         # Run acoustic substeps
-        w_new, theta_new, rho_new = _acoustic_substeps_grid(
+        w_new, theta_new, rho_new, _ = _acoustic_substeps_grid(
             w_grid, theta_p_grid, rho_p_grid, 0.5, 4,
             height_coord, terrain_metric, config,
         )
@@ -547,7 +547,7 @@ def test_semi_implicit_acoustic_matches_shared_kernel_on_stretched_grid():
     cfg = SpectralNHConfig()
     dt_s = 2.0
 
-    w_s, th_s, rho_s = _acoustic_substeps_grid_semi_implicit(
+    w_s, th_s, rho_s, _ = _acoustic_substeps_grid_semi_implicit(
         w, theta_p, rho_p, dt_s, 1, hc, tm, cfg)
     w_k, th_k, rho_k = semi_implicit_acoustic_column_kernel(
         w, theta_p, rho_p, hc, tm.jacobian, dt_s, 0.0, cfg.g)
