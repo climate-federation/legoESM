@@ -563,3 +563,101 @@ biggest software gap). All genuinely-remaining levers are hardware-bound
 (multi-node/multi-GPU, consumer-fp64 1/64, single-socket bandwidth) or
 deep-low-ROI (CRM N256 GPU L2 tiling). No distributed operator remains
 unimplemented or unvalidated.
+
+## Derecho CPU, 1–4 nodes (2026-11-20 → 11-23): CRM weak + strong, fp32 / mixed / fp64
+
+Plane CRM `step_halo`, RCEMIP1 production deck (`scripts/run/run_rcemip1_crm.sh`
+numerics, nlev 64, semi-implicit, substepped horizontal acoustics, Morrison),
+one rank per core, single-threaded XLA, `scripts/cluster/crm_les_scaling/crm_les_ladder.pbs`
+(`PPN_MAX` spreads ranks over nodes). Weak: 64×64×64 per rank. Strong:
+512×512×64 global. ms/step = median of 3 windows × 5 steps, dycore only
+(column physics timed separately per rank; tile-only). "Packed" = the
+no-communication ceiling: independent 1-rank copies at the same ranks per
+node (`packed_node_probe.pbs`; the halo code path gives the same numbers,
+748 vs 746 ms fp32 at 32/node). Mixed = fp32 state, fp64 acoustic substeps,
+microphysics inputs, radiation and fixer sums.
+
+Code: tracer tendency fused per tracer under `lax.map` (bd09bfe38e);
+rows marked † were measured after the fused fixer allreduce and the
+crm-mpi-gaps merge (26dc651af2; that change alone measured 0.6–1.6 %
+faster at 32–64/node; its effect at 128/node is unmeasured). Every
+unmarked cell in both tables predates it, so any comparison pairing a †
+cell with an unmarked one mixes the two code versions.
+
+### Weak scaling (ms/step; efficiency vs the packed ceiling at the same ranks/node)
+
+| Nodes × ranks/node | ranks | fp32 | mixed | fp64 | packed fp32 / mixed / fp64 | eff fp32 / mixed / fp64 |
+|---|---|---|---|---|---|---|
+| 1 × 1 | 1 | 673 | 1227 | 1385 | — | — |
+| 1 × 16 | 16 | 830 | 1317 | 1588 | — | — |
+| 1 × 32 | 32 | 966 | 1605 | 1961 | 746 / 1337 / 1607 | 77 / 83 / 82 % |
+| 4 × 32 | 128 | 994 | 1654 | 2005 | 746 / 1337 / 1607 | 75 / 81 / 80 % |
+| 1 × 64 | 64 | 1389 | 2432 | 3202 | 1077 / 1806 / 2394 | 78 / 74 / 75 % |
+| 2 × 64 | 128 | 1410 | 2435 | 3268 | 1077 / 1806 / 2394 | 76 / 74 / 73 % |
+| 4 × 64 | 256 | 1413 | 2449 | 3306 | 1077 / 1806 / 2394 | 76 / 74 / 72 % |
+| 1 × 128 | 128 | 2776 | 4758† | 6212 | 2541 / 4154 / 5539 | 92 / 87 / 89 % |
+| 2 × 128 | 256 | 2834 | 4860† | 6313† | 2541 / 4154 / 5539 | 90 / 85 / 88 % |
+| 4 × 128 | 512 | 2817 | 4860† | 6319† | 2541 / 4154 / 5539 | 90 / 85 / 88 % |
+
+Against the 1-rank time the 128/node efficiency is 24 % (fp32): 88.8 % of
+the excess step time already occurs in the packed control (1 → 128 copies:
+673 → 2541 ms), consistent with node memory-bandwidth contention; the rest
+is the halo-vs-packed gap (2776 vs 2541 ms). Peak RSS 1.6–3.0 GB/rank.
+
+### Strong scaling, 512×512×64 (ms/step)
+
+| Nodes × ranks/node | ranks | fp32 | mixed | fp64 |
+|---|---|---|---|---|
+| 1 × 1 | 1 | 35643 | 51458 | 54660 |
+| 1 × 16 | 16 | 5888 | 5503 | 6572 |
+| 1 × 32 | 32 | 2840 | 3775 | 4508 |
+| 1 × 64 | 64 | 1392 | 2428 | 3200 |
+| 1 × 128 | 128 | 1180 | 1963 | 2662 |
+| 2 × 64 | 128 | 594 | 889 | 1241 |
+| 4 × 32 | 128 | 425 | 567 | 740 |
+| 2 × 128 | 256 | 713 | 834 | 1191 |
+| 4 × 64 | 256 | 607 | 392 | 530 |
+| 4 × 128 | 512 | 363 | 461† | 544† |
+
+fp32 speed-up 1 → 512 ranks: 98× (19 % of ideal); 16 → 512: 16× (51 %).
+Single unrepeated runs with orderings that do not fit the rest of the
+table, not used in any conclusion: the whole 4 × 64 row (fp32 607 is slower
+than mixed 392 and than 4 × 32 fp32 425) and the 1 × 16 mixed cell (5503,
+faster than fp32 5888 although mixed does more work; the fp32 cell that
+feeds the 16 → 512 figure scales as expected from 1 × 32).
+Spreading the same rank count over more nodes gave the largest gain
+measured here (128 ranks, fp32: 1180 → 425 ms, 2.78×, from 1 to 4 nodes),
+consistent with the packed control's finding that per-rank memory bandwidth
+dominates on a full node.
+
+### Decomposition of the halo-vs-packed gap at 32/node (fp32, 128 ranks on 4 nodes, perfetto diff MPI rank 0 vs a packed copy)
+
+| term | ms/step |
+|---|---|
+| blocking mpi4jax sendrecv (312 calls, incl. neighbour waits) | +92 |
+| compute fusions split/slower around the custom calls | ≈ +90 |
+| halo copies / concatenates (net) | ≈ +25 |
+| dry-mass fixer allreduces (now one allreduce) | ≈ +6 |
+| not attributed to an op (host dispatch, gaps between ops) | ≈ +30 |
+
+Op terms are CPU time summed per op class over 2 traced steps (992 ms/step
+on that run vs 748 packed, gap 244 ms).
+
+Levers measured in same-job A/Bs (128 ranks, ms/step, base → lever):
+- rejected, in-place halo assembly: 1 node fp32 2769 → 2900.
+- rejected, 42 slow-tendency exchanges/step grouped into 3 packed rounds:
+  32/node fp32 991 → 1217, fp64 1999 → 2496; 64/node fp32 1409 → 1883.
+- rejected, communication-avoiding acoustics (one wide exchange per stage):
+  32/node fp64 2005 → 1850 but fp32 992 → 1008, 64/node fp32 1409 → 1750,
+  1 node fp32 2759 → 3814; state not bit-identical.
+- kept, fused per-tracer tendency: 1 node fp32 4168 → 2769, fp64 8684 →
+  6176; bit-identical.
+- kept, fused fixer allreduce: 32/node fp32 994 → 985, fp64 2004 → 1992;
+  64/node fp32 1409 → 1387; bit-identical.
+The remaining 32–64/node gap is the observed overhead of the tested
+blocking halo implementation; further work was stopped by vote, with an
+XLA-native collective path recorded as the open alternative.
+
+Weak fp64/mixed at 128/node across nodes could not time column physics: the
+steady state (~1.9 GB/rank) leaves no room for the radiation compile within
+230 GB/node; those rows are dycore-only (`TIME_PHYSICS=0`).
