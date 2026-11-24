@@ -31,6 +31,7 @@ from legoesm.driver.mpas_diff_step import (  # noqa: E402
     mpas_cadence,
     mpas_segment,
     pick_physics_fn,
+    stack_windows,
 )
 
 DT, N = 600.0, 4
@@ -43,19 +44,19 @@ FWD_TOL = 1e-11
 GRAD_TOL = 1e-12
 
 
-def _driver(tmp_path, name):
+def _driver(tmp_path, name, start_day=0.0, **extra):
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8,
                         vertical_coord="hybrid"),
         dycore=DycoreConfig(dt=DT, discretization="mpas"),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=0),
-        days=(N + 0.5) * DT / 86400.0, start_day=0.0,
+        days=(N + 0.5) * DT / 86400.0, start_day=start_day,
         dataset="analytical", radiation="gray",
         convection="sbm", turbulence="tke", microphysics="kessler",
         physics_update_steps=2, rad_update_steps=4,
         mpas_qv_smooth_del2_m2s=1.0e5, sponge_enabled=True,
         precision="fp64", distributed=False,
-    )
+    )._replace(**extra)
     d = ModelDriver(cfg, output_dir=str(tmp_path / name))
     d.setup()
     return d
@@ -367,3 +368,218 @@ def test_segment_refuses_schedule_arguments_it_would_ignore(runs):
         mpas_segment(exp, s0, ps0, 1, storage="host")
     with pytest.raises(ValueError, match="binomial budget"):
         mpas_segment(exp, s0, ps0, 1, schedule="uniform", checkpoints=4)
+
+
+def _take(tree, b):
+    return jax.tree_util.tree_map(lambda x: x[b], tree)
+
+
+def _stack(*trees):
+    return jax.tree_util.tree_map(lambda *x: jnp.stack(x), *trees)
+
+
+def _clock_live(exp):
+    """``exp`` whose physics variants see a surface temperature raised by
+    1 K per hour of ``seconds_of_day``: the fixture's gray radiation ignores
+    the clock, so without this a test of the clock path is vacuous."""
+    import functools
+
+    def wrap(pfn):
+        @functools.wraps(pfn)
+        def w(*a, forcing=None, **k):
+            if forcing is not None:
+                forcing = dict(forcing, T_sfc=forcing["T_sfc"]
+                               + forcing["seconds_of_day"] / 3600.0)
+            return pfn(*a, forcing=forcing, **k)
+        return w
+    return dict(exp, **{k: wrap(exp[k]) for k in (
+        "physics_fn", "physics_fn_norad", "physics_fn_held")})
+
+
+@pytest.fixture(scope="module")
+def two_windows(runs, tmp_path_factory):
+    """Window 0: the fixture export (day 0).  Window 1: a second export of the
+    same deck started on day 10.25 (another date and time of day), with a
+    distinct initial T and its surface temperature raised 1 K, so its state,
+    forcing and clock all differ from window 0's."""
+    e0 = runs[1]
+    e1 = _driver(tmp_path_factory.mktemp("mpas_win1"), "w1",
+                 start_day=10.25).export_mpas_step()
+    s1 = e1["state"]
+    f1 = dict(e1["forcing"])
+    f1["T_sfc"] = f1["T_sfc"] + 1.0
+    e1 = dict(e1, state=s1._replace(T=s1.T.replace(data=s1.T.data + 0.5)),
+              forcing=f1)
+    return e0, e1
+
+
+def test_vmapped_windows_match_separate_windows(two_windows):
+    """Two windows from two exports, batched by jax.vmap over (state,
+    phys_state, forcing, clock) with export 0's physics, reproduce each window
+    run alone from its OWN export (own physics closures, clock built inside):
+    forward, and the gradient of the summed loss w.r.t. each initial T."""
+    exps = [_clock_live(e) for e in two_windows]
+    n = N_SCHED
+    states, phys, forcings, clocks = stack_windows(exps, n)
+    rng = np.random.default_rng(0)
+    # weights over the END state's RMS (the initial wind is zero here)
+    e0 = exps[0]
+    ws = [jnp.asarray(rng.standard_normal(np.shape(x))) / float(
+        jnp.sqrt(jnp.mean(jnp.square(x))))
+        for x in _fields(mpas_segment(e0, e0["state"], e0["phys_state"], n)[0])]
+
+    def run(s, p, f, c):
+        return mpas_segment(e0, s, p, n, forcing=f, schedule="uniform",
+                            clock=c)[0]
+
+    def loss_one(s, p, f, c):
+        return sum(jnp.sum(w * x) for w, x in zip(ws, _fields(run(s, p, f, c))))
+
+    def with_t(states_, t):
+        return states_._replace(T=states_.T.replace(data=t))
+    out = jax.jit(jax.vmap(run))(states, phys, forcings, clocks)
+    g = jax.jit(jax.grad(lambda t: jnp.sum(jax.vmap(loss_one)(
+        with_t(states, t), phys, forcings, clocks))))(states.T.data)
+    for b, eb in enumerate(exps):
+        sb, pb = eb["state"], eb["phys_state"]
+
+        def alone(s, p, _e=eb):
+            return mpas_segment(_e, s, p, n, schedule="uniform")[0]
+        ref = jax.jit(alone)(sb, pb)
+        for a, o, k in zip(_fields(ref), _fields(_take(out, b)),
+                           ("u", "T", "p_s", "q_v")):
+            a, o = np.asarray(a), np.asarray(o)
+            np.testing.assert_allclose(o, a, rtol=0.0,
+                                       atol=FWD_TOL * np.abs(a).max(),
+                                       err_msg=f"window {b} {k}")
+        g_ref = jax.jit(jax.grad(lambda t, _a=alone, _s=sb, _p=pb: sum(
+            jnp.sum(w * x) for w, x in zip(ws, _fields(_a(
+                _s._replace(T=_s.T.replace(data=t)), _p))))))(sb.T.data)
+        scale = float(jnp.abs(g_ref).max())
+        assert scale > 0.0
+        np.testing.assert_allclose(np.asarray(g[b]), np.asarray(g_ref),
+                                   rtol=0.0, atol=GRAD_TOL * scale,
+                                   err_msg=f"window {b} grad")
+    # each window's own forcing and clock are live: window 1 run with window
+    # 0's forcing, or window 0's clock, gives another answer
+    s1, p1 = _take(states, 1), _take(phys, 1)
+    o1 = _take(out, 1).T.data
+    for f, c in ((_take(forcings, 0), _take(clocks, 1)),
+                 (_take(forcings, 1), _take(clocks, 0))):
+        assert float(jnp.abs(jax.jit(run)(s1, p1, f, c).T.data - o1).max()) > 0.0
+
+
+def test_stack_windows_refusals(two_windows):
+    e0, e1 = two_windows
+    with pytest.raises(ValueError, match="no forcing"):
+        stack_windows([e0, dict(e1, forcing=None)], 3)
+    with pytest.raises(ValueError, match="cadence"):
+        stack_windows([e0, dict(e1, rad_update_steps=8)], 3)
+    with pytest.raises(ValueError, match="forcing differs"):
+        stack_windows([e0, dict(e1, forcing=dict(e1["forcing"],
+                                                 extra=jnp.zeros(1)))], 3)
+    with pytest.raises(ValueError, match="state differs"):
+        stack_windows([e0, dict(e1, state=e1["state"]._replace(
+            T=e1["state"].T.replace(data=e1["state"].T.data[:-1])))], 3)
+    with pytest.raises(ValueError, match="no exports"):
+        stack_windows([], 3)
+
+
+def test_stack_windows_refuses_another_post_step_coefficient(
+        two_windows, tmp_path):
+    """A changed q_v smoothing coefficient leaves the physics config, mesh
+    and vertical coordinate identical, yet export 0's would silently be used
+    for that window."""
+    e0, e1 = two_windows
+    other = _driver(tmp_path, "nu", start_day=10.25,
+                    mpas_qv_smooth_del2_m2s=2.0e5).export_mpas_step()
+    assert other["phys_cfg"] == e0["phys_cfg"]
+    with pytest.raises(ValueError, match="export 2 computes a different step"):
+        stack_windows([e0, e1, other], N_SCHED)
+
+
+def test_stack_windows_refuses_another_physics_coefficient(two_windows):
+    """A coefficient changed through build_physics, as a calibration loop
+    does: the export's phys_cfg is stale, its closures are not."""
+    e0, e1 = two_windows
+    cfg = e1["phys_cfg"]
+    gray = cfg.radiation.gray
+    changed = cfg._replace(radiation=cfg.radiation._replace(
+        gray=gray._replace(tau_equator=gray.tau_equator * (1.0 + 1e-6))))
+    rebuilt = dict(e1, physics_fn=e1["build_physics"](changed))
+    with pytest.raises(ValueError, match="export 1 computes a different step"):
+        stack_windows([e0, rebuilt], N_SCHED)
+
+
+@pytest.mark.parametrize("transform", [jax.jit, jax.grad])
+def test_stack_windows_refuses_distinct_exports_under_a_trace(two_windows,
+                                                              transform):
+    e0, e1 = two_windows
+
+    def f(a):
+        stack_windows([e0, e1], 3)
+        return a
+    with pytest.raises(ValueError, match="outside jit/grad/vmap"):
+        transform(f)(1.0)
+
+
+def test_segment_refuses_a_malformed_clock(runs):
+    _, exp = runs
+    s0, ps0 = exp["state"], exp["phys_state"]
+    forcing = dict(exp["forcing"] or {})
+    c = clock_tables(exp, forcing, range(3))
+    with pytest.raises(ValueError, match="unrolled loop builds"):
+        mpas_segment(exp, s0, ps0, 3, forcing=forcing, clock=c)
+    with pytest.raises(ValueError, match=r"shape \(n_steps,\)"):
+        mpas_segment(exp, s0, ps0, 4, forcing=forcing, schedule="uniform",
+                     clock=c)
+    with pytest.raises(ValueError, match=r"shape \(n_steps,\)"):
+        mpas_segment(exp, s0, ps0, 3, forcing=forcing, schedule="uniform",
+                     clock={"day_of_year": c["day_of_year"]})
+    # an unvmapped window stack whose window count equals n_steps
+    with pytest.raises(ValueError, match=r"shape \(n_steps,\)"):
+        mpas_segment(exp, s0, ps0, 3, forcing=forcing, schedule="uniform",
+                     clock=stack_windows([exp] * 3, 3)[3])
+
+
+def _n_checkpoints(jaxpr):
+    """jax.checkpoint equations in ``jaxpr``, nested jaxprs included."""
+    n = 0
+    for eqn in jaxpr.eqns:
+        n += eqn.primitive.name in ("checkpoint", "remat", "remat2")
+        for v in eqn.params.values():
+            for sub in (v if isinstance(v, (tuple, list)) else (v,)):
+                inner = getattr(sub, "jaxpr", sub)
+                if hasattr(inner, "eqns"):
+                    n += _n_checkpoints(inner)
+    return n
+
+
+def test_physics_module_checkpoint_switch(runs, tmp_path):
+    """physics_module_checkpoint (default on) wraps each combined-physics
+    module call in jax.checkpoint: an export built with it off has fewer
+    checkpoint equations, and the forward is bitwise the same either way."""
+    _, exp = runs
+    assert exp["phys_cfg"].module_checkpoint is True
+    off = _driver(tmp_path, "off",
+                  physics_module_checkpoint=False).export_mpas_step()
+    assert off["phys_cfg"].module_checkpoint is False
+    s0, ps0 = exp["state"], exp["phys_state"]
+    counts, outs = [], []
+    for e in (exp, off):
+        def seg(s, _e=e):
+            return mpas_segment(_e, s, ps0, 1)[0]
+        counts.append(_n_checkpoints(jax.make_jaxpr(seg)(s0).jaxpr))
+        outs.append(jax.jit(seg)(s0))
+    assert counts[0] > counts[1], counts
+    for a, b in zip(_fields(outs[0]), _fields(outs[1])):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+@pytest.mark.parametrize("fp32", [True, False])
+def test_mpas_rrtmgp_fp32_switch_reaches_the_radiation(tmp_path, fp32):
+    """mpas_rrtmgp_fp32 selects the RRTMGP solve precision on the MPAS lane
+    (default True = fp32; False = fp64 radiation for gradient runs)."""
+    exp = _driver(tmp_path, f"rrtmgp_{fp32}", radiation="rrtmgp",
+                  mpas_rrtmgp_fp32=fp32).export_mpas_step()
+    assert exp["phys_cfg"].radiation.rrtmgp.compute_fp32 is fp32

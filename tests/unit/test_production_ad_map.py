@@ -9,6 +9,7 @@ module spies (record the first concrete call, keep the dispatcher markers).
 """
 from __future__ import annotations
 
+import functools
 import sys
 from pathlib import Path
 
@@ -294,3 +295,190 @@ def test_code_provenance_names_the_imported_file():
     line = pam.code_provenance(("json",))
     assert line.startswith("json=") and "json" in line and "@" in line
     assert "UNIMPORTABLE" in pam.code_provenance(("no_such_module_xyz",))
+
+
+def test_memory_report_prints_xla_accounting_per_column(capsys):
+    # argument size is exact (n f64); the temp size is XLA's (fusion may
+    # elide the n*n buffer), so only its per-column arithmetic is checked
+    import json
+    n = 2048
+
+    def mem_outer(x):
+        o = jnp.outer(x, x)
+        return jnp.sum(jnp.sin(o), axis=0) + jnp.sum(jnp.cos(o), axis=1)
+    pam.memory_report("outer", mem_outer, (jnp.ones(n),), ncol=n)
+    line = [ln for ln in capsys.readouterr().out.splitlines()
+            if ln.startswith("MEMORY ")][-1]
+    rec = json.loads(line[len("MEMORY "):])
+    assert rec["label"] == "outer" and rec["ncol"] == n
+    assert rec["argument_gib"] * 2**30 == 8 * n
+    assert rec["temp_mb_per_col"] == rec["temp_gib"] * 2**30 / 1e6 / n
+
+
+def test_parser_accepts_the_memory_stage():
+    assert pam.build_parser().parse_args(["--stage", "memory"]).stage == "memory"
+
+
+def test_parser_round_trips_batch():
+    a = pam.build_parser().parse_args(
+        ["--stage", "timing", "--schedule", "uniform", "--batch", "4"])
+    assert a.batch == 4 and pam.build_parser().parse_args(
+        ["--stage", "timing"]).batch == 1
+
+
+def test_loop_census_ranks_the_scan_that_stacks_residuals(capsys):
+    # grad of a 5-step scan of sin stores the 5 carries (5x3 f64) for the
+    # reverse pass; a loop with no stacked output ranks below it
+    def body(c, _):
+        return jnp.sin(c) * 1.1, None
+
+    def f(x):
+        c, _ = jax.lax.scan(body, x, None, length=5)
+        y = jax.lax.fori_loop(0, 3, lambda i, v: v * 0.5, x)
+        return jnp.sum(c) + jnp.sum(y)
+    rows = pam.loop_census(jax.grad(f), jnp.ones(3))
+    top = rows[0]
+    assert top["prim"] == "scan" and top["length"] == 5
+    assert top["stacked"] == ["float64[5,3]"]
+    assert top["stacked_mib"] * 2**20 == 5 * 3 * 8
+    assert top["src"].split(":")[0].endswith("test_production_ad_map.py")
+    assert "LOOP " in capsys.readouterr().out
+
+
+def test_parser_accepts_the_modmem_stage():
+    assert pam.build_parser().parse_args(["--stage", "modmem"]).stage == "modmem"
+
+
+def test_nonfinite_census_names_windows_and_columns(capsys):
+    import numpy as np
+    g = {"T": np.zeros((3, 5, 2)), "q": np.zeros((3, 5))}
+    g["T"][2, 4, 1] = np.nan
+    g["T"][0, 1, 0] = np.inf
+    pam.nonfinite_census(g, batched=True)
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1 and "['T']" in out[0]
+    assert "count=2/30" in out[0] and "windows=[0, 2]" in out[0]
+    assert "cols=[1, 4]" in out[0]
+    pam.nonfinite_census(g)
+    assert "windows" not in capsys.readouterr().out
+
+
+def test_window_check_compares_chosen_windows_with_their_own_export(
+        monkeypatch, capsys):
+    """Fake segment: x scaled by the export's own factor * n_steps, no clock
+    or forcing passed (the export's own).  Checks the chosen windows only:
+    loss alone vs batched, gradient diffs (zero for a correct window, 0.5 max
+    for a corrupted one), and the vmap-of-one noise floor on the first."""
+    import json
+    import numpy as np
+    import legoesm.driver.mpas_diff_step as mds
+
+    def seg(exp, s, p, n, **kw):
+        assert "clock" not in kw and "forcing" not in kw and "step0" not in kw
+        return {k: v * exp["fac"] * n for k, v in s.items()}, p
+    monkeypatch.setattr(mds, "mpas_segment", seg)
+    monkeypatch.setattr(pam, "_with_x", lambda s, x: x)
+    monkeypatch.setattr(pam, "_state_x", lambda s: s)
+    monkeypatch.setattr(pam, "_proj_loss",
+                        lambda s: sum(jnp.sum(v ** 2) for v in s.values()))
+    xs = jnp.arange(6.0).reshape(3, 2) + 1.0
+    exps = [dict(fac=float(b + 1), state={"T": xs[b]}, phys_state=None)
+            for b in range(3)]
+    fac = jnp.arange(1.0, 4.0)[:, None] * 4
+    g = {"T": (2 * xs * fac ** 2).at[2, 1].multiply(1.5)}
+    losses = np.asarray(jnp.sum((xs * fac) ** 2, axis=1))
+    pam.window_check(exps, g, losses, 4, {}, [2, 0])
+    rows = [json.loads(line[len("WINDOW_CHECK "):])
+            for line in capsys.readouterr().out.splitlines()]
+    assert [r["window"] for r in rows] == [2, 0]
+    for r in rows:
+        np.testing.assert_allclose(r["loss_alone"], r["loss_batched"], rtol=1e-12)
+        assert r["alone_finite"]
+    d2, d0 = rows[0]["batched_vs_alone"]["T"], rows[1]["batched_vs_alone"]["T"]
+    np.testing.assert_allclose(d2["max_rel"], 0.5, rtol=1e-12)
+    assert d2["norm_rel"] > 0 and d2["cos"] < 1.0
+    assert d0["max_rel"] == 0.0 and d0["norm_rel"] == 0.0
+    assert "vmap1_vs_alone" in rows[0] and "vmap1_vs_alone" not in rows[1]
+    assert rows[0]["vmap1_vs_alone"]["T"]["max_rel"] == 0.0
+
+
+@pytest.mark.parametrize("bad_window", [None, 1])
+def test_window_check_holds_each_path_against_its_own_fd(
+        monkeypatch, capsys, bad_window):
+    """Quadratic fake segment (central differences exact): both paths match
+    their own FD in every direction; a batched gradient corrupted in one
+    window fails its FD there and only there, and along the gap direction
+    the standalone gradient is the one the FD confirms."""
+    import json
+    import numpy as np
+    import legoesm.driver.mpas_diff_step as mds
+    monkeypatch.setattr(mds, "mpas_segment", lambda e, s, p, n, **kw: (
+        {k: v * e["fac"] * n for k, v in s.items()}, p))
+    monkeypatch.setattr(pam, "_with_x", lambda s, x: x)
+    monkeypatch.setattr(pam, "_state_x", lambda s: s)
+    monkeypatch.setattr(pam, "_proj_loss",
+                        lambda s: sum(jnp.sum(v ** 2) for v in s.values()))
+    monkeypatch.setattr(pam, "H_SWEEP", (10.0, 1.0, 0.1))
+    xb = {"T": jnp.arange(6.0).reshape(2, 3) + 1.0,
+          "q_v": jnp.arange(6.0).reshape(2, 3) * 0.1 + 0.2}
+    exps = [dict(fac=float(b + 1), phys_state=None,
+                 state={k: v[b] for k, v in xb.items()}) for b in range(2)]
+    fac = jnp.asarray([4.0, 8.0])[:, None]
+    # a real vmap: a batch of the wrong size is an error, not a broadcast
+    fwd = jax.vmap(lambda z, f: sum(jnp.sum((v * f) ** 2) for v in z.values()))
+    fwd = functools.partial(lambda f, z: f(z, fac), fwd)
+    g = {k: 2.0 * v * fac ** 2 for k, v in xb.items()}
+    if bad_window is not None:
+        g["T"] = g["T"].at[bad_window].multiply(1.02)
+    pam.window_check(exps, g, np.asarray(fwd(xb)), 4, {}, [0, 1],
+                     fwd_batch=fwd, h=1e-2)
+    out = capsys.readouterr().out.splitlines()
+    fd = [json.loads(ln[len("FD_CHECK "):]) for ln in out
+          if ln.startswith("FD_CHECK ")]
+    seen = {(r["path"], r["window"], r["direction"]) for r in fd}
+    for path in ("batched", "alone"):
+        for b in (0, 1):
+            for d in ("both", "T", "q_v"):
+                assert (path, b, d) in seen
+    if bad_window is not None:
+        assert {("alone", 1, "gap"), ("batched", 1, "gap")} <= seen
+    for r in fd:
+        err = max(abs(e) for e in r["fd_over_ad_minus_1"].values())
+        wrong = (r["path"] == "batched" and r["window"] == bad_window
+                 and r["direction"] != "q_v")
+        assert (err > 1e-3) if wrong else (err < 1e-7), r
+        if r["direction"] == "gap":
+            right = r["ad_other_path"] if r["path"] == "batched" else r["ad"]
+            assert right != 0.0
+            for d in r["fd"].values():
+                assert d == pytest.approx(right, rel=1e-7), r
+    rows = [json.loads(ln[len("WINDOW_CHECK "):]) for ln in out
+            if ln.startswith("WINDOW_CHECK ")]
+    for r in rows:
+        assert r["repeat_vs_alone"]["T"]["max_rel"] == 0.0
+        assert r["ulp_vs_alone"]["T"]["max_rel"] < 1e-14
+        assert r["loss_alone_fwd"] == pytest.approx(r["loss_alone"], rel=1e-12)
+
+
+def test_grad_diff_metrics():
+    import numpy as np
+    d = pam.grad_diff({"a": np.array([1.0, 2.0])}, {"a": np.array([1.0, 1.0])})["a"]
+    np.testing.assert_allclose(d["max_rel"], 1.0)
+    np.testing.assert_allclose(d["norm_rel"], 1.0 / np.sqrt(2.0))
+    np.testing.assert_allclose(d["cos"], 3.0 / (np.sqrt(5.0) * np.sqrt(2.0)))
+
+
+def test_parser_check_windows():
+    assert pam.build_parser().parse_args(["--stage", "timing", "--check-windows"]).check_windows
+
+
+def test_parser_window_spacing_days():
+    ap = pam.build_parser()
+    assert ap.parse_args(["--stage", "timing"]).window_spacing_days is None
+    assert ap.parse_args(["--stage", "timing", "--window-spacing-days",
+                          "30"]).window_spacing_days == 30.0
+
+
+def test_parser_check_window_ids():
+    a = pam.build_parser().parse_args(["--stage", "timing", "--check-window-ids", "0,5,7"])
+    assert a.check_window_ids == "0,5,7"

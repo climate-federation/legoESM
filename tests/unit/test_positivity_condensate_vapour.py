@@ -197,3 +197,26 @@ def test_vapour_short_column_pays_what_it_holds():
     np.testing.assert_allclose(np.asarray(out["q_v"]), 0.0, atol=1e-22)
     gained = float(jnp.sum((out["q_c"] - tr["q_c"]) * dp))
     np.testing.assert_allclose(gained, V, rtol=1e-14)
+
+
+def test_gradient_finite_at_vanishing_debt_negative_mass_and_vapour():
+    """A column debt, a negative level or the vapour near 1e-200: a plain
+    divide's derivative squares it to 0 and the gradient is NaN (measured on
+    the res3 MPAS step, every leaf); the payment's derivatives stay finite."""
+    dp = jnp.full((3, 3), 2000.0)
+    T = jnp.full((3, 3), 280.0)
+
+    def f(qc, qv):
+        out, T1 = pay_condensate_deficit_from_vapour({"q_v": qv, "q_c": qc}, T, dp)
+        return jnp.sum(out["q_c"] ** 2) + jnp.sum(out["q_v"] * T1)
+
+    qc = jnp.array([[-1.0e-200, 0.0, 0.0],        # column debt ~1e-200
+                    [-1.0e-200, 1.0e-5, 0.0],     # tiny negative level, column positive
+                    [-1.0e-6, 0.0, 0.0]])         # vapour ~1e-200 cannot pay
+    qv = jnp.array([[1.0e-2, 5.0e-3, 1.0e-3],
+                    [1.0e-2, 5.0e-3, 1.0e-3],
+                    [1.0e-200, 0.0, 0.0]])
+    for g in (jax.grad(f, argnums=(0, 1))(qc, qv),
+              jax.jacfwd(f, argnums=(0, 1))(qc, qv)):
+        assert all(bool(jnp.all(jnp.isfinite(x))) for x in g)
+        assert float(jnp.max(jnp.abs(g[0]))) > 0.0

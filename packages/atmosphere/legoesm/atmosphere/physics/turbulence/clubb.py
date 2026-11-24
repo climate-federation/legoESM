@@ -1411,6 +1411,9 @@ def _bounded_while(cond_fn, body_fn, init_state, max_iters):
     ``while_loop`` final state bit-exactly when ``max_iters >= true trip count``;
     unlike ``while_loop`` it supports ``jax.grad``.
     """
+    # Remat per iteration: reverse mode stores the state, not each
+    # iteration's residuals, across all ``max_iters`` (values unchanged).
+    @jax.checkpoint
     def step(state, _):
         run = cond_fn(state)
         new = body_fn(state)
@@ -7332,6 +7335,9 @@ def clubb_turbulence_prognostic(
         _liq_on = q_c is not None
         qc_init = q_c if _liq_on else jnp.zeros_like(q_v)
 
+        # Remat per sub-step: reverse mode stores the carry and recomputes the
+        # sub-step, not every sub-step's residuals (forward values unchanged).
+        @jax.checkpoint
         def _sub(carry, _):
             u_c, v_c, T_c, q_c_col, ql_c, m_c = carry
             # HOST density on every sub-step (CAM: rho_ds once, before the nadv

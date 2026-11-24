@@ -29,6 +29,7 @@ from legoesm import constants
 from legoesm.core.operators import global_integral, is_distributed
 from legoesm.core.operators_voronoi import kinetic_energy_cell
 from legoesm.core.precision import resolve_dtype, get_policy
+from legoesm.core.smooth import stable_div
 from legoesm.core.state import ShallowWaterState, HydrostaticState
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import compute_geopotential
@@ -222,7 +223,10 @@ def pay_condensate_deficit_from_vapour(tracers, T, dp):
          for x in cond}
     D_tot = sum(D.values())
     has_d = D_tot > 0.0
-    f = jnp.where(has_d, jnp.minimum(1.0, V / jnp.where(has_d, D_tot, 1.0)), 0.0)
+    # every ratio below is <= 1 and goes through stable_div: a debt or negative
+    # mass near 1e-200 squares to 0 in the derivative of a plain divide (NaN)
+    short = D_tot > V
+    f = jnp.where(has_d, jnp.where(short, stable_div(V, jnp.where(short, D_tot, 1.0)), 1.0), 0.0)
     out = dict(tracers)
     pay = {}
     for x in cond:
@@ -232,13 +236,13 @@ def pay_condensate_deficit_from_vapour(tracers, T, dp):
         pay[x] = f * D[x]
         # D_x > 0 implies N_x > 0; guard the division before it happens
         has_n = N > 0.0
-        out[x] = put(tracers[x], q + jnp.where(has_n, pay[x] / jnp.where(has_n, N, 1.0), 0.0) * neg)
+        out[x] = put(tracers[x], q + jnp.where(has_n, stable_div(pay[x], jnp.where(has_n, N, 1.0)), 0.0) * neg)
     has_v = V > 0.0
     V_s = jnp.where(has_v, V, 1.0)
-    out["q_v"] = put(tracers["q_v"], qv - vpos * (sum(pay.values()) / V_s))
+    out["q_v"] = put(tracers["q_v"], qv - vpos * stable_div(sum(pay.values()), V_s))
     heat = sum((constants.L_v - _FLOOR_LATENT_COEF[x]) * pay[x] for x in cond)
     T_data = raw(T)
-    dT = vpos / V_s * heat / constants.c_pd
+    dT = stable_div(vpos, V_s) * heat / constants.c_pd
     return out, put(T, T_data + dT.astype(T_data.dtype))
 
 

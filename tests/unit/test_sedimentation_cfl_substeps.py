@@ -408,6 +408,8 @@ def test_combined_count_is_the_max_over_the_macmic_window(monkeypatch):
                                     **{k: zeros.replace(name=k) for k in
                                        ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}})
     cfg = cmb.PhysicsConfig(
+        # the spy reads concrete values: no module remat (it traces its body)
+        module_checkpoint=False,
         turbulence=TurbulenceConfig(scheme="tke"),
         microphysics=MicrophysicsConfig(scheme="morrison",
                                         morrison=MorrisonConfig(warm_rain_scheme="kk2000",
@@ -999,3 +1001,29 @@ def test_empty_column_batch_returns_empty_outputs():
     tend, sfc = sedimentation_tendency(q, rho, Vt, dz, dt=10.0, return_surface_flux=True,
                                        n_substeps_max=8)
     assert tend.shape == (0, 20) and sfc.shape == (0,)
+
+
+def test_gradient_stores_one_carry_per_chunk_not_every_substep():
+    """Reverse mode remats each chunk: the chunk loop stacks only its input
+    carry (n_chunks x column arrays), never the sub-steps' residuals up to
+    the cap (n_chunks x _SED_CHUNK x ...), which made the cap -- not the
+    sub-steps a column needs -- size the production gradient."""
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                           / "scripts" / "validate"))
+    import production_ad_map as pam
+    from legoesm.atmosphere.physics.microphysics.output import _SED_CHUNK
+    q, rho, Vt, dz = _column(ncol=3, nlev=20)
+    n_max = 96   # 12 chunks: not _SED_CHUNK, so the filter isolates the chunk loop
+
+    def loss(qq):
+        return jnp.sum(sedimentation_tendency(qq, rho, Vt, dz, dt=3000.0,
+                                              n_substeps_max=n_max) ** 2)
+    rows = pam.loop_census(jax.grad(loss), q + 1.0e-6)
+    n_chunks = -(-n_max // _SED_CHUNK)
+    chunk_loops = [r for r in rows if r["length"] == n_chunks]
+    assert chunk_loops
+    col_bytes = q.size * q.dtype.itemsize
+    for r in chunk_loops:
+        # carry (q, tendency, surface flux) + chunk index; 8x that without remat
+        assert r["stacked_mib"] * 2**20 <= n_chunks * (3 * col_bytes + 8), r

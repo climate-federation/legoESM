@@ -51,3 +51,54 @@ def test_bound_is_inert_when_the_cap_does_not_bind():
     np.testing.assert_allclose(np.asarray(dq), np.asarray(acc), rtol=1e-13, atol=0)
     np.testing.assert_allclose(np.asarray(dn), np.asarray(accn), rtol=1e-13, atol=0)
     np.testing.assert_allclose(np.asarray(sfc), np.asarray(s), rtol=1e-13, atol=0)
+
+
+def test_gradient_stores_one_carry_per_chunk_not_every_substep():
+    """Reverse mode remats each chunk of sub-steps: the chunk loop stacks only
+    its input carry, never every sub-step's residuals up to the cap (that made
+    the cap -- 256 by default -- size the production gradient)."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts" / "validate"))
+    import production_ad_map as pam
+    from legoesm.atmosphere.physics.microphysics._warm_rain import _FALLOUT_CHUNK
+    rng = np.random.default_rng(0)
+    p_half = jnp.asarray(np.cumsum(rng.uniform(800.0, 1500.0, (3, 21)), axis=1) + 2.0e4)
+    pdel = p_half[:, 1:] - p_half[:, :-1]
+    c0 = jnp.asarray(rng.uniform(0.0, 1.0e-4, (3, 20)))
+    n0 = jnp.asarray(rng.uniform(0.0, 1.0e5, (3, 20)))
+    f = 2.5 * pdel / DT
+    cld = jnp.asarray(rng.uniform(0.2, 1.0, (3, 20)))
+    n_max = 96   # 12 chunks: not _FALLOUT_CHUNK, so the filter isolates the chunk loop
+
+    def loss(c):
+        dq, dn, dqv, sfc, _ = mg2_cloud_fallout(c, n0, f, f, cld, p_half, DT, n_max)
+        return jnp.sum(dq ** 2) + jnp.sum(dqv) + jnp.sum(sfc)
+    rows = pam.loop_census(jax.grad(loss), c0)
+    n_chunks = n_max // _FALLOUT_CHUNK
+    chunk_loops = [r for r in rows if r["length"] == n_chunks]
+    assert chunk_loops
+    col_bytes = c0.size * c0.dtype.itemsize
+    for r in chunk_loops:
+        # carry (c, n, dq, dn, dq_v: column arrays; sfc) + chunk index
+        assert r["stacked_mib"] * 2**20 <= n_chunks * (6 * col_bytes + 8), r
+
+
+def test_remat_chunks_gradient_matches_finite_differences():
+    """Chunked remat, also when n_max is not a multiple of the chunk (the
+    remainder sub-steps): finite, nonzero gradient that matches FD."""
+    from jax.test_util import check_grads
+    rng = np.random.default_rng(1)
+    p_half = jnp.asarray(np.cumsum(rng.uniform(800.0, 1500.0, (2, 9)), axis=1) + 2.0e4)
+    pdel = p_half[:, 1:] - p_half[:, :-1]
+    c0 = jnp.asarray(rng.uniform(1.0e-6, 1.0e-4, (2, 8)))
+    n0 = jnp.asarray(rng.uniform(1.0e3, 1.0e5, (2, 8)))
+    f = 6.5 * pdel / DT
+    cld = jnp.asarray(rng.uniform(0.2, 1.0, (2, 8)))
+    for n_max in (5, 8, 13):
+        def loss(c, n_max=n_max):
+            dq, dn, dqv, sfc, _ = mg2_cloud_fallout(c, n0, f, f, cld, p_half, DT, n_max)
+            return jnp.sum(dq ** 2) + jnp.sum(dn) * 1e-9 + jnp.sum(dqv) + jnp.sum(sfc)
+        g = jax.grad(loss)(c0)
+        assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+        check_grads(loss, (c0,), order=1, modes=("rev",), eps=1e-9, atol=1e-6, rtol=1e-4)

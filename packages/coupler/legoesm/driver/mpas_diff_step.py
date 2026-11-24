@@ -50,11 +50,15 @@ refused at export.
 """
 from __future__ import annotations
 
+import hashlib
+
 import jax
 import jax.numpy as jnp
 
+from legoesm.parallel.geometry_consistency import in_jax_trace
+
 __all__ = ["mpas_cadence", "pick_physics_fn", "mpas_branch_index", "mpas_step",
-           "mpas_segment"]
+           "mpas_segment", "stack_windows"]
 
 
 def mpas_cadence(step: int, *, subcycle_rad: bool, rad_update_steps: int,
@@ -130,10 +134,108 @@ def clock_tables(exp: dict, forcing, steps):
     return t
 
 
+_CADENCE_KEYS = ("dt", "subcycle_rad", "rad_update_steps", "hold_phys",
+                 "phys_update_steps")
+
+
+def _step_program(exp: dict, args, n_steps: int) -> str:
+    """Digest of the lowered program of ``exp``'s segment on ``args``: its
+    operations with every value the closures captured (coefficients, mesh,
+    vertical coordinate, post-step edits), and none of the argument values."""
+    def segment(state, phys_state, forcing, clock):
+        return mpas_segment(exp, state, phys_state, n_steps, forcing=forcing,
+                            schedule="uniform", clock=clock)
+    text = jax.jit(segment).lower(*args).as_text()
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def stack_windows(exps, n_steps: int):
+    """Batch windows that each come from their OWN export: ``exps[b]`` is the
+    driver exported at window b's start date (started there from its config
+    start day or a restart), so window b runs from its own state, physics
+    state and forcing -- SST/SIC, ozone, aerosol, solar constant, land skin,
+    as the run loop assembled them at that date -- with its own clock
+    (:func:`clock_tables` of ``exps[b]``).  Returns ``(state, phys_state,
+    forcing, clock)``, each stacked on a leading window axis, for a
+    ``jax.vmap`` of the scheduled
+    ``mpas_segment(exps[0], s, p, n_steps, forcing=f, clock=c)`` (job-local
+    step 0 in every export, so one cadence phase).
+
+    ``jax.vmap`` maps ONE function over arrays, so ``exps[0]``'s closures
+    serve every window and only the stacked arrays differ between windows.
+    That is valid only if every export computes the same function of those
+    arrays, which is checked: each export's segment is lowered on export 0's
+    arguments and must give the identical program (:func:`_step_program`).
+    Comparing configs would not do: the post-step edits are outside the
+    physics config, and a physics function rebuilt with ``build_physics``
+    leaves the export's config stale.  The check costs one trace + lowering
+    per distinct export (no compile; about half a minute each on the
+    production deck), so stack once, outside any jax transformation.
+
+    The check is of the primal program over steps ``0..n_steps-1``, and it
+    is conservative: a captured constant that differs but is later
+    overwritten (the config's fixed CO2 under external GHG forcing) is still
+    refused.  It cannot see what only the derivative sees
+    (``lax.stop_gradient``, which lowering drops, and values read only by a
+    custom derivative rule) or the inside of a host callback.
+
+    Refused: an export without forcing, cadence or time-step settings that
+    differ between exports, states / forcing whose pytree structure, shapes
+    or dtypes differ, distinct exports stacked inside a jax transformation
+    (a traced value captured by a closure is invisible to the check), and an
+    export whose program differs from export 0's."""
+    exps = list(exps)
+    if not exps:
+        raise ValueError("stack_windows: no exports")
+    if any(e["forcing"] is None for e in exps):
+        raise ValueError("stack_windows: an export has no forcing dict (no "
+                         "clock to give each window)")
+    ref = tuple(exps[0][k] for k in _CADENCE_KEYS)
+    for b, e in enumerate(exps[1:], start=1):
+        got = tuple(e[k] for k in _CADENCE_KEYS)
+        if got != ref:
+            raise ValueError(
+                f"stack_windows: export {b} has {dict(zip(_CADENCE_KEYS, got))}"
+                f", export 0 {dict(zip(_CADENCE_KEYS, ref))}; batched windows "
+                "share one time step and physics/radiation cadence")
+    trees = [(e["state"], e["phys_state"], e["forcing"],
+              clock_tables(e, e["forcing"], range(n_steps))) for e in exps]
+
+    def sig(t):
+        return (jax.tree_util.tree_structure(t),
+                [(jnp.shape(x), jnp.result_type(x))
+                 for x in jax.tree_util.tree_leaves(t)])
+    for b, t in enumerate(trees[1:], start=1):
+        for name, x, y in zip(("state", "phys_state", "forcing", "clock"),
+                              trees[0], t):
+            if sig(x) != sig(y):
+                raise ValueError(
+                    f"stack_windows: export {b}'s {name} differs from export "
+                    "0's in pytree structure, shape or dtype")
+    others = [b for b, e in enumerate(exps) if e is not exps[0]]
+    if others:
+        if in_jax_trace():
+            raise ValueError(
+                "stack_windows: call it outside jit/grad/vmap; whether the "
+                "exports share their physics cannot be checked under a trace")
+        ref_program = _step_program(exps[0], trees[0], n_steps)
+        for b in others:
+            if _step_program(exps[b], trees[0], n_steps) != ref_program:
+                raise ValueError(
+                    f"stack_windows: export {b} computes a different step "
+                    "from export 0 on the same state, forcing and clock (a "
+                    "physics, dycore or post-step setting, the mesh, the "
+                    "vertical coordinate, or a constant fixed from that "
+                    "export's own start); batched windows all run export "
+                    "0's, so batch only exports that share them")
+    return tuple(jax.tree_util.tree_map(lambda *x: jnp.stack(x), *parts)
+                 for parts in zip(*trees))
+
+
 def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
                  step0: int = 0, checkpoint: bool = False,
                  schedule: str | None = None, checkpoints: int | None = None,
-                 storage: str = "recompute", tap=None):
+                 storage: str = "recompute", tap=None, clock=None):
     """Advance ``n_steps`` from job-local ``step0``; pure in (state, phys_state,
     forcing).  The forcing clock (``day_of_year`` / ``seconds_of_day``, and
     ``model_seconds`` when the run carries it) is
@@ -151,7 +253,13 @@ def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
     ``tap(step, state, phys_state) -> (state, phys_state)``: an identity hook
     applied to the state ENTERING each step of the unrolled loop (a
     ``custom_vjp`` identity whose backward pass records the cotangent is how
-    a probe reads the adjoint at every step); unrolled loop only."""
+    a probe reads the adjoint at every step); unrolled loop only.
+
+    ``clock``: the per-step clock tables (:func:`clock_tables` of this
+    window) passed in as arrays instead of built from ``step0``, so windows
+    at different dates can share one ``jax.vmap``ped call
+    (:func:`stack_windows`); ``step0`` still selects the variant table.
+    Scheduled loop only."""
     forcing = exp["forcing"] if forcing is None else forcing
     if schedule is None and (checkpoints is not None or storage != "recompute"):
         raise ValueError("mpas_segment: checkpoints/storage configure a "
@@ -160,6 +268,21 @@ def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
     if schedule == "uniform" and checkpoints is not None:
         raise ValueError("mpas_segment: checkpoints is the binomial budget; "
                          "the uniform schedule remats every step")
+    if clock is not None:
+        if schedule is None:
+            raise ValueError("mpas_segment: clock= feeds the scheduled loop's "
+                             "clock tables; the unrolled loop builds its own")
+        if forcing is None:
+            raise ValueError("mpas_segment: clock= without forcing (no "
+                             "forcing dict carries a clock)")
+        want = {"day_of_year", "seconds_of_day"} | (
+            {"model_seconds"} if "model_seconds" in forcing else set())
+        if set(clock) != want or any(jnp.shape(v) != (n_steps,)
+                                     for v in clock.values()):
+            raise ValueError(
+                f"mpas_segment: clock= must hold {sorted(want)}, each of "
+                f"shape (n_steps,) = ({n_steps},) (one window); got "
+                f"{ {k: jnp.shape(v) for k, v in clock.items()} }")
     target_mass = exp["model"].mass_target(state)
     if schedule is not None:
         if tap is not None:
@@ -168,7 +291,7 @@ def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
                              "static step to hand it")
         return _scheduled_segment(exp, state, phys_state, n_steps, forcing,
                                   step0, target_mass, checkpoint, schedule,
-                                  checkpoints, storage)
+                                  checkpoints, storage, clock)
     for k in range(n_steps):
         step = step0 + k
         f = _clock(exp, forcing, step)
@@ -184,7 +307,8 @@ def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
 
 
 def _scheduled_segment(exp, state, phys_state, n_steps, forcing, step0,
-                       target_mass, checkpoint, schedule, checkpoints, storage):
+                       target_mass, checkpoint, schedule, checkpoints, storage,
+                       clock=None):
     from legoesm.training.checkpoint_schedule import checkpointed_loop
 
     if checkpoint:
@@ -200,7 +324,7 @@ def _scheduled_segment(exp, state, phys_state, n_steps, forcing, step0,
     branch = [mpas_branch_index(s, exp) for s in steps]
     used = sorted(set(branch))
     idx = jnp.asarray([used.index(b) for b in branch], dtype=jnp.int32)
-    tables = clock_tables(exp, forcing, steps)
+    tables = clock_tables(exp, forcing, steps) if clock is None else clock
 
     def _branch(key):
         pfn = exp[key]

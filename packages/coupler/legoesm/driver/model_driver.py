@@ -13662,7 +13662,7 @@ class ModelDriver:
             "rrtmgp" if cfg.radiation in ("rrtmg", "rrtmgp")
             else cfg.radiation
         )
-        _rrtmgp_fp32 = (_rad_scheme == "rrtmgp")
+        _rrtmgp_fp32 = (_rad_scheme == "rrtmgp") and cfg.mpas_rrtmgp_fp32
         # Cloud-radiation coupling: thread the configured cloud-fraction
         # scheme into RRTMGP (cloud optics from microphysics condensate +
         # number).  ``include_clouds`` must be consistent with the cloud
@@ -13797,6 +13797,7 @@ class ModelDriver:
         from legoesm.driver.orbit import experiment_orbit
         _orbit_params = experiment_orbit(cfg)
         phys_cfg = PhysicsConfig(
+            module_checkpoint=cfg.physics_module_checkpoint,
             radiation=RadiationConfig(
                 scheme=_rad_scheme if _rad_scheme != "none" else "none",
                 # cfg.S_0 (--solar-s0) is the constant-solar TSI on every lane;
@@ -18235,6 +18236,7 @@ class ModelDriver:
             from legoesm.driver.orbit import experiment_orbit
             _orbit_params = experiment_orbit(cfg)
             phys_cfg = PhysicsConfig(
+                module_checkpoint=cfg.physics_module_checkpoint,
                 radiation=RadiationConfig(
                     scheme=_rad_scheme,
                     # cfg.S_0: same constant-solar TSI as the compiled lanes.

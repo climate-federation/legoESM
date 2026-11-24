@@ -451,7 +451,11 @@ def test_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep(monkeypa
     tr["N_s"] = state.T.replace(data=jnp.zeros_like(state.T.data), name="N_s",
                                 units="1/kg")
     state = state._replace(tracers=tr)
-    fn, cfg = _mpas_physics(True, n=2)
+    _, cfg = _mpas_physics(True, n=2)
+    # the spies read concrete values: no module remat (it traces its body)
+    from legoesm.atmosphere.physics.combined import make_physics
+    fn = make_physics(cfg._replace(module_checkpoint=False), model_type="mpas",
+                      dt=600.0, cld_macmic_num_steps=2)
     ps = init_physics_state(*state.T.data.shape, cfg)
     ps = ps._replace(cloud_fraction=jnp.full(state.T.data.shape, 0.123))
     fn(state, mesh, sigma, phys_state=ps)

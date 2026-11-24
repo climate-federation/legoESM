@@ -277,7 +277,9 @@ def test_macmic_subcycle_holds_the_pre_physics_omega(monkeypatch):
                        convection=ConvectionConfig(scheme="none"),
                        turbulence=tc,
                        microphysics=MicrophysicsConfig(scheme="none"),
-                       gravity_wave_drag=GWDConfig(scheme="none"))
+                       gravity_wave_drag=GWDConfig(scheme="none"),
+                       # the spies read concrete values: no module remat (it traces its body)
+                       module_checkpoint=False)
     ncell, nlev = state.T.data.shape
     ps = init_physics_state(ncol=ncell, nlev=nlev, physics_config=pc,
                             dtype=jnp.float64)

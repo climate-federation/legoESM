@@ -468,6 +468,8 @@ def test_radiation_cloud_call_receives_the_clubb_and_deepcu_carries(monkeypatch)
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     seen.clear()
     combined_fn = make_physics(PhysicsConfig(
+        # the spies read concrete values: no module remat (it traces its body)
+        module_checkpoint=False,
         radiation=_rad_cfg(rad="rrtmgp"),
         turbulence=TurbulenceConfig(scheme="clubb",
                                     clubb=CLUBBConfig(prognostic=True)),

@@ -98,6 +98,22 @@ H_SWEEP = (1.0,)          # multiples of --h; --h-sweep widens it
 RAD_FP64 = False          # --rad-fp64
 
 
+def nonfinite_census(g, batched=False):
+    """Census, not verdict: which leaf, how many entries, which columns carry
+    a non-finite cotangent (columns = axis 0, or axis 1 with ``batched``,
+    where axis 0 is the window and the windows hit are listed too)."""
+    for path, a in jax.tree_util.tree_leaves_with_path(g):
+        bad = np.asarray(~jnp.isfinite(a))
+        if not bad.any():
+            continue
+        idx = np.nonzero(bad)
+        cols = np.unique(idx[1 if batched else 0])
+        win = (f" windows={np.unique(idx[0]).tolist()}" if batched else "")
+        print(f"NONFINITE {jax.tree_util.keystr(path)} shape={a.shape} "
+              f"count={int(bad.sum())}/{bad.size}{win} ncols={cols.size} "
+              f"cols={cols[:12].tolist()}", flush=True)
+
+
 def grad_check(f, x, v, h, name):
     """f: pytree -> scalar.  AD directional derivative vs central FD (at each
     step in ``H_SWEEP * h``: an FD that converges to AD as h shrinks is a
@@ -112,15 +128,7 @@ def grad_check(f, x, v, h, name):
     gl = jax.tree_util.tree_leaves(g)
     finite = all(bool(jnp.all(jnp.isfinite(a))) for a in gl)
     if not finite:
-        # census, not verdict: which leaf, how many entries, which columns
-        # (axis 0) carry a non-finite cotangent
-        for path, a in jax.tree_util.tree_leaves_with_path(g):
-            bad = np.asarray(~jnp.isfinite(a))
-            if bad.any():
-                cols = np.unique(np.nonzero(bad)[0])
-                print(f"NONFINITE {jax.tree_util.keystr(path)} shape={a.shape} "
-                      f"count={int(bad.sum())}/{bad.size} ncols={cols.size} "
-                      f"cols={cols[:12].tolist()}", flush=True)
+        nonfinite_census(g)
     gmax = max(float(jnp.max(jnp.abs(a))) for a in gl)
     ad = float(sum(jnp.vdot(a, b) for a, b in zip(gl, jax.tree_util.tree_leaves(v))))
     fds = {}
@@ -515,6 +523,49 @@ def eqn_trace(f, x):
     return jax.tree_util.tree_unflatten(tdef, grad), rows
 
 
+def loop_census(f, x, top=20):
+    """Every scan / while loop in the jaxpr of ``f(x)`` (recursing into every
+    sub-jaxpr: jit, cond branches, loop bodies, remat, custom derivatives),
+    ranked by the bytes of its STACKED outputs -- a scan's ``ys`` with the
+    loop length as leading axis, i.e. what a traced ``jax.grad(g)`` stores per
+    iteration for the reverse pass (a while loop stacks nothing).  Prints ``LOOP {prim, length, stacked_mib,
+    stacked, n_seen, src}`` (identical loops reached through several call sites
+    are merged, ``n_seen`` counts them); returns the rows."""
+    from jax._src import core as jcore
+    from jax._src import source_info_util as siu
+    rows = {}
+
+    def subs(eqn):
+        for v in eqn.params.values():
+            for j in (v if isinstance(v, (tuple, list)) else (v,)):
+                if isinstance(j, jcore.ClosedJaxpr):
+                    yield j.jaxpr
+                elif isinstance(j, jcore.Jaxpr):
+                    yield j
+
+    def walk(jaxpr):
+        for e in jaxpr.eqns:
+            if e.primitive.name in ("scan", "while"):
+                n = e.params.get("length")
+                st = ([v.aval for v in e.outvars[e.params["num_carry"]:]]
+                      if e.primitive.name == "scan" else [])
+                key = (e.primitive.name, n, siu.summarize(e.source_info),
+                       tuple(a.str_short() for a in st))
+                r = rows.setdefault(key, dict(
+                    prim=e.primitive.name, length=n, src=key[2], n_seen=0,
+                    stacked_mib=sum(a.size * a.dtype.itemsize
+                                    for a in st) / 2**20,
+                    stacked=[a.str_short() for a in st][:6]))
+                r["n_seen"] += 1
+            for j in subs(e):
+                walk(j)
+    walk(jax.make_jaxpr(f)(x).jaxpr)
+    out = sorted(rows.values(), key=lambda r: -r["stacked_mib"])
+    for r in out[:top]:
+        print("LOOP " + json.dumps(r), flush=True)
+    return out
+
+
 def print_eqn_trace(rows, label, top=25):
     """The equations that multiplied the cotangent most (``EQN_GAIN``) and
     the ones whose input cotangent is largest (``EQN_MAX``)."""
@@ -634,6 +685,190 @@ def time_compiled(fn, args, repeats):
     return t_c, t_1, reps, out
 
 
+def grad_diff(got, ref):
+    """Per leaf: max|got-ref|/max|ref|, ||got-ref||/||ref|| and the cosine
+    of the two (fp64 on host; NaN where either side is non-finite)."""
+    out = {}
+    for k in ref:
+        r = np.asarray(ref[k], np.float64).ravel()
+        g = np.asarray(got[k], np.float64).ravel()
+        d = g - r
+        nr, ng = np.linalg.norm(r), np.linalg.norm(g)
+        out[k] = dict(max_rel=float(np.max(np.abs(d)) / np.max(np.abs(r))),
+                      norm_rel=float(np.linalg.norm(d) / nr),
+                      cos=float(r @ g / (nr * ng)))
+    return out
+
+
+def _tdot(a, b):
+    return float(sum(np.vdot(np.asarray(a[k], np.float64),
+                             np.asarray(b[k], np.float64)) for k in b))
+
+
+def check_directions(x):
+    """The probe's random direction, whole and one variable at a time."""
+    v = _direction(x)
+    return dict({"both": v}, **{
+        k: {j: (a if j == k else jnp.zeros_like(a)) for j, a in v.items()}
+        for k in v})
+
+
+def gap_direction(x, gap):
+    """Along a gradient gap, each variable on :func:`_direction`'s scale (0.1
+    K in T, 1e-3 relative in a tracer) and at most that scale in any cell:
+    two gradients that differ predict different derivatives here, so a
+    central difference can tell them apart wherever its rounding error
+    (``fd_rounding``) is below the difference of the two predictions.  None
+    without a gap."""
+    s = {k: (0.1 if k == "T" else 1e-3 * jnp.abs(x[k])) for k in gap}
+    top = max(float(jnp.max(jnp.abs(s[k] * gap[k]))) for k in gap)
+    if not (np.isfinite(top) and top > 0.0):
+        return None
+    return {k: s[k] * s[k] * gap[k] / top for k in gap}
+
+
+def fd_sweep(f, x, v, h):
+    """Central differences of ``f`` along ``v`` at each step of ``H_SWEEP *
+    h``; ``f`` returns one loss or one loss per window."""
+    def at(hh):
+        return np.asarray(f(jax.tree_util.tree_map(
+            lambda a, b: a + hh * b, x, v)), np.float64)
+    return {f"{h * m:.0e}": (at(h * m) - at(-h * m)) / (2.0 * h * m)
+            for m in H_SWEEP}
+
+
+def one_ulp(x):
+    """``x`` with every entry moved one rounding unit, random sign."""
+    return {k: a * (1.0 + jnp.finfo(a.dtype).eps * jax.random.rademacher(
+        jax.random.PRNGKey(j), a.shape, a.dtype))
+        for j, (k, a) in enumerate(sorted(x.items()))}
+
+
+def print_fd_check(path, window, direction, ad, ad_other, fds, loss_rounding):
+    """``loss_rounding``: the path's loss change at one rounding unit in x;
+    over 2h it is the resolution of that step's central difference."""
+    print("FD_CHECK " + json.dumps(dict(
+        path=path, window=window, direction=direction, ad=ad,
+        ad_other_path=ad_other, fd={h: float(x) for h, x in fds.items()},
+        fd_rounding={h: float(loss_rounding) / (2.0 * float(h)) for h in fds},
+        fd_over_ad_minus_1={h: (float(x) / ad - 1.0 if ad else float("nan"))
+                            for h, x in fds.items()})), flush=True)
+
+
+def gap_concentration(gap, k=10):
+    """Per leaf: the share of the squared gap held by its ``k`` largest
+    entries and the largest one's index."""
+    out = {}
+    for name, d in gap.items():
+        a = np.square(np.asarray(d, np.float64))
+        tot = float(a.sum())
+        out[name] = dict(
+            top_share=(float(np.sort(a, axis=None)[-k:].sum()) / tot
+                       if tot else 0.0),
+            at=[int(i) for i in np.unravel_index(int(np.argmax(a)), a.shape)])
+    return out
+
+
+def window_check(exps, g_batch, losses_batch, n, kw, ids, fwd_batch=None,
+                 h=1e-3):
+    """Windows ``ids`` from a true standalone run (each its OWN export: own
+    physics closures, forcing, clock built inside; no vmap; one compile per
+    window) against the batched run: the forward loss (batched per-window
+    ``losses_batch``) and the gradient (its slice of ``g_batch``).  The
+    first id's standalone gradient is also compiled a second way (jax.vmap
+    over a batch of one, same export): the gap between the two is the
+    rounding noise of the gradient itself, the floor any batched-vs-alone
+    difference is read against.  Each standalone gradient is also repeated
+    (same executable: determinism) and taken again one rounding unit away in
+    x (same executable: conditioning).  Numbers only, no tolerance.
+
+    With ``fwd_batch`` (stacked x -> one loss per window) each path is held
+    against its OWN central difference (FD_CHECK lines, steps ``H_SWEEP *
+    h``): every window of the batch and each standalone window along the
+    probe's random directions, and each checked window of both paths along
+    the batched-minus-standalone gradient gap (:func:`gap_direction`)."""
+    from legoesm.driver.mpas_diff_step import mpas_segment
+    tm = jax.tree_util.tree_map
+    if fwd_batch is not None:
+        xs = [_state_x(e["state"]) for e in exps]
+        dirs = [check_directions(x_) for x_ in xs]
+        xb = tm(lambda *t: jnp.stack(t), *xs)
+        noise_b = np.abs(np.asarray(fwd_batch(one_ulp(xb)), np.float64)
+                         - np.asarray(fwd_batch(xb), np.float64))
+        for name in dirs[0]:
+            fds = fd_sweep(fwd_batch, xb,
+                           tm(lambda *t: jnp.stack(t), *[d[name] for d in dirs]),
+                           h)
+            for b, d in enumerate(dirs):
+                print_fd_check(
+                    "batched", b, name,
+                    _tdot({k: v[b] for k, v in g_batch.items()}, d[name]),
+                    None, {m: f[b] for m, f in fds.items()}, noise_b[b])
+    for i, b in enumerate(ids):
+        e = exps[b]
+
+        def one(x_, _e=e):
+            out, _ = mpas_segment(_e, _with_x(_e["state"], x_),
+                                  _e["phys_state"], n, **kw)
+            return _proj_loss(out)
+        x = _state_x(e["state"])
+        t0 = time.time()
+        vg = jax.jit(jax.value_and_grad(one))
+        loss, gb = jax.block_until_ready(vg(x))
+        row = dict(window=b, seconds=time.time() - t0,
+                   loss_alone=float(loss), loss_batched=float(losses_batch[b]),
+                   alone_finite=bool(all(np.all(np.isfinite(np.asarray(v)))
+                                         for v in gb.values())),
+                   batched_vs_alone=grad_diff({k: g_batch[k][b] for k in gb}, gb))
+        g_b = {k: g_batch[k][b] for k in gb}
+        gap = {k: g_b[k] - gb[k] for k in gb}
+        row["gap_top10"] = gap_concentration(gap)
+        row["repeat_vs_alone"] = grad_diff(vg(x)[1], gb)
+        x_ulp = one_ulp(x)
+        row["ulp_vs_alone"] = grad_diff(vg(x_ulp)[1], gb)
+        if fwd_batch is not None:
+            f1 = jax.jit(one)
+            row["loss_alone_fwd"] = float(f1(x))
+            noise = abs(float(f1(x_ulp)) - row["loss_alone_fwd"])
+            todo = dict(dirs[b])
+            w = gap_direction(x, gap)
+            if w is not None:
+                todo["gap"] = w
+            for name, d in todo.items():
+                print_fd_check("alone", b, name, _tdot(gb, d), _tdot(g_b, d),
+                               fd_sweep(f1, x, d, h), noise)
+            if w is not None:
+                wb = {k: jnp.zeros_like(xb[k]).at[b].set(w[k]) for k in w}
+                fds = fd_sweep(fwd_batch, xb, wb, h)
+                print_fd_check("batched", b, "gap", _tdot(g_b, w),
+                               _tdot(gb, w), {m: f[b] for m, f in fds.items()},
+                               noise_b[b])
+        if i == 0:
+            x1 = jax.tree_util.tree_map(lambda t: t[None], x)
+            g1 = jax.block_until_ready(jax.jit(jax.grad(
+                lambda z: jnp.sum(jax.vmap(one)(z))))(x1))
+            row["vmap1_vs_alone"] = grad_diff(
+                {k: v[0] for k, v in g1.items()}, gb)
+        print("WINDOW_CHECK " + json.dumps(row), flush=True)
+
+
+def memory_report(label, fn, args, ncol):
+    """Compile ``fn`` (named ``fn.__name__``, so an ``--xla_dump_hlo_module_re``
+    filter can select it) WITHOUT running it and print XLA's own buffer
+    accounting: ``MEMORY {label, temp/argument/output/alias/code GiB, temp
+    MB per column}``.  Compile-only, so a window that would OOM is still
+    measured."""
+    t0 = time.time()
+    c = jax.jit(fn).lower(*args).compile()
+    m = c.memory_analysis()
+    gib = {k: getattr(m, f"{k}_size_in_bytes") / 2**30
+           for k in ("temp", "argument", "output", "alias", "generated_code")}
+    print("MEMORY " + json.dumps(dict(
+        label=label, ncol=ncol, compile_s=time.time() - t0,
+        temp_mb_per_col=gib["temp"] * 2**30 / 1e6 / ncol,
+        **{f"{k}_gib": v for k, v in gib.items()})), flush=True)
+
+
 def peak_gib():
     """Peak memory so far, GiB: the device's peak_bytes_in_use where the
     backend reports it (GPU/TPU), else the process RSS high-water mark (CPU).
@@ -652,7 +887,8 @@ def build_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", required=True,
                     choices=("components", "physics", "params", "dycore",
-                             "step", "land", "eager", "eqns", "timing"))
+                             "step", "land", "eager", "eqns", "timing",
+                             "memory", "loops", "modmem"))
     ap.add_argument("--module", default="microphysics",
                     help="eqns stage: the module whose calls are traced")
     ap.add_argument("--calls", default="1,2,3",
@@ -706,6 +942,23 @@ def build_parser():
                          "the forcing clock")
     ap.add_argument("--timing-steps", default="64,256",
                     help="timing stage: comma list of window lengths [steps]")
+    ap.add_argument("--batch", type=int, default=1,
+                    help="timing stage: B windows, each its own driver "
+                         "export (see --window-spacing-days), in one jax.vmap "
+                         "call; needs --schedule")
+    ap.add_argument("--window-spacing-days", type=float, default=None,
+                    help="timing stage with --batch: window b is the driver "
+                         "started this many days * b after the deck's start "
+                         "day (required with --batch)")
+    ap.add_argument("--check-window-ids", default="",
+                    help="--check-windows: comma-separated window indices "
+                         "(default: first and last)")
+    ap.add_argument("--check-windows", action="store_true",
+                    help="timing stage with --batch: also take the first and "
+                         "last window's gradient from a standalone run and "
+                         "print its difference from the batched slice; "
+                         "hold both paths against their own central "
+                         "differences (--h, --h-sweep)")
     ap.add_argument("--repeats", type=int, default=3,
                     help="timing stage: steady-state calls timed per window")
     ap.add_argument("--stash-modules", action="store_true",
@@ -740,8 +993,14 @@ def main(argv=None):
     if a.stage == "eqns":
         global ALL_CALLS
         ALL_CALLS = {}
-    if a.stage in ("components", "eqns") or a.rad_fp64 or a.stash_modules:
+    if (a.stage in ("components", "eqns", "modmem") or a.rad_fp64
+            or a.stash_modules):
         install_spies(rec)
+    if a.stage in ("components", "eqns", "modmem"):
+        # the spies record only concrete calls, and jax.checkpoint traces its
+        # arguments even when called eagerly: without this no module records.
+        # Forward values are the same with or without the module remat.
+        rest = rest + ["--no-physics-module-checkpoint"]
     t0 = time.time()
     drv = build_driver(rest, a.resolution, a.n_steps)
     exp = drv.export_mpas_step()
@@ -793,6 +1052,8 @@ def main(argv=None):
             raise SystemExit("--physics-variant norad: this cadence has no "
                              "no-radiation variant")
         _ = pfn(state0, mesh, sigma, phys_state=ps0, forcing=forcing0)
+        if not rec:
+            raise SystemExit("no physics module call was recorded")
         print("recorded modules: " + ", ".join(sorted(rec)), flush=True)
         only = {x.strip() for x in a.only.split(",") if x.strip()}
         for name, (fn, fa, fk) in sorted(rec.items()):
@@ -810,28 +1071,144 @@ def main(argv=None):
                 print(f"GRADCHECK_FAIL {name}: {type(e).__name__}: {e}"[:2000],
                       flush=True)
     elif a.stage == "timing":
-        from legoesm.driver.mpas_diff_step import mpas_segment
+        from legoesm.driver.mpas_diff_step import mpas_segment, stack_windows
         sched = None if a.schedule == "none" else a.schedule
+        nb = a.batch
+        if nb > 1:
+            if sched is None:
+                raise SystemExit("--batch needs --schedule uniform|binomial "
+                                 "(the clock is vmapped into the scheduled loop)")
+            if a.window_spacing_days is None:
+                raise SystemExit("--batch needs --window-spacing-days")
+            if a.at_step or a.load_state:
+                raise SystemExit("--batch: each window starts at its own "
+                                 "export; --at-step/--load-state set window "
+                                 "0 only")
+            # window b: the driver started window_spacing_days * b after the
+            # deck's start day and exported there (own state, forcing, clock)
+            day0 = float(drv.config.start_day)
+            exps = [exp] + [build_driver(
+                rest + ["--start-day", repr(day0 + b * a.window_spacing_days)],
+                a.resolution, a.n_steps).export_mpas_step()
+                for b in range(1, nb)]
+            print("WINDOWS start days " + ", ".join(
+                repr(day0 + b * a.window_spacing_days) for b in range(nb)),
+                flush=True)
         for n in (int(t) for t in a.timing_steps.split(",") if t.strip()):
             kw = (dict(checkpoint=True) if sched is None else
                   dict(schedule=sched, checkpoints=a.checkpoints,
                        storage=a.storage))
+            if nb == 1:
+                def fwd(x, _n=n):
+                    s, _ = mpas_segment(exp, _with_x(state0, x), ps0, _n, **kw)
+                    return _proj_loss(s)
+                args = (x0,)
+            else:
+                sb, pb, fb, cb = stack_windows(exps, n)
 
-            def fwd(x, _n=n):
-                s, _ = mpas_segment(exp, _with_x(state0, x), ps0, _n, **kw)
-                return _proj_loss(s)
-            tf_c, tf_1, tf_r, _ = time_compiled(fwd, (x0,), a.repeats)
-            tg_c, tg_1, tg_r, g = time_compiled(jax.grad(fwd), (x0,), a.repeats)
+                def one_b(x_, s_, p_, f_, c_, _n=n):
+                    out, _ = mpas_segment(exp, _with_x(s_, x_), p_, _n,
+                                          forcing=f_, clock=c_, **kw)
+                    return _proj_loss(out)
+
+                def fwd(x, s, p, f, c):
+                    return jnp.sum(jax.vmap(one_b)(x, s, p, f, c))
+                args = (_state_x(sb), sb, pb, fb, cb)
+            tf_c, tf_1, tf_r, _ = time_compiled(fwd, args, a.repeats)
+            tg_c, tg_1, tg_r, (loss_g, g) = time_compiled(
+                jax.value_and_grad(fwd), args, a.repeats)
             fin = all(bool(jnp.all(jnp.isfinite(t)))
                       for t in jax.tree_util.tree_leaves(g))
+            if not fin:
+                nonfinite_census(g, batched=nb > 1)
             med_f, med_g = float(np.median(tf_r)), float(np.median(tg_r))
             print("TIMING " + json.dumps(dict(
                 n_steps=n, schedule=a.schedule, checkpoints=a.checkpoints,
-                ncol=int(state0.T.data.shape[0]), fwd_compile_s=tf_c,
+                ncol=int(state0.T.data.shape[0]), batch=nb,
+                grad_per_window_s=med_g / nb, fwd_compile_s=tf_c,
                 fwd_first_s=tf_1, fwd_s=tf_r, grad_compile_s=tg_c,
                 grad_first_s=tg_1, grad_s=tg_r, grad_per_step_s=med_g / n,
                 grad_over_fwd=med_g / med_f, grad_finite=fin,
+                loss_grad_exec=float(loss_g),
                 peak_gib=peak_gib())), flush=True)
+            if a.check_windows and nb > 1:
+                losses_fn = jax.jit(jax.vmap(one_b))
+                losses = np.asarray(losses_fn(*args))
+                ids = ([int(t) for t in a.check_window_ids.split(",")]
+                       if a.check_window_ids else sorted({0, nb - 1}))
+                window_check(exps, g, losses, n, kw, ids,
+                             fwd_batch=lambda x: losses_fn(x, *args[1:]),
+                             h=a.h)
+    elif a.stage == "loops":
+        # trace-only: which loops stack per-iteration residuals in the
+        # gradient of one full-physics step (no compile, no device run)
+        tm = model.mass_target(state0)
+        pfn = exp["physics_fn" if a.physics_variant == "full" else
+                  "physics_fn_norad"]
+
+        def step_loss(x):
+            s = model.step_pure(_with_x(state0, x), exp["dt"], physics_fn=pfn,
+                                forcing=forcing0, phys_state=ps0,
+                                target_mass=tm)[0]
+            return _proj_loss(s)
+        loop_census(jax.grad(step_loss), x0)
+    elif a.stage == "modmem":
+        # compile-only gradient memory of each CAM6 module call, as the
+        # combined physics calls it (spies record the first concrete call)
+        pfn = exp["physics_fn" if a.physics_variant == "full" else
+                  "physics_fn_norad"]
+        _ = pfn(state0, mesh, sigma, phys_state=ps0, forcing=forcing0)
+        ncol = int(state0.T.data.shape[0])
+        for name, (fn, fa, fk) in sorted(rec.items()):
+            st = fa[0]
+
+            def mem_module(x, _fn=fn, _fa=fa, _fk=fk, _st=st):
+                return _proj_loss(_fn(_with_x(_st, x), *_fa[1:], **_fk))
+            try:
+                memory_report(name.replace("make_", "").replace("_physics", ""),
+                              jax.grad(mem_module), (_state_x(st),), ncol)
+            except Exception as e:   # report, do not hide
+                print(f"MEMORY_FAIL {name}: {type(e).__name__}: {e}"[:2000],
+                      flush=True)
+    elif a.stage == "memory":
+        # Compile-only buffer accounting of each piece of one production
+        # step, then the scheduled segment over --n-steps (forward), so the
+        # per-column forward buffer is attributed to a piece.
+        from legoesm.driver.mpas_diff_step import mpas_segment
+        ncol = int(state0.T.data.shape[0])
+        tm = model.mass_target(state0)
+
+        def mem_dycore(s):
+            return model.step_pure(s, exp["dt"], target_mass=tm)[0]
+        memory_report("dycore_step", mem_dycore, (state0,), ncol)
+        for key in ("physics_fn", "physics_fn_norad", "physics_fn_held"):
+            pfn = exp[key]
+            if pfn is None:
+                continue
+
+            def mem_physics(s, p, f, _p=pfn):
+                return _p(s, mesh, sigma, phys_state=p, forcing=f)
+
+            def mem_step(s, p, f, _p=pfn):
+                return model.step_pure(s, exp["dt"], physics_fn=_p, forcing=f,
+                                       phys_state=p, target_mass=tm)[:2]
+            memory_report(key, mem_physics, (state0, ps0, forcing0), ncol)
+            memory_report(f"step_{key}", mem_step, (state0, ps0, forcing0),
+                          ncol)
+        sched = "uniform" if a.schedule == "none" else a.schedule
+
+        def mem_segment(s, p):
+            return mpas_segment(exp, s, p, a.n_steps, step0=a.at_step,
+                                schedule=sched, checkpoints=a.checkpoints,
+                                storage=a.storage)
+        memory_report(f"segment_{sched}_{a.n_steps}_fwd", mem_segment,
+                      (state0, ps0), ncol)
+
+        def mem_segment_grad(x):
+            s, _ = mem_segment(_with_x(state0, x), ps0)
+            return _proj_loss(s)
+        memory_report(f"segment_{sched}_{a.n_steps}_grad",
+                      jax.grad(mem_segment_grad), (x0,), ncol)
     elif a.stage == "eqns":
         pfn = exp["physics_fn" if a.physics_variant == "full" else
                   "physics_fn_norad"]
