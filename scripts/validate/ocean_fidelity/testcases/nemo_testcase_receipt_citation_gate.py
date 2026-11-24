@@ -19004,6 +19004,16 @@ for _citation in (
 ):
     _pin_at(_citation, _D239_PRE_MERGE)
 
+# The D184b restart parity test gained two lines so its frozen parent copy of
+# restart.py classifies main's tbudget slot: that span is pinned to the tree the
+# receipt describes; the two tests below it only moved.
+_pin_at('tests/ice/unit/test_si3_o12_pnd.py:3030-3200', 'e38225d6ce')
+for _citation, _lines in (
+    ('tests/ice/unit/test_si3_o12_pnd.py:3203-3333', '3309-3439'),
+    ('tests/ice/unit/test_si3_o12_pnd.py:3336-3793', '3442-3899'),
+):
+    _merge_resolution_repin(_citation, _lines)
+
 def audit_map() -> list[dict]:
     """EVERY entry in the map must resolve cleanly, cited this round or not.
 
