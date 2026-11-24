@@ -202,6 +202,12 @@ The published constants 3.1 and 5.4 replace the former `langmuir_coeff` field
 and `--langmuir-coeff` CLI option; these old settings must be removed from
 scripts/configurations rather than interpreted as a VR12 tuning coefficient.
 
+The refreshed comparison against the November 24 main is documented in
+[the current-main Wave/KPP report](kpp_wave_coupling_current_main.md), with
+new source-verified integrations and figures. Select `--comparison-config`
+with `scripts/validate/wave_kpp_s_l2/current_main.json` for that protocol. The
+original November 19 comparison below remains a historical record.
+
 The preregistration, exact forcing/configuration and attributed author input
 profiles are committed in `scripts/validate/wave_kpp_s_l2/`. The existing SCM
 entrypoint dispatches the controlled experiment; it uses the production SCM,
