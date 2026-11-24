@@ -144,6 +144,8 @@ def test_hard_limit_matches_cam_oracle(fx, step):
 def _gaps(fx):
     out = {}
     for sw in MFSmoothing._fields:
+        if sw.startswith("bsort_"):  # opt-in switches cannot affect this legacy lane
+            continue
         sm = HARD._replace(**{sw: getattr(MFSmoothing(), sw)})
         for step in (1, 2):
             got = _run(fx, sm, step)

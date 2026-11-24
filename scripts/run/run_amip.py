@@ -1369,6 +1369,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "prognostic CLUBB (fixed L0 = 200 m, CAM's random "
                              "draws). Requires --turbulence clubb and "
                              "--clubb-prognostic. Default off = no mass flux.")
+    parser.add_argument("--clubb-mf-bsort", dest="clubb_mf_bsort",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM buoyancy-sorting detrainment (3 passes, 0.6 area cap). "
+                             "Requires --clubb-mf; carries each plume's previous top.")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -3468,6 +3472,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_host_omega=args.clubb_host_omega,
         clubb_mf=args.clubb_mf,
+        clubb_mf_bsort=args.clubb_mf_bsort,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
            for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS,

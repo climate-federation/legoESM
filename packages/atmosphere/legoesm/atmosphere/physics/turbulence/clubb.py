@@ -334,6 +334,13 @@ __param_spec__ = {
             "routec_lock_m_width": "numerics: route C (RULE 5) ramp width [1] in m of Lock's double-jump switch at m = 0.1 (value voted 2026-11-21)",
             "routec_E_width": "numerics: route C (RULE 5) width [1] of the smooth [0, 1] clip of the evaporative enhancement (value voted 2026-11-21)",
             "mf_alive_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/s2/m2] of the plume-alive wn2 > 0 switch (inf = CAM; value voted)",
+            "mf_bsort_case_sharpness": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
+            "mf_bsort_sat_sharpness": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
+            "mf_bsort_xc_sharpness": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
+            "mf_bsort_disc_sharpness": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
+            "mf_bsort_root_sharpness": "numerics: RULE 5 stable-root sign smoothing (inf = CAM), not a tunable",
+            "mf_bsort_equal_sharpness": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
+            "mf_bsort_area_sharpness": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
             "mf_qc_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/kg/kg] of the cloudy qt - qs > 0 switch (inf = CAM; value voted)",
             "mf_trig_wthv_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/K m/s] of the trigger w'thv'_sfc > 0 switch (inf = CAM; value voted)",
             "mf_trig_wqt_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/kg/kg m/s] of the trigger w'qt'_sfc > 0 switch (inf = CAM; value voted)",
@@ -781,6 +788,14 @@ class CLUBBConfig(NamedTuple):
     mf_kspan_sharpness: float = 100.0
     mf_conv_sharpness: float = 1.0e7
     mf_cfl_sharpness: float = 100.0
+    # TODO-VOTE: same defaults/units as MFSmoothing.bsort_* (clubb_mf.py).
+    mf_bsort_case_sharpness: float = 1.0e10
+    mf_bsort_sat_sharpness: float = 1.0e5
+    mf_bsort_xc_sharpness: float = 100.0
+    mf_bsort_disc_sharpness: float = 100.0
+    mf_bsort_root_sharpness: float = 100.0
+    mf_bsort_equal_sharpness: float = 100.0
+    mf_bsort_area_sharpness: float = 100.0
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -6707,6 +6722,8 @@ def clubb_step(
     clubb_mf: bool = False,
     mf_pblh: jax.Array | None = None,
     mf_lts: jax.Array | None = None,
+    clubb_mf_bsort: bool = False,
+    mf_ztopm1: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6789,6 +6806,9 @@ def clubb_step(
     liquid partition on, ``diagnostics["dq_c_dt"]`` carries the cloud-liquid
     tendency (top-down) that REPLACES the host's liquid with the closure's.
     """
+    if clubb_mf_bsort and not clubb_mf:
+        raise ValueError("clubb_mf_bsort requires clubb_mf=True")
+
     ncol, nlev = T.shape
     params = config.params
 
@@ -6951,12 +6971,24 @@ def clubb_step(
             pblh=(jnp.zeros((ncol,), T.dtype) if mf_pblh is None
                   else jnp.reshape(mf_pblh, (ncol,))),
             lts=jnp.reshape(mf_lts, (ncol,)))
+        if clubb_mf_bsort:
+            mf_in.update(thl_zm=zt2zm(thlm, gr), qt_zm=zt2zm(rtm, gr),
+                         thv_zm=thv_ds_zm, rho_zm=rho_ds_zm)
         sm = MFSmoothing(*(getattr(config, f"mf_{f}_sharpness")
                            for f in MFSmoothing._fields))
-        thlm_forcing, rtm_forcing, _mf_out = jax.vmap(
-            lambda c, rzm, irzt, idz: clubb_mf_forcing(
-                c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness))(
-            mf_in, rho_ds_zm, invrs_rho_ds_zt, 1.0 / dzt)
+        if clubb_mf_bsort:
+            from legoesm.atmosphere.physics.turbulence.clubb_mf import NUP
+            memory = jnp.zeros((ncol, NUP), T.dtype) if mf_ztopm1 is None else mf_ztopm1
+            thlm_forcing, rtm_forcing, _mf_out = jax.vmap(
+                lambda c, rzm, irzt, idz, z: clubb_mf_forcing(
+                    c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness,
+                    bsort=True, ztopm1=z))(
+                mf_in, rho_ds_zm, invrs_rho_ds_zt, 1.0 / dzt, memory)
+        else:
+            thlm_forcing, rtm_forcing, _mf_out = jax.vmap(
+                lambda c, rzm, irzt, idz: clubb_mf_forcing(
+                    c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness))(
+                mf_in, rho_ds_zm, invrs_rho_ds_zt, 1.0 / dzt)
     mf_cloud = {}
     if clubb_mf:
         # CAM7 clubb.F90:2566-2568: plume cloud from zm to zt (mf_cloudfrac_zt,
@@ -6964,6 +6996,8 @@ def clubb_step(
         mf_cloud = dict(
             mf_cloudfrac=flip_vertical(zm2zt(_mf_out["moist_a"], gr)),
             mf_qc=flip_vertical(zm2zt(_mf_out["moist_qc"], gr)))
+    if clubb_mf_bsort:
+        mf_cloud["mf_ztopm1"] = _mf_out["ztopm1"]
     forcing = CLUBBForcing(
         rtm=rtm_forcing, thlm=thlm_forcing, um=zeros_zt, vm=zeros_zt, wprtp=zeros_zm,
         wpthlp=zeros_zm, rtp2=zeros_zm, thlp2=zeros_zm, rtpthlp=zeros_zm)
@@ -7130,6 +7164,8 @@ def clubb_turbulence_prognostic(
     omega_cam_layer_density: bool = False,
     clubb_mf: bool = False,
     mf_pblh: jax.Array | None = None,
+    clubb_mf_bsort: bool = False,
+    mf_ztopm1: jax.Array | None = None,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -7195,6 +7231,9 @@ def clubb_turbulence_prognostic(
     Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
     back into ``PhysicsState.clubb_moments`` via the carry machinery.
     """
+    if clubb_mf_bsort and not clubb_mf:
+        raise ValueError("clubb_mf_bsort requires clubb_mf=True")
+
     if float(config.q_flux_scale) != 1.0:
         raise ValueError(
             "q_flux_scale is a diagnostic-CLUBB mechanism probe; the prognostic "
@@ -7226,10 +7265,10 @@ def clubb_turbulence_prognostic(
     config = jax.tree.map(_traced_to_wd, config)
     (u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho, dt,
      sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp, surface_flux, rad_dT_dt, q_c,
-     lat, omega) = jax.tree.map(_to_wd, (
+     lat, omega, mf_ztopm1) = jax.tree.map(_to_wd, (
         u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho, dt,
         sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp, surface_flux, rad_dT_dt,
-        q_c, lat, omega))
+        q_c, lat, omega, mf_ztopm1))
     moments = unpack_clubb_moments(clubb_moments)
     _top_kw = {}
     if config.trop_cloud_top_press > 0.0:
@@ -7311,6 +7350,7 @@ def clubb_turbulence_prognostic(
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
             radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
             clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
+            clubb_mf_bsort=clubb_mf_bsort, mf_ztopm1=mf_ztopm1,
             omega_cam_layer_density=omega_cam_layer_density, **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         sfc_energy_in = diags["sfc_energy_in"]
@@ -7322,6 +7362,7 @@ def clubb_turbulence_prognostic(
         rcm_relvar_a = diags.get("rcm_relvar")
         dq_c_dt = diags.get("dq_c_dt")
         mf_cf_a, mf_qc_a = diags.get("mf_cloudfrac"), diags.get("mf_qc")
+        mf_top = diags.get("mf_ztopm1")
     else:
         dt_sub = dt / n_sub
 
@@ -7333,7 +7374,8 @@ def clubb_turbulence_prognostic(
         qc_init = q_c if _liq_on else jnp.zeros_like(q_v)
 
         def _sub(carry, _):
-            u_c, v_c, T_c, q_c_col, ql_c, m_c = carry
+            u_c, v_c, T_c, q_c_col, ql_c, m_c = carry[:6]
+            z_c = carry[6] if clubb_mf_bsort else None
             # HOST density on every sub-step (CAM: rho_ds once, before the nadv
             # loop).  With the heights fixed, a density re-derived from the
             # evolving T_v made CLUBB's conserved mass sum(rho dz) drift off the
@@ -7346,16 +7388,25 @@ def clubb_turbulence_prognostic(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
                 radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
-            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
+                clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
+                clubb_mf_bsort=clubb_mf_bsort, mf_ztopm1=z_c,
                 omega_cam_layer_density=omega_cam_layer_density, **_top_kw,
                 **({"q_c": ql_c} if _liq_on else {}))
             ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c
             carry = (u_c + dt_sub * du, v_c + dt_sub * dv, T_c + dt_sub * dT,
                      q_c_col + dt_sub * dq, ql_new, m_new)
+            if clubb_mf_bsort:
+                carry += (diag["mf_ztopm1"],)
             return carry, diag
 
-        (u_f, v_f, T_f, q_f, ql_f, new_moments), diag_stk = jax.lax.scan(
-            _sub, (u, v, T, q_v, qc_init, moments), xs=None, length=n_sub)
+        sub_initial = (u, v, T, q_v, qc_init, moments)
+        if clubb_mf_bsort:
+            from legoesm.atmosphere.physics.turbulence.clubb_mf import NUP
+            sub_initial += (jnp.zeros((T.shape[0], NUP), T.dtype)
+                            if mf_ztopm1 is None else mf_ztopm1,)
+        final, diag_stk = jax.lax.scan(_sub, sub_initial, xs=None, length=n_sub)
+        u_f, v_f, T_f, q_f, ql_f, new_moments = final[:6]
+        mf_top = final[6] if clubb_mf_bsort else None
         du_dt = (u_f - u) / dt
         dv_dt = (v_f - v) / dt
         dT_dt = (T_f - T) / dt
@@ -7451,7 +7502,7 @@ def clubb_turbulence_prognostic(
         # sub-step's advance (clubb_intr.F90:1915, :1997, surface interface
         # included) and the end-of-sub-cycle wp2 left in WP2_nadv (:1987).
         Kh_iface=Kh_iface, wp2_iface=flip_vertical(new_moments.wp2),
-        mf_cloudfrac=mf_cf_a, mf_qc=mf_qc_a)
+        mf_cloudfrac=mf_cf_a, mf_qc=mf_qc_a, mf_ztopm1=mf_top)
     return output, pack_clubb_moments(new_moments)
 
 

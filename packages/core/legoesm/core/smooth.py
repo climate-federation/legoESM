@@ -465,3 +465,14 @@ def blend_integer_index(r: jax.Array, take):
     a, b = take(lo), take(lo + 1)
     t = t.reshape(t.shape + (1,) * (a.ndim - t.ndim))
     return (1.0 - t) * a + t * b
+
+
+def expm1_over_x(x):
+    """``expm1(x)/x`` with its analytic value and slope at zero.
+
+    Shared from RRTMGP's two-stream solver. The machine-epsilon series switch
+    handles only a removable singularity, with no physical threshold.
+    """
+    near_zero = jnp.abs(x) < float(jnp.finfo(jnp.result_type(x)).eps)
+    x_safe = jnp.where(near_zero, 1.0, x)
+    return jnp.where(near_zero, 1.0 + 0.5 * x, jnp.expm1(x_safe) / x_safe)

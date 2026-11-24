@@ -5194,6 +5194,8 @@ def turbulence_config_for(config):
     (``apply_surface_flux_config``) so every backend gets the same surface
     layer (#870).
     """
+    if getattr(config, "clubb_mf_bsort", False) and not config.clubb_mf:
+        raise ValueError("clubb_mf_bsort=True requires clubb_mf=True")
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
     override = getattr(config, "turbulence_override", None)
@@ -5286,7 +5288,7 @@ def turbulence_config_for(config):
                 raise ValueError(
                     "clubb_mf=True requires clubb_prognostic=True: the plume "
                     "flux is the prognostic closure's thl/rt forcing.")
-            tc = tc._replace(clubb_mf=True)
+            tc = tc._replace(clubb_mf=True, clubb_mf_bsort=getattr(config, "clubb_mf_bsort", False))
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => the scheme's own default stands (CLUBBConfig, CAM6 100 Pa).
@@ -5437,6 +5439,8 @@ def turbulence_config_for(config):
                 f"and does not select it (override scheme={tc.scheme!r}, "
                 f"clubb_mf={getattr(tc, 'clubb_mf', None)!r}). Set "
                 "TurbulenceConfig(clubb_mf=True) on the override.")
+    if getattr(config, "clubb_mf_bsort", False) and not (tc.clubb_mf and tc.clubb_mf_bsort):
+        raise ValueError("clubb_mf_bsort=True requires clubb_mf=True and an override selecting bsort")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the

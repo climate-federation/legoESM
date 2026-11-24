@@ -10,7 +10,7 @@ does), and CAM's coupling (``clubb.F90`` ``compute_mf_plumes``): the
 mass-flux convergence of thl and qt, CFL-limited, as CLUBB's explicit
 ``thlm``/``rtm`` forcing.  First scored against our EDMF (user decision
 2026-11-19, option 2); a model option since 2026-11-23 (user: CAM's exact
-generator, fixed L0 = 200 m, no new carried state).
+generator, fixed L0 = 200 m, no new carried state unless buoyancy sorting is selected).
 
 Setting (CAM cam7 namelist defaults except where the user's reduced setting
 says otherwise): ``do_clubb_mf_aloft = F`` and ``clubb_mf_alphturb = 0`` (user:
@@ -27,12 +27,11 @@ each from the source):
   downdraft, ``ddcp`` returned 0, hence ``cpfac = 1`` (vote V24, asserted on
   the fixture); with ``mf_sqt = 0`` CAM's "MF drying exceeds rtm" abort can
   never fire, so it is not ported;
-* ``dynamic_L0`` is the fixed L0 (Lopt 0); the plume-top memory ``ztopm1``
-  feeds only ``dynamic_L0`` under other Lopt values and the culled-plume
-  output, so it is not carried (the column always starts from the 500 m
-  memory the fixture's first call uses);
+* ``dynamic_L0`` is the fixed L0 (Lopt 0); with optional ``bsort``,
+  ``ztopm1`` is carried per column/plume for the stopping distance;
+  otherwise the historical call-local 500 m memory remains unused by physics;
 * convective momentum transport (``do_clubb_mf_cmt`` cam7 default F);
-* ``bsort``/``aspd``/``limarea``/``scalesrf``/``do_implicit``/``fixent`` are
+* ``aspd``/``scalesrf``/``do_implicit``/``fixent`` are
   compile-time ``.false.``; ``rhinv`` is unused (``rhtke`` off, Lopt 0);
 * dry/moist aggregates, mcape, ent/det diagnostics (vote V8).
 
@@ -47,6 +46,25 @@ given the draws.
 
 KNOWN DIFFERENCES at the smooth defaults are stored per fixture column in
 ``tests/atmosphere/oracle_fixtures/clubb_mf_default_gaps.json``.
+
+Optional buoyancy sorting follows the pinned ``clubb_mf.F90`` at
+``oracle_audit/bsort_build`` (cec8c93ed2 with ``poisson`` made public and
+``bsort = .true.``): lines 739-742, 1068-1210, 1612-1622, 1792-1810,
+1929-2040, 2497-2538. Three successive-substitution passes and the total-area
+cap of 0.6 are included. KNOWN DIFFERENCES: smooth case selection, neutral
+fraction clamps, discriminant selection/square root, segment equality, and
+area cap replace CAM's hard switches. The root sign and its reciprocal
+are regularised by ``bsort_root`` (inf recovers CAM's stable quadratic). ``bsort_sat`` extends the two-segment
+formula smoothly using regularised absolute water excesses (CAM's ratio
+when the excesses have opposite signs). This keeps the otherwise inactive
+same-sign and endpoint evaluations finite. Defaults and denominator guards
+are TODO-VOTE; ``HARD`` recovers CAM. Per-column/per-call gaps belong in
+``tests/atmosphere/oracle_fixtures/clubb_mf_bsort_default_gaps.json``; run the
+new test module as a script on a compute node to measure them. No measured
+default gap is claimed before that generator has run. The cap rescales the
+fluxes before convergence, retaining zero boundary fluxes and column thl/qt
+conservation; it does not discard prognostic water or energy.
+
 """
 
 from __future__ import annotations
@@ -57,7 +75,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import erf
-from legoesm.core.smooth import sigmoid_switch, smooth_max, smooth_relu
+from legoesm.core.smooth import expm1_over_x, sigmoid_switch, smooth_max, smooth_min, smooth_relu
 from legoesm.thermo import saturation_specific_humidity_cam_table
 
 from legoesm import constants
@@ -101,6 +119,13 @@ __param_spec__ = {
             "convh": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
             "kspan": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
             "conv": "numerics: RULE 5 sharpness of a CLUBB-MF switch on traced state (inf = CAM), not a tunable",
+            "bsort_case": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
+            "bsort_sat": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
+            "bsort_xc": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
+            "bsort_disc": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
+            "bsort_root": "numerics: RULE 5 stable-root sign smoothing (inf = CAM), not a tunable",
+            "bsort_equal": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
+            "bsort_area": "numerics: RULE 5 buoyancy-sorting smoothing (inf = CAM), not a tunable",
         },
     },
 }
@@ -120,6 +145,8 @@ COND_MAX_ITER, COND_TOL = 50, 2.0e-5  # condensation_mf
 L0 = 200.0  # clubb_mf_L0 [m], Lopt 0 (user 2026-11-23)
 KSEED = 1  # clubb_mf_kseed: offset of the 2nd..4th seed winds
 ZTOPM1_COLD = 500.0  # plume-top memory [m] each call starts from (fixture call 1)
+_BSORT_ITER = 3  # CAM integrate_mf:741, static successive-substitution count
+_BSORT_RLE, _BSORT_AMAX = 0.1, 0.6  # CAM :471, :467
 CFLVAL = 1.0  # clubb.F90 compute_mf_plumes: Courant-number limit
 CFL_SHARPNESS = 100.0  # RULE 5 default of the Courant limiter's max(1, .) [1]^-1 (voted)
 
@@ -154,6 +181,15 @@ class MFSmoothing(NamedTuple):
     convh: float = 1.0  # max(pblh, pblhmin) [1/m]                    V20
     kspan: float = 100.0  # alive-level count >= kspan_min [1/level]    V22'
     conv: float = 1.0e7  # condensation exit |dqc| < 2e-5 [kg/kg]^-1   V7'
+    # TODO-VOTE defaults: case=1e10 [(kg/kg)^-2], sat=1e5 [(kg/kg)^-1],
+    # xc=100 [1], disc=100 [s4/m4], root=100 [s2/m2], equal=100 [1], area=100 [1].
+    bsort_case: float = 1.0e10
+    bsort_sat: float = 1.0e5
+    bsort_xc: float = 100.0
+    bsort_disc: float = 100.0
+    bsort_root: float = 100.0  # stable-root sign choice [s2/m2], TODO-VOTE
+    bsort_equal: float = 100.0
+    bsort_area: float = 100.0
 
 
 HARD = MFSmoothing(*(math.inf,) * len(MFSmoothing._fields))
@@ -197,9 +233,105 @@ def condensation_mf(qt, thl, p, iex, sm: MFSmoothing):
     return thv, qc, t * iex, excess, n_iter
 
 
-def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
+def bsort_roots(a, b, c, sm):
+    """CAM roots :2497-2538, general quadratic on the alive ``a=wn**2>0`` branch.
+
+    b==0 uses the same general formula (Fortran sign(1,0)=1). The sign is
+    smooth by default; TODO-VOTE: regularise c/q with q/(q*q + width*width),
+    width=1/bsort_root, since smoothing sign makes q cross zero. At inf the
+    only q==0 case with a real root is b=c=0; its double root is zero.
+    """
+    disc = b**2 - 4.0 * a * c
+    rd = smooth_relu(disc, sm.bsort_disc)
+    rootdisc = jnp.where(rd > 0.0, jnp.sqrt(jnp.where(rd > 0.0, rd, 1.0)), 0.0)
+    sign = 2.0 * sigmoid_switch(b, sm.bsort_root) - 1.0
+    q = -0.5 * (b + sign * rootdisc)
+    r1 = q / a
+    if math.isinf(sm.bsort_root):
+        r2 = c / jnp.where(q != 0.0, q, 1.0)
+    else:
+        r2 = c * q / (q**2 + (1.0 / sm.bsort_root)**2)
+    return smooth_min(r1, r2, sm.bsort_xc), disc
+
+
+def bsort_clip(x, sharpness):
+    """CAM neutral-fraction min(1,max(0,x)), with a RULE 5 smooth default."""
+    return smooth_min(jnp.asarray(1.0), smooth_max(jnp.asarray(0.0), x, sharpness), sharpness)
+
+
+def bsort_choose(x_cu, x_en, xsat, sm):
+    """CAM x_cu==xsat branch, smoothed with an equality kernel by default."""
+    eq = ((x_cu == xsat).astype(x_cu.dtype) if math.isinf(sm.bsort_equal)
+          else jnp.exp(-(sm.bsort_equal * (x_cu - xsat))**2))
+    return eq * smooth_max(x_cu, x_en, sm.bsort_xc) + (1.0 - eq) * x_cu
+
+
+def buoyancy_sort_mixfrac(qtn, thln, wn, thl_e, qt_e, thv_e, iex, p, ztopm1, sm):
+    """CAM :1929-2040, Bretherton et al. (2004), returns ``ee2, ud2``.
+
+    ``a = wn**2`` is positive on the alive CAM branch (including the
+    averaged trials of passes 2/3). Zero velocity is evaluated only for
+    already dead scan lanes: replace it by 1 there, without a physics floor.
+    CAM's stable general quadratic is used (see :func:`bsort_roots`);
+    no a==0/b==0 branch is needed on the alive branch.
+    Safe exact-zero denominators protect inactive endpoint evaluations only.
+    TODO-VOTE: at the degenerate both-zero excess, use xsat=1/2, and at
+    endpoint xsat=0/1 use zero segment slope (CAM itself divides by zero).
+    """
+    hard_sat = math.isinf(sm.bsort_sat)
+    hard_qc = math.isinf(sm.qc)
+    em = qt_e - _qsat(thl_e / iex, p, hard_qc)
+    en = qtn - _qsat(thln / iex, p, hard_qc)
+    thvn = condensation_mf(qtn, thln, p, iex, sm)[0]
+    w2 = jnp.where(wn != 0.0, wn, 1.0)**2
+    cridis = _BSORT_RLE * ztopm1
+    coeff = 2.0 * WA * constants.g * cridis
+
+    xc_same = bsort_clip(1.0 - coeff / w2 * (1.0 - thvn / thv_e), sm.bsort_xc)
+    # On CAM's mixed-sign branch |en|/(|en|+|em|) = en/(en-em).
+    # Positive regularised magnitudes also define a bounded continuation on
+    # the same-sign branch, which a smooth case blend must evaluate.
+    if hard_sat:
+        an, am = jnp.abs(en), jnp.abs(em)
+    else:
+        width = 1.0 / sm.bsort_sat
+        an, am = jnp.sqrt(en**2 + width**2), jnp.sqrt(em**2 + width**2)
+    den = an + am
+    xsat = jnp.where(den != 0.0, an / jnp.where(den != 0.0, den, 1.0), 0.5)
+    thv_sat = condensation_mf(qtn + xsat * (qt_e - qtn),
+                              thln + xsat * (thl_e - thln), p, iex, sm)[0]
+    inv_x = 1.0 / jnp.where(xsat != 0.0, xsat, 1.0)
+    inv_y = 1.0 / jnp.where(xsat != 1.0, 1.0 - xsat, 1.0)
+
+    def segment(t0, t1, cumulus):
+        a = w2
+        b = coeff * (t1 - t0) / thv_e - 2.0 * w2
+        cc = coeff * (t0 - thv_e) / thv_e + w2
+        small, disc = bsort_roots(a, b, cc, sm)
+        candidate = (smooth_min(xsat, small, sm.bsort_xc) if cumulus
+                     else smooth_max(xsat, small, sm.bsort_xc))
+        has_roots = sigmoid_switch(disc, sm.bsort_disc)  # CAM >=, not >
+        return has_roots * bsort_clip(candidate, sm.bsort_xc) + (1.0 - has_roots) * (xsat if cumulus else 1.0)
+
+    x_cu = segment(thvn, (1.0 - inv_x) * thvn + inv_x * thv_sat, True)
+    x_en = segment((1.0 - inv_y) * thv_e + inv_y * thv_sat, thv_e, False)
+    xc_mixed = bsort_choose(x_cu, x_en, xsat, sm)
+    same = _strict_pos(em * en, sm.bsort_case)
+    xc = same * xc_same + (1.0 - same) * xc_mixed
+    return xc**2, 1.0 - 2.0 * xc + xc**2
+
+
+def limit_bsort_area(area, sharpness):
+    """CAM :1612-1622, same per-level rescaling for all plumes, except top."""
+    ac = jnp.sum(area, axis=1, keepdims=True)
+    factor = _BSORT_AMAX / smooth_max(jnp.asarray(_BSORT_AMAX), ac, sharpness)
+    return area.at[:-1].multiply(factor[:-1])
+
+
+def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing(), *, bsort=False):
     """One column.  ``c``: CLUBB-grid inputs (keys as the fixture's ``c_*``
-    arrays without the prefix, one column); ``enti`` (nzt, NUP) int draws;
+    arrays without the prefix, one column; bsort also needs thl_zm, qt_zm,
+    thv_zm and rho_zm); ``enti`` (nzt, NUP) int draws;
     ``ztopm1_in`` (NUP,) plume-top memory.  Returns the compared outputs."""
     g, zvir = constants.g, constants.R_v / constants.R_d - 1.0
     zm, dzt = c["zm"], c["dzt"]
@@ -237,36 +369,73 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
     v0 = jnp.full((NUP,), c["v"][0])
 
     def step(carry, xk):
-        w, thl, qt, thv, u, v = carry
-        dz, qt_e, thl_e, thv_e, u_e, v_e, p_n, iex_n, ent_k = xk
-        entn = ent_k * ENT0 / dz
-        entexp = jnp.exp(-entn * dz)
-        entexpu = jnp.exp(-entn * dz / ENT_MOM_REDUCTION)
-        qtn = qt_e * (1.0 - entexp) + qt * entexp
-        thln = thl_e * (1.0 - entexp) + thl * entexp
-        un = u_e * (1.0 - entexpu) + u * entexpu
-        vn = v_e * (1.0 - entexpu) + v * entexpu
-        thvn, qcn, _, exn, _ = condensation_mf(qtn, thln, p_n, iex_n, sm)
-        b = g * (0.5 * (thvn + thv) / thv_e - 1.0)
-        wp = WB * entn
-        noent = ent_k == 0
-        wp_safe = jnp.where(noent, 1.0, wp)
-        entw = jnp.exp(-2.0 * wp_safe * dz)
-        wn2 = jnp.where(
-            noent, w**2 + 2.0 * WA * b * dz, entw * w**2 + (1.0 - entw) * WA * b / wp_safe
-        )
-        r = smooth_relu(wn2, sm.alive)
-        wn = jnp.where(r > 0.0, jnp.sqrt(jnp.where(r > 0.0, r, 1.0)), 0.0)
+        w, thl, qt, thv, u, v = carry[:6]
+        dz, qt_e, thl_e, thv_e, u_e, v_e, p_n, iex_n, ent_k = xk[:9]
+        mix = ent_k * ENT0 / dz
+        entn = mix
+        qtn, thln, wn = qt, thl, w
+        qtn0, thln0, wn0 = qtn, thln, wn
+        for iteration in range(_BSORT_ITER if bsort else 1):
+            if bsort:
+                if iteration:
+                    qtn, thln, wn = (0.5 * (qtn + qtn0), 0.5 * (thln + thln0),
+                                     0.5 * (wn + wn0))
+                qtn0, thln0, wn0 = qtn, thln, wn
+                ee2, ud2 = buoyancy_sort_mixfrac(
+                    qtn, thln, wn, *xk[9:12], iex_n, p_n, ztopm1_in, sm)
+                entn, detn = mix * ee2, mix * ud2
+            entexp = jnp.exp(-entn * dz)
+            entexpu = jnp.exp(-entn * dz / ENT_MOM_REDUCTION)
+            qtn = qt_e * (1.0 - entexp) + qt * entexp
+            thln = thl_e * (1.0 - entexp) + thl * entexp
+            un = u_e * (1.0 - entexpu) + u * entexpu
+            vn = v_e * (1.0 - entexpu) + v * entexpu
+            thvn, qcn, _, exn, _ = condensation_mf(qtn, thln, p_n, iex_n, sm)
+            b = g * (0.5 * (thvn + thv) / thv_e - 1.0)
+            wp = WB * entn
+            noent = (entn == 0.0) if bsort else (ent_k == 0)
+            wp_safe = jnp.where(noent, 1.0, wp)
+            entw = jnp.exp(-2.0 * wp_safe * dz)
+            if bsort:
+                # Analytic zero-entrainment continuation, including its slope.
+                # expm1 avoids losing the acceleration at tiny traced entn.
+                x = -2.0 * wp * dz
+                wn2 = jnp.exp(x) * w**2 + 2.0 * WA * b * dz * expm1_over_x(x)
+            else:
+                wn2 = jnp.where(
+                    noent, w**2 + 2.0 * WA * b * dz, entw * w**2 + (1.0 - entw) * WA * b / wp_safe
+                )
+            r = smooth_relu(wn2, sm.alive)
+            wn = jnp.where(r > 0.0, jnp.sqrt(jnp.where(r > 0.0, r, 1.0)), 0.0)
         gate = _strict_pos(wn2, sm.alive)
         new = (wn, thln, qtn, thvn, un, vn)
-        return new, (gate, wn, thln, qtn, thvn, qcn, un, vn, exn)
+        prof = (gate, wn, thln, qtn, thvn, qcn, un, vn, exn)
+        if bsort:
+            # CAM has exited exactly-zero-survival lanes. Avoid evaluating
+            # their exponential (0*inf in tall fp32 columns); fractional
+            # survival is applied only through cumulative alive below.
+            live = (gate > 0.0) & (carry[6] != 0.0)
+            mfn = carry[6] * jnp.exp(jnp.where(live, dz * (entn - detn), 0.0))
+            mfn = jnp.where(live, mfn, 0.0)
+            area = mfn / (jnp.where(wn > 0.0, wn, 1.0) * xk[12])
+            new += (mfn,)
+            prof += (area,)
+        return new, prof
 
     k = slice(0, nzm - 1)
     xs = (dzt, c["qt"], c["thl"], c["thv"], c["u"], c["v"], c["p_zm"][1:], c["iex_zm"][1:])
     xs = tuple(jnp.broadcast_to(x[k][:, None], (nzm - 1, NUP)) for x in xs) + (
         enti[k].astype(zm.dtype),
     )
-    _, (gate, *prof) = jax.lax.scan(step, (w0, thl0, qt0, thv0, u0, v0), xs)
+    initial = (w0, thl0, qt0, thv0, u0, v0)
+    if bsort:
+        extra = (c["thl_zm"][1:], c["qt_zm"][1:], c["thv_zm"][1:], c["rho_zm"][1:])
+        xs += tuple(jnp.broadcast_to(x[:, None], (nzm - 1, NUP)) for x in extra)
+        initial += (c["rho_zm"][0] * a * w0,)
+    _, (gate, *prof) = jax.lax.scan(step, initial, xs)
+    area = None
+    if bsort:
+        area = jnp.concatenate([a[None], prof.pop()], axis=0)
     cat = lambda x0, x: jnp.concatenate([x0[None], x], axis=0)  # noqa: E731
     w, thl, qt, thv, qc, u, v, ex = (
         cat(x0, x) for x0, x in zip((w0, thl0, qt0, thv0, qc0, u0, v0, ex0), prof)
@@ -277,13 +446,16 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
     keep = sigmoid_switch(jnp.sum(alive, axis=0) - (KSPAN_MIN - 0.5), sm.kspan)
     on = alive * keep  # (nzm, NUP)
     up = {
-        "upa": on * a,
+        "upa": on * (area if bsort else a),
         "upw": on * w,
         "upthl": on * thl,
         "upqt": on * qt,
         "upthv": on * thv,
         "upqc": on * qc,
     }
+
+    if bsort:
+        up["upa"] = limit_bsort_area(up["upa"], sm.bsort_area)
 
     aw = jnp.sum(up["upa"] * up["upw"], axis=1)
     flux = {}
@@ -455,7 +627,8 @@ def mf_lts(T, q_liq, p_full, p_sfc):
 
 
 def clubb_mf_forcing(c, dt, rho_ds_zm, invrs_rho_ds_zt, invrs_dzt,
-                     sm: MFSmoothing = MFSmoothing(), cfl_sharpness: float = CFL_SHARPNESS):
+                     sm: MFSmoothing = MFSmoothing(), cfl_sharpness: float = CFL_SHARPNESS,
+                     *, bsort=False, ztopm1=None):
     """One column: the plumes, then CAM's explicit forcing on CLUBB's thermo
     levels, ``-(1/rho_ds_zt) d(rho_ds_zm F)/dz * cflfac`` for thl and qt.
     ``c`` as :func:`integrate_mf` (plus ``u`` for the seed); returns
@@ -466,7 +639,8 @@ def clubb_mf_forcing(c, dt, rho_ds_zm, invrs_rho_ds_zt, invrs_dzt,
     lam = (c["dzt"] / L0).at[nzt - 1].set(0.0)[:, None] * jnp.ones((1, NUP))
     u = c["u"]
     enti = entrainment_draws(lam, jnp.stack([u[0], u[KSEED], u[1 + KSEED], u[2 + KSEED]]))
-    out = integrate_mf(c, enti, jnp.full((NUP,), ZTOPM1_COLD), sm)
+    memory = (jnp.zeros((NUP,), c["zm"].dtype) if ztopm1 is None else ztopm1) if bsort else jnp.full((NUP,), ZTOPM1_COLD)
+    out = integrate_mf(c, enti, memory, sm, bsort=bsort)
     aw = jnp.sum(out["upa"] * out["upw"], axis=1).at[0].set(0.0)
     max_cfl = jnp.max(dt * invrs_dzt * jnp.maximum(jnp.abs(aw[:-1]), jnp.abs(aw[1:])))
     cflfac = CFLVAL / smooth_max(jnp.asarray(CFLVAL), max_cfl, cfl_sharpness)

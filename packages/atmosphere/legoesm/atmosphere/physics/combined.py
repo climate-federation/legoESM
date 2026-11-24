@@ -242,6 +242,8 @@ def make_physics(
     # (e.g. the SCM shallow-cumulus cases) runs the flux alone.
     _cc = getattr(getattr(config, "radiation", None), "cloud_config", None)
     _mf_on = bool(getattr(getattr(config, "turbulence", None), "clubb_mf", False))
+    if getattr(config.turbulence, "clubb_mf_bsort", False) and not _mf_on:
+        raise ValueError("TurbulenceConfig.clubb_mf_bsort requires clubb_mf=True")
     _mf_cloud = bool(getattr(_cc, "clubb_mf_cloud", False))
     _cam6 = (getattr(_cc, "scheme", None) if _cc is not None else
              getattr(getattr(config, "radiation", None), "cloud_scheme", None)) == "cam6_clubb"

@@ -36,8 +36,9 @@ from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 
 
 # WRF Tiedtke's lagged qvpblten / qfx, published by every scheme (kept only
-# where PhysicsState materialises the slots)
-_LAGS = ("turb_tendency_qv", "evap_sfc")
+# where PhysicsState materialises the slots). mf_ztopm1 is always published
+# too, as zero when buoyancy sorting has no producer.
+_LAGS = ("turb_tendency_qv", "evap_sfc", "mf_ztopm1")
 
 
 def _turb_out(cf):

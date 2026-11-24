@@ -64,3 +64,40 @@ def test_cldfrac_fac_yaml_round_trip(tmp_path, line, cli, want):
     p.set_defaults(**load_yaml_config(deck, p))
     cfg = run_amip.build_config_from_args(p.parse_args(cli))
     assert cfg.cloud_clubb_mf_cldfrac_fac == want and cfg.clubb_mf is True
+
+
+def test_bsort_arm_differs_from_mf_only_in_one_row():
+    mf = _flat(_cfg("amip_production_clubb_mf.yaml"))
+    arm = _flat(_cfg("amip_production_clubb_mf_bsort.yaml"))
+    assert mf.keys() == arm.keys()
+    assert {k: arm[k] for k in mf if mf[k] != arm[k]} == {"clubb_mf_bsort": True}
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    tc = turbulence_config_for(_cfg("amip_production_clubb_mf_bsort.yaml"))
+    assert tc.clubb_mf and tc.clubb_mf_bsort
+
+
+@pytest.mark.parametrize("args, want", [([], False), (["--clubb-mf-bsort"], True),
+                                       (["--no-clubb-mf-bsort"], False)])
+def test_bsort_cli(args, want):
+    from scripts.run import run_amip
+    parser = run_amip.build_arg_parser()
+    parser.set_defaults(**load_yaml_config(_AMIP / "amip_production_clubb_mf.yaml", parser))
+    assert run_amip.build_config_from_args(parser.parse_args(args)).clubb_mf_bsort is want
+
+
+@pytest.mark.parametrize("value", [True, "true", 1])
+def test_bsort_strict_refuses_without_mf_or_non_bool(value):
+    cfg = _cfg("amip_production_clubb_mf.yaml")._replace(clubb_mf=False, clubb_mf_bsort=value)
+    with pytest.raises(ValueError, match="clubb_mf_bsort"):
+        cfg.validate_strict()
+
+
+def test_bsort_builder_refuses_without_mf_and_ignored_override():
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    cfg = _cfg("amip_production_clubb_mf_bsort.yaml")
+    with pytest.raises(ValueError, match="clubb_mf_bsort"):
+        turbulence_config_for(cfg._replace(clubb_mf=False))
+    with pytest.raises(ValueError, match="clubb_mf_bsort"):
+        turbulence_config_for(cfg._replace(turbulence_override=TurbulenceConfig(
+            scheme="clubb", clubb_mf=True)))

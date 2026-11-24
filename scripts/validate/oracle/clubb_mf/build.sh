@@ -7,9 +7,12 @@
 # The only source edit: clubb_mf's private `poisson` is made public so the
 # driver can replay CAM's draws (diffed below; must be the one added line).
 # stubs.F90 supplies CAM/CCPP infrastructure only.  gfortran, fp64, FPE traps.
-# usage: build.sh <atmos_phys> <CESM_share> <build dir>
+# Optional 4th argument `bsort`: also switch on CAM's buoyancy-sorting
+# detrainment, a local `logical :: bsort = .false.` that CAM never sets
+# (one more edited line, diffed below).
+# usage: build.sh <atmos_phys> <CESM_share> <build dir> [bsort]
 set -euo pipefail
-AP=$1; SH=$2/RandNum/src; B=$3
+AP=$1; SH=$2/RandNum/src; B=$3; MODE=${4:-}
 HERE=$(cd "$(dirname "$0")" && pwd)
 test "$(git -C "$AP" rev-parse HEAD)" = cec8c93ed22e6dd60bd676459d4fc0468826fe7d
 test "$(git -C "$2" rev-parse HEAD)" = f256faa25edb103f09f3c372d021ea6e1a633516
@@ -18,7 +21,14 @@ test -z "$(git -C "$AP" status --porcelain -- schemes/clubb/clubb_mf.F90 to_be_c
 test -z "$(git -C "$2" status --porcelain -- RandNum)"
 mkdir -p "$B"; cd "$B"; rm -f ./*.o ./*.mod
 sed 's/^\(  public :: clubb_mf_init, &\)$/\1\n            poisson, \&/' "$AP/schemes/clubb/clubb_mf.F90" > clubb_mf.F90
-test "$(diff "$AP/schemes/clubb/clubb_mf.F90" clubb_mf.F90 | grep -c '^>')" = 1
+NEDIT=1
+if [ "$MODE" = bsort ]; then
+  sed -i 's/^\(     logical  *:: bsort = \)\.false\.$/\1.true./' clubb_mf.F90
+  NEDIT=2
+elif [ -n "$MODE" ]; then
+  echo "unknown mode $MODE" >&2; exit 2
+fi
+test "$(diff "$AP/schemes/clubb/clubb_mf.F90" clubb_mf.F90 | grep -c '^>')" = "$NEDIT"
 FF="-O0 -g -fbacktrace -cpp -ffree-line-length-none -fcheck=bounds -ffpe-trap=invalid,zero,overflow"
 gfortran --version | head -1
 gfortran $FF -c "$HERE/stubs.F90"

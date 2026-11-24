@@ -29,6 +29,7 @@ from typing import TypeAlias
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.smooth import expm1_over_x as _expm1_over_x
 from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 from legoesm.atmosphere.physics.radiation.rrtmgp.rte import rte_utils
@@ -255,19 +256,6 @@ def _k_fn(gamma1: Array, gamma2: Array) -> Array:
   ``k``) carries the diffuse quantities anyway.
   """
   return jnp.sqrt(jnp.maximum(_k_squared(gamma1, gamma2), _eps_of(gamma1)))
-
-
-def _expm1_over_x(x: Array) -> Array:
-  """``expm1(x) / x``, exact-in-the-limit at ``x = 0`` (value 1).
-
-  ``expm1`` itself is accurate for all arguments; only the literal ``0/0`` at
-  ``x = 0`` needs the series fallback, so the switch threshold is machine eps
-  (below it ``1 + x/2`` is the correctly rounded value). Safe operands inside
-  the ``where`` keep reverse-mode gradients NaN-free.
-  """
-  near_zero = jnp.abs(x) < _eps_of(x)
-  x_safe = jnp.where(near_zero, 1.0, x)
-  return jnp.where(near_zero, 1.0 + 0.5 * x, jnp.expm1(x_safe) / x_safe)
 
 
 def _direct_quantities(

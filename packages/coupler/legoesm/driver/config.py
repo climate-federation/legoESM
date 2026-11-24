@@ -2444,6 +2444,8 @@ class ExperimentConfig(NamedTuple):
     # (CloudConfig.mf_cldfrac_fac, clubb_mf_cldfrac_fac).  None = 10 (CAM7).
     # Needs clubb_mf with cloud_scheme='cam6_clubb'.
     cloud_clubb_mf_cldfrac_fac: float | None = None
+    # Opt-in CAM buoyancy sorting on the CLUBB-MF plumes.
+    clubb_mf_bsort: bool = False
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -5166,6 +5168,12 @@ class ExperimentConfig(NamedTuple):
                 "needs cloud_scheme='cam6_clubb', microphysics='morrison', "
                 "morrison_prognostic_droplet_number=False and aerosol_ccn "
                 "(nc_from_aerosol) off.")
+        if not isinstance(self.clubb_mf_bsort, bool):
+            errors.append(f"clubb_mf_bsort must be a bool, got {self.clubb_mf_bsort!r}")
+        if self.clubb_mf_bsort and not self.clubb_mf:
+            errors.append("clubb_mf_bsort=True requires clubb_mf=True")
+        if self.clubb_mf_bsort and (self.turbulence != "clubb" or not self.clubb_prognostic):
+            errors.append("clubb_mf_bsort=True requires turbulence='clubb' and clubb_prognostic=True")
         if self.cloud_clubb_mf_cldfrac_fac is not None and not (
                 self.clubb_mf and self.cloud_scheme == "cam6_clubb"):
             errors.append(

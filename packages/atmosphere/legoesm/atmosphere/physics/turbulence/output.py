@@ -122,3 +122,5 @@ class TurbulenceOutput(NamedTuple):
     # only; None otherwise).  Appended LAST.
     mf_cloudfrac: jax.Array | None = None
     mf_qc: jax.Array | None = None
+    # Per-plume top height [m], (ncol, 25), final sub-step; bsort only.
+    mf_ztopm1: jax.Array | None = None

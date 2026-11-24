@@ -856,6 +856,8 @@ class TurbulenceConfig(NamedTuple):
     # draws).  False (default) leaves every path unchanged.  Selected by
     # ExperimentConfig.clubb_mf.
     clubb_mf: bool = False
+    # Opt-in CAM buoyancy sorting; three passes, total-area cap, carried plume tops.
+    clubb_mf_bsort: bool = False
 
 
 CLUBB_LITE_STANDIN_NOTE = (

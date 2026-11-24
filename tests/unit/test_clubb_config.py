@@ -84,6 +84,14 @@ _CLUBB_CONFIG_SCALAR_FIELDS = frozenset({
     "mf_alive_sharpness", "mf_qc_sharpness", "mf_trig_wthv_sharpness", "mf_trig_wqt_sharpness",
     "mf_trig_lts_sharpness", "mf_wstar_sharpness", "mf_convh_sharpness", "mf_kspan_sharpness",
     "mf_conv_sharpness", "mf_cfl_sharpness",
+    "mf_bsort_case_sharpness",
+    "mf_bsort_sat_sharpness",
+    "mf_bsort_xc_sharpness",
+    "mf_bsort_disc_sharpness",
+    "mf_bsort_root_sharpness",
+    "mf_bsort_equal_sharpness",
+    "mf_bsort_area_sharpness",
+
 })
 
 

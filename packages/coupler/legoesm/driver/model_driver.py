@@ -15816,6 +15816,7 @@ class ModelDriver:
                 # any run before the option (MF off writes nothing else).
                 "mf_cloudfrac",
                 "mf_qc",
+                "mf_ztopm1",  # TODO-VOTE: old checkpoints seed zero (user decision 2).
             })
             if _any_physstate:
                 from legoesm.atmosphere.physics.physics_state import (
@@ -15917,6 +15918,10 @@ class ModelDriver:
             for _k in [k for k in self._carry_aux
                        if k.startswith("physstate_")]:
                 del self._carry_aux[_k]
+        # Disabled buoyancy sorting never retains enabled-run memory, even
+        # when turbulence='none' skips the normal per-step producer/reset.
+        if not phys_cfg.turbulence.clubb_mf_bsort:
+            _phys_state = _phys_state._replace(mf_ztopm1=jnp.zeros_like(_phys_state.mf_ztopm1))
         # Latest carry for save_checkpoint (#413) — updated every step.
         self._mpas_phys_state = _phys_state
 

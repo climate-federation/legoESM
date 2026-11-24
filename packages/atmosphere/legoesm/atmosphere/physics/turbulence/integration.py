@@ -233,6 +233,8 @@ def _smagorinsky_condensate_kwargs(scheme_name, tracers, shape) -> dict:
 
 def get_turbulence_fn(config: TurbulenceConfig):
     """Select the turbulence backend based on config.scheme."""
+    if config.clubb_mf_bsort and not config.clubb_mf:
+        raise ValueError("TurbulenceConfig.clubb_mf_bsort requires clubb_mf=True")
     if getattr(config, "clubb_mf", False) and config.scheme != "clubb":
         raise ValueError(f"TurbulenceConfig.clubb_mf is CLUBB's mass flux; "
                          f"scheme={config.scheme!r} has no CLUBB closure to force")
@@ -257,6 +259,8 @@ def get_turbulence_fn(config: TurbulenceConfig):
                 fn = functools.partial(fn, routec_inversion=True)
             if config.clubb_mf:
                 fn = functools.partial(fn, clubb_mf=True)
+                if config.clubb_mf_bsort:
+                    fn = functools.partial(fn, clubb_mf_bsort=True)
             return "clubb", fn, clubb_cfg
         if config.clubb_mf:
             raise ValueError("TurbulenceConfig.clubb_mf needs prognostic CLUBB: "
@@ -472,7 +476,12 @@ def _clubb_mf_kwargs(turbulence_config, phys_state, ncol):
     if not getattr(turbulence_config, "clubb_mf", False):
         return {}
     pblh = getattr(phys_state, "pblh", None) if phys_state is not None else None
-    return {"mf_pblh": None if pblh is None else jnp.reshape(pblh, (ncol,))}
+    kw = {"mf_pblh": None if pblh is None else jnp.reshape(pblh, (ncol,))}
+    if turbulence_config.clubb_mf_bsort:
+        from legoesm.atmosphere.physics.turbulence.clubb_mf import NUP
+        top = phys_state.mf_ztopm1 if phys_state is not None else None
+        kw["mf_ztopm1"] = None if top is None else jnp.reshape(top, (ncol, NUP))
+    return kw
 
 
 def _prognostic_clubb_lat_kwargs(carry_field, lat_fn):
@@ -756,6 +765,11 @@ def _carry_update_with_cloud_fraction(carry_field, carry_val, turb_out):
     if turb_out.mf_cloudfrac is not None:
         updates["mf_cloudfrac"] = turb_out.mf_cloudfrac
         updates["mf_qc"] = turb_out.mf_qc
+    from legoesm.atmosphere.physics.turbulence.clubb_mf import NUP
+    # The option is off when there is no producer: erase old enabled-run
+    # memory as required, without ever reading it in the off physics.
+    updates["mf_ztopm1"] = (turb_out.mf_ztopm1 if turb_out.mf_ztopm1 is not None
+                             else jnp.zeros((turb_out.h_pbl.size, NUP), turb_out.h_pbl.dtype))
     if carry_field is not None and carry_val is not None:
         updates[carry_field] = carry_val
     return updates

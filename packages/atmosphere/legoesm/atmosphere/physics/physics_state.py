@@ -331,6 +331,8 @@ class PhysicsState(NamedTuple):
     # cold start).  Appended LAST.
     mf_cloudfrac: jnp.ndarray = None
     mf_qc: jnp.ndarray = None
+    # CAM bsort stopping-distance memory [m], (ncol, NUP=25). Zero when off.
+    mf_ztopm1: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -504,6 +506,8 @@ def init_physics_state(
     # overwrites it each step and radiation reads it when cloud_scheme="clubb".
     cloud_fraction = jnp.zeros((ncol, nlev), dtype=dtype)
 
+    from legoesm.atmosphere.physics.turbulence.clubb_mf import NUP
+
     return _strong_types(PhysicsState(
         tke=tke,
         conv_prog_profile=conv_prog_profile,
@@ -532,6 +536,7 @@ def init_physics_state(
         relvar=jnp.full((ncol, nlev), _RELVAR_INIT, dtype=dtype),
         mf_cloudfrac=jnp.zeros((ncol, nlev), dtype=dtype),
         mf_qc=jnp.zeros((ncol, nlev), dtype=dtype),
+        mf_ztopm1=jnp.zeros((ncol, NUP), dtype=dtype),
         clubb_wp2_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         clubb_kh_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         cloud_fraction_old=jnp.zeros((ncol, nlev), dtype=dtype),
@@ -686,6 +691,7 @@ def update_physics_state(phys_state, updates):
         five_carry=updates.get("five_carry", phys_state.five_carry),
         mf_cloudfrac=updates.get("mf_cloudfrac", phys_state.mf_cloudfrac),
         mf_qc=updates.get("mf_qc", phys_state.mf_qc),
+        mf_ztopm1=updates.get("mf_ztopm1", phys_state.mf_ztopm1),
     )
 
 
