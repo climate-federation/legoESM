@@ -59,6 +59,14 @@ def compare(ref, run, rho_ref, dz) -> dict:
     return out
 
 
+def time_gate(t_ref, t_run) -> bool:
+    """Both checkpoints at the same model time (1 us slack) and >= 1 h."""
+    if t_ref is None or t_run is None:
+        return False
+    return (abs(t_ref - t_run) <= 1e-6
+            and t_run >= ACCEPTANCE_TIME_S - 1e-6)
+
+
 def _last_common(ref_dir: Path, run_dir: Path) -> str:
     names = sorted({p.name for p in (ref_dir / "checkpoints").glob("ckpt_*.npz")}
                    & {p.name for p in (run_dir / "checkpoints").glob("ckpt_*.npz")})
@@ -87,11 +95,12 @@ def main(argv=None) -> int:
                   np.load(a.run_dir / "checkpoints" / name),
                   np.asarray(hc.rho_ref, np.float64), np.asarray(hc.dz, np.float64))
     res["checkpoint"] = name
-    t_ref = float(np.load(a.ref_dir / "checkpoints" / name)["t_s"])
-    t_run = float(np.load(a.run_dir / "checkpoints" / name)["t_s"])
-    res["t_s"] = t_run
-    if t_ref != t_run or t_run < ACCEPTANCE_TIME_S:
-        res["pass"] = False      # not the same time, or short of 1 h
+    def _t(d):
+        z = np.load(d / "checkpoints" / name)
+        return float(z["t_s"]) if "t_s" in z.files else None
+    res["t_s_ref"], res["t_s_run"] = _t(a.ref_dir), _t(a.run_dir)
+    if not time_gate(res["t_s_ref"], res["t_s_run"]):
+        res["pass"] = False      # missing, different, or short of 1 h
     print(json.dumps(res, indent=1))
     return 0 if res["pass"] else 1
 

@@ -71,3 +71,10 @@ def test_budget_violations_fail_even_with_matching_fields():
     res = acc.compare(ref, shifted, rho_ref, dz)
     assert abs(res["dry_mass_rel_diff"]) > 1e-11 and not res["pass"]
 
+
+def test_time_gate_needs_equal_times_of_at_least_one_hour():
+    assert acc.time_gate(3600.0, 3600.0)
+    assert acc.time_gate(7200.0, 7200.0 + 1e-9)
+    assert not acc.time_gate(3600.0, 3594.0)       # different times
+    assert not acc.time_gate(1800.0, 1800.0)       # short of 1 h
+    assert not acc.time_gate(None, 3600.0)          # no time recorded
