@@ -26,6 +26,7 @@ import numpy as np
 
 THRESHOLDS = {"theta_prime": 1e-4, "rho_prime": 1e-4, "u": 1e-3, "w": 1e-3}
 BUDGET_THRESHOLDS = {"water_rel_diff": 4e-8, "dry_mass_rel_diff": 1e-11}
+ACCEPTANCE_TIME_S = 3600.0   # the acceptance is stated after 1 h
 
 
 def relative_rms(a: np.ndarray, ref: np.ndarray) -> float:
@@ -96,6 +97,11 @@ def main(argv=None) -> int:
                   np.load(a.run_dir / "checkpoints" / name), *geo,
                   run_geometry=run_geo)
     res["checkpoint"] = name
+    t_ref = float(np.load(a.ref_dir / "checkpoints" / name)["t_s"])
+    t_run = float(np.load(a.run_dir / "checkpoints" / name)["t_s"])
+    res["t_s"] = t_run
+    if t_ref != t_run or t_run < ACCEPTANCE_TIME_S:
+        res["pass"] = False      # not the same time, or short of 1 h
     print(json.dumps(res, indent=1))
     return 0 if res["pass"] else 1
 
