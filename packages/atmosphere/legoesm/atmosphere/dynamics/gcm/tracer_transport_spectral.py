@@ -28,7 +28,19 @@ coincide and the global mean (the ``(n=0, m=0)`` coefficient) is invariant.
 Vertical advection (optional): the shared upwind advective-form operator
 ``grids.vertical.vertical_advection`` (``-sigma_dot dq/dsigma``), evaluated
 in grid space and transformed back — identical operator to the lat-lon
-sibling.  Pass ``sigma_dot=None`` from the wind function for pure
+sibling.  ``vertical_scheme="fv3_remap"`` instead runs the horizontal
+step alone and then the split FV3 Lagrangian remap
+(``grids.vertical.vertical_remap_sigma_fv3``) in grid space, sigma_dot at
+the step mid-time, followed by analysis and the Orszag-band truncation.
+KNOWN DIFFERENCE (RULE 0): the grid-space remap closes every column's
+tracer integral to round-off, but projecting the result back onto the
+truncated band keeps only the GLOBAL integral exactly (the (0,0)
+coefficient is the Gaussian-quadrature mean; tested), not each column's:
+the column budget misses by the field's out-of-band content (measured
+7.6e-12 absolute on 0.117 column integrals, DCMIP 1-2 at T21 L30, one
+600 s step, vertical wind only).  The same projection follows the upwind
+path's grid-space vertical tendency.
+Pass ``sigma_dot=None`` from the wind function for pure
 horizontal transport (the classic solid-body / Williamson-1 protocols).
 
 Green's-function structure (what the unit tests pin): for solid-body
@@ -66,7 +78,9 @@ from legoesm.grids.gaussian import (
     sh_synthesis_3d,
     spectral_hyperdiffusion_3d,
 )
-from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
+from legoesm.grids.vertical import (
+    SigmaCoordinate, check_tracer_vertical_scheme, vertical_advection,
+    vertical_remap_sigma_fv3)
 from legoesm.parallel.metal import place_spectral_grid
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
@@ -100,12 +114,16 @@ class TracerTransportSpectralConfig(NamedTuple):
     dealiasing_fraction : float
         Orszag-rule fraction for the quadratic advection products
         (default 0.667, matching the spectral dycores).
+    vertical_scheme : str
+        "upwind" (default, in-tendency) or "fv3_remap" (split remap after
+        the horizontal step; see module docstring).
     """
 
     time_integrator: str = "ssp_rk3"
     hyperdiff_coeff: float = 0.0
     hyperdiff_order: int = 2
     dealiasing_fraction: float = 0.667
+    vertical_scheme: str = "upwind"
 
 
 def spectral_tracer_state(
@@ -157,6 +175,7 @@ def tracer_tendencies_spectral(
 
     Returns a ``TracerState`` tendency pytree (``dq_hat_dt``, ``dtime_dt=1``).
     """
+    check_tracer_vertical_scheme(config.vertical_scheme)
     t = state.time.data
     q_hat = state.tracers.data                     # (n_sh, nlev, n_tracers)
     n_sh, nlev, n_tracers = q_hat.shape
@@ -198,12 +217,12 @@ def tracer_tendencies_spectral(
 
     # --- advective-form correction + optional vertical advection ---
     corr_grid = q_flat * div_b                     # q * div(V)
-    if sigma_dot is not None:
-        if sigma_coord is None:
-            raise ValueError(
-                "wind_fn returned sigma_dot but sigma_coord is None; pass "
-                "the SigmaCoordinate to enable vertical transport."
-            )
+    if sigma_dot is not None and sigma_coord is None:
+        raise ValueError(
+            "wind_fn returned sigma_dot but sigma_coord is None; pass "
+            "the SigmaCoordinate to enable vertical transport."
+        )
+    if sigma_dot is not None and config.vertical_scheme != "fv3_remap":
         q4 = q                                      # (n_lat, n_lon, nlev, ntr)
 
         def _vert_one(q_one):
@@ -276,6 +295,11 @@ class SpectralTracerTransportModel(IntegrationMixin):
         allow_unsupported_backend: bool = False,
     ):
         self.config = config or TracerTransportSpectralConfig()
+        check_tracer_vertical_scheme(self.config.vertical_scheme)
+        # step() is not jitted (Metal CPU routing); jit the remap once so
+        # its k-scans are not re-traced every step.
+        self._remap_jit = jax.jit(
+            lambda q, sd, dt, sc: vertical_remap_sigma_fv3(q, sd, sc, dt))
         placement = place_spectral_grid(
             grid, allow_unsupported=allow_unsupported_backend
         )
@@ -318,7 +342,37 @@ class SpectralTracerTransportModel(IntegrationMixin):
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
             result = dispatch_integrator(state_cpu, tendency_fn, dt, integrator)
-            result = self._truncate(result)
+            result = self._vertical_remap(state_cpu, result, dt)
             return jax.device_put(result, self._default_device)
         result = dispatch_integrator(state, tendency_fn, dt, integrator)
-        return self._truncate(result)
+        return self._vertical_remap(state, result, dt)
+
+    def _vertical_remap(self, state0: TracerState, new: TracerState,
+                        dt: float) -> TracerState:
+        """Split FV3 vertical remap (``vertical_scheme="fv3_remap"``) of the
+        horizontally advected, NOT yet truncated state ``new``, then the
+        Orszag truncation (the truncation alone for "upwind").  Remapping
+        before truncating keeps the out-of-band content in the remap's
+        column budget; only the final projection drops it."""
+        if self.config.vertical_scheme != "fv3_remap":
+            return self._truncate(new)
+        _, _, sigma_dot = self.wind_fn(state0.time.data + 0.5 * dt,
+                                       self.grid, self.sigma_coord)
+        if sigma_dot is None:              # pure horizontal transport
+            return self._truncate(new)
+        if self.sigma_coord is None:
+            raise ValueError(
+                "wind_fn returned sigma_dot but sigma_coord is None; pass "
+                "the SigmaCoordinate to enable vertical transport.")
+        sigma_coord = self.sigma_coord
+        if self._use_cpu_for_spectral:
+            # Metal CPU routing: every remap input on the CPU device with
+            # the (CPU) tracer state, so the jitted remap never mixes
+            # committed devices.
+            sigma_dot = jax.device_put(sigma_dot, self._cpu_device)
+            sigma_coord = jax.device_put(sigma_coord, self._cpu_device)
+        q = self._remap_jit(spectral_tracer_grid_values(self.grid, new),
+                            sigma_dot, dt, sigma_coord)
+        q_hat = spectral_tracer_state(self.grid, q).tracers.data
+        return self._truncate(new._replace(
+            tracers=new.tracers.replace(data=q_hat)))
