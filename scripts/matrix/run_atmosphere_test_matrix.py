@@ -4860,33 +4860,31 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         level = int(tc.resolution.replace("ico", ""))
         grid = create_voronoi_mesh(level)
 
-        # Wind wrapper: convert geographic (u_east, v_north) to edge-normal.
-        wind_geo_fn = cfg["wind_geo"]
+        # MPAS-A scalar transport (user decision 2026-11-23): edge-normal
+        # winds whose rotational part is the TRiSK curl of the DCMIP
+        # streamfunction (discretely non-divergent) plus the projected
+        # divergent part; flux form on a prognostic air mass, Skamarock-
+        # Gassmann 3rd/4th-order reconstruction, RK3 with the monotonic
+        # limiter on the last stage.
+        from tests.test_cases.dcmip_transport import (
+            dcmip_wind_mpas, dcmip_air_mass_state_mpas)
 
         def mpas_wind(t, mesh, sc):
-            u_east, v_north, sigma_dot = wind_geo_fn(
-                t, mesh.lonCell, mesh.latCell, sc)
-            # Project geographic winds to edge-normal at each level.
-            # u_edge = u_east(cell) * cos(angleEdge) + v_north(cell) * sin(angleEdge)
-            # Average the two cells straddling each edge.
-            c1 = mesh.cellsOnEdge[0]  # (nEdges,)
-            c2 = mesh.cellsOnEdge[1]
-            cos_a = jnp.cos(mesh.angleEdge)  # (nEdges,)
-            sin_a = jnp.sin(mesh.angleEdge)
-            ue_c1 = u_east[c1] * cos_a[:, None] + v_north[c1] * sin_a[:, None]
-            ue_c2 = u_east[c2] * cos_a[:, None] + v_north[c2] * sin_a[:, None]
-            u_edge = 0.5 * (ue_c1 + ue_c2)  # (nEdges, nlev)
-            return u_edge, sigma_dot
+            return dcmip_wind_mpas(test_num, t, mesh, sc)
 
         init_fns = {
             11: dcmip11_init_mpas,
             12: dcmip12_init_mpas,
             13: dcmip13_init_mpas,
         }
-        state_init = init_fns[test_num](grid, sigma_coord)
+        state_init = dcmip_air_mass_state_mpas(
+            test_num, init_fns[test_num](grid, sigma_coord), grid, sigma_coord)
         model = TracerTransportMPASModel(
             grid, sigma_coord, mpas_wind,
-            TracerTransportMPASConfig(hyperdiff_coeff=0.0))
+            TracerTransportMPASConfig(
+                hyperdiff_coeff=0.0, time_integrator="mpas_rk3",
+                horizontal_scheme="mpas_fct", coef_3rd_order=0.25,
+                fct_smoothing_width=1.0e-4, fct_upwind_width_ms=1.0e-3))
         coord_kind = "icosa"
         lon_deg = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
@@ -4955,8 +4953,11 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
 
     def check_fn(s):
         q = to_grid(s).tracers.data
-        return (check_finite({"tracers": q}),
-                float(jnp.max(jnp.abs(q))))
+        ok_ = check_finite({"tracers": q})
+        if hasattr(s, "air_mass"):    # mpas_fct: prognostic layer air mass
+            ok_ = ok_ and check_finite({"air_mass": s.air_mass.data}) and bool(
+                jnp.min(s.air_mass.data) > 0)
+        return (ok_, float(jnp.max(jnp.abs(q))))
 
     _area_for_mean = _grid_cell_area(grid)
 
@@ -4996,6 +4997,18 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             f"q{i + 1} L1={norms['l1'][i]:.4e} "
             f"L2={norms['l2'][i]:.4e} Linf={norms['linf'][i]:.4e}"
             for i in range(n_tracers)]
+    if ok and hasattr(state_final, "air_mass"):
+        # RULE 0 record: air mass and per-tracer mass, sum(area dp [q]).
+        def _masses(s):
+            dp_ = np.asarray(s.air_mass.data, np.float64)
+            q_ = np.asarray(s.tracers.data, np.float64)
+            w_ = np.asarray(_area_for_mean, np.float64)[:, None] * dp_
+            return w_.sum(), (w_[..., None] * q_).sum(axis=(0, 1))
+        am0, tm0 = _masses(state_init)
+        am1, tm1 = _masses(state_final)
+        notes_parts.append(f"air-mass rel change {am1 / am0 - 1.0:.3e}")
+        notes_parts += [f"q{i + 1} mass rel change {tm1[i] / tm0[i] - 1.0:.3e}"
+                        for i in range(n_tracers)]
     if test_num in (11, 12) and tc.grid_type == "spectral":
         # Initialization (projection + Orszag truncation) error alone, so
         # the transport error can be separated from it.

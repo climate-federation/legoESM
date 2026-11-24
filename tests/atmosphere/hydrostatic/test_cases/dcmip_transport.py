@@ -202,6 +202,17 @@ def dcmip11_tracers_at_points(
     return q1, q2, q3, q4
 
 
+def _dcmip11_ud(t, lon, lat, sigma_coord):
+    """Divergent zonal wind of DCMIP Test 1-1 (v5), ``(*spatial, nlev)``."""
+    p = sigma_coord.sigma_full * _p0  # (nlev,)
+    lonp = lon[..., None] - 2.0 * jnp.pi * t / _tau11
+    return ((_omega0 * _a) / (_bs * _ptop)
+            * jnp.cos(lonp) * jnp.cos(lat[..., None]) ** 2
+            * jnp.cos(2.0 * jnp.pi * t / _tau11)
+            * (-jnp.exp((p - _p0) / (_bs * _ptop))
+               + jnp.exp((_ptop - p) / (_bs * _ptop))))
+
+
 def dcmip11_wind_geo(
     t: float | jax.Array,
     lon: jax.Array,
@@ -240,11 +251,7 @@ def dcmip11_wind_geo(
          - jnp.exp((_ptop - p) / (_bs * _ptop)))
 
     # Divergent part of u (v5)
-    ud = ((_omega0 * _a) / (_bs * _ptop)
-          * jnp.cos(lonp) * jnp.cos(lat[..., None]) ** 2
-          * jnp.cos(2.0 * jnp.pi * t / _tau11)
-          * (-jnp.exp((p - _p0) / (_bs * _ptop))
-             + jnp.exp((_ptop - p) / (_bs * _ptop))))
+    ud = _dcmip11_ud(t, lon, lat, sigma_coord)
 
     # Zonal wind (geographic east)
     u_east = (_k0 * jnp.sin(lonp) ** 2 * jnp.sin(2.0 * lat[..., None])
@@ -301,6 +308,19 @@ def dcmip12_tracers_at_points(z: jax.Array) -> jax.Array:
     return q1
 
 
+def _dcmip12_v(t, lat, sigma_coord):
+    """Meridional (divergent) wind of DCMIP Test 1-2 (v5), ``(*spatial, nlev)``."""
+    z_full = _height_from_sigma(sigma_coord.sigma_full)  # (nlev,)
+    p = sigma_coord.sigma_full * _p0  # (nlev,)
+    rho_ratio = _p0 / p  # (nlev,)
+    cos_t = jnp.cos(jnp.pi * t / _tau12)
+    return (-rho_ratio * (_a * _w0_12 * jnp.pi) / (_K12 * _ztop12)
+            * jnp.cos(lat[..., None])
+            * jnp.sin(_K12 * lat[..., None])
+            * jnp.cos(jnp.pi * z_full / _ztop12)
+            * cos_t)
+
+
 def dcmip12_wind_geo(
     t: float | jax.Array,
     lon: jax.Array,
@@ -335,11 +355,7 @@ def dcmip12_wind_geo(
     u_east = _u0_12 * jnp.cos(lat[..., None]) * jnp.ones_like(z_full)
 
     # Meridional wind (v5: multiply by rho0/rho)
-    v_north = (-rho_ratio * (_a * _w0_12 * jnp.pi) / (_K12 * _ztop12)
-               * jnp.cos(lat[..., None])
-               * jnp.sin(_K12 * lat[..., None])
-               * jnp.cos(jnp.pi * z_full / _ztop12)
-               * cos_t)
+    v_north = _dcmip12_v(t, lat, sigma_coord)
 
     # Vertical velocity w (v5: multiply by rho0/rho)
     w = (rho_ratio * (_w0_12 / _K12)
@@ -469,6 +485,86 @@ def dcmip13_wind_geo(
     sigma_dot = sigma_half * terrain_crossing[..., None] / _H  # (*spatial, nlev+1)
 
     return u_east_3d, v_north_3d, sigma_dot
+
+
+# ============================================================================
+# MPAS edge-normal winds: rotational part from the analytic streamfunction
+# ============================================================================
+
+
+def dcmip_streamfunction(test_num, t, lon, lat, sigma_coord):
+    """Streamfunction [m^2/s] of the non-divergent horizontal wind of DCMIP
+    Test 1-1/1-2/1-3, ``u = k x grad(psi)`` (``u_east = -dpsi/(a dphi)``,
+    ``v_north = dpsi/(a cos(phi) dlambda)``), ``(*spatial, nlev)``.
+
+    1-1: ``k0 a sin^2(lon') cos^2(lat) cos(pi t/tau) - a u0 sin(lat)``;
+    1-2: ``-a u0 sin(lat)``; 1-3 (solid body tilted by alpha):
+    ``-a u0 (sin(lat) cos(alpha) - cos(lon) cos(lat) sin(alpha))``.
+    The divergent remainder is :func:`dcmip_divergent_wind_geo`."""
+    ones = jnp.ones(sigma_coord.n_levels)
+    if test_num == 11:
+        lonp = lon - 2.0 * jnp.pi * t / _tau11
+        psi = (_k0 * _a * jnp.sin(lonp) ** 2 * jnp.cos(lat) ** 2 * jnp.cos(jnp.pi * t / _tau11)
+               - _a * _u0_11 * jnp.sin(lat))
+    elif test_num == 12:
+        psi = -_a * _u0_12 * jnp.sin(lat)
+    elif test_num == 13:
+        psi = -_a * _u0_13 * (jnp.sin(lat) * jnp.cos(_alpha13)
+                              - jnp.cos(lon) * jnp.cos(lat) * jnp.sin(_alpha13))
+    else:
+        raise ValueError(f"unknown DCMIP transport test {test_num!r}")
+    return psi[..., None] * ones
+
+
+def dcmip_divergent_wind_geo(test_num, t, lon, lat, sigma_coord):
+    """Divergent part ``(u_east, v_north)`` of the DCMIP horizontal wind:
+    the full ``dcmip1X_wind_geo`` wind minus the streamfunction's."""
+    zero = jnp.zeros(jnp.shape(lat) + (sigma_coord.n_levels,))
+    if test_num == 11:
+        return _dcmip11_ud(t, lon, lat, sigma_coord), zero
+    if test_num == 12:
+        return zero, _dcmip12_v(t, lat, sigma_coord)
+    if test_num == 13:
+        return zero, zero
+    raise ValueError(f"unknown DCMIP transport test {test_num!r}")
+
+
+def dcmip_wind_mpas(test_num, t, mesh, sigma_coord):
+    """``(u_edge, sigma_dot)`` of DCMIP Test 1-1/1-2/1-3 on an MPAS mesh: the
+    rotational part is the TRiSK curl of the vertex streamfunction (discretely
+    non-divergent), the divergent part is projected on the edge normal at the
+    edge point, ``sigma_dot`` is the analytic one at the cell centres."""
+    from legoesm.core.operators_voronoi import edge_normal_velocity_from_streamfunction
+    wind_geo = {11: dcmip11_wind_geo, 12: dcmip12_wind_geo, 13: dcmip13_wind_geo}[test_num]
+    psi = dcmip_streamfunction(test_num, t, mesh.lonVertex, mesh.latVertex, sigma_coord)
+    u_rot = edge_normal_velocity_from_streamfunction(psi, mesh)
+    ud, vd = dcmip_divergent_wind_geo(test_num, t, mesh.lonEdge, mesh.latEdge, sigma_coord)
+    ang = mesh.angleEdge[:, None]
+    u_edge = u_rot + ud * jnp.cos(ang) + vd * jnp.sin(ang)
+    _, _, sigma_dot = wind_geo(t, mesh.lonCell, mesh.latCell, sigma_coord)
+    return u_edge, sigma_dot
+
+
+def dcmip_air_mass_state_mpas(test_num, state: TracerState, mesh,
+                              sigma_coord: SigmaCoordinate):
+    """The DCMIP state with its layer air mass ``dp = p_s dsigma`` for
+    ``horizontal_scheme="mpas_fct"``.
+
+    1-1/1-2: flat surface, ``p_s = p0``.  1-3: the isothermal atmosphere over
+    the Schaer-type mountains, ``p_s = p0 exp(-z_s/H)``, the surface pressure
+    of the coordinate the 1-3 IC and wind use (``z = z_s - H ln(sigma)``, so
+    ``sigma = p / p_s``).  With it the analytic vertical mass flux ``p_s
+    sigma_dot`` (eq. 220) balances the horizontal mass divergence ``v . grad
+    p_s`` of the solid-body flow, and ``dp`` stays steady up to truncation
+    error; with ``p_s = p0`` it would not (``sigma_dot`` then creates and
+    destroys air mass over the mountains)."""
+    from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import air_mass_state
+    if test_num in (11, 12):
+        return air_mass_state(state, _p0, sigma_coord)
+    if test_num == 13:
+        zs = _mountain_height(mesh.lonCell, mesh.latCell)
+        return air_mass_state(state, _p0 * jnp.exp(-zs / _H), sigma_coord)
+    raise ValueError(f"unknown DCMIP transport test {test_num!r}")
 
 
 # ============================================================================
