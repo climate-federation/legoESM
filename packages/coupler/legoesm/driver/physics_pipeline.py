@@ -5287,6 +5287,15 @@ def turbulence_config_for(config):
                     "clubb_mf=True requires clubb_prognostic=True: the plume "
                     "flux is the prognostic closure's thl/rt forcing.")
             tc = tc._replace(clubb_mf=True)
+        _alph = getattr(config, "clubb_mf_alphturb", None)
+        if _alph is not None:
+            if not getattr(config, "clubb_mf", False):
+                raise ValueError("clubb_mf_alphturb requires clubb_mf=True.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(mf_alphturb=float(_alph)))
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => the scheme's own default stands (CLUBBConfig, CAM6 100 Pa).
