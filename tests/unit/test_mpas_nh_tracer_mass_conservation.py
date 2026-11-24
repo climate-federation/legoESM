@@ -18,7 +18,7 @@ from jax.test_util import check_grads
 HILL = {"mountain_height": 2000.0, "mountain_halfwidth": 2000.0e3}
 
 
-def _setup(n_tracers_q, **cfg):
+def _setup(n_tracers_q, fp64_geometry=True, **cfg):
     from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
         MPASCompressibleEulerConfig, MPASCompressibleEulerModel)
     from legoesm.grids.voronoi import create_voronoi_mesh
@@ -27,10 +27,11 @@ def _setup(n_tracers_q, **cfg):
 
     mesh = create_voronoi_mesh(3)
     # The builder returns float32 geometry, whose area/edge-length mismatch
-    # (~3e-12 of a flux sum) would set the floor; test the scheme in fp64.
-    mesh = mesh._replace(**{
-        f: getattr(mesh, f).astype(jnp.float64) for f in mesh._fields
-        if getattr(getattr(mesh, f), "dtype", None) == jnp.float32})
+    # (~3e-12 of a flux sum) sets the floor; test the scheme in fp64.
+    if fp64_geometry:
+        mesh = mesh._replace(**{
+            f: getattr(mesh, f).astype(jnp.float64) for f in mesh._fields
+            if getattr(getattr(mesh, f), "dtype", None) == jnp.float32})
     state, hc, tm = dcmip25_tc1_init_mpas(mesh, n_levels=8, params=HILL)
     cfg = {"n_acoustic_substeps": 6, "fix_mass": False, **cfg}
     model = MPASCompressibleEulerModel(mesh, hc, tm, MPASCompressibleEulerConfig(**cfg))
@@ -67,6 +68,14 @@ def test_tracer_mass_conserved_over_hill(cfg):
     assert jnp.all(jnp.isfinite(state.tracers.data))
     rel = jnp.abs(_tracer_mass(model, state) - m0) / m0
     assert float(jnp.max(rel)) < 1e-13, rel
+
+
+def test_tracer_mass_conserved_with_production_float32_geometry():
+    model, state = _setup(_varying, fp64_geometry=False)
+    m0 = _tracer_mass(model, state)
+    for _ in range(30):
+        state = model.step(state, 60.0)
+    assert float(jnp.max(jnp.abs(_tracer_mass(model, state) - m0) / m0)) < 1e-11
 
 
 def test_uniform_tracer_stays_uniform_over_hill():
