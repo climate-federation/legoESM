@@ -335,6 +335,15 @@ def _owned_column_weight(grid, terrain_metric, owned_mask):
     return (terrain_metric.jacobian * grid.area_T * owned_mask)[:, :, None]
 
 
+def _validated_column_weight(state, grid, height_coord, terrain_metric,
+                             owned_mask):
+    """:func:`_owned_column_weight` after the same state / geometry /
+    ownership-mask shape checks as :func:`compute_dry_mass_plane_mpi`."""
+    _validate_plane_state_for_mpi_dry(state, height_coord, grid, terrain_metric)
+    _validate_owned_mask(owned_mask, state.rho_prime.data.shape[:2])
+    return _owned_column_weight(grid, terrain_metric, owned_mask)
+
+
 def compute_rho_prime_mass_plane_mpi(
     state, grid, height_coord, terrain_metric, layout, owned_mask,
 ) -> jax.Array:
@@ -344,7 +353,8 @@ def compute_rho_prime_mass_plane_mpi(
     _validate_layout(layout)
     from legoesm.parallel.reductions import global_sum_mpi
 
-    weight_horizontal = _owned_column_weight(grid, terrain_metric, owned_mask)
+    weight_horizontal = _validated_column_weight(
+        state, grid, height_coord, terrain_metric, owned_mask)
     local = jnp.sum(state.rho_prime.data * weight_horizontal * height_coord.dz)
     return local if layout.n_ranks == 1 else global_sum_mpi(local)
 
@@ -401,7 +411,8 @@ def fix_mass_nonhydrostatic_plane_mpi(
 
     # A and V in ONE allreduce (same per-rank partial sums as
     # compute_rho_prime_mass_plane_mpi / _plane_volume_weight_mpi).
-    w_col = _owned_column_weight(grid, terrain_metric, owned_mask)
+    w_col = _validated_column_weight(
+        state, grid, height_coord, terrain_metric, owned_mask)
     current, volume = global_sum_mpi(jnp.stack([
         jnp.sum(state.rho_prime.data * w_col * height_coord.dz),
         jnp.sum(w_col * height_coord.dz),

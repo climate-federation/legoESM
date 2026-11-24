@@ -3332,12 +3332,13 @@ class PlaneCompressibleEulerModel:
 
     def _fixer_target(self, target, state):
         """Anomaly-form fixer target: the cached anchor anomaly when it
-        belongs to ``target``; the pre-step anomaly when not anchoring;
-        else (``_target_mass`` set by a caller) ``target - B``."""
+        belongs to ``target``; the pre-step anomaly when no target is set
+        (``target`` was computed from ``state``); else (``_target_mass`` set
+        by a caller, anchored or not) ``target - B``."""
         cached = getattr(self, "_target_anomaly", None)
         if cached is not None and cached[0] is target:
             return cached[1]
-        if not self.config.anchor_mass_to_initial:
+        if self._target_mass is None:
             return _plane_weighted_mass_sum(
                 state.rho_prime.data, self.grid, self.height_coord,
                 self.terrain_metric,
