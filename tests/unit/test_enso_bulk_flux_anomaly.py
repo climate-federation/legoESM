@@ -31,3 +31,19 @@ def test_planted_ocean_nan_is_fatal():
     d[1993]["10m_u_component_of_wind"][5, 0, 0] = np.nan
     with pytest.raises(AssertionError, match="non-finite"):
         mod.check_inputs(d, ocean, lat, lon)
+
+
+def test_alignment_guard_refuses_offset_hourly_store():
+    import pytest
+    rng = np.random.default_rng(0)
+    six = {"2m_temperature": 290 + rng.random((124, 2, 2)),
+           "sea_surface_temperature": 300 + rng.random((124, 2, 2))}
+    six["sea_surface_temperature"][:, 0, 0] = np.nan  # a cell NaN in the 6h store only
+    sst1 = six["sea_surface_temperature"].copy(); sst1[:, 0, 0] = 301.0
+    ends = [0, -1]
+    t2h = six["2m_temperature"][ends] + 5e-5
+    mod.check_alignment(six, {"sea_surface_temperature": sst1}, t2h, ends)
+    with pytest.raises(AssertionError, match="2 m temperature"):
+        mod.check_alignment(six, {"sea_surface_temperature": sst1}, t2h + 4.0, ends)
+    with pytest.raises(AssertionError, match="SST"):
+        mod.check_alignment(six, {"sea_surface_temperature": sst1 + 0.01}, t2h, ends)

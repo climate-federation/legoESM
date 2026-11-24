@@ -10,7 +10,13 @@ inputs through the same function (paired by day/hour; residual = interaction).
 The source store carries no surface stress, so the zonal stress anomaly is the
 bulk formula on ERA5 winds only (no ERA5 stress to score against).
 
-Source: WeatherBench2 ERA5, 1.5 deg conservative, 6-hourly (``_WB2``).  Its
+Source: WeatherBench2 ERA5, 1.5 deg conservative, 6-hourly (``_WB2``).  That
+store's 2 m dewpoint is all-NaN for these Decembers and its SST is NaN on 254
+coastal ocean cells, so both come from the same-version hourly store on the same
+grid (``_WB2_1H``) at the same stamps; no regridding.  Alignment is checked at
+fetch: hourly vs 6-hourly 2 m temperature at each December's first and last
+stamp, and SST wherever both stores are finite at every stamp, within 1e-3 K
+(measured 6.1e-5 K; one hour off is ~4 K).  Its
 ``mean_surface_latent_heat_flux`` at stamp t is the mean over the hour BEFORE t,
 so each December uses stamps Dec 1 06 UTC .. Jan 1 00 UTC (124 samples, every
 flux window inside December) for inputs and fluxes alike; the inputs are
@@ -22,7 +28,10 @@ instantaneous at t, half an hour after the flux window's centre.
 Detail choices (votes author/GLM/codex): z_bot=10 m with 2 m T,q (a/a/a);
 climatology includes 1997 (a/b/a); 6-hourly (a/a/a, after transfer cost);
 per-sample fluxes (a/a/a); swap split (a/a/a); ratio + pattern correlation
-(a/a/a); ERA5 mean-rate fluxes (a/a/a).  1.5 deg WB2 store: user choice.
+(a/a/a); ERA5 mean-rate fluxes (a/a/a); dewpoint+SST from the hourly
+same-grid store, not ARCO 0.25 deg regridded (a/a/a); SST from the hourly store,
+not a shrunk ocean mask (a/a/a); alignment guard = endpoint T2 + every-stamp SST,
+fatal at 1e-3 K (d/d/d; GLM preferred 1e-2 K and SST as a warning).  1.5 deg WB2 store: user choice.
 """
 import argparse
 import hashlib
@@ -36,6 +45,9 @@ _WB2 = ("gs://weatherbench2/datasets/era5/"
 _IN = ["10m_u_component_of_wind", "10m_v_component_of_wind", "2m_temperature",
        "2m_dewpoint_temperature", "sea_surface_temperature", "surface_pressure"]
 _OUT = ["mean_surface_latent_heat_flux"]
+_WB2_1H = _WB2.replace("-6h-", "-1h-")
+_HOURLY = ["2m_dewpoint_temperature", "sea_surface_temperature"]  # override the 6h store's
+_ALIGN_TOL_K = 1e-3
 _YEARS = range(1991, 2001)
 _BOX = dict(latitude=slice(-30.01, 30.01), longitude=slice(119.99, 280.0))  # float32 grid
 _NINO34 = (-5.0, 5.0, 190.0, 240.0)
@@ -47,41 +59,87 @@ def stamps(y):
     return pd.date_range(f"{y}-12-01 06:00", f"{y + 1}-01-01 00:00", freq="6h")
 
 
+def _chunk_bytes(fs, store, ds, times, names):
+    n = ds[names[0]].encoding["chunks"][0]
+    chunks = sorted({int(c) for c in ds.indexes["time"].get_indexer(times) // n})
+    return sum(fs.info(f"{store}/{v}/{c}.0.0")["size"] for v in names for c in chunks)
+
+
 def fetch(out):
     import gcsfs
+    import pandas as pd
     import xarray as xr
     fs = gcsfs.GCSFileSystem(token="anon")
     ds = xr.open_zarr(fs.get_mapper(_WB2), chunks=None)
-    # whole-globe chunks: count the chunks touched and refuse past the cap
-    idx = [ds.indexes["time"].get_indexer(stamps(y)) for y in _YEARS]
-    assert all((i >= 0).all() for i in idx), "a December stamp is missing from the store"
-    chunks = sorted({int(c) for i in idx for c in i // 8})
-    est = sum(fs.info(f"{_WB2}/{v}/{c}.0.0")["size"] for v in _IN + _OUT for c in chunks)
-    print(f"# transfer {est / 1e6:.0f} MB ({len(chunks)} time chunks per variable)")
+    dh = xr.open_zarr(fs.get_mapper(_WB2_1H), chunks=None)
+    assert np.array_equal(ds.latitude.values, dh.latitude.values) \
+        and np.array_equal(ds.longitude.values, dh.longitude.values), "1h/6h grids differ"
+    for d in (ds, dh):
+        assert all((d.indexes["time"].get_indexer(stamps(y)) >= 0).all() for y in _YEARS), \
+            "a December stamp is missing from a store"
+    # whole-globe chunks: count the bytes of the chunks still to fetch and refuse past the cap
+    todo6 = [y for y in _YEARS if not os.path.exists(os.path.join(out, f"era5_dec{y}.npz"))]
+    todo1 = [y for y in _YEARS if not os.path.exists(os.path.join(out, f"era5_dec{y}_1h.npz"))]
+    t6 = pd.DatetimeIndex(np.concatenate([stamps(y) for y in todo6])) if todo6 else None
+    t1 = pd.DatetimeIndex(np.concatenate([stamps(y) for y in todo1])) if todo1 else None
+    ends = pd.DatetimeIndex([t for y in todo1 for t in (stamps(y)[0], stamps(y)[-1])])
+    est = (_chunk_bytes(fs, _WB2, ds, t6, _IN + _OUT) if todo6 else 0) \
+        + (_chunk_bytes(fs, _WB2_1H, dh, t1, _HOURLY)
+           + _chunk_bytes(fs, _WB2_1H, dh, ends, ["2m_temperature"]) if todo1 else 0)
+    print(f"# transfer {est / 1e6:.0f} MB")
     assert est < _MAX_BYTES, est
     for y in _YEARS:
         f = os.path.join(out, f"era5_dec{y}.npz")
-        if os.path.exists(f):
+        if not os.path.exists(f):
+            sel = ds[_IN + _OUT].sel(time=stamps(y)).sel(**_BOX).load()
+            sel = sel.transpose("time", "latitude", "longitude")
+            assert sel.sizes["time"] == 124 and sel.sizes["latitude"] == 41 \
+                and sel.sizes["longitude"] == 107, sel.sizes  # 1.5 deg, 30S-30N, 120E-279E
+            np.savez(f, time=stamps(y).values.astype("datetime64[s]").astype("int64"),
+                     lat=sel.latitude.values, lon=sel.longitude.values,
+                     **{v: sel[v].values for v in _IN + _OUT})
+            print(f"# saved {f}", flush=True)
+        fh = os.path.join(out, f"era5_dec{y}_1h.npz")
+        if os.path.exists(fh):
             continue
-        sel = ds[_IN + _OUT].sel(time=stamps(y)).sel(**_BOX).load()
-        sel = sel.transpose("time", "latitude", "longitude")
-        assert sel.sizes["time"] == 124 and sel.sizes["latitude"] == 41 \
-            and sel.sizes["longitude"] == 107, sel.sizes  # 1.5 deg, 30S-30N, 120E-279E
-        np.savez(f, time=stamps(y).values.astype("datetime64[s]").astype("int64"),
-                 lat=sel.latitude.values, lon=sel.longitude.values,
-                 **{v: sel[v].values for v in _IN + _OUT})
-        print(f"# saved {f}", flush=True)
+        six = np.load(f)
+        h = dh[_HOURLY].sel(time=stamps(y)).sel(**_BOX).transpose(
+            "time", "latitude", "longitude").load()
+        e = [0, -1]
+        t2h = dh["2m_temperature"].sel(time=stamps(y)[e]).sel(**_BOX).transpose(
+            "time", "latitude", "longitude").values
+        check_alignment(six, {v: h[v].values for v in _HOURLY}, t2h, e)
+        np.savez(fh, time=six["time"], **{v: h[v].values for v in _HOURLY})
+        print(f"# saved {fh}", flush=True)
     st = ds["land_sea_mask"].sel(**_BOX).transpose("latitude", "longitude").load()
     np.savez(os.path.join(out, "static.npz"), lsm=st.values,
              lat=st.latitude.values, lon=st.longitude.values)
 
 
+def check_alignment(six, hourly, t2h, ends):
+    """Fatal unless the hourly store matches the 6-hourly one at these stamps."""
+    d = np.abs(t2h - six["2m_temperature"][ends]).max()
+    assert d < _ALIGN_TOL_K, f"1h vs 6h 2 m temperature differ by {d} K at December ends"
+    a, b = hourly["sea_surface_temperature"], six["sea_surface_temperature"]
+    m = np.isfinite(a) & np.isfinite(b)
+    d = np.abs(a - b)[m].max()
+    assert d < _ALIGN_TOL_K, f"1h vs 6h SST differ by {d} K"
+
+
+def load_year(out, y):
+    """6-hourly fields with dewpoint and SST replaced by the hourly store's."""
+    f, fh = np.load(os.path.join(out, f"era5_dec{y}.npz")), \
+        np.load(os.path.join(out, f"era5_dec{y}_1h.npz"))
+    assert np.array_equal(f["time"], fh["time"]), y
+    return {**{k: f[k] for k in f.files}, **{v: fh[v] for v in _HOURLY}}
+
+
 def _provenance(out):
     h = hashlib.sha256()
-    for name in ["static.npz"] + [f"era5_dec{y}.npz" for y in _YEARS]:
+    for name in ["static.npz"] + [f"era5_dec{y}{s}.npz" for y in _YEARS for s in ("", "_1h")]:
         with open(os.path.join(out, name), "rb") as fh:
             h.update(fh.read())
-    return f"# source {_WB2}; sha256(static+10 Decembers) {h.hexdigest()[:16]}"
+    return f"# source {_WB2} + {_HOURLY} from {_WB2_1H}; sha256 {h.hexdigest()[:16]}"
 
 
 def model_fluxes(u, v, t2, td2, sst, ps):
@@ -142,7 +200,7 @@ def _wslope(y, x, w):
 def score(out):
     st = np.load(os.path.join(out, "static.npz"))
     lat, lon = st["lat"], st["lon"]
-    d = {y: np.load(os.path.join(out, f"era5_dec{y}.npz")) for y in _YEARS}
+    d = {y: load_year(out, y) for y in _YEARS}
     ocean = st["lsm"] < 0.5
     check_inputs(d, ocean, lat, lon)  # any non-finite SST on an ocean cell is fatal
     from legoesm import constants
