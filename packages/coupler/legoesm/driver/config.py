@@ -2440,6 +2440,10 @@ class ExperimentConfig(NamedTuple):
     # (fixed L0 = 200 m, CAM's KISS draws).  False (default) = no mass flux
     # (byte-identical).  Requires turbulence='clubb' and clubb_prognostic=True.
     clubb_mf: bool = False
+    # APPENDED LAST.  CAM7 CLUBB-MF plume-area to deep-cloud-fraction factor
+    # (CloudConfig.mf_cldfrac_fac, clubb_mf_cldfrac_fac).  None = 10 (CAM7).
+    # Needs clubb_mf with cloud_scheme='cam6_clubb'.
+    cloud_clubb_mf_cldfrac_fac: float | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -5162,6 +5166,12 @@ class ExperimentConfig(NamedTuple):
                 "needs cloud_scheme='cam6_clubb', microphysics='morrison', "
                 "morrison_prognostic_droplet_number=False and aerosol_ccn "
                 "(nc_from_aerosol) off.")
+        if self.cloud_clubb_mf_cldfrac_fac is not None and not (
+                self.clubb_mf and self.cloud_scheme == "cam6_clubb"):
+            errors.append(
+                "cloud_clubb_mf_cldfrac_fac needs clubb_mf=True with "
+                f"cloud_scheme='cam6_clubb' (got clubb_mf={self.clubb_mf!r}, "
+                f"cloud_scheme={self.cloud_scheme!r}): nothing else reads it.")
         if self.cloud_cam6_conv_water_in_rad not in (0, 1):
             errors.append(
                 "cloud_cam6_conv_water_in_rad must be 0 (off) or 1 (CAM6 "
@@ -5324,6 +5334,8 @@ class ExperimentConfig(NamedTuple):
             # CAM6 namelist conv_water_frac_limit 0.01; it must stay positive
             # (every conv_water_4rad division is floored by it).
             ("cloud_cam6_conv_water_frac_limit", 1.0e-4, 0.1),
+            # CloudConfig.__param_spec__ mf_cldfrac_fac bounds (vote 2026-11-24).
+            ("cloud_clubb_mf_cldfrac_fac", 1.0, 20.0),
             ("cloud_cap_floor_lat_deg", 40.0, 89.0),
             ("cloud_cap_floor_p_max_pa", 20000.0, 100000.0),
             ("cloud_cap_floor_cf", 0.1, 1.0),
