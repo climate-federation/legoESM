@@ -21,8 +21,9 @@ KNOWN DEFECT (#2641, RULE 0): tracer mass is NOT conserved. Acoustic
 substeps move the air mass while tracers keep an advective-form spectral
 tendency, and RK stages blend rho and q separately. The plane and MPAS
 height-coordinate cores were fixed (flux form with the stage mass flux);
-this core is excluded by the owner's ruling because a truncated spectral
-tracer cannot hold the weighted product integral exactly. Measured with
+this core is excluded by the owner's ruling (its truncated spectral
+transport has no flux-form counterpart; restoring the integral would need a
+separate design, e.g. a global fixer). Measured with
 ``test_spectral_nh_tracer_mass_known_defect.py`` (T21, 10 levels,
 0.2 K theta perturbation, dt 5 s, fp64): dry mass 4e-15, tracer mass
 +1.9e-7 relative after 20 steps (about 1e-8 per step).
