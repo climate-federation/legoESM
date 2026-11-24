@@ -82,6 +82,10 @@ def subset(data, sites):
     return {s: v for s, v in data.items() if s in sites}
 
 
+def bench_subset(bench, sites):
+    return {**bench, "sites": {s: v for s, v in bench["sites"].items() if s in sites}}
+
+
 def plot(out, path):
     """Per new site and panel: each standard scheme's held-out log-RMSE, and J3 frozen (v5) and refitted (v6)."""
     import matplotlib
@@ -139,7 +143,7 @@ def main():
     worst, n = unchanged(ref, v6)
     print(f"CHECK v5 sites, standard schemes, v6 vs v5: worst relative change {worst:.2e} over {n} scores", flush=True)
     cache_worst = r2.check(subset(data, set(v5["sites"])), v5, a.min_count)
-    new_worst = r2.check(subset(data, set(new)), v6, a.min_count)  # the new sites' cache against the v6 json
+    new_worst = r2.check(subset(data, set(new)), bench_subset(v6, set(new)), a.min_count)  # new sites vs the v6 json
     for label, w in (("v5 sites unchanged", worst if n else np.inf), ("cache vs v5", cache_worst), ("new-site cache vs v6", new_worst)):
         if not w <= CHECK_TOL:
             raise SystemExit(f"instrument check failed: {label} worst relative difference {w}")

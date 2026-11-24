@@ -58,6 +58,14 @@ def test_missing_from_cache_names_a_benchmark_score_the_cache_lacks():
     assert sn.missing_from_cache(data, bench, {"s", "t"}, 30) == [("m_stable", "t")]
 
 
+def test_new_site_check_ignores_old_sites_absent_from_the_subset(monkeypatch):
+    score = {"global_fit": {"J3": {"a0": 4.0, "a_inf": 0.5, "zc": 1.0, "pr0": 1.0}},
+             "sites": {s: {"offset_corrected": {"m_stable": {"dyer1974": {"gradient": {"log_rmse": 0.3}}}}} for s in ("old", "new")}}
+    monkeypatch.setattr(r2, "score", lambda spec, p, kind, data, mc: {"m_stable": {"new": 0.3}} if spec is r2.DYER["m"] else {})
+    assert r2.check({}, sn.bench_subset(score, {"new"}), 30) == 0.0
+    assert r2.check({}, score, 30) == np.inf
+
+
 def test_unchanged_reference_must_cover_every_v5_site():
     v5 = {"sites": {"a": {}, "b": {}}}
     assert sn.same_sites({"sites": {"a": {}, "b": {}}}, v5)

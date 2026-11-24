@@ -95,6 +95,41 @@ def test_offset_uses_only_its_own_split():
         assert np.allclose(a["phi"][a["keep"]], b["phi"][b["keep"]], equal_nan=True)
 
 
+def test_scored_days_take_their_offset_from_odd_days():
+    """Perturbing even-day NEUTRAL rows (the offset calibration rows) must not change even-day heat samples."""
+    n = 400
+    base = site(h=-200.0)
+    ds = xr.concat([base, base], dim="time").assign_coords(time=1800.0 * (np.arange(n) + 1))
+    even = (np.floor(ds.time.values / 86400) % 2 == 0)
+    neutral = np.arange(n) % 4 == 0
+    ds["h"].values[:] = np.where(neutral, 2.0, -200.0)[:, None]
+    ds["ustar"].values[:] = 0.5
+    even_a = sf.site_pairs(ds, 0.1, True, 50.0, day_parity=0)[0]["h"]
+    ds2 = ds.copy(deep=True)
+    ds2["temp"].values[even & neutral, 1] += 0.7
+    even_b = sf.site_pairs(ds2, 0.1, True, 50.0, day_parity=0)[0]["h"]
+    assert even_a and sum(int(p["keep"].sum()) for p in even_a) > 30
+    for a, b in zip(even_a, even_b):
+        assert np.allclose(a["phi"][a["keep"]], b["phi"][b["keep"]], equal_nan=True)
+    ds3 = ds.copy(deep=True)
+    ds3["temp"].values[~even & neutral, 1] += 0.7  # the odd-day offset must reach the even-day samples
+    even_c = sf.site_pairs(ds3, 0.1, True, 50.0, day_parity=0)[0]["h"]
+    assert all(np.array_equal(a["keep"], c["keep"]) for a, c in zip(even_a, even_c))
+    phi_a, phi_c = (np.concatenate([p["phi"][p["keep"]] for p in x]) for x in (even_a, even_c))
+    assert phi_a.size > 30 and not np.allclose(phi_a, phi_c)
+
+
+def test_missing_calibration_offset_warns():
+    n = 400
+    base = site(h=-200.0)
+    ds = xr.concat([base, base], dim="time").assign_coords(time=1800.0 * (np.arange(n) + 1))
+    even = np.floor(ds.time.values / 86400) % 2 == 0
+    ds["h"].values[:] = np.where(even & (np.arange(n) % 4 == 0), 2.0, -200.0)[:, None]  # neutral rows on even days only
+    ds["ustar"].values[:] = 0.5
+    with pytest.warns(UserWarning, match="no neutral offset"):
+        sf.site_pairs(ds, 0.1, True, 50.0, day_parity=0)
+
+
 def test_global_weights_equal_per_site():
     one = [("h", np.full(100, 0.5), np.full(100, 2.0))]
     two = [("h", np.full(50, 0.5), np.full(50, 2.0)), ("h", np.full(50, -0.5), np.full(50, 0.5))]

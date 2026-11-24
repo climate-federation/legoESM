@@ -16,6 +16,7 @@ import argparse
 import glob
 import json
 import os
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -274,8 +275,10 @@ def site_pairs(ds, min_ustar, offset_correct, max_zg, day_parity=None, all_pairs
     z_u, z_t = ds.z_u.values.astype(float), ds.z_t.values.astype(float)
     theta = ds.temp.values.astype(float) + fs.potential_temperature_offset(z_t)
     reference = fs.site_samples(ds, low, min_ustar, 0.0, False, offset_correct)
-    in_split = (np.ones(ds.sizes["time"], bool) if day_parity is None
-                else np.floor(ds.time.values.astype(float) / SECONDS_PER_DAY) % 2 == day_parity)
+    day = np.floor(ds.time.values.astype(float) / SECONDS_PER_DAY) % 2
+    in_split = np.ones(ds.sizes["time"], bool) if day_parity is None else day == day_parity
+    # the neutral offset is calibrated on odd (fit) days for both splits, so scored days never calibrate themselves
+    offset_days = in_split if day_parity is None else day == 1
     out = {"m": [], "h": []}
     for kind, z, x, scale in (("m", z_u, wind, f["ustar"]), ("h", z_t, theta, theta_star)):
         level_pairs = ([(i, j) for i in range(x.shape[1]) for j in range(i + 1, x.shape[1])] if all_pairs
@@ -289,8 +292,11 @@ def site_pairs(ds, min_ustar, offset_correct, max_zg, day_parity=None, all_pairs
                 continue
             above = np.isfinite(z_g)
             z1, z2 = np.where(above, z[:, i] - d, np.nan), np.where(above, z[:, j] - d, np.nan)
-            if kind == "h" and offset_correct:  # offset from this split's days only, so fit and score never share data
-                diff = diff - fs.neutral_offset(np.where(in_split, diff, np.nan), f["h"], f["ustar"])
+            if kind == "h" and offset_correct:
+                offset = fs.neutral_offset(np.where(offset_days, diff, np.nan), f["h"], f["ustar"])
+                if not np.isfinite(offset) and np.isfinite(diff[in_split]).any():
+                    warnings.warn(f"{ds.attrs.get('site', '?')} {key}: no neutral offset from the calibration days, heat pair dropped")
+                diff = diff - offset
             zeta = np.where(good, z_g / length, np.nan)
             phi_obs = KAPPA * diff / (np.log(z2 / z1) * scale)
             if key in reference:
