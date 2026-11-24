@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -79,6 +80,15 @@ GRID_TYPES = list(GRID_RESOLUTIONS.keys())
 # held_suarez_topo runaway?).  Unset -> 40, exactly as before, so no committed
 # configuration moves; the override exists so an arm need not edit this file
 # while a run is reading it.
+#
+# By default DEFAULT_NLEV is the SIGMA level count only.  Hybrid rows run the
+# fixed CAM6 L32 table on every grid (see ``_create_vertical``), because that
+# is the only table the cube FV3 duo supports and the cross-grid comparison
+# must be like-for-like.  Setting ``LEGOESM_MATRIX_NLEV`` (any value) or
+# ``LEGOESM_MATRIX_TRANSITION_EXPONENT`` switches the non-cube hybrid rows back
+# to the analytic ``standard_hybrid_levels(DEFAULT_NLEV, exponent)`` family
+# for the #1029 probes (exponent alone -> analytic L40); the exponent is
+# rejected on sigma rows; the cube duo always runs CAM6 L32.
 DEFAULT_NLEV = int(os.environ.get("LEGOESM_MATRIX_NLEV", "40"))
 
 
@@ -1291,14 +1301,105 @@ def _laplacian_visc_ico(mesh, frac: float = 0.1) -> float:
 # Vertical coordinate creation
 # ---------------------------------------------------------------------------
 
+def _hybrid_table_is_analytic() -> bool:
+    """True when a #1029 probe knob asks for the analytic hybrid family.
+
+    Hybrid rows run the CAM6 L32 table (``make_cam6_l32_levels``) on EVERY
+    grid: it is the only table the cube FV3 duo supports, and the cross-grid
+    comparison is only like-for-like when every grid shares it (the analytic
+    L40 put its top full level at ~33 hPa against L32's ~3.6 hPa, so upper-
+    level winds were not comparable).  A fixed table has no level count and
+    no ``B = eta**exponent``, so the two analytic-family probe overrides
+    cannot act on it.  Rather than silently ignore them, setting EITHER
+    ``LEGOESM_MATRIX_NLEV`` or ``LEGOESM_MATRIX_TRANSITION_EXPONENT`` selects
+    ``standard_hybrid_levels(DEFAULT_NLEV, exponent)`` -- exactly what those
+    probe arms ran before the switch.  The cube duo ignores both (it only
+    runs CAM6 L32; its notes say so).  ``LEGOESM_MATRIX_VCOORD`` only picks
+    sigma vs hybrid and does not choose the table.
+    """
+    return ("LEGOESM_MATRIX_NLEV" in os.environ
+            or "LEGOESM_MATRIX_TRANSITION_EXPONENT" in os.environ)
+
+
+def _vertical_table_label(vertical_coord: str, sigma) -> str:
+    """Record of the vertical table a row ran, for results.txt notes.
+
+    The first token after ``vertical table: `` is a stable table ID
+    (``cam6_l32`` -- the same ID the cube duo writes from its ``eta`` --
+    ``analytic_hybrid_L<n>_exp<p>`` (effective power, followed by
+    ``analytic (nlev=<n>, exp=<p>)``) or ``sigma_L<n>``); the cross-grid
+    RMS refuses to compare rows whose IDs differ (``_vertical_table_id``).
+    """
+    n = len(np.asarray(sigma.sigma_full))
+    if vertical_coord != "hybrid":
+        return f"vertical table: {vertical_coord}_L{n}"
+    if _hybrid_table_is_analytic():
+        exp = _analytic_hybrid_exponent(n, sigma)
+        return (f"vertical table: analytic_hybrid_L{n}_exp{exp} "
+                f"(analytic (nlev={n}, exp={exp}): standard_hybrid_levels, "
+                f"#1029 probe override)")
+    return f"vertical table: cam6_l32 (make_cam6_l32_levels, L{n})"
+
+
+def _analytic_hybrid_exponent(n: int, sigma) -> str:
+    """Effective ``B = eta**exp`` power of an analytic hybrid table.
+
+    The power whose ``standard_hybrid_levels(n, transition_exponent=e)``
+    reproduces ``sigma``'s ``B_half``: read off the table itself (the tier
+    default is resolved inside ``standard_hybrid_levels`` and not stored on
+    the coordinate), so the tag cannot disagree with what ran.
+    """
+    from legoesm.grids.vertical import standard_hybrid_levels
+    b = np.asarray(sigma.B_half, dtype=np.float64)
+    for e in (1, 2, 3, 4):
+        ref = np.asarray(standard_hybrid_levels(n, transition_exponent=e).B_half,
+                         dtype=np.float64)
+        if ref.shape == b.shape and np.allclose(ref, b, rtol=0, atol=1e-6):
+            return str(e)
+    return "unknown"
+
+
+def _namelist_vertical_table(tc) -> str | None:
+    """The vertical table a hydrostatic HYBRID row will run, for namelist.txt.
+
+    Written before the run (so it is present even if the run fails); the
+    same table ID the row's results.txt notes carry.  ``None`` (no entry)
+    for every other row.
+    """
+    if tc.equation_set != "hydrostatic" or (
+            tc.vertical_coord != "hybrid" and tc.case != "amip"):
+        return None   # run_amip builds hybrid whatever the label
+    if tc.grid_type == "cubed_sphere":
+        if tc.case == "amip":
+            return None   # skipped: no duo adapter
+        return "cam6_l32 (fv3_duo eta table; probe env vars do not apply)"
+    try:
+        sig = _create_vertical(DEFAULT_NLEV, "hybrid")
+    except ValueError as e:   # bad probe env: the runner reports the row
+        return f"invalid ({e})"
+    return _vertical_table_label("hybrid", sig).split(": ", 1)[1]
+
+
+def _vertical_table_id(notes: str) -> str | None:
+    """The table ID ``_vertical_table_label`` wrote, or None if absent."""
+    # whole token only: "cam6_l32-v2" must not read as "cam6_l32"
+    m = re.search(r"vertical table: ([A-Za-z0-9_=.]+)(?=\s|;|$)", notes or "")
+    return m.group(1) if m else None
+
+
 def _create_vertical(nlev: int, vertical_coord: str):
     """Create vertical coordinate (sigma or hybrid).
 
+    Sigma: ``create_sigma_coordinate(nlev)``.  Hybrid: the CAM6 L32 table
+    (``make_cam6_l32_levels``; ``nlev`` is not used) unless a #1029 probe
+    knob is set -- see ``_hybrid_table_is_analytic``.
+
     ``LEGOESM_MATRIX_TRANSITION_EXPONENT`` (#1029 probe override, 2 or 3)
-    changes only the hybrid ``B = eta**exponent`` power; the reference-state
-    level pressures do not move.  Unset -> the standard tier, unchanged.
+    changes only the analytic hybrid ``B = eta**exponent`` power; the
+    reference-state level pressures do not move.
     """
-    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    from legoesm.grids.vertical import (
+        create_sigma_coordinate, make_cam6_l32_levels, standard_hybrid_levels)
     env = os.environ.get("LEGOESM_MATRIX_TRANSITION_EXPONENT")
     exponent = None
     if env is not None:
@@ -1313,6 +1414,10 @@ def _create_vertical(nlev: int, vertical_coord: str):
         print(f"  #1029 LEGOESM_MATRIX_TRANSITION_EXPONENT override: "
               f"B = eta**{exponent}")
     if vertical_coord == "hybrid":
+        if not _hybrid_table_is_analytic():
+            return make_cam6_l32_levels()
+        print(f"  #1029 probe override: hybrid rows run the ANALYTIC "
+              f"standard_hybrid_levels({nlev}), not CAM6 L32")
         return standard_hybrid_levels(nlev, transition_exponent=exponent)
     return create_sigma_coordinate(nlev)
 
@@ -3836,7 +3941,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         _ps0 = duo.ps(state)
         _duo_note = (f"{duo.note}; matrix vertical label "
                      f"'{tc.vertical_coord}' NOT honoured (duo runs its "
-                     f"hybrid table)")
+                     f"hybrid table); vertical table: {duo.eta} (fv3_duo "
+                     f"eta table, L{duo.km})")
 
         def step_fn(s, dt_):
             return duo.step(s, dt_)
@@ -4254,11 +4360,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
     if tc.grid_type == "cubed_sphere":
         notes = f"{notes}; {_duo_note}"
+    else:
+        notes = f"{notes}; {_vertical_table_label(tc.vertical_coord, sigma)}"
 
     _write_results_txt(output_dir, _augment_with_rrtmgp_overrides({
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "vertical_coord": tc.vertical_coord, "radiation": radiation,
-        "days": days, "dt": dt, "levels": nlev,
+        "days": days, "dt": dt, "levels": len(level_values),
         "status": "PASS" if ok else "FAIL", "notes": notes,
         "wall_time": f"{wall:.1f}s"}, radiation),
         diag=diag)  # iter-98: surface BLOWUP info if any
@@ -4402,7 +4510,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         _ps0 = duo.ps(state)
         _duo_note = (f"{duo.note}; matrix vertical label "
                      f"'{tc.vertical_coord}' NOT honoured (duo runs its "
-                     f"hybrid table)")
+                     f"hybrid table); vertical table: {duo.eta} (fv3_duo "
+                     f"eta table, L{duo.km})")
 
         def step_fn(s, dt_):
             return duo.step(s, dt_)
@@ -4716,6 +4825,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
     if tc.grid_type == "cubed_sphere":
         notes = f"{notes}; {_duo_note}"
+    else:
+        notes = f"{notes}; {_vertical_table_label(tc.vertical_coord, sigma)}"
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -5045,7 +5156,6 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid)
@@ -5054,7 +5164,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
         grid = create_latlon_grid(n_lat, n_lon)
-        sigma = standard_hybrid_levels(nlev)
+        sigma = _create_vertical(nlev, "hybrid")  # AMIP: hybrid only
         ah = _laplacian_visc_latlon(n_lat)
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
@@ -5111,7 +5221,6 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
         from legoesm.atmosphere.forcing.idealized.held_suarez import (
@@ -5120,7 +5229,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
-        sigma = standard_hybrid_levels(nlev)
+        sigma = _create_vertical(nlev, "hybrid")  # AMIP: hybrid only
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
@@ -5167,7 +5276,6 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis_3d,
         )
-        from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
@@ -5178,7 +5286,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
-        sigma = standard_hybrid_levels(nlev)
+        sigma = _create_vertical(nlev, "hybrid")  # AMIP: hybrid only
         dt = 600.0
         pe_config = SpectralPEConfig(
             hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
@@ -5261,6 +5369,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
+    notes = f"{notes}; {_vertical_table_label('hybrid', sigma)}"
 
     # iter-32 codex LOW + iter-35 factored: record effective GHG
     # concentrations in ``results.txt`` for reproducibility when
@@ -6919,6 +7028,30 @@ def _compute_cross_grid_rms_agreement(
     if len(zonal_means) < 2:
         return None
 
+    # The rows must have run the SAME vertical table: a level-index RMS
+    # between two different tables of equal length (e.g. CAM6 L32 vs an
+    # analytic L32 probe arm) compares different pressures.  A MIX of tagged
+    # and untagged rows cannot be proven to match, so it is skipped.  Every
+    # row must carry an ID when the set is HYBRID or includes an fv3_duo
+    # hydrostatic row (the duo runs CAM6 L32 whatever the row's label, so a
+    # pre-ID tree at LEGOESM_MATRIX_NLEV=32 pairs it with a different
+    # 32-level table by index; legacy duo rows are recognised by their
+    # note).  Other untagged sets (e.g. DCMIP transport: one shared sigma-30
+    # table on every grid) keep the level-count check below.
+    _notes = {g: grid_results[g].get("metadata", {}).get("notes", "")
+              for g in zonal_means}
+    table_ids = {g: _vertical_table_id(n) for g, n in _notes.items()}
+    _ids = set(table_ids.values())
+    _need_ids = any(
+        grid_results[g].get("vertical_coord") == "hybrid"
+        or "FV3DuoDynamicsModel" in _notes[g] for g in zonal_means)
+    if len(_ids) > 1 or (_need_ids and None in _ids):
+        print(
+            f"    [comparison] cross-grid RMS for {field}: vertical tables "
+            f"differ across grids ({table_ids}); skipping metric."
+        )
+        return None
+
     # Verify nlev consistency across grids.
     nlev_per_grid = {g: zm.shape[1] for g, zm in zonal_means.items()}
     nlev_set = set(nlev_per_grid.values())
@@ -7913,7 +8046,9 @@ def main():
             out_dir, tc,
             title=f"atmosphere test-case namelist: {tc.output_path}",
             extra={"radiation": args.radiation, "days_run": days,
-                   "quick": bool(args.quick)},
+                   "quick": bool(args.quick),
+                   **({"vertical_table": _vt}
+                      if (_vt := _namelist_vertical_table(tc)) else {})},
         )
 
         label = f"{tc.equation_set}/{tc.case}/{tc.grid_type}"

@@ -58,11 +58,123 @@ def matrix():
     return mod
 
 
-def test_matrix_override_unset_is_the_standard_tier(matrix, monkeypatch):
+def test_matrix_hybrid_unset_is_cam6_l32(matrix, monkeypatch):
+    """No probe knob: every grid's hybrid rows run the cube duo's CAM6 L32."""
+    from legoesm.grids.vertical import make_cam6_l32_levels
     monkeypatch.delenv("LEGOESM_MATRIX_TRANSITION_EXPONENT", raising=False)
-    np.testing.assert_array_equal(
-        np.asarray(matrix._create_vertical(40, "hybrid").B_half),
-        np.asarray(standard_hybrid_levels(40).B_half))
+    monkeypatch.delenv("LEGOESM_MATRIX_NLEV", raising=False)
+    got, ref = matrix._create_vertical(40, "hybrid"), make_cam6_l32_levels()
+    assert got.n_levels == 32
+    np.testing.assert_array_equal(np.asarray(got.A_half), np.asarray(ref.A_half))
+    np.testing.assert_array_equal(np.asarray(got.B_half), np.asarray(ref.B_half))
+    assert matrix._vertical_table_id(
+        matrix._vertical_table_label("hybrid", got)) == "cam6_l32"
+    # sigma rows are untouched by the switch
+    assert matrix._create_vertical(40, "sigma").n_levels == 40
+
+
+def test_matrix_nlev_override_selects_the_analytic_tier(matrix, monkeypatch):
+    monkeypatch.delenv("LEGOESM_MATRIX_TRANSITION_EXPONENT", raising=False)
+    monkeypatch.setenv("LEGOESM_MATRIX_NLEV", "40")
+    got = matrix._create_vertical(40, "hybrid")
+    np.testing.assert_array_equal(np.asarray(got.B_half),
+                                  np.asarray(standard_hybrid_levels(40).B_half))
+    assert matrix._vertical_table_id(matrix._vertical_table_label(
+        "hybrid", got)) == "analytic_hybrid_L40_exp3"
+
+
+def test_cross_grid_rms_refuses_different_tables(matrix):
+    """Equal level counts are not enough: the tables must be the same."""
+    arr = np.ones((3, 4, 8, 32))           # (time, lat, lon, lev)
+    snap = {"T_3d": arr, "lat": np.linspace(-90, 90, 4)}
+
+    class _Snap(dict):
+        files = property(lambda self: list(self))
+
+    def row(table):
+        return {"snapshots": _Snap(snap),
+                "metadata": {"notes": f"x; vertical table: {table} (y)"}}
+
+    same = {"cubed_sphere": row("cam6_l32"), "latlon": row("cam6_l32")}
+    assert matrix._compute_cross_grid_rms_agreement(same, "T_3d") is not None
+    diff = {"cubed_sphere": row("cam6_l32"),
+            "latlon": row("analytic_hybrid_L32_exp3")}
+    assert matrix._compute_cross_grid_rms_agreement(diff, "T_3d") is None
+    assert matrix._vertical_table_id("a; vertical table: cam6_l32-v2 (x)") is None
+    assert matrix._vertical_table_id("a; vertical table: cam6_l32") == "cam6_l32"
+    untagged = {"cubed_sphere": row("cam6_l32"),
+                "latlon": {"snapshots": _Snap(snap), "metadata": {"notes": "x"}}}
+    assert matrix._compute_cross_grid_rms_agreement(untagged, "T_3d") is None
+    legacy = {g: {"snapshots": _Snap(snap), "metadata": {"notes": "x"}}
+              for g in ("cubed_sphere", "latlon")}
+    assert matrix._compute_cross_grid_rms_agreement(legacy, "T_3d") is not None
+    # ... but an untagged HYBRID tree is refused: equal counts hid different
+    # tables there (analytic L32 off-cube vs CAM6 L32 on the cube)
+    for r in legacy.values():
+        r["vertical_coord"] = "hybrid"
+    assert matrix._compute_cross_grid_rms_agreement(legacy, "T_3d") is None
+    # ... and so is an untagged SIGMA tree containing an fv3_duo row (the
+    # duo runs CAM6 L32 under any label), while untagged sigma rows with no
+    # duo (DCMIP transport: one shared table) keep the count fallback
+    for r in legacy.values():
+        r["vertical_coord"] = "sigma"
+    assert matrix._compute_cross_grid_rms_agreement(legacy, "T_3d") is not None
+    legacy["cubed_sphere"]["metadata"]["notes"] = (
+        "mass drift=0; fv3_duo FV3DuoDynamicsModel km=32 eta=cam6_l32")
+    assert matrix._compute_cross_grid_rms_agreement(legacy, "T_3d") is None
+
+
+@pytest.mark.parametrize("nlev_env,exp_env,want", [
+    ("40", None, "analytic_hybrid_L40_exp3"),   # tier default resolved
+    ("20", None, "analytic_hybrid_L20_exp2"),   # a different tier
+    (None, "2", "analytic_hybrid_L40_exp2"),    # exponent alone -> L40
+    ("32", "2", "analytic_hybrid_L32_exp2"),
+])
+def test_analytic_tag_records_effective_nlev_and_exp(matrix, monkeypatch,
+                                                     nlev_env, exp_env, want):
+    """Either probe knob opts into the analytic table; the row tag and the
+    namelist both carry its effective level count and B = eta**exp power."""
+    for k, v in (("LEGOESM_MATRIX_NLEV", nlev_env),
+                 ("LEGOESM_MATRIX_TRANSITION_EXPONENT", exp_env)):
+        if v is None:
+            monkeypatch.delenv(k, raising=False)
+        else:
+            monkeypatch.setenv(k, v)
+    nlev = int(nlev_env) if nlev_env else 40
+    monkeypatch.setattr(matrix, "DEFAULT_NLEV", nlev)
+    sig = matrix._create_vertical(nlev, "hybrid")
+    label = matrix._vertical_table_label("hybrid", sig)
+    assert matrix._vertical_table_id(label) == want
+    n, e = want.split("_L")[1].split("_exp")
+    assert f"analytic (nlev={n}, exp={e})" in label
+    nl = matrix._namelist_vertical_table(matrix.TestCase(
+        "hydrostatic", "held_suarez", "latlon", "72x144", "hybrid", 1, 1))
+    assert nl.split()[0] == want and f"analytic (nlev={n}, exp={e})" in nl
+
+
+def test_namelist_vertical_table_default_and_scope(matrix, monkeypatch):
+    monkeypatch.delenv("LEGOESM_MATRIX_NLEV", raising=False)
+    monkeypatch.delenv("LEGOESM_MATRIX_TRANSITION_EXPONENT", raising=False)
+    mk = lambda g, v, eq="hydrostatic": matrix.TestCase(
+        eq, "held_suarez", g, "x", v, 1, 1)
+    assert matrix._namelist_vertical_table(
+        mk("latlon", "hybrid")).split()[0] == "cam6_l32"
+    assert matrix._namelist_vertical_table(
+        mk("cubed_sphere", "hybrid")).split()[0] == "cam6_l32"
+    assert matrix._namelist_vertical_table(mk("latlon", "sigma")) is None
+    assert matrix._namelist_vertical_table(
+        matrix.TestCase("hydrostatic", "amip", "cubed_sphere", "C36",
+                        "hybrid", 1, 1)) is None   # skipped row
+    monkeypatch.setenv("LEGOESM_MATRIX_TRANSITION_EXPONENT", "+2")
+    assert matrix._namelist_vertical_table(
+        mk("latlon", "hybrid")).startswith("invalid")   # no crash
+    monkeypatch.delenv("LEGOESM_MATRIX_TRANSITION_EXPONENT")
+    assert matrix._namelist_vertical_table(
+        mk("latlon", "hybrid", "nonhydrostatic")) is None
+    # the cube ignores the probe knobs: it always runs CAM6 L32
+    monkeypatch.setenv("LEGOESM_MATRIX_NLEV", "40")
+    assert matrix._namelist_vertical_table(
+        mk("cubed_sphere", "hybrid")).split()[0] == "cam6_l32"
 
 
 def test_matrix_override_selects_exponent_two(matrix, monkeypatch):

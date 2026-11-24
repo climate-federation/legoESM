@@ -25,7 +25,10 @@ import run_atmosphere_test_matrix as runner  # noqa: E402
 
 z = np.load(sys.argv[1])
 grid = create_latlon_grid(72, 144)
-sigma = runner._create_vertical(40, "hybrid")
+# the archived #1029 states are on the analytic L40 hybrid table (the matrix
+# hybrid default is now CAM6 L32), so pin it explicitly
+from legoesm.grids.vertical import standard_hybrid_levels
+sigma = standard_hybrid_levels(40)
 st = CGridLatLonHydrostaticState(**{k: jnp.asarray(z[k]) for k in ("u", "v", "T", "p_s", "phis")})
 nu = runner._biharmonic_visc_latlon(72)
 dt = 200.0
