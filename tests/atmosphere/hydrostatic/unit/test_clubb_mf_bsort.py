@@ -12,7 +12,6 @@ import argparse
 import hashlib
 import json
 import math
-import subprocess
 import types
 from pathlib import Path
 
@@ -37,9 +36,8 @@ GAPS = FIXTURE.with_name("clubb_mf_bsort_default_gaps.json")
 REPO = Path(__file__).resolve().parents[4]
 EXTRA = ("thl_zm", "qt_zm", "thv_zm")
 SWITCHES = tuple(f for f in MFSmoothing._fields if f.startswith("bsort_"))
-# Immutable main revision from which this worktree branched. This is executable
-# pre-change code, not a second implementation of the modified function.
-MAIN = "5ffaa759bf543e7f598a7a6b1bfbace139aff509"
+# Vendored verbatim from 097655038e^2 (origin/main merge parent, with alphturb).
+PRE_BSORT = Path(__file__).with_name("_clubb_mf_pre_bsort.py.txt")
 SOURCE = "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mf.py"
 
 
@@ -49,17 +47,24 @@ def fx():
 
 
 def _cols(fx):
-    return {k: jnp.asarray(fx[f"c_{k}"]) for k in C_KEYS + EXTRA}
+    return {k: jnp.asarray(fx[f"c_{k}"]) for k in C_KEYS + EXTRA + ("tke",)}
 
 
 _RUN = {}
 
 
-def _run(fx, sm, step, memory=None):
-    if sm not in _RUN:
-        _RUN[sm] = jax.jit(jax.vmap(lambda c, e, z: integrate_mf(c, e, z, sm, bsort=True)))
-    return _RUN[sm](_cols(fx), jnp.asarray(fx[f"ora{step}_enti"]),
+def _run(fx, sm, step, memory=None, alphturb=0.0):
+    key = (sm, alphturb)
+    if key not in _RUN:
+        _RUN[key] = jax.jit(jax.vmap(lambda c, e, z: integrate_mf(
+            c, e, z, sm, alphturb=alphturb, bsort=True)))
+    return _RUN[key](_cols(fx), jnp.asarray(fx[f"ora{step}_enti"]),
                     jnp.asarray(fx[f"ora{step}_ztopm1_in"]) if memory is None else memory)
+
+
+def _rel_columns(a, b):
+    """One field normalised within each column; all-zero oracle uses absolute error."""
+    return [_rel(ai, bi) for ai, bi in zip(a, b, strict=True)]
 
 
 def test_fixture_provenance_and_nonvacuity(fx):
@@ -81,15 +86,24 @@ def test_fixture_provenance_and_nonvacuity(fx):
 @pytest.mark.parametrize("step", [1, 2])
 def test_hard_limit_matches_cam_oracle(fx, step):
     got = _run(fx, HARD, step)
-    errors = {k: _rel(np.asarray(got[k]), fx[f"ora{step}_{k}"]) for k in FIELDS}
-    assert max(errors.values()) <= TOL, errors
+    errors = {k: _rel_columns(np.asarray(got[k]), fx[f"ora{step}_{k}"]) for k in FIELDS}
+    assert max(max(values) for values in errors.values()) <= TOL, errors
+
+
+@pytest.mark.parametrize("step", [1, 2])
+def test_bsort_alphturb3_hard_limit_matches_cam_oracle(step):
+    fx = dict(np.load(FIXTURE.with_name("clubb_mf_bsort_alphturb3.npz"), allow_pickle=True))
+    assert json.loads(str(fx["meta"]))["init_reals"][4] == 3.0
+    got = _run(fx, HARD, step, alphturb=3.0)
+    errors = {k: _rel_columns(np.asarray(got[k]), fx[f"ora{step}_{k}"]) for k in FIELDS}
+    assert max(max(values) for values in errors.values()) <= TOL, errors
 
 
 def test_second_call_uses_first_calls_memory(fx):
     first = _run(fx, HARD, 1)
     second = _run(fx, HARD, 2, first["ztopm1"])
     for k in FIELDS:
-        assert _rel(np.asarray(second[k]), fx[f"ora2_{k}"]) <= TOL, k
+        assert max(_rel_columns(np.asarray(second[k]), fx[f"ora2_{k}"])) <= TOL, k
     reset = _run(fx, HARD, 2, jnp.asarray(fx["ora1_ztopm1_in"]))
     assert np.any(np.asarray(second["upa"]) != np.asarray(reset["upa"]))
 
@@ -102,8 +116,7 @@ def _gaps(fx):
         for step in (1, 2):
             got = _run(fx, sm, step)
             gaps[f"{switch}_step{step}"] = {
-                k: [_rel(np.asarray(got[k][i]), fx[f"ora{step}_{k}"][i])
-                    for i in range(fx["c_zm"].shape[0])]
+                k: _rel_columns(np.asarray(got[k]), fx[f"ora{step}_{k}"])
                 for k in FIELDS
             }
     return gaps
@@ -123,19 +136,19 @@ def test_default_gaps_per_column_and_call(fx):
 
 @pytest.fixture(scope="module")
 def main_module():
-    source = subprocess.check_output(["git", "show", f"{MAIN}:{SOURCE}"], cwd=REPO, text=True)
-    mod = types.ModuleType("clubb_mf_main_reference")
-    exec(compile(source, f"{MAIN}:{SOURCE}", "exec"), mod.__dict__)
+    mod = types.ModuleType("clubb_mf_pre_bsort_reference")
+    exec(compile(PRE_BSORT.read_text(), str(PRE_BSORT), "exec"), mod.__dict__)
     return mod
 
 
+@pytest.mark.parametrize("alphturb", [0.0, 3.0])
 @pytest.mark.parametrize("hard", [False, True])
 @pytest.mark.parametrize("step", [1, 2])
-def test_bsort_off_is_bitwise_main(fx, main_module, hard, step):
+def test_bsort_off_is_bitwise_main(fx, main_module, hard, step, alphturb):
     old_sm = main_module.HARD if hard else main_module.MFSmoothing()
     new_sm = HARD if hard else MFSmoothing()
-    old = jax.jit(jax.vmap(lambda c, e, z: main_module.integrate_mf(c, e, z, old_sm)))
-    new = jax.jit(jax.vmap(lambda c, e, z: integrate_mf(c, e, z, new_sm, bsort=False)))
+    old = jax.jit(jax.vmap(lambda c, e, z: main_module.integrate_mf(c, e, z, old_sm, alphturb=alphturb)))
+    new = jax.jit(jax.vmap(lambda c, e, z: integrate_mf(c, e, z, new_sm, alphturb=alphturb, bsort=False)))
     args = (_cols(fx), jnp.asarray(fx[f"ora{step}_enti"]), jnp.asarray(fx[f"ora{step}_ztopm1_in"]))
     before, after = old(*args), new(*args)
     assert before.keys() == after.keys()
@@ -185,7 +198,7 @@ def test_zero_entrainment_continuation_has_the_correct_value_and_slope():
 
 
 def _gradient_function(switch, sm):
-    """Place production helpers on each transition, others hard; no clone of switch maths."""
+    """Place production helpers on each transition; no clone of switch maths."""
     if switch == "bsort_xc":
         return lambda x: bsort_clip(0.005 + 0.01 * x, sm.bsort_xc)
     if switch == "bsort_area":
@@ -222,9 +235,9 @@ def _gradient_function(switch, sm):
 
 @pytest.mark.parametrize("switch", SWITCHES)
 def test_check_grads_through_each_new_switch_at_default(switch):
-    sm = HARD._replace(**{switch: getattr(MFSmoothing(), switch)})
+    sm = MFSmoothing()
     f = _gradient_function(switch, sm)
-    hard = _gradient_function(switch, HARD)
+    hard = _gradient_function(switch, sm._replace(**{switch: math.inf}))
     x = jnp.asarray(0.0)
     g, gh = float(jax.grad(f)(x)), float(jax.grad(hard)(x))
     assert math.isfinite(g) and g != 0.0

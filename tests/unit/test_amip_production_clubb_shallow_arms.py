@@ -94,10 +94,9 @@ def test_bsort_strict_refuses_without_mf_or_non_bool(value):
 
 def test_bsort_builder_refuses_without_mf_and_ignored_override():
     from legoesm.driver.physics_pipeline import turbulence_config_for
-    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     cfg = _cfg("amip_production_clubb_mf_bsort.yaml")
     with pytest.raises(ValueError, match="clubb_mf_bsort"):
         turbulence_config_for(cfg._replace(clubb_mf=False))
+    override = turbulence_config_for(cfg)._replace(clubb_mf_bsort=False)
     with pytest.raises(ValueError, match="clubb_mf_bsort"):
-        turbulence_config_for(cfg._replace(turbulence_override=TurbulenceConfig(
-            scheme="clubb", clubb_mf=True)))
+        turbulence_config_for(cfg._replace(turbulence_override=override))
