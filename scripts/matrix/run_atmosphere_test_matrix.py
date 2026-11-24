@@ -4769,13 +4769,20 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         dcmip13_wind_geo, dcmip13_tracers_at_points,
     )
 
+    # ``vertical``: the prescribed-wind models' vertical transport, selected
+    # explicitly per test.  1-1/1-2 use the FV3 Lagrangian remap (split,
+    # horizontal step then remap, as FV3); 1-3 stays upwind because its
+    # terrain-crossing sigma_dot is nonzero at the top and surface, which
+    # the remap refuses (mass would leave the column).  The cube row runs
+    # the legacy cube model, which has no remap option; the icosahedral
+    # (MPAS) rows select their own vertical transport in their branch.
     TC_CFGS = {
         11: {"wind_geo": dcmip11_wind_geo, "period": 12.0,
-             "dt": 1800.0, "n_tracers": 4},
+             "dt": 1800.0, "n_tracers": 4, "vertical": "fv3_remap"},
         12: {"wind_geo": dcmip12_wind_geo, "period": 1.0,
-             "dt": 600.0, "n_tracers": 1},
+             "dt": 600.0, "n_tracers": 1, "vertical": "fv3_remap"},
         13: {"wind_geo": dcmip13_wind_geo, "period": 12.0,
-             "dt": 1800.0, "n_tracers": 4},
+             "dt": 1800.0, "n_tracers": 4, "vertical": "upwind"},
     }
     cfg = TC_CFGS[test_num]
     nlev = 30
@@ -4845,7 +4852,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         state_init = init_fns[test_num](grid, sigma_coord)
         model = TracerTransportLatLonModel(
             grid, sigma_coord, latlon_wind,
-            TracerTransportLatLonConfig())
+            TracerTransportLatLonConfig(vertical_scheme=cfg["vertical"]))
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -4882,7 +4889,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         model = TracerTransportMPASModel(
             grid, sigma_coord, mpas_wind,
             TracerTransportMPASConfig(
-                hyperdiff_coeff=0.0, time_integrator="mpas_rk3",
+                hyperdiff_coeff=0.0, time_integrator="mpas_rk3", vertical_scheme="upwind",
                 horizontal_scheme="mpas_fct", coef_3rd_order=0.25,
                 fct_smoothing_width=1.0e-4, fct_upwind_width_ms=1.0e-3))
         coord_kind = "icosa"
@@ -4905,7 +4912,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
 
         model = SpectralTracerTransportModel(
             create_gaussian_grid(n_max), sigma_coord, spectral_wind,
-            TracerTransportSpectralConfig())
+            TracerTransportSpectralConfig(vertical_scheme=cfg["vertical"]))
         grid = model.grid
         # The lat-lon init helpers read only lon2d/lat2d/n_lat/n_lon, which
         # the Gaussian grid exposes too: same analytic IC as the lat-lon row.
@@ -4998,17 +5005,16 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             f"L2={norms['l2'][i]:.4e} Linf={norms['linf'][i]:.4e}"
             for i in range(n_tracers)]
     if ok and hasattr(state_final, "air_mass"):
-        # RULE 0 record: air mass and per-tracer mass, sum(area dp [q]).
-        def _masses(s):
-            dp_ = np.asarray(s.air_mass.data, np.float64)
-            q_ = np.asarray(s.tracers.data, np.float64)
-            w_ = np.asarray(_area_for_mean, np.float64)[:, None] * dp_
-            return w_.sum(), (w_[..., None] * q_).sum(axis=(0, 1))
-        am0, tm0 = _masses(state_init)
-        am1, tm1 = _masses(state_final)
+        # RULE 0 record: global air mass sum(area dp); the per-tracer mass
+        # sum(area q dp) is the audit below.
+        def _air(s):
+            if s.air_mass.data.shape != (np.asarray(_area_for_mean).shape[0], nlev):
+                raise RuntimeError(f"DCMIP air-mass audit: air_mass shape "
+                                   f"{s.air_mass.data.shape} != (nCells, {nlev})")
+            return float((np.asarray(_area_for_mean, np.float64)[:, None]
+                          * np.asarray(s.air_mass.data, np.float64)).sum())
+        am0, am1 = _air(state_init), _air(state_final)
         notes_parts.append(f"air-mass rel change {am1 / am0 - 1.0:.3e}")
-        notes_parts += [f"q{i + 1} mass rel change {tm1[i] / tm0[i] - 1.0:.3e}"
-                        for i in range(n_tracers)]
     if test_num in (11, 12) and tc.grid_type == "spectral":
         # Initialization (projection + Orszag truncation) error alone, so
         # the transport error can be separated from it.
@@ -5016,6 +5022,46 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             to_grid(state_init), state_init_grid, _area_ns)
         notes_parts.append("IC-projection " + ", ".join(
             f"q{i + 1} L2={ic_norms['l2'][i]:.4e}"
+            for i in range(n_tracers)))
+    # RULE 0 audit, every grid/test/scheme: per-tracer global tracer mass
+    # at the start and end and its relative residual.  Models without a
+    # prognostic air mass: sum(area * sum_k q dsigma) (uniform p_s, so
+    # dsigma ~ dp/p_s; "mass[q dsigma]"); the MPAS mpas_fct state carries
+    # dp: sum(area * sum_k q dp) [Pa m^2] ("mass[q dp]").  The
+    # advective-form prescribed-wind models do NOT conserve it (declared).
+    _q0 = np.asarray(to_grid(state_init).tracers.data, dtype=np.float64)
+    _q1 = np.asarray(to_grid(state_final).tracers.data, dtype=np.float64)
+    _ar = np.asarray(_area_for_mean, dtype=np.float64)
+    _dsg = np.diff(np.asarray(sigma_coord.sigma_half, dtype=np.float64))
+    _want = (*_ar.shape, nlev, n_tracers)
+    if _q0.shape != _want or _q1.shape != _want:
+        # never a PASS with an unmeasured (or mis-broadcast) budget
+        raise RuntimeError(
+            f"DCMIP mass audit: tracer shapes {_q0.shape}/{_q1.shape} != "
+            f"(area {_ar.shape}, nlev {nlev}, ntr {n_tracers})")
+    if not (np.all(np.isfinite(_q0)) and np.all(np.isfinite(_q1))):
+        notes_parts.append("mass audit unavailable: non-finite tracer state")
+    else:
+        def _mass(q, s):
+            # prognostic layer air mass (MPAS mpas_fct): the conserved
+            # tracer mass is sum(area q dp) [Pa m^2]; else q dsigma
+            w = (np.asarray(s.air_mass.data, np.float64)
+                 if hasattr(s, "air_mass") else _dsg)
+            if hasattr(s, "air_mass") and w.shape != _want[:-1]:
+                raise RuntimeError(f"DCMIP mass audit: air_mass shape {w.shape}"
+                                   f" != {_want[:-1]}")
+            col = np.sum(q * w[..., None], axis=-2)   # (..., ntr)
+            return np.sum(col * _ar[..., None],
+                          axis=tuple(range(col.ndim - 1)))
+        _m0, _m1 = _mass(_q0, state_init), _mass(_q1, state_final)
+        if not (np.all(np.isfinite(_m0)) and np.all(np.isfinite(_m1))):
+            raise RuntimeError(f"DCMIP mass audit: non-finite budget "
+                               f"M0={_m0} M1={_m1}")
+        notes_parts.append(("mass[q dp] " if hasattr(state_final, "air_mass")
+                            else "mass[q dsigma] ") + ", ".join(
+            f"q{i + 1} M0={_m0[i]:.15e} M1={_m1[i]:.15e} "
+            f"rel={(_m1[i] - _m0[i]) / _m0[i]:+.6e}"
+            if _m0[i] != 0.0 else f"q{i + 1} M0=0 M1={_m1[i]:.15e}"
             for i in range(n_tracers)))
     notes = ", ".join(notes_parts)
 
@@ -5027,6 +5073,11 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "levels": nlev, "period_days": period, "dt": dt,
+        "vertical_scheme": ("upwind (legacy cube model)"
+                            if tc.grid_type == "cubed_sphere"
+                            else model.config.vertical_scheme
+                            if tc.grid_type == "icosahedral"
+                            else cfg["vertical"]),
         "status": "PASS" if ok else "FAIL", "notes": notes,
         "wall_time": f"{wall:.1f}s"},
         diag=diag)  # iter-99: surface BLOWUP info if any

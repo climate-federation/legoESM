@@ -44,7 +44,9 @@ from legoesm.core.operators_voronoi import (
     cell_to_edge_avg_3d,
 )
 from legoesm.grids.voronoi import VoronoiMesh
-from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
+from legoesm.grids.vertical import (
+    SigmaCoordinate, check_tracer_vertical_scheme, vertical_advection,
+    vertical_remap_sigma_fv3)
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 
@@ -63,6 +65,12 @@ class TracerTransportMPASConfig(NamedTuple):
     """Configuration for MPAS tracer transport model."""
     hyperdiff_coeff: float = 0.0
     time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45" | "mpas_rk3"
+    #: "upwind" (in-tendency) | "fv3_remap": the horizontal SSP-RK step runs
+    #: alone, then a split FV3 Lagrangian vertical remap
+    #: (``grids.vertical.vertical_remap_sigma_fv3``, sigma_dot at mid-step).
+    #: ``horizontal_scheme="mpas_fct"`` runs with "upwind" only (its own
+    #: coupling, see :func:`mpas_rk3_fct_step`).
+    vertical_scheme: str = "upwind"
     # Horizontal scheme: "centred2" (advective form, centred two-cell edge
     # average, any ``dispatch_integrator`` scheme) or "mpas_fct" (MPAS-A
     # scalar transport; needs ``time_integrator="mpas_rk3"`` and a
@@ -84,6 +92,10 @@ MPAS_MONO_EPS = 1.0e-20
 
 def validate_tracer_transport_mpas_config(config: TracerTransportMPASConfig) -> None:
     """Raise on an unknown horizontal scheme or an integrator it cannot use."""
+    check_tracer_vertical_scheme(config.vertical_scheme)
+    if config.horizontal_scheme == "mpas_fct" and config.vertical_scheme != "upwind":
+        raise ValueError("horizontal_scheme='mpas_fct' couples its own vertical transport; "
+                         f"vertical_scheme must be 'upwind' (got {config.vertical_scheme!r})")
     if config.horizontal_scheme not in HORIZONTAL_SCHEMES:
         raise ValueError(f"unknown horizontal_scheme {config.horizontal_scheme!r}; "
                          f"expected one of {HORIZONTAL_SCHEMES}")
@@ -237,13 +249,18 @@ def tracer_tendencies_mpas(
         raise ValueError("tracer_tendencies_mpas is the centred2 method-of-lines form; "
                          f"horizontal_scheme={config.horizontal_scheme!r} steps with "
                          "mpas_rk3_fct_step")
+    check_tracer_vertical_scheme(config.vertical_scheme)
     t = state.time.data  # scalar time
     q = state.tracers.data  # (nCells, nlev, n_tracers)
 
     # Get prescribed winds at current time
     u_edge, sigma_dot = wind_fn(t, mesh, sigma_coord)  # (nEdges, nlev), (nCells, nlev+1)
 
-    dq_dt = tracer_advection_tendency(q, u_edge, sigma_dot, mesh, sigma_coord)
+    if config.vertical_scheme == "fv3_remap":
+        dq_dt = tracer_horizontal_advection(q, u_edge, mesh)
+    else:
+        dq_dt = tracer_advection_tendency(q, u_edge, sigma_dot, mesh,
+                                          sigma_coord)
 
     # Hyperdiffusion placeholder — MPAS scalar hyperdiffusion is not yet
     # available in operators_voronoi; tendency contribution is zero.
@@ -326,9 +343,16 @@ class TracerTransportMPASModel(IntegrationMixin):
                 s, self.mesh, self.sigma_coord, self.wind_fn, self.config
             )
 
-        return dispatch_integrator(
+        new = dispatch_integrator(
             state, tendency_fn, dt, self.config.time_integrator,
         )
+        if self.config.vertical_scheme != "fv3_remap":
+            return new
+        _, sigma_dot = self.wind_fn(state.time.data + 0.5 * dt, self.mesh,
+                                    self.sigma_coord)
+        q = vertical_remap_sigma_fv3(
+            new.tracers.data, sigma_dot, self.sigma_coord, dt)
+        return new._replace(tracers=new.tracers.replace(data=q))
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
 

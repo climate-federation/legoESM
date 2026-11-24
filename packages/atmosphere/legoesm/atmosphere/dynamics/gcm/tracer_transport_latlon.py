@@ -11,7 +11,13 @@ advective form is correct for prescribed-wind transport because there
 is no companion continuity equation to be mass-consistent with, and
 it preserves uniform tracers exactly regardless of wind divergence.
 Vertical advection uses the shared upwind operator from
-grids.vertical.
+grids.vertical (``vertical_scheme="upwind"``, default), or -- with
+``vertical_scheme="fv3_remap"`` -- the FV3 way: the horizontal SSP-RK step
+runs alone, then the layer interfaces are displaced by ``dt * sigma_dot``
+(sigma_dot at the step mid-time) and the tracer is remapped back to the
+fixed levels with the certified duo remap
+(``grids.vertical.vertical_remap_sigma_fv3``).  Lie splitting, horizontal
+then vertical, as FV3 does within each remap step.
 
 Prescribed winds are evaluated directly at C-grid face coordinates
 (u at longitude interfaces, v at latitude interfaces) to avoid
@@ -34,7 +40,9 @@ import jax.numpy as jnp
 from legoesm.core.state import TracerState
 from legoesm.core.operators_fv_latlon_3d import cgrid_fv_scalar_advection_latlon_3d
 from legoesm.grids.latlon import LatLonGrid
-from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
+from legoesm.grids.vertical import (
+    SigmaCoordinate, check_tracer_vertical_scheme, vertical_advection,
+    vertical_remap_sigma_fv3)
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 
@@ -53,6 +61,9 @@ WindFnLatLon = Callable[
 class TracerTransportLatLonConfig(NamedTuple):
     """Configuration for lat-lon C-grid tracer transport model."""
     time_integrator: str = "ssp_rk3"
+    #: "upwind" (in-tendency donor cell) | "fv3_remap" (split Lagrangian
+    #: remap after the horizontal step; see module docstring).
+    vertical_scheme: str = "upwind"
 
 
 def _uface_coords(grid: LatLonGrid):
@@ -127,6 +138,7 @@ def tracer_tendencies_latlon(
     -------
     TracerState  — tendency pytree (dtracers_dt, dtime_dt=1).
     """
+    check_tracer_vertical_scheme(config.vertical_scheme)
     t = state.time.data
     q = state.tracers.data  # (n_lat, n_lon, nlev, n_tracers)
     n_lat, n_lon, nlev, n_tracers = q.shape
@@ -174,9 +186,11 @@ def tracer_tendencies_latlon(
     def _vert_one(q_one):
         return vertical_advection(q_one, sigma_dot, sigma_coord)
 
-    vert_adv = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(q)
-
-    dq_dt = horiz_adv + vert_adv
+    if config.vertical_scheme == "fv3_remap":
+        dq_dt = horiz_adv           # vertical done by the split remap
+    else:
+        vert_adv = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(q)
+        dq_dt = horiz_adv + vert_adv
 
     return TracerState(
         tracers=state.tracers.replace(data=dq_dt),
@@ -207,6 +221,7 @@ class TracerTransportLatLonModel(IntegrationMixin):
         self.sigma_coord = sigma_coord
         self.wind_fn = wind_fn
         self.config = config or TracerTransportLatLonConfig()
+        check_tracer_vertical_scheme(self.config.vertical_scheme)
 
     def tendencies(self, state: TracerState) -> TracerState:
         return tracer_tendencies_latlon(
@@ -220,6 +235,14 @@ class TracerTransportLatLonModel(IntegrationMixin):
             return tracer_tendencies_latlon(
                 s, self.grid, self.sigma_coord, self.wind_fn, self.config,
             )
-        return dispatch_integrator(
+        new = dispatch_integrator(
             state, tendency_fn, dt, self.config.time_integrator,
         )
+        if self.config.vertical_scheme != "fv3_remap":
+            return new
+        _, _, sigma_dot = self.wind_fn(
+            state.time.data + 0.5 * dt, self.grid.lon2d, self.grid.lat2d,
+            self.sigma_coord)
+        q = vertical_remap_sigma_fv3(
+            new.tracers.data, sigma_dot, self.sigma_coord, dt)
+        return new._replace(tracers=new.tracers.replace(data=q))
