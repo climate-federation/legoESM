@@ -52,6 +52,34 @@ def _load_yaml(p):
         return yaml.safe_load(fh) or {}
 
 
+def _build_spec_cfg(cfg: dict, first_year: int):
+    """The fine-tune's spectral config from the merged suite cfg."""
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+    from legoesm.training.campaign_driver import pressure_surface_flags
+    from legoesm.training.losses import LossConfig
+    from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
+    return NeuralGCMSpectralConfig(
+        n_max=int(cfg["n_max"]), n_levels=int(cfg["nlev"]), dt=float(cfg["dt"]),
+        pe_config=SpectralPEConfig(
+            hyperdiff_coeff=2.5e15, hyperdiff_order=2, time_integrator="ssp_rk3",
+            spectral_filter_strength=0.01, spectral_filter_order=8,
+            # Forwarded so a suite's dry-mass anchor is not silently
+            # ignored on the prescribed-SST lane; default False keeps
+            # every existing AMIP run byte-identical.
+            fix_mass=bool(cfg.get("fix_mass", False)),
+            anchor_mass_to_initial=bool(
+                cfg.get("anchor_mass_to_initial", False)),
+            # Same suite key as run_aimip (default off): a checkpoint trained
+            # with the pressure-surface T damping keeps it here.
+            T_damping_pressure_surfaces=pressure_surface_flags(
+                cfg, "spectral", where="AIMIP suite (AMIP fine-tune)")[
+                    "spectral_t_damping_pressure_surfaces"],
+        ),
+        n_epochs=1, n_train_days=1, start_year=first_year,
+        loss_config=LossConfig(),
+    )
+
+
 def _merged_cfg(suite_path: Path, variant: str = "classical") -> dict:
     suite = _load_yaml(suite_path)
     base = _load_yaml(Path(suite["base"]))
@@ -166,24 +194,19 @@ def main():
         # PhysicsState all read cfg["aimip_convection"].
         cfg["aimip_convection"] = args.convection_scheme
         logger.info(f"convection override: {cfg['aimip_convection']}")
-    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
-    from legoesm.training.losses import LossConfig
-    from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
-    spec_cfg = NeuralGCMSpectralConfig(
-        n_max=int(cfg["n_max"]), n_levels=int(cfg["nlev"]), dt=float(cfg["dt"]),
-        pe_config=SpectralPEConfig(
-            hyperdiff_coeff=2.5e15, hyperdiff_order=2, time_integrator="ssp_rk3",
-            spectral_filter_strength=0.01, spectral_filter_order=8,
-            # Forwarded so a suite's dry-mass anchor is not silently
-            # ignored on the prescribed-SST lane; default False keeps
-            # every existing AMIP run byte-identical.
-            fix_mass=bool(cfg.get("fix_mass", False)),
-            anchor_mass_to_initial=bool(
-                cfg.get("anchor_mass_to_initial", False)),
-        ),
-        n_epochs=1, n_train_days=1, start_year=args.first_year,
-        loss_config=LossConfig(),
-    )
+    spec_cfg = _build_spec_cfg(cfg, args.first_year)
+    # --init-ckpt must have been trained with this run's dycore options
+    # (legacy checkpoint without a record = all off); every save records them.
+    from legoesm.ml.checkpoint_io import check_dycore_record
+    from legoesm.training.neural_gcm_spectral import spectral_dycore_options
+    _dyo = spectral_dycore_options(spec_cfg.pe_config)
+    check_dycore_record(args.init_ckpt, _dyo, what="--init-ckpt")
+    from legoesm.ml.checkpoint_io import checkpoint_path
+    if (checkpoint_path(args.out_ckpt) != args.out_ckpt   # as save_checkpoint
+            or args.out_ckpt.is_symlink()):
+        raise SystemExit(
+            f"--out-ckpt needs a file suffix and must not be a symlink, got "
+            f"{args.out_ckpt}")
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top)
     sigma_full = jnp.asarray(sigma.sigma_full)
@@ -496,7 +519,7 @@ def main():
             # save_checkpoint is itself atomic (tmp + rename) and writes the
             # knob record beside its own path, so it saves to _ck directly.
             _ck = args.out_ckpt.with_name(args.out_ckpt.stem + "_latest_raw.eqx")
-            save_checkpoint(params, _ck)
+            save_checkpoint(params, _ck, dycore_options=_dyo)
             # BEST-drift raw params across the whole fine-tune: a late-phase
             # divergence (colnn v3: 15d drift 4.2 -> 424 K^2) must not
             # overwrite the best stability state. Drift normalised by the
@@ -506,7 +529,8 @@ def main():
             if _drift_per_day < best_drift_per_day:
                 best_drift_per_day = _drift_per_day
                 _bk = args.out_ckpt.with_name(args.out_ckpt.stem + "_best_raw.eqx")
-                save_checkpoint(params_at_drift, _bk)  # the params that produced it
+                save_checkpoint(params_at_drift, _bk,  # the params that produced it
+                                dycore_options=_dyo)
                 logger.info(
                     f"  new BEST drift/day^2 {_drift_per_day:.4f} "
                     f"[K^2/d^2 @rd={rd}d] -> {_bk.name}"
@@ -527,8 +551,9 @@ def main():
             lambda e, p0: (e - d_t * p0) / (1.0 - d_t), ema_arrays, p0_arrays,
         )
     ema_params = eqx.combine(ema_arrays, static)
-    save_checkpoint(ema_params, args.out_ckpt)
-    save_checkpoint(params, args.out_ckpt.with_name(args.out_ckpt.stem + "_raw.eqx"))
+    save_checkpoint(ema_params, args.out_ckpt, dycore_options=_dyo)
+    save_checkpoint(params, args.out_ckpt.with_name(args.out_ckpt.stem + "_raw.eqx"),
+                    dycore_options=_dyo)
     logger.info(
         f"Wrote fine-tuned params (bias-corrected EMA over {ema_steps} steps): "
         f"{args.out_ckpt}"

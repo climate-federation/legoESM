@@ -45,6 +45,12 @@ def main():
                         help="Dycore timestep [s] (600 for T42 explicit RK3)")
     parser.add_argument("--hyperdiff", type=float, default=2.5e15,
                         help="Hyperdiffusion coefficient")
+    parser.add_argument("--spectral-t-damping-pressure-surfaces",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="spectral_t_damping_pressure_surfaces",
+                        help="spectral PE: T hyperdiffusion/filter corrected to "
+                             "pressure surfaces (area-mean quadratic); default "
+                             "off (run_amip's flag)")
 
     # SFNO
     parser.add_argument("--sfno-embed", type=int, default=128,
@@ -117,6 +123,7 @@ def main():
             time_integrator="ssp_rk3",
             spectral_filter_strength=0.01,
             spectral_filter_order=8,
+            T_damping_pressure_surfaces=args.spectral_t_damping_pressure_surfaces,
         ),
         sfno_embed_dim=args.sfno_embed,
         sfno_n_blocks=args.sfno_blocks,
@@ -136,8 +143,33 @@ def main():
         f"NeuralGCM training: T{config.n_max} L{config.n_levels}, "
         f"SFNO({config.sfno_embed_dim}d, {config.sfno_n_blocks} blocks), "
         f"dt={config.dt}s, {config.n_train_days} days, "
-        f"{config.n_epochs} epochs"
+        f"{config.n_epochs} epochs, spectral_t_damping_pressure_surfaces="
+        f"{config.pe_config.T_damping_pressure_surfaces}"
     )
+
+    # LAUNCH record of the dycore option (also when off): the setting of the
+    # last launch in this directory, not a per-checkpoint record (checkpoints
+    # carry no config).  Written only once the config has passed the same
+    # refusals the training rollout's integrator applies (advective CFL,
+    # SI-hybrid, this option).
+    import json
+    import os
+    from pathlib import Path
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        check_T_damping_pressure_surfaces, check_advective_cfl,
+        refuse_semi_implicit_hybrid)
+    from legoesm.grids.vertical import create_sigma_coordinate
+    _sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
+    check_advective_cfl(int(config.n_max), config.dt, config.pe_config)
+    refuse_semi_implicit_hybrid(config.pe_config, _sigma)
+    check_T_damping_pressure_surfaces(config.pe_config, _sigma)
+    _rec = Path(config.checkpoint_dir) / "last_launch_dycore_options.json"
+    _rec.parent.mkdir(parents=True, exist_ok=True)
+    _tmp = _rec.with_name(f".{_rec.name}.{os.getpid()}.tmp")
+    _tmp.write_text(json.dumps({
+        "spectral_t_damping_pressure_surfaces":
+            bool(config.pe_config.T_damping_pressure_surfaces)}))
+    _tmp.replace(_rec)   # atomic publish
 
     sfno, loss_history = train_neural_gcm_spectral(
         config=config,

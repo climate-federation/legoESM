@@ -99,6 +99,176 @@ def read_knob_record(path) -> dict | None:
     return rec
 
 
+# Sidecar record of the dycore options a checkpoint was trained with
+# (pressure-surface T damping, DycoreConfig names; user 2026-11-24).  A
+# checkpoint without one predates the options: both are off.
+# ponytail: CONCURRENCY CONTRACT (same as the knob record and the WB
+# fingerprint; vote author/codex for, inkling abstained) -- no locks.  One
+# writer per checkpoint path (the trainers save from rank 0 only), and no
+# reader of a path while it is being written.  Within that contract every
+# interrupted save is refused (uncommitted or stamp-mismatched record), never
+# read as all off.
+DYCORE_RECORD_FORMAT = "legoesm-dycore-options"
+DYCORE_RECORD_VERSION = 1
+DYCORE_OPTION_KEYS = ("latlon_ah_pressure_surfaces",
+                      "spectral_t_damping_pressure_surfaces")
+
+
+class CheckpointDycoreMismatch(ValueError):
+    """A checkpoint was trained with different dycore options than this run."""
+
+
+def dycore_record_path(path) -> Path:
+    """``epoch_0003.eqx`` -> ``epoch_0003.eqx.dycore.json`` (full file name:
+    ``params.eqx`` and ``params.bin`` never share a record)."""
+    p = checkpoint_path(path)
+    return p.with_name(p.name + ".dycore.json")
+
+
+def _resolved_record(path):
+    """(real payload file, its sidecar): suffix rule once, then symlinks."""
+    p = checkpoint_path(path).resolve()
+    return p, p.with_name(p.name + ".dycore.json")
+
+
+def validate_dycore_options(options) -> dict:
+    """``options`` as the canonical ``{key: bool}`` dict; anything else
+    (missing/extra keys, non-bool values) raises."""
+    if (not isinstance(options, dict) or set(options) != set(DYCORE_OPTION_KEYS)
+            or not all(isinstance(options[k], bool) for k in DYCORE_OPTION_KEYS)):
+        raise ValueError(
+            f"dycore options must be exactly {DYCORE_OPTION_KEYS} as bools, "
+            f"got {options!r}")
+    return {k: options[k] for k in DYCORE_OPTION_KEYS}
+
+
+def _payload_stamp(path) -> dict:
+    """crc32 + size of a checkpoint payload file, streamed."""
+    import zlib
+
+    crc, size = 0, 0
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 24), b""):
+            crc, size = zlib.crc32(chunk, crc), size + len(chunk)
+    return {"payload_crc32": crc, "payload_size": size}
+
+
+def write_dycore_record(path, options, *, payload=None,
+                        committed: bool = True, stamp=None) -> dict:
+    """Write the dycore-options record beside checkpoint ``path`` (atomic).
+
+    The record carries the crc32/size of the payload it describes:
+    ``payload`` (default ``path`` itself).  Two-phase save protocol: publish
+    an UNCOMMITTED record stamped from the temp payload, rename the payload,
+    then rewrite the record as committed.  A save interrupted anywhere in
+    between leaves an uncommitted record, which :func:`read_dycore_record`
+    refuses -- never a payload that silently reads as all off, nor an old
+    payload relabelled by the new record.  Returns the payload stamp; the
+    commit passes phase 1's back as ``stamp`` (the renamed payload is the same
+    file under the single-writer contract) instead of re-reading it."""
+    import json
+    import os
+
+    if payload is not None and Path(path).is_symlink():
+        raise ValueError(f"a recorded save cannot replace a symlink: {path}")
+    if payload is None:   # record-only write / commit: the real file
+        real, side = _resolved_record(path)
+    else:   # phase 1: beside the literal entry the rename replaces (for a
+        # suffix-less payload, the name readers find after resolving a link)
+        real, side = payload, Path(path).with_name(Path(path).name + ".dycore.json")
+    if stamp is None:
+        stamp = _payload_stamp(real)
+    rec = {"format": DYCORE_RECORD_FORMAT, "version": DYCORE_RECORD_VERSION,
+           "committed": bool(committed),
+           **validate_dycore_options(options), **stamp}
+    tmp = side.with_name(f"{side.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(rec, sort_keys=True))
+    os.replace(tmp, side)
+    return stamp
+
+
+def fence_dycore_record(path) -> Path:
+    """Publish an uncommitted (refused) marker beside the literal entry
+    ``path`` while a record-less save replaces it; the caller removes it once
+    the save is complete.  Returns the marker's path."""
+    import json
+    import os
+
+    side = Path(path).with_name(Path(path).name + ".dycore.json")
+    tmp = side.with_name(f"{side.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps({"format": DYCORE_RECORD_FORMAT,
+                               "version": DYCORE_RECORD_VERSION,
+                               "committed": False}))
+    os.replace(tmp, side)
+    return side
+
+
+def read_dycore_record(path) -> dict:
+    """The dycore options ``path`` was trained with; all off for a checkpoint
+    written without a record (legacy).  An unknown format/version, or a
+    record whose payload stamp does not match the file (interrupted save),
+    raises.  A symlinked path is resolved first (the record sits beside the
+    real file).  ponytail: a COPY of a checkpoint must be copied with its
+    ``*.dycore.json``; a copy without it reads as legacy (all off)."""
+    import json
+
+    path, side = _resolved_record(path)
+    if not path.exists():
+        raise FileNotFoundError(f"checkpoint {path} does not exist")
+    if not side.exists():
+        if side.is_symlink():   # dangling: a record exists but is unreadable
+            raise CheckpointStructureError(f"{side}: dangling dycore record")
+        return {k: False for k in DYCORE_OPTION_KEYS}
+    try:
+        rec = json.loads(side.read_text())
+    except ValueError as exc:
+        raise CheckpointStructureError(f"{side}: not a dycore record ({exc})")
+    if (not isinstance(rec, dict) or rec.get("format") != DYCORE_RECORD_FORMAT
+            or type(rec.get("version")) is not int
+            or rec.get("version") != DYCORE_RECORD_VERSION):
+        raise CheckpointStructureError(
+            f"{side}: not a dycore record of format/version "
+            f"{DYCORE_RECORD_FORMAT!r}/{DYCORE_RECORD_VERSION}")
+    if rec.get("committed") is not True:
+        raise CheckpointStructureError(
+            f"{side} is an uncommitted record: the save of "
+            f"{path} was interrupted (an interrupted save). "
+            "Its dycore options cannot be trusted; use another checkpoint.")
+    stamp = _payload_stamp(path)
+    if any(rec.get(k) != v for k, v in stamp.items()):
+        raise CheckpointStructureError(
+            f"{side} does not describe {path} (payload "
+            f"crc/size differ: an interrupted save?). Its dycore options "
+            "cannot be trusted; use another checkpoint.")
+    try:
+        return validate_dycore_options({k: rec.get(k) for k in DYCORE_OPTION_KEYS})
+    except ValueError as exc:
+        raise CheckpointStructureError(f"{side}: not a dycore record ({exc})")
+
+
+def load_checked(path, options, load, *, what: str = ""):
+    """:func:`check_dycore_record`, then ``load()`` (one check: the
+    single-writer contract above)."""
+    check_dycore_record(path, options, what=what)
+    return load()
+
+
+def check_dycore_record(path, options, *, what: str = "") -> None:
+    """Refuse to load ``path`` into a run whose dycore options differ from
+    the ones it was trained with (a legacy checkpoint counts as all off)."""
+    want = validate_dycore_options(options)
+    have = read_dycore_record(path)
+    diff = [k for k in DYCORE_OPTION_KEYS if have[k] != want[k]]
+    if diff:
+        rows = ", ".join(f"{k}: checkpoint {have[k]}, this run {want[k]}"
+                         for k in diff)
+        raise CheckpointDycoreMismatch(
+            f"{checkpoint_path(path)}{f' ({what})' if what else ''} was trained "
+            f"with different dycore options than this run ({rows}). Set the "
+            "same option for this run (deck/suite key or CLI flag of that "
+            "name), or retrain.")
+
+
 def knob_filter_spec(path, skeleton):
     """The equinox filter spec for loading ``path`` into ``skeleton``: each
     AIMIP module's ``checkpoint_load_spec`` (fed the record beside ``path``,

@@ -2693,6 +2693,79 @@ def sb81_full_level_ln_p(
     return jnp.log(p_half_safe[..., 1:]) - alpha
 
 
+def cam_pi_B_dT_dp(
+    T: jax.Array,
+    p_s: jax.Array,
+    coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """``(pi B dT/dp)_k`` of the CAM3 partial correction of horizontal
+    temperature diffusion to pressure surfaces (Collins et al. 2004,
+    NCAR/TN-464+STR, eqs. 3.194-3.196), shape ``(..., nlev)``:
+
+        k interior: pi/(2 dp_k) [B_{k+1/2}(T_{k+1}-T_k) + B_{k-1/2}(T_k-T_{k-1})]
+        top / bottom: the single interior-interface term of the same form.
+
+    ``pi = p_s``; ``B`` the half-level B (sigma: ``sigma_half``); ``dp_k`` the
+    layer thickness.  The corrected harmonic diffusion is (eq. 3.80)
+    ``lap_p T = lap_eta T - (pi B dT/dp) lap(ln pi)``.  Zero for an
+    isothermal column.
+    """
+    if isinstance(coord, HybridSigmaPressureCoordinate):
+        B = coord.B_half.astype(T.dtype)
+        dp = dp_from_hybrid(coord, p_s)
+    else:
+        B = coord.sigma_half.astype(T.dtype)
+        dp = p_s[..., None] * coord.dsigma.astype(T.dtype)
+    if B.shape != (T.shape[-1] + 1,):
+        # A full-level (nlev) array here would silently shift every
+        # interface weight by half a level; the shapes are static.
+        raise ValueError(
+            f"cam_pi_B_dT_dp: half-level B must have nlev+1 = "
+            f"{T.shape[-1] + 1} entries, got shape {B.shape}")
+    jump = B[1:-1] * (T[..., 1:] - T[..., :-1])          # B_{k+1/2}(T_{k+1}-T_k)
+    pad = ((0, 0),) * (T.ndim - 1)
+    below = jnp.pad(jump, (*pad, (0, 1)))                # interface k+1/2
+    above = jnp.pad(jump, (*pad, (1, 0)))                # interface k-1/2
+    return p_s[..., None] * (below + above) / (2.0 * dp)
+
+
+def local_quadratic_dT_dp(
+    T: jax.Array,
+    p_full: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """``(dT/dp, d2T/dp2)`` at the full levels, shape ``(..., nlev)`` each,
+    from the quadratic in ``p`` through three adjacent levels of the column
+    (levels ``j-1, j, j+1`` with ``j = clip(k, 1, nlev-2)``: centred in the
+    interior, the nearest three-level stencil at the top and bottom).
+
+    Exact for any ``T`` quadratic in ``p`` on a nonuniform grid (pressure
+    differences only, no squared pressures: fp32-safe).  Needs ``nlev >= 3``
+    and strictly monotonic ``p_full``.
+    """
+    nlev = T.shape[-1]
+    if nlev < 3:
+        raise ValueError(f"local_quadratic_dT_dp needs nlev >= 3, got {nlev}")
+    if p_full.shape[-1] != nlev:
+        raise ValueError(
+            f"local_quadratic_dT_dp: p_full has {p_full.shape[-1]} levels, "
+            f"T has {nlev}")
+    h = p_full[..., 1:] - p_full[..., :-1]                 # (.., nlev-1)
+    slope = (T[..., 1:] - T[..., :-1]) / h                 # interface k+1/2
+    # stencil centres j = 1 .. nlev-2: the quadratic's derivatives at p_j
+    hm, hp = h[..., :-1], h[..., 1:]
+    sm, sp = slope[..., :-1], slope[..., 1:]
+    Tpp_c = 2.0 * (sp - sm) / (hm + hp)
+    Tp_c = (hp * sm + hm * sp) / (hm + hp)
+    # every level k uses the stencil centred at j = clip(k, 1, nlev-2); the
+    # quadratic's slope moves linearly: T_p(p_k) = T_p(p_j) + T_pp (p_k - p_j)
+    Tpp = jnp.concatenate([Tpp_c[..., :1], Tpp_c, Tpp_c[..., -1:]], axis=-1)
+    Tp = jnp.concatenate([
+        Tp_c[..., :1] - Tpp_c[..., :1] * h[..., :1],
+        Tp_c,
+        Tp_c[..., -1:] + Tpp_c[..., -1:] * h[..., -1:]], axis=-1)
+    return Tp, Tpp
+
+
 def compute_geopotential_hybrid(
     T: jax.Array,
     p_s: jax.Array,

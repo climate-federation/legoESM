@@ -484,6 +484,12 @@ def build_latlon_config(cfg, yml):
     elif _skin != "auto":
         raise ValueError(
             f"ice_skin_prognostic must be true, false or auto; got {_skin!r}")
+    # Pressure-surface A_h T diffusion (run_amip's flag; default off adds
+    # nothing to argv).  The spectral key is refused on this core.
+    from legoesm.training.campaign_driver import pressure_surface_flags
+    if pressure_surface_flags(yml, "latlon", where="WB campaign YAML")[
+            "latlon_ah_pressure_surfaces"]:
+        argv.append("--latlon-ah-pressure-surfaces")
     parsed = ra.build_arg_parser().parse_args(argv)
     return resolve_training_ice_skin(ra.build_config_from_args(parsed))
 
@@ -518,6 +524,9 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
     "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
     "sfno", "smoke_radiation", "spectral", "train_windows", "train_years",
     "turbulence", "warmup_steps", "weight_decay",
+    # pressure-surface T damping, one per core (campaign_driver.
+    # pressure_surface_flags; refused on the other core)
+    "latlon_ah_pressure_surfaces", "spectral_t_damping_pressure_surfaces",
 })
 # Deck metadata this trainer never reads but the decks legitimately carry
 # (documentation / other tooling).  Kept OUT of the consumed set so the
@@ -720,6 +729,7 @@ def _spectral_pe_config(yml):
     since the -0.48 K/day upwind T leak was measured).
     """
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+    from legoesm.training.campaign_driver import pressure_surface_flags
 
     _PE_DEFAULTS = SpectralPEConfig()
     spec = dict(yml.get("spectral", {}))
@@ -743,6 +753,10 @@ def _spectral_pe_config(yml):
             _PE_DEFAULTS.vertical_advection_scheme)),
         frictional_heating=bool(spec.get(
             "frictional_heating", _PE_DEFAULTS.frictional_heating)),
+        # Top-level deck key (DycoreConfig / run_amip name); default off.
+        T_damping_pressure_surfaces=pressure_surface_flags(
+            yml, "spectral", where="WB campaign YAML")[
+                "spectral_t_damping_pressure_surfaces"],
     )
 
 

@@ -50,13 +50,17 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     apply_sponge_filter,
     apply_spectral_filter_to_state,
     apply_filter_to_tracers,
+    check_T_damping_pressure_surfaces,
+    correct_T_damping_pressure_surfaces,
     anchor_lnps_to_mass,
     global_dry_mass,
 )
 from legoesm import constants
 from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
-from legoesm.ml.checkpoint_io import deserialise_knob_aware
+from legoesm.ml.checkpoint_io import (
+    check_dycore_record, deserialise_knob_aware, load_checked,
+)
 from legoesm.core.tracers import (
     make_full_moisture_registry,
     make_moisture_registry,
@@ -317,14 +321,30 @@ def _trainable_raw_values(grads) -> dict:
     return out
 
 
-def maybe_resume_model(model_template, resume_from_dir):
+def spectral_dycore_options(pe_config) -> dict:
+    """The dycore-options record (``checkpoint_io.DYCORE_OPTION_KEYS``) of a
+    run on the spectral training core: the lat-lon option cannot apply."""
+    return {"latlon_ah_pressure_surfaces": False,
+            "spectral_t_damping_pressure_surfaces":
+                pe_config.T_damping_pressure_surfaces}
+
+
+def _dycore_options_or_off(dycore_options):
+    """Omitted (None) = all off; anything else is validated by the check."""
+    return (spectral_dycore_options(SpectralPEConfig())
+            if dycore_options is None else dycore_options)
+
+
+def maybe_resume_model(model_template, resume_from_dir, *, dycore_options=None):
     """Load latest epoch checkpoint from ``resume_from_dir`` into ``model_template``.
 
     Returns ``(model, start_epoch)``.  When no checkpoint exists or
     ``resume_from_dir`` is ``None``, returns ``(model_template, 0)``.
 
     The caller is responsible for constructing ``model_template`` with
-    the same pytree structure as the saved model.
+    the same pytree structure as the saved model.  ``dycore_options`` (the
+    run's, see ``spectral_dycore_options``; omitted = all off) is checked
+    against the checkpoint's record before loading; a mismatch raises.
     """
     if resume_from_dir is None:
         return model_template, 0
@@ -333,7 +353,9 @@ def maybe_resume_model(model_template, resume_from_dir):
         return model_template, 0
     epoch_done, ckpt_path = latest
     from legoesm.ml.training import load_checkpoint
-    model = load_checkpoint(model_template, ckpt_path)
+    model = load_checked(   # omitted options = all off, still checked
+        ckpt_path, _dycore_options_or_off(dycore_options),
+        lambda: load_checkpoint(model_template, ckpt_path), what="resume")
     start_epoch = epoch_done + 1
     logger.info(
         f"Resume: loaded {ckpt_path} (last completed epoch={epoch_done}); "
@@ -375,7 +397,8 @@ MIDEPOCH_CHECKPOINT_NAME = "chunk_latest.eqx"
 
 
 def _save_midepoch_checkpoint(
-    ckpt_dir, model, opt_state, epoch, next_chunk, ema_model=None
+    ckpt_dir, model, opt_state, epoch, next_chunk, ema_model=None,
+    dycore_options=None,
 ):
     """Atomically save the mid-epoch (per-chunk) resume state.
 
@@ -398,11 +421,13 @@ def _save_midepoch_checkpoint(
         payload = (model, opt_state, _epoch_i, _chunk_i)
     else:
         payload = (model, opt_state, ema_model, _epoch_i, _chunk_i)
-    save_checkpoint(payload, ckpt_dir / MIDEPOCH_CHECKPOINT_NAME)
+    save_checkpoint(payload, ckpt_dir / MIDEPOCH_CHECKPOINT_NAME,
+                    dycore_options=dycore_options)
 
 
 def _load_midepoch_checkpoint(
-    ckpt_dir, model_template, opt_state_template, ema_template=None
+    ckpt_dir, model_template, opt_state_template, ema_template=None,
+    dycore_options=None,
 ):
     """Load the mid-epoch resume state, or ``None`` if absent.
 
@@ -420,6 +445,9 @@ def _load_midepoch_checkpoint(
     path = Path(ckpt_dir) / MIDEPOCH_CHECKPOINT_NAME
     if not path.exists():
         return None
+    check_dycore_record(   # omitted options = all off, still checked
+        path, _dycore_options_or_off(dycore_options),
+        what="mid-epoch resume")
     _zero = jnp.asarray(0, dtype=jnp.int32)
     _tmpl4 = (model_template, opt_state_template, _zero, _zero)
     # A usable EMA template for the 5-tuple attempt: the caller's, or a
@@ -1159,6 +1187,27 @@ def _add_phys_tendencies(a, b):
     )
 
 
+def _make_state_filter(pe_config, grid, sigma_coord, spectral_filter):
+    """Post-step exponential spectral filter on vor/div/T for the functional
+    rollouts.  With ``pe_config.T_damping_pressure_surfaces`` the T part gets
+    the same pressure-surface correction the model class applies to its
+    filter (``correct_T_damping_pressure_surfaces``, on the pre-filter state,
+    truncated to the de-aliased band); off, it is exactly
+    ``apply_spectral_filter_to_state`` (bit-identical to before)."""
+    if not pe_config.T_damping_pressure_surfaces or spectral_filter is None:
+        return lambda s: apply_spectral_filter_to_state(s, spectral_filter)
+    from legoesm.grids.gaussian import dealiasing_mask
+    mask = (dealiasing_mask(grid, pe_config.dealiasing_fraction)
+            if pe_config.dealiasing_fraction > 0.0 else None)
+
+    def _filter(s):
+        return correct_T_damping_pressure_surfaces(
+            grid, sigma_coord, s,
+            apply_spectral_filter_to_state(s, spectral_filter),
+            spectral_filter, mask)
+    return _filter
+
+
 def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name):
     """Build the per-step ``(state, tendency_fn) -> new_state`` integrator for the
     differentiable spectral training rollouts.
@@ -1189,6 +1238,7 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
         check_advective_cfl, refuse_semi_implicit_hybrid)
     check_advective_cfl(int(grid.n_max), dt, pe_config)
     refuse_semi_implicit_hybrid(pe_config, sigma_coord)
+    check_T_damping_pressure_surfaces(pe_config, sigma_coord)
 
     if not pe_config.semi_implicit:
         def _integrate_explicit(state, tendency_fn):
@@ -1429,6 +1479,8 @@ def spectral_rollout(
         pe_config, grid, sigma_coord, dt, integrator_name,
     )
     ms = grid.ms  # for sponge filter
+    _filter_state = _make_state_filter(
+        pe_config, grid, sigma_coord, spectral_filter)
 
     # Precompute the tracer filter (mirrors the precomputation done by
     # the model class for ordinary stepping).  ``None`` when neither
@@ -1594,9 +1646,7 @@ def spectral_rollout(
 
             # Exponential spectral filter on highest wavenumbers
             if spectral_filter is not None:
-                new_state = apply_spectral_filter_to_state(
-                    new_state, spectral_filter,
-                )
+                new_state = _filter_state(new_state)
 
             # Combined spectral + implicit hyperdiff applied to grid-space
             # tracers via one SH round-trip per tracer per step (no-op when
@@ -1840,9 +1890,7 @@ def spectral_rollout(
         if sponge_factor is not None:
             new_state = apply_sponge_filter(new_state, sponge_factor, ms)
         if spectral_filter is not None:
-            new_state = apply_spectral_filter_to_state(
-                new_state, spectral_filter,
-            )
+            new_state = _filter_state(new_state)
         if tracer_filter is not None and new_state.tracers is not None:
             new_state = new_state._replace(
                 tracers=apply_filter_to_tracers(
@@ -2130,6 +2178,8 @@ def spectral_amip_rollout(
         pe_config, grid, sigma_coord, dt, integrator_name,
     )
     ms = grid.ms  # for sponge filter
+    _filter_state = _make_state_filter(
+        pe_config, grid, sigma_coord, spectral_filter)
     tracer_filter = _compute_tracer_filter(grid, pe_config, spectral_filter, dt)
 
     # Dry-mass anchor target for THIS rollout, captured from its own initial
@@ -2196,7 +2246,7 @@ def spectral_amip_rollout(
         if sponge_factor is not None:
             new_state = apply_sponge_filter(new_state, sponge_factor, ms)
         if spectral_filter is not None:
-            new_state = apply_spectral_filter_to_state(new_state, spectral_filter)
+            new_state = _filter_state(new_state)
         if tracer_filter is not None and new_state.tracers is not None:
             new_state = new_state._replace(
                 tracers=apply_filter_to_tracers(
@@ -3644,6 +3694,7 @@ def _train_spectral_loop(
         _ema_tmpl = init_ema(model) if ema_decay > 0.0 else None
         _mid = _load_midepoch_checkpoint(
             resume_from_dir, model, opt_state, ema_template=_ema_tmpl,
+            dycore_options=spectral_dycore_options(config.pe_config),
         )
         if _mid is not None:
             if _ema_tmpl is not None:
@@ -3724,7 +3775,10 @@ def _train_spectral_loop(
                 Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
             )
             if _cand.exists():
-                ema_model = deserialise_knob_aware(_cand, ema_model)
+                ema_model = load_checked(
+                    _cand, spectral_dycore_options(config.pe_config),
+                    lambda: deserialise_knob_aware(_cand, ema_model),
+                    what="EMA resume")
                 logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(
@@ -4192,6 +4246,7 @@ def _train_spectral_loop(
                 _save_midepoch_checkpoint(
                     config.checkpoint_dir, model, opt_state,
                     _save_epoch, _save_chunk, ema_model=ema_model,
+                    dycore_options=spectral_dycore_options(config.pe_config),
                 )
                 logger.info(
                     f"Saved mid-epoch checkpoint {MIDEPOCH_CHECKPOINT_NAME} "
@@ -4255,11 +4310,12 @@ def _train_spectral_loop(
         if dp_rank == 0:
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
-            save_checkpoint(model, ckpt_path)
+            _dyo = spectral_dycore_options(config.pe_config)
+            save_checkpoint(model, ckpt_path, dycore_options=_dyo)
             logger.info(f"Saved checkpoint: {ckpt_path}")
             if ema_model is not None:
                 ema_path = ckpt_dir / f"epoch_{epoch:04d}_ema.eqx"
-                save_checkpoint(ema_model, ema_path)
+                save_checkpoint(ema_model, ema_path, dycore_options=_dyo)
                 logger.info(f"Saved EMA checkpoint: {ema_path}")
 
         # AIMIP-style early stopping.  Stop when the rolling loss has
@@ -4568,7 +4624,9 @@ def train_neural_gcm_spectral(
     logger.info(f"SFNO: {spec.n_channels}ch, {config.sfno_embed_dim}d, "
                 f"{config.sfno_n_blocks} blocks, {n_p:,} params")
 
-    sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
+    sfno, start_epoch = maybe_resume_model(
+        sfno, resume_from_dir,
+        dycore_options=spectral_dycore_options(config.pe_config))
 
     if int(config.chunk_windows or 0) > 0:
         chunk_loader, n_total = _make_chunk_loader(
@@ -4812,7 +4870,9 @@ def train_sfno_full_spectral(
         use_normalization=True,
     )
 
-    sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
+    sfno, start_epoch = maybe_resume_model(
+        sfno, resume_from_dir,
+        dycore_options=spectral_dycore_options(config.pe_config))
 
     # Host-resident dataset (#1155): sfno_full loads ALL pairs up front (no
     # chunking) — at T106 all-years that is ~130 GB, an unconditional GPU OOM
@@ -5602,7 +5662,10 @@ def _train_sfno_full_loop(
                 / f"epoch_{start_epoch - 1:04d}_ema.eqx"
             )
             if _cand.exists():
-                ema_model = deserialise_knob_aware(_cand, ema_model)
+                ema_model = load_checked(
+                    _cand, spectral_dycore_options(config.pe_config),
+                    lambda: deserialise_knob_aware(_cand, ema_model),
+                    what="EMA resume")
                 logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(
@@ -5877,11 +5940,12 @@ def _train_sfno_full_loop(
             ckpt_dir = Path(config.checkpoint_dir)
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
-            save_checkpoint(sfno, ckpt_path)
+            _dyo = spectral_dycore_options(config.pe_config)
+            save_checkpoint(sfno, ckpt_path, dycore_options=_dyo)
             logger.info(f"Saved checkpoint: {ckpt_path}")
             if ema_model is not None:
                 ema_path = ckpt_dir / f"epoch_{epoch:04d}_ema.eqx"
-                save_checkpoint(ema_model, ema_path)
+                save_checkpoint(ema_model, ema_path, dycore_options=_dyo)
                 logger.info(f"Saved EMA checkpoint: {ema_path}")
 
         # Early stopping is DISABLED under a rollout curriculum (mirrors
@@ -5952,7 +6016,9 @@ def train_column_mlp_spectral(
     logger.info(f"Column MLP: {config.n_levels} levels, {hidden_dim}d, "
                 f"{n_layers} layers, {n_p:,} params")
 
-    nn_phys, start_epoch = maybe_resume_model(nn_phys, resume_from_dir)
+    nn_phys, start_epoch = maybe_resume_model(
+        nn_phys, resume_from_dir,
+        dycore_options=spectral_dycore_options(config.pe_config))
 
     if int(config.chunk_windows or 0) > 0:
         chunk_loader, n_total = _make_chunk_loader(
