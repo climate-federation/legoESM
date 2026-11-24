@@ -286,3 +286,17 @@ def test_multi_rank_fixer_validates_mask_shape():
     with pytest.raises(ValueError, match="owned_mask shape"):
         fix_mass_nonhydrostatic_plane_mpi(
             state, jnp.zeros(()), grid, hc, tm, layout, bad)
+
+
+def test_single_rank_anomaly_integral_ignores_mask_like_the_fixer():
+    """Single rank: the rho' integral follows the serial (unmasked) contract
+    of compute_dry_mass_plane_mpi and the single-rank fixer, so fixing an
+    unchanged state to its own anomaly is a no-op even with a partial mask."""
+    grid, hc, tm, state, layout, mask = _setup()
+    partial = mask.at[0, :].set(0.0)
+    target = compute_rho_prime_mass_plane_mpi(state, grid, hc, tm, layout, partial)
+    fixed = fix_mass_nonhydrostatic_plane_mpi(
+        state, target, grid, hc, tm, layout, partial)
+    np.testing.assert_allclose(np.asarray(fixed.rho_prime.data),
+                               np.asarray(state.rho_prime.data),
+                               rtol=0, atol=1e-15)
