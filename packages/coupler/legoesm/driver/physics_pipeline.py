@@ -2877,6 +2877,7 @@ class PhysicsPipeline:
             cover_condensate_q_ref=getattr(
                 self, "_cloud_cover_condensate_q_ref", None),
             clubb_mf_cloud=getattr(self, "_clubb_mf_cloud", None),
+            mf_cldfrac_fac=getattr(self, "_cloud_clubb_mf_cldfrac_fac", None),
         )
 
     def _sundqvist_kwargs(self, ad, q_i, cell_area=None):
@@ -5964,6 +5965,8 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
         config, 'cloud_adiabatic_lwc_rate', None)
     # CAM7 CLUBB-MF plume cloud into the cam6_clubb deep cloud (opt-in).
     pipeline._clubb_mf_cloud = bool(getattr(config, 'clubb_mf', False)) or None
+    pipeline._cloud_clubb_mf_cldfrac_fac = getattr(
+        config, 'cloud_clubb_mf_cldfrac_fac', None)
     pipeline._cloud_saturation_scheme = getattr(
         config, 'cloud_saturation_scheme', None)
     pipeline._cloud_cover_condensate_q_ref = getattr(

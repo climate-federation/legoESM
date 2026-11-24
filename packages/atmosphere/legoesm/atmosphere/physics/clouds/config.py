@@ -15,7 +15,6 @@ __param_spec__ = {
     "CloudConfig": {
         "scheme_key": "atm.clouds.CloudConfig",
         "excluded": {
-            "mf_cldfrac_fac": "structural: CAM7 clubb_mf_cldfrac_fac (plume-area to cloud-fraction factor of the deep-cloud hookup, atmos_phys clubb_mf.F90:48), fixed with the port",
             "mf_deepcu_select_sharpness": "numerics: RULE 5 sharpness of the larger-of-two ZM/plume deep cloud (inf = hard max), value voted",
             "mf_deepcu_cap_sharpness": "numerics: RULE 5 sharpness of CAM's concld <= 0.8 cap (inf = hard min), value voted",
             "mf_deepcu_frac_gate_sharpness": "numerics: RULE 5 sharpness of the deepcu > frac_limit gate (inf = CAM), value voted",
@@ -106,6 +105,7 @@ __param_spec__ = {
             # --- cam6_deep_convective: clubb_intr.F90 deepcu = min(dp1*log(1+dp2*M_up), max) ---
             "cam6_deepcu_dp1": {"units": "1", "bounds": (0.01, 0.5), "tunable_tier": 0, "transform": "sigmoid", "category": "cam6_deep_convective", "reference": "CAM6 clubb_intr.F90:2501 (0.1)", "shape": None},
             "cam6_deepcu_dp2": {"units": "m^2 s/kg", "bounds": (50.0, 5000.0), "tunable_tier": 0, "transform": "sigmoid", "category": "cam6_deep_convective", "reference": "CAM6 clubb_intr.F90:2501 (500)", "shape": None},
+            "mf_cldfrac_fac": {"units": "1", "bounds": (1.0, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "clubb_mf_deep_cloud", "reference": "CAM7 atmos_phys clubb_mf.F90:48 clubb_mf_cldfrac_fac (10); bounds/tier voted 2026-11-24", "shape": None},
             "cam6_deepcu_max": {"units": "1", "bounds": (0.1, 0.99), "tunable_tier": 0, "transform": "sigmoid", "category": "cam6_deep_convective", "reference": "CAM6 clubb_intr.F90:2501 (0.6)", "shape": None},
         },
     },
@@ -523,6 +523,7 @@ def build_cloud_config(
     cam6_rad_specified_nc: bool | None = None,
     cam6_rad_gate_log_width: float | None = None,
     clubb_mf_cloud: bool | None = None,
+    mf_cldfrac_fac: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -584,7 +585,8 @@ def build_cloud_config(
                         ("cam6_snow_optics_file", cam6_snow_optics_file),
                         ("cam6_rad_specified_nc", cam6_rad_specified_nc),
                         ("cam6_rad_gate_log_width", cam6_rad_gate_log_width),
-                        ("clubb_mf_cloud", clubb_mf_cloud)):
+                        ("clubb_mf_cloud", clubb_mf_cloud),
+                        ("mf_cldfrac_fac", mf_cldfrac_fac)):
         if _val is not None:
             overrides[_name] = _val
     for _name, _val in (("cap_floor_on", cap_floor_on), ("cap_floor_lat_deg", cap_floor_lat_deg),
