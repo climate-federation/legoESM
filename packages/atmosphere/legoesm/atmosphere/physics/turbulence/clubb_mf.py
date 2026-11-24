@@ -277,7 +277,13 @@ def bsort_roots(a, b, c, sm):
     margin = (0.0 if math.isinf(sm.bsort_xc)
               else -math.log(jnp.finfo(a.dtype).tiny) / sm.bsort_xc)
     discard = (a >= 0.0) & (q - a * r2 > a * margin)
-    r1 = jnp.where(discard, 0.0, q) / jnp.where(discard, 1.0, a)
+    # VOTE F (pending): R=1/eps (fp32 2**23, fp64 2**52); clip is saturated far beyond [0,1].
+    # Alternatives: a smaller clip-tail-derived R, or a custom division derivative.
+    root_bound = 1.0 / jnp.finfo(a.dtype).eps
+    saturated = jnp.abs(q) > jnp.abs(a) * root_bound
+    masked = discard | saturated
+    r1 = jnp.where(masked, 0.0, q) / jnp.where(masked, 1.0, a)
+    r1 = jnp.where(saturated, jnp.where(q < 0.0, -root_bound, root_bound), r1)
     small = smooth_min(jnp.where(discard, r2, r1), r2, sm.bsort_xc)
     return jnp.where(discard, r2, small), disc
 

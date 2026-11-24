@@ -251,17 +251,40 @@ def test_stable_roots_near_stopping_plume_and_zero_b():
 
 
 @pytest.mark.parametrize("sm", [HARD, MFSmoothing()])
-@pytest.mark.parametrize("a", [1e-16, 1e-20, 1e-25, 1e-30, 1e-37])
-def test_stable_roots_fp32_reverse_gradient_has_no_discarded_division_nan(sm, a):
+@pytest.mark.parametrize("b", [1.0, -1.0])
+@pytest.mark.parametrize("dtype,a", [
+    (jnp.float32, a) for a in (1e-12, 1e-16, 1e-20, 1e-25, 1e-30, 1e-37)
+] + [
+    (jnp.float64, a) for a in (1e-12, 1e-20, 1e-25, 1e-160, 1e-200, 1e-300)
+])
+def test_stable_roots_reverse_gradient_has_no_clipped_division_nan(sm, b, dtype, a):
     def root(aa):
-        return bsort_roots(aa, jnp.float32(-1.0), jnp.float32(0.5), sm)[0]
-    value, grad = jax.jit(jax.value_and_grad(root))(jnp.float32(a))
-    assert value.dtype == grad.dtype == jnp.float32
+        return bsort_clip(bsort_roots(aa, dtype(b), dtype(0.5), sm)[0], sm.bsort_xc)
+    value, grad = jax.jit(jax.value_and_grad(root))(dtype(a))
+    assert value.dtype == grad.dtype == dtype
     assert np.isfinite(np.asarray(value)) and np.isfinite(np.asarray(grad))
-    # The finite root retains a nonzero derivative through the discriminant.
-    assert float(grad) != 0.0
-    expected = 0.5 if math.isinf(sm.bsort_root) else 0.5 / (1.0 + (1.0 / sm.bsort_root)**2)
-    np.testing.assert_allclose(value, expected, rtol=4 * np.finfo(np.float32).eps)
+    if b < 0.0:
+        # The finite root retains a nonzero derivative through the discriminant.
+        assert float(grad) != 0.0
+        q = 0.5 * (1.0 + math.sqrt(1.0 - 2.0 * a))
+        expected = (0.5 / q if math.isinf(sm.bsort_root)
+                    else 0.5 * q / (q**2 + (1.0 / sm.bsort_root)**2))
+        np.testing.assert_allclose(value, expected, rtol=4 * np.finfo(dtype).eps)
+    else:
+        assert float(grad) == 0.0  # planted regression: unguarded q/a gives NaN
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+@pytest.mark.parametrize("a", [1.0, 0.1, 1e-12, 1e-20, 1e-25])
+def test_stable_roots_hard_non_saturating_value_is_bitwise_unguarded(dtype, a):
+    a, b, c = dtype(a), dtype(-1.0), dtype(0.125)
+    q = -0.5 * (b - jnp.sqrt(b**2 - 4.0 * a * c))
+    unguarded = jnp.minimum(q / a, c / q)
+    got = bsort_roots(a, b, c, HARD)[0]
+    assert 0.0 < float(unguarded) < 1.0  # non-vacuous: clipping keeps this root
+    assert np.asarray(got).tobytes() == np.asarray(unguarded).tobytes()
+    clipped = bsort_clip(got, HARD.bsort_xc)
+    assert np.asarray(clipped).tobytes() == np.asarray(unguarded).tobytes()
 
 
 @pytest.mark.parametrize("sm", [HARD, MFSmoothing()])
