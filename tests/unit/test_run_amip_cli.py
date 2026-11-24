@@ -6834,3 +6834,10 @@ def test_clubb_mf_cldfrac_fac_flag_reaches_the_cloud_config():
                      cloud_scheme="cam6_clubb")):
         with pytest.raises(ValueError, match="cloud_clubb_mf_cldfrac_fac"):
             ExperimentConfig()._replace(**bad).validate_strict()
+    for edge in (1.0, 20.0):  # spec bounds are inclusive
+        try:
+            ExperimentConfig()._replace(
+                cloud_clubb_mf_cldfrac_fac=edge, clubb_mf=True,
+                cloud_scheme="cam6_clubb").validate_strict()
+        except ValueError as e:
+            assert "cloud_clubb_mf_cldfrac_fac" not in str(e)
