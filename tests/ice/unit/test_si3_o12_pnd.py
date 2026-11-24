@@ -3160,6 +3160,8 @@ def test_decision_184b_default_run_restarts_are_byte_identical_to_parent(tmp_pat
     parent_ponds_mod = _load_parent_module("_par_184b_ponds", "packages/ice/legoesm/ice/ponds.py")
     parent_sea_ice_mod = _load_parent_module("_par_184b_sea_ice", "packages/ice/legoesm/ice/sea_ice.py")
     parent_restart_mod = _load_parent_module("_par_184b_restart", "packages/ocean/legoesm/ocean/restart.py")
+    # The parent predates main's tracer-budget slot; classify it as the current policy does.
+    parent_restart_mod._SLOT_POLICY.setdefault("tbudget", parent_restart_mod._SLOT_DIAGNOSTIC)
     parent_sea_ice_mod.step_ponds = parent_ponds_mod.step_ponds
     parent_sea_ice_mod.DynamicSeaIceState = parent_state_mod.DynamicSeaIceState
     parent_sea_ice_mod.SeaIceState = parent_state_mod.SeaIceState
