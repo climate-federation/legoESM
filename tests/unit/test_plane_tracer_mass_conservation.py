@@ -160,3 +160,51 @@ def test_tracer_step_gradient():
     q0 = state.tracers.data
     assert float(jnp.max(jnp.abs(jax.grad(loss)(q0)))) > 0.0
     check_grads(loss, (q0,), order=1, modes=("rev",), eps=1e-6)
+
+
+def test_face_values_take_the_upwind_donor():
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        _tracer_face_value, _tracer_vertical_face_value)
+    step = jnp.array([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])          # jump at face 3
+    for scheme in ("upwind1", "van_leer"):
+        f = step[None, :, None, None]
+        assert float(_tracer_face_value(f, jnp.ones_like(f), 1, scheme)[0, 3, 0, 0]) == 0.0
+        assert float(_tracer_face_value(f, -jnp.ones_like(f), 1, scheme)[0, 3, 0, 0]) == 1.0
+    f = step[None, None, :, None]                              # index 0 = top
+    up = jnp.ones((1, 1, 7, 1))
+    assert float(_tracer_vertical_face_value(f, up, "van_leer")[0, 0, 3, 0]) == 1.0
+    assert float(_tracer_vertical_face_value(f, -up, "van_leer")[0, 0, 3, 0]) == 0.0
+
+
+def test_tracer_blob_moves_with_the_wind():
+    model, state = _model(n=16, nlev=6)
+    nx = state.u.data.shape[1]
+    x = jnp.arange(nx) / nx
+    blob = 1.0 + jnp.exp(-((x - 0.3) ** 2) / 0.005)
+    q = jnp.broadcast_to(blob[None, :, None], state.u.data.shape)[..., None]
+    state = state._replace(u=state.u.replace(data=jnp.full_like(state.u.data, 10.0)),
+                           tracers=state.tracers.replace(data=q))
+
+    def centroid(s):
+        a = s.tracers.data[..., 0] - 1.0
+        return float(jnp.sum(a * x[None, :, None]) / jnp.sum(a))
+
+    c0 = centroid(state)
+    for _ in range(20):
+        state = model.step(state, dt=2.0)
+    shift = (centroid(state) - c0) * nx * model.grid.dx
+    assert abs(shift - 10.0 * 40.0) < 0.1 * 400.0, shift
+
+
+def test_conservative_sgs_tendency_is_active_and_mass_neutral():
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        plane_compressible_euler_slow_tendencies)
+    model, state = _model(smagorinsky_cs=0.17, sgs_vertical_diffusion=True)
+    state = _perturbed(model, state, _varying_q(state.u.data.shape))
+    tend = plane_compressible_euler_slow_tendencies(
+        state, model.grid, model.height_coord, model.terrain_metric,
+        model.config, conservative_tracers=True).dtracers_dt.data
+    rho = (model.height_coord.rho_ref + state.rho_prime.data)[..., None]
+    mass_tend = jnp.sum(rho * tend * model.height_coord.dz[:, None], axis=(0, 1, 2))
+    assert float(jnp.max(jnp.abs(tend))) > 0.0
+    assert float(jnp.max(jnp.abs(mass_tend))) < 1e-12 * float(jnp.sum(jnp.abs(rho * tend)))
