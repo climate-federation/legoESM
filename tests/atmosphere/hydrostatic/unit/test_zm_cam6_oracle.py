@@ -48,7 +48,10 @@ KW = dict(tpert=0.0, capelmt=CFG.capelmt, tau=CFG.tau, num_cin=CFG.num_cin,
           trigger_width=CFG.trigger_width_J_kg)
 
 
-@pytest.fixture(autouse=True)
+# Module scope, so x64 is on before the module-scoped ``cols`` fixture builds
+# its columns (a function-scoped autouse fixture runs after it, which left the
+# inputs in float32 unless JAX_ENABLE_X64 was set in the environment).
+@pytest.fixture(autouse=True, scope="module")
 def _x64():
     prev = jax.config.jax_enable_x64
     jax.config.update("jax_enable_x64", True)

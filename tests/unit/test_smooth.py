@@ -6,7 +6,13 @@ import numpy as np
 import pytest
 
 from legoesm.core.smooth import (
+    abs_tanh,
     max_c1,
+    max_rel,
+    min_rel,
+    step_rel,
+    sign_tanh,
+    zero_at_or_below,
     min_c1,
     pnorm_smooth_min, positive_part_c1, sigmoid_switch, smooth_max, smooth_min, smooth_clamp,
     smooth_relu, smooth_abs, smoothstep_cubic, smoothstep_quintic,
@@ -214,3 +220,73 @@ def test_positive_part_c1_traced_inf_is_hard_and_finite():
     g = jax.jit(jax.grad(lambda x, s: jnp.sum(positive_part_c1(x, s))))(x, jnp.inf)
     assert jnp.all(jnp.isfinite(g))
     assert jnp.array_equal(f(x, 4.0), positive_part_c1(x, 4.0))
+
+
+def test_abs_sign_tanh_and_zero_at_or_below():
+    """RULE 5 helpers (#2546): width 0 is the hard switch bitwise; the smooth
+    forms stay within their stated bounds and are C2 at the switch."""
+    x = jnp.linspace(-0.05, 0.05, 1001)
+    assert jnp.array_equal(abs_tanh(x, 0.0), jnp.abs(x))
+    assert jnp.array_equal(sign_tanh(x, 0.0), jnp.sign(x))
+    w = 0.01
+    a = abs_tanh(x, w)
+    assert jnp.all(a <= jnp.abs(x)) and jnp.all(jnp.abs(x) - a <= 0.28 * w)
+    assert jnp.all(jnp.abs(sign_tanh(x, w)) <= 1.0)
+    tau = jnp.linspace(0.0, 3e-10, 301)
+    assert jnp.array_equal(zero_at_or_below(tau, 1e-10, 0.0), jnp.where(tau <= 1e-10, 0.0, tau))
+    r = zero_at_or_below(tau, 1e-10, 1e-10)
+    assert jnp.all(r[tau <= 1e-10] == 0.0) and jnp.array_equal(r[tau >= 2e-10], tau[tau >= 2e-10])
+    for f, x0 in ((lambda t: abs_tanh(t, w), 0.0), (lambda t: sign_tanh(t, w) * t * t, 0.0),
+                  (lambda t: zero_at_or_below(t, 1.0, 1.0), 1.0)):
+        for g in (jax.grad(f), jax.grad(jax.grad(f))):
+            assert abs(float(g(x0 - 1e-7)) - float(g(x0 + 1e-7))) < 1e-3
+
+
+def test_relative_switches_hard_limit_band_and_c1():
+    """step_rel / max_rel / min_rel: width 0 is the hard form bitwise, the result is
+    exact outside the relative band, and the derivative is continuous across it."""
+    x = jnp.linspace(-3.0, 3.0, 61, dtype=jnp.float64)
+    b = jnp.asarray(1.0, dtype=jnp.float64)
+    assert jnp.array_equal(step_rel(x, 2.0, 0), (x > 0).astype(x.dtype))
+    assert jnp.array_equal(max_rel(x, b, 0), jnp.maximum(x, b))
+    assert jnp.array_equal(min_rel(x, b, 0), jnp.minimum(x, b))
+    w = 0.1
+    far = jnp.abs(x - b) >= w * (jnp.abs(x) + 1.0)
+    assert jnp.allclose(max_rel(x, b, w)[far], jnp.maximum(x, b)[far], rtol=1e-15, atol=0)
+    assert jnp.allclose(min_rel(x, b, w)[far], jnp.minimum(x, b)[far], rtol=1e-15, atol=0)
+    s = step_rel(x, 2.0, w)
+    assert jnp.all(s[x <= 0.0] == 0.0) and jnp.all(s[x >= 0.2] == 1.0)   # one-sided: ties as the hard form
+    for f, x0 in ((lambda t: step_rel(t, 2.0, w), 0.1), (lambda t: max_rel(t, 1.0, w), 1.0)):
+        g = jax.grad(f)
+        assert abs(float(g(x0 - 1e-7)) - float(g(x0 + 1e-7))) < 1e-4
+        assert float(g(x0)) > 0.0          # a derivative through the switch, unlike the hard form
+    g = jax.grad(lambda t: step_rel(t, 2.0, w))
+    assert float(g(0.0)) == 0.0 and abs(float(g(1e-7))) < 1e-4        # C1 at the one-sided join
+
+
+def test_max_rel_gradient_is_finite_at_zero_operands():
+    for w in (0.01, 0.1):
+        g = jax.grad(lambda x: max_rel(x, 0.0, w))(0.0)
+        assert np.isfinite(float(g))
+        g2 = jax.grad(lambda x: min_rel(x * x, x, w))(0.0)
+        assert np.isfinite(float(g2))
+
+
+def test_relative_helpers_float32_gradient_at_tiny_operands():
+    from legoesm.core.smooth import positive_part_rel
+    x = jnp.float32(1e-20)
+    for f in (lambda t: max_rel(t, jnp.float32(0.0), 0.01), lambda t: min_rel(t, t * t, 0.01),
+              lambda t: step_rel(t, jnp.float32(0.0), 0.01), lambda t: positive_part_rel(t, t, 0.01)):
+        for x0 in (x, jnp.float32(0.0)):
+            assert np.isfinite(float(jax.grad(f)(x0)))
+
+
+def test_step_rel_tie_at_zero_band_matches_the_hard_form():
+    assert float(step_rel(jnp.float64(0.0), 0.0, 0.01)) == 0.0
+    assert float(step_rel(jnp.float64(1.0), 0.0, 0.01)) == 1.0
+
+
+def test_relative_helpers_float32_gradient_inside_a_tiny_band():
+    a = jnp.float32(1e-18)
+    for f in (lambda t: max_rel(t, a, 0.01), lambda t: step_rel(t - a, a, 0.01)):
+        assert np.isfinite(float(jax.grad(f)(a * jnp.float32(1.002))))

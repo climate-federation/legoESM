@@ -38,6 +38,9 @@ def high_band_share(row: np.ndarray, max_wavelength_dx: float = 4.0) -> float:
         return float("nan")
     p = np.abs(np.fft.rfft(v)) ** 2
     k = np.arange(p.size)                     # cycles per row
+    # Parseval weights of the one-sided spectrum (#2525): every bin except
+    # the mean and the even-length Nyquist stands for two two-sided bins.
+    p[1:(v.size + 1) // 2] *= 2.0
     wl = np.where(k > 0, v.size / np.maximum(k, 1), np.inf)
     return float(p[wl <= max_wavelength_dx].sum() / p[1:].sum())
 
@@ -100,6 +103,10 @@ def selftest() -> None:
     checker = np.tile(((-1.0) ** np.arange(nx))[None, :], (ny, 1))
     smooth = np.tile(np.cos(2 * np.pi * np.arange(nx) / 20.0)[None, :], (ny, 1))
     hb_c = np.mean([high_band_share(checker[j]) for j in range(ny)]); hb_s = np.mean([high_band_share(smooth[j]) for j in range(ny)])
+    # Equal-variance mix: unit-amplitude 2-dx checker (variance 1) plus a
+    # sqrt(2)-amplitude 20-dx cosine (variance 1) must score exactly half.
+    hb_m = high_band_share(checker[0] + np.sqrt(2.0) * smooth[0])
+    assert abs(hb_m - 0.5) < 0.01, f"Parseval self-check FAILED: equal-variance mix scored {hb_m:.3f}, not 0.5"
     td_c = np.mean([two_dx_share(checker, wet, j) for j in range(ny)]); td_s = np.mean([two_dx_share(smooth, wet, j) for j in range(ny)])
     print(f"[selftest] checkerboard: share(<=4dx)={hb_c:.3f} share(2dx)={td_c:.3f}; 20-dx cosine: {hb_s:.3f} {td_s:.3f}")
     assert hb_c > 0.99 and td_c > 0.99 and hb_s < 0.01 and td_s < 0.01, "metric self-check FAILED"

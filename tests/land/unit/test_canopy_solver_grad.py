@@ -14,7 +14,9 @@ implicit-function-theorem adjoint.  These tests verify it is *consistent*:
   the finite gradients of the other inputs (La, Vcmax25, ...).
 - The cotangent w.r.t. the initial guess ``x0`` is zero (a fixed point does
   not depend on where the iteration started).
-- A non-converged solve (max_iters = 1) returns a zero gradient.
+- A non-converged solve (max_iters = 1) returns a zero gradient when the
+  column falls back to the cold state (``fallback_from_last_iterate=False``),
+  and the implicit-function gradient at its last iterate otherwise.
 
 Run under JAX_ENABLE_X64=1 for a clean FD comparison.
 """
@@ -113,13 +115,24 @@ def test_initial_guess_cotangent_is_zero():
 
 
 def test_nonconverged_returns_zero_gradient():
-    cfg_bad = CanopyConfig(tol=1e-12, max_iters=1)
+    cfg_bad = CanopyConfig(tol=1e-12, max_iters=1, fallback_from_last_iterate=False)
 
     def tf_bad(La):
         return solve_canopy_closure(_X0, _bundle(La=La), cfg_bad)[0][0]
 
     g = jax.grad(tf_bad)(_a(350.0))
     assert float(g) == 0.0
+
+
+def test_nonconverged_last_iterate_carries_a_gradient():
+    cfg_bad = CanopyConfig(tol=1e-12, max_iters=1)   # fallback_from_last_iterate
+    assert not bool(solve_canopy_closure(_X0, _bundle(La=_a(350.0)), cfg_bad)[2])
+
+    def tf_bad(La):
+        return solve_canopy_closure(_X0, _bundle(La=La), cfg_bad)[0][0]
+
+    g = float(jax.grad(tf_bad)(_a(350.0)))
+    assert jnp.isfinite(g) and g != 0.0
 
 
 def test_cold_calm_forcing_stays_finite():

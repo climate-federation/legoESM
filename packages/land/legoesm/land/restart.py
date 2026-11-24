@@ -74,6 +74,8 @@ _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
     # Intercepted canopy-water store (present iff interception is enabled); real
     # mass, so it must round-trip or the warm start leaks it.
     "W_canopy",
+    # Intercepted canopy snow (present iff canopy snow is enabled); real mass.
+    "W_canopy_snow",
     # Layered snowpack (present iff snow_scheme == "layered"): the pack's water,
     # enthalpy and density, which snow_depth alone cannot rebuild.
     *_SNOW_LAYER_FIELDS,
@@ -547,6 +549,12 @@ def merge_land_restart_into_template(loaded, template):
             raise ValueError(
                 "land restart carries the snow-node temperature 'T_snow' but "
                 "this run has no snow thermal node; refusing to discard it.")
+        if (name == "W_canopy_snow" and arr is not None and ref is None
+                and np.any(np.asarray(arr) != 0.0)):
+            # Real snow mass with nowhere to go in a run without canopy snow.
+            raise ValueError(
+                "land restart carries intercepted canopy snow 'W_canopy_snow' but "
+                "this run has canopy snow off; refusing to discard that water.")
         if arr is None or ref is None:
             continue  # feature off on one end -> keep template structure, invent no mass
         if hasattr(arr, "shape") and hasattr(ref, "shape") and arr.shape != ref.shape:

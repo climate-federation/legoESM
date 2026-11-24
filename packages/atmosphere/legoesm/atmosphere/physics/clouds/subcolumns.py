@@ -413,7 +413,7 @@ PER_COLUMN_SOLVER_KEYS = frozenset({
     "T", "p_full", "p_half", "sfc_temperature", "q_v", "cos_zenith",
     "sfc_albedo", "sfc_albedo_direct", "sfc_emissivity", "o3_vmr", "o3_top_vmr",
     "aerosol_optical_depth", "aerosol_absorption_optical_depth_lw",
-    "cloud_path_liq", "cloud_path_ice", "cloud_r_eff_liq", "cloud_r_eff_ice",
+    "aerosol_volcanic_moments_sw", "cloud_path_liq", "cloud_path_ice", "cloud_r_eff_liq", "cloud_r_eff_ice",
     "cloud_fraction",
 })
 

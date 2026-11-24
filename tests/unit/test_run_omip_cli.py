@@ -36,6 +36,31 @@ def test_issue484_new_omip_flags_flow_to_config():
     assert cfg.vertical_mixing.kpp.A_bg == 2e-4
 
 
+def test_kpp_cvmix_option_flags_flow_to_config():
+    """KPP options reach the config; actual weak flux remains on by default."""
+    cfg = build_config_from_args(parse_args([
+        "--grid", "latlon", "--kpp-vt2-velocity-scale", "candidate",
+        "--kpp-actual-buoyancy-flux", "--kpp-gradient-surrogates"]))
+    kpp = cfg.vertical_mixing.kpp
+    assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates) == (
+        "candidate", True, True)
+    kpp = build_config_from_args(parse_args(["--grid", "latlon"])).vertical_mixing.kpp
+    assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates) == (
+        "column", True, False)
+    kpp = build_config_from_args(parse_args([
+        "--grid", "latlon", "--no-kpp-actual-buoyancy-flux"])).vertical_mixing.kpp
+    assert kpp.actual_buoyancy_flux is False
+
+
+def test_shortwave_ohlmann_and_skin_fraction_flags_parse():
+    args = parse_args(["--grid", "tripole", "--sw-penetration", "ohlmann_2003"])
+    assert args.sw_penetration == "ohlmann_2003"
+    args = parse_args(["--grid", "tripole", "--sw-penetration", "jerlov_2band",
+                       "--sw-skin-fraction", "0"])
+    assert args.sw_skin_fraction == 0.0
+    assert parse_args(["--grid", "latlon"]).sw_skin_fraction is None
+
+
 def test_langmuir_flag_flows_to_config():
     """--langmuir toggles KPPConfig.enable_langmuir (default off)."""
     off = build_config_from_args(parse_args(["--grid", "latlon"]))

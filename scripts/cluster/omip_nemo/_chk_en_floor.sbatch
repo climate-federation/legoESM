@@ -23,6 +23,8 @@
 #
 # So: what fraction of NEMO's own en sits at or below each threshold, and what
 # discrete values does it take below rn_emin?
+# NOT REPRODUCIBLE FROM THE REPO ALONE (#2525): it runs scripts/tmp/_chk_en_floor.py, which is untracked (scripts/tmp is scratch). Refused up front if absent.
 set -uo pipefail
 cd /burg-archive/glab/users/pg2328/_omip_merge || exit 1
+[ -r scripts/tmp/_chk_en_floor.py ] || { echo "FATAL: untracked scripts/tmp/_chk_en_floor.py is absent"; exit 1; }
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python scripts/tmp/_chk_en_floor.py

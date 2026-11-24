@@ -25,6 +25,8 @@
 # which would be exactly the "infer what data exists from the one file a
 # script happens to open" mistake.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge
 cd $ROOT || exit 1
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
@@ -62,3 +64,4 @@ for fn in ("ORCA1_5d_20000101_20000331_SBC.nc",
     ds.close()
 PY
 echo "=== rc=$? ==="
+exit ${RC:-0}

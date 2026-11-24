@@ -1607,8 +1607,13 @@ def wb_aerosol_forcing(spec, grid, sigma, carry, time_ns):
     per_year = [aerosol_layer_fields(
         acfg._replace(start_year=y), sim_day, lat_col, p_half, w_strat,
         active=True, lw_active=lw_active, dtype=p_s.dtype) for y in years]
-    od, ccn, lw = (jnp.mean(jnp.stack(f), axis=0) for f in zip(*per_year))
-    return {"aerosol_od": od, "aerosol_ccn_aod": ccn, "aerosol_lw_od": lw}
+    od, ccn, lw = (jnp.mean(jnp.stack(f), axis=0)
+                   for f in list(zip(*per_year))[:3])
+    out = {"aerosol_od": od, "aerosol_ccn_aod": ccn, "aerosol_lw_od": lw}
+    volc = [f[3] for f in per_year]
+    if volc[0] is not None:
+        out["aerosol_sw_volc"] = jnp.mean(jnp.stack(volc), axis=0)
+    return out
 
 
 def build_spectral_forcing(sl, grid, time_ns, year, *, aerosol=None,
@@ -1850,6 +1855,7 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             o3_top_vmr=getattr(driver, "_o3_top_vmr", None),
+            aerosol_sw_volc=getattr(driver, "_aerosol_sw_volc", None),
             **plane_kwargs)
         return (ic, target, forcing)
 

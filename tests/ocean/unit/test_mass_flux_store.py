@@ -1437,6 +1437,13 @@ def test_store_mass_flux_is_the_last_config_field():
             "runoff_temperature_floor_sharpness",
             # NEMO eddy_viscosity_3D coastal closure (OMIP card port, #2472)
             "lateral_viscosity_file_coastal",
+            # ENSO-fork port: per-step temperature budget record (diagnostic, default off)
+            "store_tracer_budget",
+            # appended by the ENSO-fork Pacific zoom port (default off)
+            "momentum_face_mask",
+            "coriolis_time_scheme",
+            "coriolis_baroclinic_operator",
+            "open_boundary_smooth_width",
             )
     assert fields[-len(tail):] == tail, (
         f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "
@@ -1843,7 +1850,8 @@ def test_generic_ocean_archive_neither_writes_nor_restores_the_diagnostics(
         DIAGNOSTIC_SLOTS, load_restart, save_restart,
     )
 
-    assert set(DIAGNOSTIC_SLOTS) == set(_NEW_SLOTS) | set(_SALT_SLOTS)
+    # plus store_tracer_budget's per-step record (a dict, rebuilt every step)
+    assert set(DIAGNOSTIC_SLOTS) == set(_NEW_SLOTS) | set(_SALT_SLOTS) | {"tbudget"}
 
     _g, _z, model, state = _setup(store=True)
     out = model.step(_perturbed(state), _DT)
@@ -1912,7 +1920,7 @@ def test_run_omip_restart_does_not_persist_the_diagnostic_flux():
     """
     from scripts.run.run_omip import _RESTART_DIAGNOSTIC_SLOTS
 
-    assert set(_RESTART_DIAGNOSTIC_SLOTS) == set(_NEW_SLOTS) | set(_SALT_SLOTS)
+    assert set(_RESTART_DIAGNOSTIC_SLOTS) == set(_NEW_SLOTS) | set(_SALT_SLOTS) | {"tbudget"}
 
 
 def test_restart_round_trip_drops_nothing_it_wrote(tmp_path):

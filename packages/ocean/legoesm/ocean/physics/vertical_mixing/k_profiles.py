@@ -1289,8 +1289,21 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         H_col = state.H_bathy.data
         hab_iface = jnp.maximum(H_col[..., jnp.newaxis] - depth_iface, 0.0)
         # Surface buoyancy flux Jb (shared helper) + friction velocity u_star.
+        # core-0027: as Oceananigans/NumericalEarth, the penetrating shortwave is a body forcing and does not enter
+        # Jb, so Jb is formed from the non-solar flux q_net - sw_down when the forcing carries sw_down.
+        _sw_mode = getattr(catke_cfg, "surface_buoyancy_flux_shortwave", "exclude")
+        if _sw_mode not in ("exclude", "include"):
+            raise ValueError(
+                "CATKEConfig.surface_buoyancy_flux_shortwave must be 'exclude' or "
+                f"'include', got {_sw_mode!r}")
+        _jb_forcing = surface_forcing
+        if (_sw_mode == "exclude" and surface_forcing is not None
+                and getattr(surface_forcing, "q_net", None) is not None
+                and getattr(surface_forcing, "sw_down", None) is not None):
+            _jb_forcing = surface_forcing._replace(
+                q_net=surface_forcing.q_net - surface_forcing.sw_down)
         Jb, _, _ = _surface_buoyancy_flux(
-            surface_forcing, state, constants_config, eos_fn=eos_fn)
+            _jb_forcing, state, constants_config, eos_fn=eos_fn)
         if Jb is None:
             Jb = jnp.zeros(T_data.shape[:-1], dtype=T_data.dtype)
         tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
@@ -1308,11 +1321,33 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 T_data.shape[:-1] + (z_coord.n_levels - 1,),
                 catke_cfg.minimum_tke, dtype=T_data.dtype,
             )
+        # core-0029: N^2 as Oceananigans' CATKE sees it, the local buoyancy gradient g (alpha dT/dz - beta dS/dz)
+        # (SeawaterBuoyancy ∂z_b), here by evaluating both cells of an interface at the upper cell's pressure
+        # ("adiabatic", eos.compute_buoyancy_frequency_adiabatic). The in-situ difference ("insitu_signed", the
+        # earlier behaviour) carries the compressibility of seawater, about +4e-5 s^-2 near the surface, which
+        # makes a mixed layer look stratified and a weak inversion look stable.
+        _n2_mode = getattr(catke_cfg, "n2_mode", "adiabatic")
+        if _n2_mode not in ("adiabatic", "insitu_signed"):
+            raise ValueError(
+                "CATKEConfig.n2_mode must be 'adiabatic' or 'insitu_signed', "
+                f"got {_n2_mode!r}")
+        _n2_kw = {}
+        if _n2_mode == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            _n2_kw = dict(
+                p_cell=compute_hydrostatic_pressure(
+                    rho, state.eta.data, z_coord.dz_ref, J,
+                    constants_config.rho_0, constants_config.g,
+                    h_actual=maybe_partial_h_actual(state, z_coord)),
+                dz_ref=z_coord.dz_ref, jacobian=J, eos_fn=eos_fn)
         K_u, K_c, tke_new = catke_vertical_mixing(
             u_data, v_data, T_data, S_data, rho, dz_half,
             depth_iface, hab_iface, H_col,
             tke_old=_seed, Jb=Jb, u_star=u_star, dt=dt_tke, cfg=catke_cfg,
             rho_0=constants_config.rho_0, g=constants_config.g,
+            n2_mode=_n2_mode, **_n2_kw,
         )
         # Return (K_v = tracer = K_c, A_v = momentum = K_u, tke_new).
         return K_c, K_u, tke_new
@@ -1343,6 +1378,16 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         _u_stokes = (getattr(surface_forcing, "u_stokes", None)
                      if surface_forcing is not None else None)
 
+        # core-0030: pressure for KPP's local N^2 (KPPConfig.n2_mode = "adiabatic"), as the CATKE branch above.
+        _kpp_p_cell = None
+        if getattr(vmix_cfg.kpp, "n2_mode", "adiabatic") == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            _kpp_p_cell = compute_hydrostatic_pressure(
+                rho, state.eta.data, z_coord.dz_ref, J,
+                constants_config.rho_0, constants_config.g,
+                h_actual=maybe_partial_h_actual(state, z_coord))
         out = kpp_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, vmix_cfg.kpp,
@@ -1350,6 +1395,9 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=False, eos_fn=eos_fn, ice_frac=_kpp_ice_fr,
             u_stokes=_u_stokes,
+            p_cell=_kpp_p_cell,
+            h_k=(maybe_partial_h_actual(state, z_coord)
+                 if _kpp_p_cell is not None else None),
         )
         return out.K_v, out.A_v, None
 

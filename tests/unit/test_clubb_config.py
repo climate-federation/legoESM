@@ -78,6 +78,12 @@ _CLUBB_CONFIG_SCALAR_FIELDS = frozenset({
     "trop_cloud_top_press", "trop_cloud_taper_lnp_width",
     "pdf_variance_scale", "q_flux_scale",
     "q_flux_scale_sigma_lo", "q_flux_scale_sigma_hi",
+    # route C RULE 5 switch widths (floats; the on/off switch is on TurbulenceConfig)
+    "routec_ql_width_kg_kg", "routec_p_top_width_pa", "routec_jump_width_k",
+    "routec_m_width", "routec_lock_m_width", "routec_E_width",
+    "mf_alive_sharpness", "mf_qc_sharpness", "mf_trig_wthv_sharpness", "mf_trig_wqt_sharpness",
+    "mf_trig_lts_sharpness", "mf_wstar_sharpness", "mf_convh_sharpness", "mf_kspan_sharpness",
+    "mf_conv_sharpness", "mf_cfl_sharpness",
 })
 
 

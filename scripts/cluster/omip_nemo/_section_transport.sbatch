@@ -39,6 +39,8 @@
 # --nemo-time-idx once silently scored day 90 against a day-30 run and looked
 # like a model regression for half a session.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge
 R=/burg-archive/glab/users/pg2328/legoESM
 cd $ROOT || exit 1
@@ -97,7 +99,8 @@ $PY -u scripts/validate/ocean_fidelity/section_transport_vs_nemo.py \
   --zonal-section="mozambique:-17:38,44" \
   ${CELL:+--cell-profile="$CELL"} \
   --out-json "$R/results/omip_nemo/section_transport/transports_d${DAY}${TAG}.json"
-echo "=== probe rc=$? ==="
+rc=$?; echo "=== probe rc=$rc ==="
+[ "$rc" = 0 ] || exit "$rc"   # never replot a stale JSON
 
 # Row by row, because a single integral cannot say whether a difference is a
 # broad excess or a jet that is too fast in three rows -- different causes,
@@ -107,3 +110,4 @@ $PY -u scripts/plot/plot_section_transport.py \
   --out "$R/results/omip_nemo/section_transport/transports_d${DAY}${TAG}.png" \
   ${CELL:+--cell-out="$R/results/omip_nemo/section_transport/cell_d${DAY}${TAG}.png"}
 echo "=== rc=$? ==="
+exit ${RC:-0}

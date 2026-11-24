@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 # "No surface-T override" sentinel for ``surface_T_sfc_override``.  Formerly
@@ -318,6 +319,10 @@ class PhysicsState(NamedTuple):
     # znt, hfx, qfx, pblh), seeded at WRF's cold start; None for every other
     # scheme.  Appended LAST with a default.
     sfclay: jnp.ndarray = None
+    # FIVE fine layers (legoesm.atmosphere.physics.five): the fine state, the
+    # fine physics carry and the column selection, as one dict pytree.  None
+    # unless FIVE is switched on (existing pytrees unchanged).
+    five_carry: object = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -491,7 +496,7 @@ def init_physics_state(
     # overwrites it each step and radiation reads it when cloud_scheme="clubb".
     cloud_fraction = jnp.zeros((ncol, nlev), dtype=dtype)
 
-    return PhysicsState(
+    return _strong_types(PhysicsState(
         tke=tke,
         conv_prog_profile=conv_prog_profile,
         conv_stoch_state=conv_stoch_state,
@@ -527,7 +532,16 @@ def init_physics_state(
         zc_q_v_prev=_zc_seed(physics_config, (ncol, nlev), dtype),
         zc_p_s_prev=_zc_seed(physics_config, (ncol,), dtype),
         sfclay=_init_sfclay(ncol, physics_config, dtype),
-    )
+    ))
+
+
+def _strong_types(phys_state):
+    """Drop the weak type of every seeded leaf: a weak seed changes the jitted
+    step's argument signature after step 1 (physics returns the field strongly
+    typed) and forces a second full compile. Values are unchanged."""
+    return jax.tree_util.tree_map(
+        lambda x: jnp.asarray(x, dtype=x.dtype) if getattr(x, "weak_type", False) else x,
+        phys_state)
 
 
 def _zc_seed(physics_config, shape, dtype):
@@ -659,6 +673,7 @@ def update_physics_state(phys_state, updates):
         zc_q_v_prev=updates.get("zc_q_v_prev", phys_state.zc_q_v_prev),
         zc_p_s_prev=updates.get("zc_p_s_prev", phys_state.zc_p_s_prev),
         sfclay=updates.get("sfclay", phys_state.sfclay),
+        five_carry=updates.get("five_carry", phys_state.five_carry),
     )
 
 

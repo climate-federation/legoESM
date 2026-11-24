@@ -1,0 +1,15 @@
+- D1 **A** — Snow storage can operate independently; resolve and record the fallback interception parameters explicitly.
+- D2 **A** — Require masking for this ON_RAD port so stored snow affects canopy radiation.
+- D3 **A** — Exposed area matches CLM’s burial-dependent interception, capacity, coverage, and wetness.
+- D4 **A** — Charge sublimation \(L_s\); apply equal, opposite latent/sensible corrections using actual snow evaporation.
+- D5 **A** — Make canopy snow available, but reserve that supply for wet-canopy evaporation; it must not fund transpiration or soil evaporation.
+- D6 **A** — Preserve existing dew routing and document frost deposition as deferred fidelity work.
+- D7 **A** — Preserve the existing radiation hand-off; document the timing difference from CLM.
+- D8 **A** — Prefer wider smooth defaults, conditional on bounded, zero-preserving transfers and measured default-versus-oracle gaps.
+- D9 **A** — Limit the first implementation to the production bulk scheme; reject unsupported configurations explicitly.
+- D10 **A** — An absent historical store implies zero additional water; allocate it during restart loading, before JIT/scan.
+- D11 **A** — The proposed names consistently identify configuration, state, experiment selection, and CLI activation.
+- D12 **A** — Keep reference coefficients fixed with provenance; express the unloading temperature using the shared freezing constant and offset.
+- D13 **A** — Follow each leaf’s temperature-dependent priority while enforcing a shared budget across both leaves.
+- D14 **A** — Use fp64 and \(10^{-12}\) relative tolerance; CLM’s near-\(2/3\) exponent must match its source literal, not rounded `0.667`.
+- D15 **A** — Ground snow presence and aging must use snowfall actually delivered, including canopy fall-off and unloading.

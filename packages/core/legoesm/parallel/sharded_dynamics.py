@@ -3731,6 +3731,13 @@ def make_voronoi_sharded_step(
                 "ModelDriver loop, which threads the carry."
             )
         return model.step
+    if getattr(model.config, "tracer_horizontal_scheme", "advective") == "flux_fct":
+        # Serial-vs-partition parity of the FCT limiter (two complete halo
+        # rings) is certified on the MPI cell-partition step only.
+        raise ValueError(
+            "make_voronoi_sharded_step: tracer_horizontal_scheme='flux_fct' is "
+            "not certified on the multi-device SPMD Voronoi step; use the MPI "
+            "cell-partition step or the serial step.")
     if getattr(model.config, "energy_fixer", False):
         # The global energy fixer (review 2026-10-10 F15) runs in the serial
         # step and the MPI cell-partition step only; this SPMD step would
@@ -4704,7 +4711,9 @@ def make_voronoi_sharded_step(
                         cfg, "conservative_tracer_clamp", False),
                     energy_consistent=getattr(
                         cfg, "energy_consistent_moisture_clip", False),
-                    area=area_arg)
+                    area=area_arg,
+                    condensate_from_vapour=getattr(
+                        cfg, "positivity_condensate_from_vapour", True))
                 state_new = state_new._replace(
                     tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

@@ -99,3 +99,7 @@ class MultiLayerLandState(NamedTuple):
     # it does not.  Present iff ``config.thermal.snow_insulation``; ``None``
     # (default) keeps the legacy heat-free snow bucket.  Appended last.
     T_snow: jax.Array | None = None
+    # Intercepted canopy SNOW [kg m-2], (ncol,): CLM5 ``snocan`` (snowveg_flag
+    # ON_RAD).  Present iff ``config.canopy_snow``; ``None`` carries no store.
+    # Real mass, heat-free like the bulk snow bucket it unloads into.  Appended last.
+    W_canopy_snow: jax.Array | None = None

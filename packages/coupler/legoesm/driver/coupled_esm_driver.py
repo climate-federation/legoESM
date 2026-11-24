@@ -2102,14 +2102,14 @@ class CoupledESMDriver:
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import (
-                daily_mean_insolation, earth_orbit, earth_sun_distance_factor,
+                daily_mean_insolation, earth_sun_distance_factor,
             )
             # Solar constant from legoesm.constants per CLAUDE.md.
             # ``acfg.S_0`` allows override for sensitivity studies.
             S_0 = acfg.S_0
             # Realistic orbit (Berger 1978) when enabled; None ⇒ circular.
-            _orbit = (earth_orbit()
-                      if getattr(acfg, "orbital_insolation", False) else None)
+            from legoesm.driver.orbit import experiment_orbit
+            _orbit = experiment_orbit(acfg)
             _eccf = (earth_sun_distance_factor(float(doy), _orbit)
                      if _orbit is not None else 1.0)
             Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0,
@@ -3031,6 +3031,32 @@ class CoupledESMDriver:
         # Diagnostics (once per segment, not per sub-step)
         self._log_coupled_diag(day, dt_segment)
 
+    def _land_water_per_cell(self, f_land):
+        """Whole-cell land water [kg/m^2] of the land model that is stepped:
+        the atmosphere's own land under ``atm_owns_surface`` (the coupler's
+        land tile is never stepped there), else the coupler's land tile."""
+        from legoesm.diagnostics.water_budget import (
+            land_water_content_multilayer, land_water_content_slab)
+        from legoesm.land.state import MultiLayerLandState
+        if self.coupled_cfg.atm_owns_surface:
+            land = self._atm._land_ml_state
+            fl = f_land.reshape(-1)
+            w = land_water_content_multilayer(
+                land.theta_soil, self._atm._land_soil_dz(), land.snow_depth,
+                fl, surface_water=land.surface_water)
+            if land.W_canopy is not None:
+                w = w + fl * land.W_canopy
+            return w
+        land = self._sfc_state.land
+        if isinstance(land, MultiLayerLandState):
+            from legoesm.land.soil_grid import make_soil_grid
+            dz = make_soil_grid(self._land_cfg.soil_grid).dz
+            return land_water_content_multilayer(
+                land.theta_soil, dz, land.snow_depth, f_land.reshape(-1),
+                surface_water=land.surface_water)
+        return land_water_content_slab(
+            land.W_bucket.data, land.snow_depth.data, f_land)
+
     def _log_coupled_diag(self, day, dt_segment=0.0):
         """Record coupled diagnostics for this segment.
 
@@ -3154,12 +3180,9 @@ class CoupledESMDriver:
                 from legoesm.diagnostics.water_budget import (
                     area_integral,
                     ice_water_content,
-                    land_water_content_multilayer,
-                    land_water_content_slab,
                     water_inventory_residual,
                 )
                 from legoesm.ice.state import DynamicSeaIceState
-                from legoesm.land.state import MultiLayerLandState
                 atm_area = getattr(self._atm.grid, "grid_area", None)
                 if atm_area is not None and self._tile_config is not None:
                     p_s = self._atm.state.p_s.data
@@ -3186,17 +3209,7 @@ class CoupledESMDriver:
                     w_ice = ice_water_content(
                         ice.h_ice.data, ice.concentration.data, f_water,
                         h_snow=_hsnow)
-                    land = self._sfc_state.land
-                    if isinstance(land, MultiLayerLandState):
-                        from legoesm.land.soil_grid import make_soil_grid
-                        dz = make_soil_grid(self._land_cfg.soil_grid).dz
-                        w_land = land_water_content_multilayer(
-                            land.theta_soil, dz, land.snow_depth,
-                            f_land.reshape(-1),
-                            surface_water=land.surface_water)
-                    else:
-                        w_land = land_water_content_slab(
-                            land.W_bucket.data, land.snow_depth.data, f_land)
+                    w_land = self._land_water_per_cell(f_land)
                     # W_lake = 0 (fixed-depth two-layer lake stores no water).
                     # Flatten every per-cell term so a multilayer land (ncol,)
                     # and the spatial atm/ice terms integrate uniformly on the

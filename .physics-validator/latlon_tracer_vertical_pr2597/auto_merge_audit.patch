@@ -1,0 +1,28 @@
+diff --git a/packages/core/legoesm/grids/vertical.py b/packages/core/legoesm/grids/vertical.py
+index 7099287ed0..21fffafac4 100644
+--- a/packages/core/legoesm/grids/vertical.py
++++ b/packages/core/legoesm/grids/vertical.py
+@@ -1011,8 +1011,9 @@ def vertical_advection(
+         return _vertical_advection_van_leer_sigma(field, sigma_dot, sigma_coord)
+     if scheme != "upwind":
+         raise ValueError(
+-            f"unknown vertical advection scheme {scheme!r}; expected one of "
+-            f"{VERTICAL_ADVECTION_SCHEMES}"
++            f"unknown vertical advection scheme {scheme!r} for the sigma "
++            "coordinate; expected 'upwind' or 'van_leer' ('sb' is the "
++            "hybrid-coordinate flux form, vertical_advection_hybrid_sb)"
+         )
+     return _vertical_advection_upwind_sigma(field, sigma_dot, sigma_coord)
+
+diff --git a/packages/coupler/legoesm/driver/component_factory.py b/packages/coupler/legoesm/driver/component_factory.py
+index 416dfa5c0a..3f37b51eb5 100644
+--- a/packages/coupler/legoesm/driver/component_factory.py
++++ b/packages/coupler/legoesm/driver/component_factory.py
+@@ -964,6 +964,7 @@ def create_atmosphere_dycore(
+             # the column-split step runs the global energy fixer (F15); the
+             # legacy step does not and is refused above with it on
+             energy_fixer=bool(dc.energy_fixer and dc.column_lane),
++            sponge_del2_nu_top_m2s=float(dc.spectral_sponge_nu_top_m2s),
+         )
+         model = SpectralPrimitiveEquationModel(
+             grid=grid, sigma_coord=sigma, config=pe_config,
