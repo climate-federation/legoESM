@@ -198,12 +198,14 @@ def test_vmapped_draws_terminate_and_match_the_plain_draws():
     and equal the plain (CAM-ordered) draws bitwise."""
     from legoesm.atmosphere.physics.turbulence.clubb_mf import entrainment_draws
 
-    lam = jnp.asarray([[0.0] * 25, [0.38] * 25, [0.05] * 25, [12.0] * 25])
+    lam = jnp.asarray([[0.0] * 25, [0.38] * 25, [0.05] * 25, [12.0] * 25,
+                       [10.0] * 25, [150.0] * 25, [np.nan] * 25])
     u = jnp.asarray([-9.84784107, -9.74319409, -9.63811106, -9.53258656])
     plain = np.asarray(entrainment_draws(lam, u))
     batched = np.asarray(jax.vmap(entrainment_draws)(lam[None], u[None]))[0]
     np.testing.assert_array_equal(batched, plain)
     assert plain[0].max() == -1 and plain[3].min() > 0
+    assert np.all(plain[6] == -1)  # NaN rate drawn at 0, no hang
 
 if __name__ == "__main__":
     d = dict(np.load(FIXTURE, allow_pickle=True))

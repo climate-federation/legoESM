@@ -432,6 +432,8 @@ def entrainment_draws(lam, u_seed):
         # Under vmap the cond runs BOTH branches; Hormann's rejection loop does
         # not terminate for small rates (seen at lam = 0.38), so each branch is
         # fed a rate inside its own range.  The selected branch sees l_ itself.
+        # A NaN rate (already-NaN state) would hang either loop: draw at 0.
+        l_ = jnp.where(jnp.isnan(l_), 0.0, l_)
         return jax.lax.cond(
             l_ < _KNUTH_MAX_LAMBDA,
             lambda s, x: _knuth(s, jnp.minimum(x, _KNUTH_MAX_LAMBDA)),
