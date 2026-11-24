@@ -62,6 +62,13 @@ def test_active_requires_dynamic_ocean():
         CoupledESMDriver._init_wave(_Stub(config, dynamic=False))
 
 
+def test_active_wave_refuses_atmosphere_owned_surface():
+    config = CoupledConfig(atm_owns_surface=True)
+    CoupledESMDriver._init_wave(_Stub(config))  # Wave off can use this mode.
+    with pytest.raises(ValueError, match="atm_owns_surface"):
+        CoupledESMDriver._init_wave(_Stub(config._replace(wave_mode="active")))
+
+
 def test_cli_flags_round_trip():
     from scripts.run.run_coupled import build_parser
 
@@ -104,6 +111,7 @@ def test_step_wave_adds_batch_axis_and_returns_ocean_shaped_stokes(
             return state
 
     class _Stub:
+        _stage_wave_stokes = CoupledESMDriver._stage_wave_stokes
         coupled_cfg = CoupledConfig(wave_mode="active")
         _wave_model = _FakeModel()
         _wave_state = tiny_state

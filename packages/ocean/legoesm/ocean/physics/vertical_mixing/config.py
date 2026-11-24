@@ -1056,8 +1056,8 @@ class KPPConfig(NamedTuple):
     # that floor with the same sign, which covers most tropical fluxes.  True: the actual
     # flux, with zeta = d_eff kappa B_f / u*^3 written without a division by B_f, as
     # LMD94 and CVMix (cvmix_kpp_compute_turbulent_scales_1d_OBL) use it.
-    # True preserves the Wave integration's approved weak-flux correction,
-    # including runs with Langmuir disabled (the no-wave B control).
+    # The Wave contribution proposes enabling this correction by default.
+    # It also applies with Langmuir disabled (the no-wave B control).
     actual_buoyancy_flux: bool = True
     # Gradient surrogates (docs/88 6.12 (a2)): the boundary-layer base switch (K_bl inside, interior K below
     # sigma = 1) and the convective switch (K_conv where N2 < Ri_conv) keep their exact forward values but

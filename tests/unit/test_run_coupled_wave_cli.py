@@ -51,6 +51,17 @@ def test_active_wave_requires_config(capsys):
     assert "requires --wave-config" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(("flags", "message"), [
+    (["--atm-owns-surface"], "requires the coupler-owned surface exchange"),
+    (["--grid", "voronoi"], "does not support Voronoi-to-wave remapping"),
+])
+def test_active_wave_refuses_unsupported_coupling(flags, message, capsys):
+    with pytest.raises(SystemExit) as exc:
+        run_coupled.main(["--wave-mode", "active", *flags])
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
+
+
 def test_coupled_config_defaults_keep_waves_off():
     config = CoupledConfig()
     assert config.wave_mode == "off"
@@ -82,3 +93,10 @@ def test_wave_weights_required_only_for_neural_config(tmp_path, capsys, neural):
         driver = run_coupled.main(args, build_only=True)
         assert driver.coupled_cfg.wave_weights_path == ""
         assert driver.coupled_cfg.wave_mode == "active"
+
+        assert driver._build_latlon_ocean_config().physics is None
+        enabled = run_coupled.main([*args, "--kpp-langmuir"], build_only=True)
+        physics = enabled._build_latlon_ocean_config().physics
+        assert physics.vertical_mixing.scheme == "kpp"
+        assert physics.vertical_mixing.kpp.enable_langmuir is True
+        assert physics.surface_forcing.scheme == "none"

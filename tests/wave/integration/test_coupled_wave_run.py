@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -11,6 +13,7 @@ from legoesm.driver.config import (
     DycoreConfig, ExperimentConfig, GridConfig, OutputConfig)
 from legoesm.driver.coupled_config import preset_aquaplanet
 from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+from legoesm.driver.restart import compute_config_hash
 from legoesm.wave.checkpoint import _path_name
 from legoesm.wave.config import WaveGSEConfig, WaveTimeConfig
 from legoesm.wave.model import WaveModel
@@ -92,8 +95,37 @@ def test_dynamic_ocean_kpp_wave_run(tmp_path, physics_only, monkeypatch):
         coupling_dt=600.0, wave_mode="active", wave_config=wave_cfg,
         wave_weights_path="" if physics_only else str(weights_path), kpp_langmuir=True,
     )
+    if not physics_only:
+        # Exercise the public CLI's ocean card in a full short integration.
+        # Keep the fixture's smaller clock and atmosphere for both test arms.
+        from scripts.run.run_coupled import main
+
+        deck = tmp_path / "wave.json"
+        # Nested NamedTuples serialize as arrays by default. The wave deck
+        # must instead preserve the fields expected by WaveConfig.from_json.
+        deck.write_text(json.dumps({name: cfg._asdict()
+                                    for name, cfg in wave_cfg._asdict().items()}))
+        cli = main([
+            "--grid", "latlon", "--ocean", "dynamic",
+            "--wave-mode", "active", "--wave-config", str(deck),
+            "--wave-weights", str(weights_path), "--kpp-langmuir",
+        ], build_only=True)
+        coupled = cli.coupled_cfg._replace(
+            coupling_dt=coupled.coupling_dt, ocean_nlev=coupled.ocean_nlev,
+            ocean_dt_s=coupled.ocean_dt_s,
+        )
     driver = CoupledESMDriver(atmosphere, coupled, output_dir=tmp_path / "run")
     driver.setup()
+    np.testing.assert_array_equal(driver._wave_stokes, np.zeros((8, 16)))
+    first_ocean_stokes = []
+    advance_ocean = driver._step_ocean
+
+    def record_ocean_step(*args, **kwargs):
+        if not first_ocean_stokes:
+            first_ocean_stokes.append(np.asarray(driver._wave_stokes))
+        return advance_ocean(*args, **kwargs)
+
+    monkeypatch.setattr(driver, "_step_ocean", record_ocean_step)
     if physics_only:
         # Source-free transport needs a nonzero initial packet. No weight file
         # is supplied; restart must preserve that weight-free identity too.
@@ -107,9 +139,14 @@ def test_dynamic_ocean_kpp_wave_run(tmp_path, physics_only, monkeypatch):
     assert driver._wave_stokes.shape == (8, 16)
     assert bool(jnp.all(jnp.isfinite(driver._wave_stokes)))
     assert bool(jnp.any(driver._wave_stokes > 0))
-    assert any(seen_stokes), "real driver never forwarded the Wave Stokes field to KPP"
+    np.testing.assert_array_equal(first_ocean_stokes[0], np.zeros((8, 16)))
+    assert seen_stokes and all(seen_stokes)
     assert bool(jnp.all(jnp.isfinite(driver.ocean_state.T.data)))
-    assert driver.resolved_component_configs()["wave"] == wave_cfg
+    # The CLI loads grid coordinates as JSON lists. Compare the canonical
+    # serialized config, which also determines restart compatibility.
+    resolved_wave = driver.resolved_component_configs()["wave"]
+    assert compute_config_hash(resolved_wave, kind="coupled") == compute_config_hash(
+        wave_cfg, kind="coupled")
 
     # The next ocean segment consumes this lagged Stokes field.  A resumed run
     # must reconstruct it from the saved spectrum before that segment starts.
@@ -118,10 +155,12 @@ def test_dynamic_ocean_kpp_wave_run(tmp_path, physics_only, monkeypatch):
     resumed = CoupledESMDriver(
         atmosphere, coupled, output_dir=tmp_path / "resumed")
     resumed.setup()
-    np.savez(tmp_path / "coupled_day_0001.npz",
-             **resumed.coupled_checkpoint_arrays())
+    initial = resumed.coupled_checkpoint_arrays()
+    # Legacy v4 checkpoints stored a False marker before the first Wave step.
+    initial["_ckpt_wave_stokes_ready"] = np.asarray(False)
+    np.savez(tmp_path / "coupled_day_0001.npz", **initial)
     resumed.load_coupled_checkpoint(1.0, checkpoint_dir=tmp_path, required=True)
-    assert resumed._wave_stokes is None
+    np.testing.assert_array_equal(resumed._wave_stokes, np.zeros((8, 16)))
     resumed.load_coupled_checkpoint(0.0, checkpoint_dir=tmp_path, required=True)
     # The restored spectrum is the file value (exact); the lagged Stokes field
     # is RECOMPUTED from it, and float32 reduction order can differ by one ULP

@@ -208,8 +208,8 @@ class CoupledConfig(NamedTuple):
     # ``wave_mode`` is "off" (default; no wave initialization or stepping) or
     # "active". Existing KPP runs retain the shared weak-buoyancy correction
     # even with waves off; Langmuir enhancement is controlled separately.
-    # Active requires a dynamic 3-D ocean (the depth/mask come from
-    # its H_bathy/land_mask), a WaveConfig, and converted NeuralSWM weights when networks are enabled.
+    # Active uses the coupler-owned surface exchange and a dynamic 3-D ocean
+    # for depth/mask. It needs a WaveConfig and, for neural runs, converted weights.
     # The component is stepped once per coupling_dt with the neutral 10 m wind
     # derived from the coupler's stress and roughness; its surface Stokes-drift
     # magnitude is remapped to the ocean grid and consumed by KPP when
@@ -221,17 +221,21 @@ class CoupledConfig(NamedTuple):
     wave_weights_path: str = ""
     # Run the dynamic ocean's KPP vertical-mixing pipeline with the Langmuir
     # enhancement, which consumes the wave component's surface Stokes drift
-    # (``OceanSurfaceForcing.u_stokes``).  Default False keeps the lat-lon
-    # ocean on its legacy constant-diffusion stack (byte-identical); True
-    # attaches the KPP pipeline the tripole/OMIP builder already uses.
+    # (``OceanSurfaceForcing.u_stokes``). With waves off, this uses the
+    # prescribed Langmuir number. Python callers supply a KPP ocean card;
+    # the CLI selects one for the regular lat-lon ocean when requested.
     kpp_langmuir: bool = False
 
     def validate_strict(self) -> None:
-        """Reject an unknown wave mode before the wave component is built."""
+        """Check that the requested wave coupling path is supported."""
         if self.wave_mode not in ("off", "active"):
             raise ValueError(
                 "CoupledConfig.wave_mode must be 'off' or 'active'; "
                 f"got {self.wave_mode!r}")
+        if self.wave_mode == "active" and self.atm_owns_surface:
+            raise ValueError(
+                "wave_mode='active' does not support atm_owns_surface=True. "
+                "Use the coupler-owned surface exchange for Wave.")
 
 
 # ============================================================================

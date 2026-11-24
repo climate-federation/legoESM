@@ -53,7 +53,21 @@ A physics-only run selects
 transport, including when `use_transport_networks=True`; the analytic theta
 and frequency tendencies are selected without constructing network weights.
 With this configuration, coupled runs omit `--wave-weights`; neural runs require
-it. Checkpoints record an empty weights hash for a run without weights.
+it. With no source terms, wind is passed through the interface but does not
+generate waves. A calm initial spectrum stays calm. Checkpoints record an
+empty weights hash for a run without weights.
+
+For a regular latitude–longitude ocean, use the coupled CLI with
+`--grid latlon --ocean dynamic --wave-mode active --wave-config wave.json --kpp-langmuir`.
+The wave deck's global time step must match the coupling interval (3600 s by
+default). Add a converted `--wave-weights` file for a neural source term.
+`--kpp-langmuir` explicitly selects KPP with Langmuir enhancement; without
+that flag the regular latitude–longitude CLI retains its existing mixing
+configuration. Wave starts with zero Stokes on the ocean grid and thereafter
+supplies the previous coupling step's diagnostic. With Wave off and Langmuir
+explicitly enabled, KPP instead uses its configured prescribed Langmuir number.
+The coupled Wave path requires the coupler-owned surface exchange and excludes
+Voronoi atmosphere or ocean grids.
 
 `WaveModel.advance` caches JIT compilation while accepting changing spectra,
 winds, environments and network weights as array inputs. GSE requires the
