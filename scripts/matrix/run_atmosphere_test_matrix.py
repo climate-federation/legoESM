@@ -4769,13 +4769,22 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         dcmip13_wind_geo, dcmip13_tracers_at_points,
     )
 
+    # ``vertical``: the prescribed-wind models' vertical transport, selected
+    # explicitly per test.  1-1/1-2 use the FV3 Lagrangian remap (split,
+    # horizontal step then remap, as FV3); 1-3 stays upwind because its
+    # terrain-crossing sigma_dot is nonzero at the top and surface, which
+    # the remap refuses (mass would leave the column).  The cube rows of
+    # 1-1/1-2 run FV3 duo's own transport (``build_duo_dcmip_transport``:
+    # flux-form horizontal tracer_2d_1L, vertical motion implicit through
+    # the Lagrangian delp + map1_q2 remap, p_s evolving); cube 1-3 still
+    # runs the legacy cube model (terrain: out of the duo port's scope).
     TC_CFGS = {
         11: {"wind_geo": dcmip11_wind_geo, "period": 12.0,
-             "dt": 1800.0, "n_tracers": 4},
+             "dt": 1800.0, "n_tracers": 4, "vertical": "fv3_remap"},
         12: {"wind_geo": dcmip12_wind_geo, "period": 1.0,
-             "dt": 600.0, "n_tracers": 1},
+             "dt": 600.0, "n_tracers": 1, "vertical": "fv3_remap"},
         13: {"wind_geo": dcmip13_wind_geo, "period": 12.0,
-             "dt": 1800.0, "n_tracers": 4},
+             "dt": 1800.0, "n_tracers": 4, "vertical": "upwind"},
     }
     cfg = TC_CFGS[test_num]
     nlev = 30
@@ -4798,8 +4807,64 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     def to_grid(s):
         return s
 
+    def key_array_fn(s):
+        return s.tracers.data
+
+    # Per-layer air-mass weight of the Rule 0 audit: dsigma on the sigma
+    # rows (uniform p_s); the duo rows carry their own evolving delp.
+    _dsg_audit = np.diff(np.asarray(sigma_coord.sigma_half,
+                                    dtype=np.float64))
+
+    def layer_weight_fn(s):
+        return _dsg_audit
+    duo = None
+    state_init_grid = None
+
     # --- Grid-specific setup ---
-    if tc.grid_type == "cubed_sphere":
+    if tc.grid_type == "cubed_sphere" and test_num in (11, 12):
+        from scripts.matrix._cube_duo_adapters import (
+            build_duo_dcmip_transport)
+        from tests.test_cases.dcmip_transport import (
+            dcmip11_init_latlon, dcmip12_init_latlon)
+        n = int(tc.resolution[1:])
+        # d_sw's delp transport needs a sub-step Courant number < 1: the
+        # sub-step count follows the grid, dt and the prescribed winds
+        # (automatic), and the realised Courant number is refused >= 1
+        duo = build_duo_dcmip_transport(
+            n, wind_geo=cfg["wind_geo"],
+            init_latlon={11: dcmip11_init_latlon,
+                         12: dcmip12_init_latlon}[test_num],
+            sigma_coord=sigma_coord, n_tracers=cfg["n_tracers"], dt=dt,
+            n_sub=None, period_s=cfg["period"] * 86400.0)
+
+        from legoesm.core.field import Field
+        from legoesm.core.state import TracerState
+
+        def _as_tracer_state(q, t):
+            return TracerState(
+                tracers=Field(data=jnp.asarray(q), name="tracers",
+                              dims=("face", "y", "x", "level", "tracer"),
+                              units="kg/kg"),
+                time=Field(data=jnp.asarray(t), name="time", dims=(),
+                           units="s"))
+
+        def to_grid(s):  # noqa: F811
+            return _as_tracer_state(duo.tracers(s), s[1])
+
+        def key_array_fn(s):  # noqa: F811
+            return to_grid(s).tracers.data
+
+        def layer_weight_fn(s):  # noqa: F811
+            return duo.layer_mass(s) / 1.0e5       # delp / p0
+
+        state_init = duo.carry
+        state_init_grid = _as_tracer_state(duo.q_ic, 0.0)
+        model = SimpleNamespace(step=duo.step)
+        grid = SimpleNamespace(area=duo.area)
+        coord_kind = "cube"
+        lon_deg, lat_deg = duo.lon_deg, duo.lat_deg
+
+    elif tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import (
             create_cubed_sphere, rotate_winds_geo_to_grid)
         from legoesm.atmosphere.dynamics.shared.tracer_transport import (
@@ -4845,7 +4910,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         state_init = init_fns[test_num](grid, sigma_coord)
         model = TracerTransportLatLonModel(
             grid, sigma_coord, latlon_wind,
-            TracerTransportLatLonConfig())
+            TracerTransportLatLonConfig(vertical_scheme=cfg["vertical"]))
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -4886,7 +4951,8 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         state_init = init_fns[test_num](grid, sigma_coord)
         model = TracerTransportMPASModel(
             grid, sigma_coord, mpas_wind,
-            TracerTransportMPASConfig(hyperdiff_coeff=0.0))
+            TracerTransportMPASConfig(hyperdiff_coeff=0.0,
+                                      vertical_scheme=cfg["vertical"]))
         coord_kind = "icosa"
         lon_deg = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
@@ -4907,7 +4973,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
 
         model = SpectralTracerTransportModel(
             create_gaussian_grid(n_max), sigma_coord, spectral_wind,
-            TracerTransportSpectralConfig())
+            TracerTransportSpectralConfig(vertical_scheme=cfg["vertical"]))
         grid = model.grid
         # The lat-lon init helpers read only lon2d/lat2d/n_lat/n_lon, which
         # the Gaussian grid exposes too: same analytic IC as the lat-lon row.
@@ -4934,7 +5000,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
                f"DCMIP transport not implemented for grid '{tc.grid_type}'")
         return "SKIP", 0.0, ""
 
-    if tc.grid_type != "spectral":
+    if tc.grid_type != "spectral" and state_init_grid is None:
         state_init_grid = state_init
 
     # --- Extract function for tracer snapshots ---
@@ -4968,13 +5034,21 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             "q1_mean": _area_weighted_mean(q[..., 0], _area_for_mean),
         }
 
-    def key_array_fn(s):
-        return s.tracers.data
-
     # --- Time loop ---
     period = min(days, cfg["period"])
-    n_steps = int(period * 86400.0 / dt)
+    _nf = period * 86400.0 / dt
+    n_steps = int(_nf)
+    if duo is not None and round(_nf) >= 1 and abs(_nf - round(_nf)) <= (
+            8 * np.spacing(float(round(_nf)))):
+        # duo rows only (the other rows' rule is unchanged): snap a request
+        # within a few ulps of an integer step count (e.g. 23 * 600 s /
+        # 86400 -> 22.999999999999996), floor otherwise
+        n_steps = int(round(_nf))
     diag_every = max(1, n_steps // 20)
+    if duo is not None and n_steps < 1:
+        # never a duo PASS with unchanged budgets and no measured omega
+        raise RuntimeError(f"DCMIP duo transport: {period:g} d is shorter "
+                           f"than one step (dt={dt:g} s); refusing")
 
     state_final, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state_init, dt, n_steps, check_fn, scalar_fn, extract_fn,
@@ -5004,6 +5078,68 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         notes_parts.append("IC-projection " + ", ".join(
             f"q{i + 1} L2={ic_norms['l2'][i]:.4e}"
             for i in range(n_tracers)))
+    # RULE 0 audit, every grid/test/scheme: per-tracer global tracer mass
+    # sum(area * sum_k q dsigma) (uniform p_s, so dsigma ~ dp/p_s) at the
+    # start and end, and its relative residual.  The advective-form
+    # prescribed-wind models do NOT conserve it (declared, not hidden).
+    _q0 = np.asarray(to_grid(state_init).tracers.data, dtype=np.float64)
+    _q1 = np.asarray(to_grid(state_final).tracers.data, dtype=np.float64)
+    _ar = np.asarray(_area_for_mean, dtype=np.float64)
+    _w0 = np.broadcast_to(np.asarray(layer_weight_fn(state_init),
+                                     dtype=np.float64), _q0.shape[:-1])
+    _w1 = np.broadcast_to(np.asarray(layer_weight_fn(state_final),
+                                     dtype=np.float64), _q1.shape[:-1])
+    _want = (*_ar.shape, nlev, n_tracers)
+    if _q0.shape != _want or _q1.shape != _want:
+        # never a PASS with an unmeasured (or mis-broadcast) budget
+        raise RuntimeError(
+            f"DCMIP mass audit: tracer shapes {_q0.shape}/{_q1.shape} != "
+            f"(area {_ar.shape}, nlev {nlev}, ntr {n_tracers})")
+    if not (np.all(np.isfinite(_q0)) and np.all(np.isfinite(_q1))):
+        notes_parts.append("mass audit unavailable: non-finite tracer state")
+    else:
+        def _mass(q, w):
+            col = np.sum(q * w[..., None], axis=-2)    # (..., ntr)
+            return np.sum(col * _ar[..., None],
+                          axis=tuple(range(col.ndim - 1)))
+        _m0, _m1 = _mass(_q0, _w0), _mass(_q1, _w1)
+        if not (np.all(np.isfinite(_m0)) and np.all(np.isfinite(_m1))):
+            raise RuntimeError(f"DCMIP mass audit: non-finite budget "
+                               f"M0={_m0} M1={_m1}")
+        notes_parts.append("mass " + ", ".join(
+            f"q{i + 1} M0={_m0[i]:.15e} M1={_m1[i]:.15e} "
+            f"rel={(_m1[i] - _m0[i]) / _m0[i]:+.6e}"
+            if _m0[i] != 0.0 else f"q{i + 1} M0=0 M1={_m1[i]:.15e}"
+            for i in range(n_tracers)))
+    if duo is not None:
+        # duo rows: air mass / p_s drift (p_s evolves, never reset), the
+        # implicit vertical motion vs the analytic omega (unused), Courant
+        _ps1 = duo.ps(state_final)
+        _air = [duo.air_mass(c) for c in (state_init, state_final)]
+        notes_parts.append(
+            f"air-mass rel {(_air[1] - _air[0]) / _air[0]:+.3e}, p_s-p0 "
+            f"min/max {np.min(_ps1) - 1e5:+.2f}/{np.max(_ps1) - 1e5:+.2f} "
+            f"Pa (rms {np.sqrt(np.mean((_ps1 - 1e5) ** 2)):.2f})")
+        _om = duo.effective_omega()
+        if _om:
+            notes_parts.append(
+                "omega_eff (material: Lagrangian interface tendency + "
+                "V.grad(pe_eul), first/last accepted step; DCMIP omega "
+                "unused) "
+                "vs analytic p0*sigma_dot: " + ", ".join(
+                    f"t={o['t_sample']:.0f}s rms err "
+                    f"{o['abs_rms_err']:.3e} Pa/s (rel {o['rel_rms_err']:.3e}"
+                    f", corr {o['corr']:.5f}; fixed-cell rel "
+                    f"{o['rel_rms_err_fixed_cell']:.3e}; rms analytic "
+                    f"{o['rms_analytic']:.3e}, V.grad(pe) "
+                    f"{o['rms_interface_advection']:.2e})"
+                    for o in (_om["first"], _om["last"])))
+        _elapsed = float(state_final[1])          # the carry's own clock
+        notes_parts.append(
+            f"integrated {int(round(_elapsed / dt))} of {n_steps} steps = "
+            f"{_elapsed / 86400.0:g} d")
+        notes_parts.append(f"n_sub {duo.n_sub_fn()}, max sub-step Courant "
+                           f"{duo.courant_max():.3f}")
     notes = ", ".join(notes_parts)
 
     # --- Diagnostics output ---
@@ -5014,6 +5150,15 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "levels": nlev, "period_days": period, "dt": dt,
+        "vertical_scheme": (
+            "fv3_duo Lagrangian (implicit omega) + map1_q2"
+            if duo is not None else
+            "upwind (legacy cube model)"
+            if tc.grid_type == "cubed_sphere" else cfg["vertical"]),
+        **({"duo": duo.note,
+            "accepted_steps": int(round(float(state_final[1]) / dt)),
+            "elapsed_days": float(state_final[1]) / 86400.0}
+           if duo is not None else {}),
         "status": "PASS" if ok else "FAIL", "notes": notes,
         "wall_time": f"{wall:.1f}s"},
         diag=diag)  # iter-99: surface BLOWUP info if any

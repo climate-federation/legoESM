@@ -34,7 +34,9 @@ from legoesm.core.operators_voronoi import (
     cell_to_edge_avg_3d,
 )
 from legoesm.grids.voronoi import VoronoiMesh
-from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
+from legoesm.grids.vertical import (
+    SigmaCoordinate, check_tracer_vertical_scheme, vertical_advection,
+    vertical_remap_sigma_fv3)
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 
@@ -53,6 +55,10 @@ class TracerTransportMPASConfig(NamedTuple):
     """Configuration for MPAS tracer transport model."""
     hyperdiff_coeff: float = 0.0
     time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
+    #: "upwind" (in-tendency) | "fv3_remap": the horizontal SSP-RK step runs
+    #: alone, then a split FV3 Lagrangian vertical remap
+    #: (``grids.vertical.vertical_remap_sigma_fv3``, sigma_dot at mid-step).
+    vertical_scheme: str = "upwind"
 
 
 def tracer_horizontal_advection(q, u_edge, mesh):
@@ -158,13 +164,18 @@ def tracer_tendencies_mpas(
     TracerState
         Tendency pytree: dtracers_dt and dtime_dt = 1.0.
     """
+    check_tracer_vertical_scheme(config.vertical_scheme)
     t = state.time.data  # scalar time
     q = state.tracers.data  # (nCells, nlev, n_tracers)
 
     # Get prescribed winds at current time
     u_edge, sigma_dot = wind_fn(t, mesh, sigma_coord)  # (nEdges, nlev), (nCells, nlev+1)
 
-    dq_dt = tracer_advection_tendency(q, u_edge, sigma_dot, mesh, sigma_coord)
+    if config.vertical_scheme == "fv3_remap":
+        dq_dt = tracer_horizontal_advection(q, u_edge, mesh)
+    else:
+        dq_dt = tracer_advection_tendency(q, u_edge, sigma_dot, mesh,
+                                          sigma_coord)
 
     # Hyperdiffusion placeholder — MPAS scalar hyperdiffusion is not yet
     # available in operators_voronoi; tendency contribution is zero.
@@ -208,6 +219,7 @@ class TracerTransportMPASModel(IntegrationMixin):
         self.sigma_coord = sigma_coord
         self.wind_fn = wind_fn
         self.config = config or TracerTransportMPASConfig()
+        check_tracer_vertical_scheme(self.config.vertical_scheme)
 
     def tendencies(self, state: TracerState) -> TracerState:
         """Compute tendencies (pure function wrapper)."""
@@ -235,9 +247,16 @@ class TracerTransportMPASModel(IntegrationMixin):
                 s, self.mesh, self.sigma_coord, self.wind_fn, self.config
             )
 
-        return dispatch_integrator(
+        new = dispatch_integrator(
             state, tendency_fn, dt, self.config.time_integrator,
         )
+        if self.config.vertical_scheme != "fv3_remap":
+            return new
+        _, sigma_dot = self.wind_fn(state.time.data + 0.5 * dt, self.mesh,
+                                    self.sigma_coord)
+        q = vertical_remap_sigma_fv3(
+            new.tracers.data, sigma_dot, self.sigma_coord, dt)
+        return new._replace(tracers=new.tracers.replace(data=q))
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
