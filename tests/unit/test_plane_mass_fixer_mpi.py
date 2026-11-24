@@ -28,7 +28,6 @@ from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_rest_state,
 )
 from legoesm.atmosphere.dynamics.crm.rce_mpi import (
-    _plane_volume_weight_mpi,
     compute_dry_mass_plane_mpi,
     compute_rho_prime_mass_plane_mpi,
     fix_mass_nonhydrostatic_plane_mpi,
@@ -119,14 +118,6 @@ def test_fix_mass_restores_target_mass_single_rank():
         np.asarray(restored_mass), np.asarray(target),
         rtol=1e-12, atol=1e-8,
     )
-
-
-def test_volume_weight_single_rank_matches_serial():
-    grid, hc, tm, state, layout, mask = _setup()
-    weight_h = (tm.jacobian * grid.area_T)[:, :, None]
-    expected = float(jnp.sum(weight_h * hc.dz))
-    actual = float(_plane_volume_weight_mpi(grid, hc, tm, layout, mask))
-    assert abs(actual - expected) < 1e-12 * abs(expected)
 
 
 def test_fix_mass_correction_is_spatially_uniform():
@@ -300,3 +291,21 @@ def test_single_rank_anomaly_integral_ignores_mask_like_the_fixer():
     np.testing.assert_allclose(np.asarray(fixed.rho_prime.data),
                                np.asarray(state.rho_prime.data),
                                rtol=0, atol=1e-15)
+
+
+def test_step_halo_honours_caller_target_without_anchor():
+    """MPI path, anchor_mass_to_initial=False: a caller-set ``_target_mass``
+    drives the fixer as in the serial step (it was ignored before)."""
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        PlaneCompressibleEulerModel,
+    )
+    grid, hc, tm, state, layout, mask = _setup()
+    cfg = CompressibleEulerConfig(fix_mass=True, anchor_mass_to_initial=False,
+                                  hyperdiff_coeff=0.0, hyperdiff_rho_coeff=0.0,
+                                  hyperdiff_w_coeff=0.0)
+    dry0 = compute_dry_mass_plane_mpi(state, grid, hc, tm, layout, mask)
+    model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
+    model._target_mass = dry0 * (1.0 + 1e-6)
+    out = model.step_halo(state, dt=2.0, layout=layout, owned_mask=mask)
+    dry1 = compute_dry_mass_plane_mpi(out, grid, hc, tm, layout, mask)
+    assert abs(float(dry1 / dry0) - 1.0 - 1e-6) < 1e-12

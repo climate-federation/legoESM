@@ -3331,14 +3331,14 @@ class PlaneCompressibleEulerModel:
         ))
 
     def _fixer_target(self, target, state):
-        """Anomaly-form fixer target: the cached anchor anomaly when it
-        belongs to ``target``; the pre-step anomaly when no target is set
-        (``target`` was computed from ``state``); else (``_target_mass`` set
-        by a caller, anchored or not) ``target - B``."""
+        """Anomaly-form fixer target for the total ``target``: the cached
+        anchor anomaly when it belongs to ``target``; the pre-step anomaly of
+        ``state`` when no target is set (``None``: hold the pre-step mass);
+        else (a caller-set total, anchored or not) ``target - B``."""
         cached = getattr(self, "_target_anomaly", None)
         if cached is not None and cached[0] is target:
             return cached[1]
-        if self._target_mass is None:
+        if target is None:
             return _plane_weighted_mass_sum(
                 state.rho_prime.data, self.grid, self.height_coord,
                 self.terrain_metric,
@@ -3383,13 +3383,9 @@ class PlaneCompressibleEulerModel:
                     state, self.grid, self.height_coord, self.terrain_metric,
                 )
                 self._cache_target_anomaly(state)
-        target = self._target_mass
-        if target is None and self.config.fix_mass:
-            target = compute_dry_mass_plane(
-                state, self.grid, self.height_coord, self.terrain_metric,
-            )
+        target = None
         if self.config.fix_mass:
-            target = self._fixer_target(target, state)
+            target = self._fixer_target(self._target_mass, state)
         return self._step_jit(state, dt, target, physics_fn)
 
     def step_halo(
@@ -3575,11 +3571,10 @@ class PlaneCompressibleEulerModel:
                     self._target_anomaly = (
                         self._target_mass,
                         compute_rho_prime_mass_plane_mpi(state_local, *mass_args))
-                target = self._target_mass
-            else:
-                target = None
-            # Anomaly-form target, as in ``_fixer_target`` (serial). A
-            # caller-replaced ``_target_mass`` total is converted once by
+            target = self._target_mass
+            # Anomaly-form target, as in ``_fixer_target`` (serial): no
+            # target holds the pre-step mass; a caller-replaced
+            # ``_target_mass`` total (anchored or not) is converted once by
             # subtracting the global background (carries that total's
             # rounding, as the serial fallback does).
             cached = getattr(self, "_target_anomaly", None)
