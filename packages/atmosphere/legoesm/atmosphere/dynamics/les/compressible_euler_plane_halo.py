@@ -389,8 +389,12 @@ def plane_compressible_euler_slow_tendencies_halo(
     config: CompressibleEulerConfig,
     layout: PlanePencilLayout,
     f_pad_cached: jax.Array | None = None,
+    conservative_tracers: bool = False,
 ) -> PlaneNonHydrostaticTendencies:
     """Halo-aware slow-tendency for the plane NH dycore.
+
+    ``conservative_tracers`` as in the serial
+    :func:`plane_compressible_euler_slow_tendencies` (#2641).
 
     Inputs: rank-local slabs. Output: rank-local interior-shape
     tendencies. Single packed MPI round per call covers all
@@ -835,7 +839,28 @@ def plane_compressible_euler_slow_tendencies_halo(
 
     # 12. Tracer advection.
     tracers = state.tracers.data
-    if tracers.shape[-1] > 0:
+    if tracers.shape[-1] > 0 and conservative_tracers:
+        # Advection moves to plane_conservative_tracer_stage; the SGS legs
+        # conserve sum(rho_ref * tend * dV), so hand back rho_ref*tend/rho.
+        dtracers_dt = jnp.zeros_like(tracers)
+        if _use_smag or _use_mol:
+            ny_l, nx_l, nlev, n_tr = tracers.shape
+            tracers_pad, = packed_exchange_halo_plane_yxz(
+                tracers.reshape(ny_l, nx_l, nlev * n_tr), layout=layout)
+            tracers_pad = tracers_pad.reshape(
+                tracers_pad.shape[:2] + (nlev, n_tr))
+            tracer_sgs = jax.vmap(
+                lambda q_pad: oh.variable_K_diffusion_vlast_halo(
+                    q_pad, K_h_pad, grid, h),
+                in_axes=-1, out_axes=-1,
+            )(tracers_pad)
+            if _sgs_vert:
+                tracer_sgs = tracer_sgs + vertical_K_diffusion_full(
+                    tracers, K_h_int, height_coord,
+                )
+            dtracers_dt = (tracer_sgs * rho_0[:, None]
+                           / (rho_0 + rho_p)[..., None])
+    elif tracers.shape[-1] > 0:
         # Pad each tracer slot via packed exchange (one MPI round).
         # tracers.shape = (ny_local, nx_local, nlev, n_tracers)
         n_tr = tracers.shape[-1]
