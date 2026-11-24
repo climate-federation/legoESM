@@ -263,7 +263,7 @@ def cgrid_fv_flux_divergence_latlon_3d(
     return -(net_lon + net_lat) / grid.area[:, :, None]
 
 
-def _cgrid_velocity_divergence_3d(
+def cgrid_velocity_divergence_3d(
     u_face_3d: jax.Array,
     v_face_3d: jax.Array,
     grid: LatLonGrid,
@@ -319,5 +319,5 @@ def cgrid_fv_scalar_advection_latlon_3d(
     flux_form = cgrid_fv_flux_divergence_latlon_3d(
         q_3d, u_face_3d, v_face_3d, grid, limiter, q_pad=q_pad,
     )
-    div_v = _cgrid_velocity_divergence_3d(u_face_3d, v_face_3d, grid)
+    div_v = cgrid_velocity_divergence_3d(u_face_3d, v_face_3d, grid)
     return flux_form + q_3d * div_v

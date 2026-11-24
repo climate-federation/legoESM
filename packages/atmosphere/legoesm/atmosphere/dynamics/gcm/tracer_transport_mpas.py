@@ -315,8 +315,11 @@ class TracerTransportMPASModel(IntegrationMixin):
         sigma_coord: SigmaCoordinate,
         wind_fn: WindFnMPAS,
         config: TracerTransportMPASConfig | None = None,
+        *,
+        mass_flux=None,
     ):
         self.mesh = mesh
+        self.mass_flux = mass_flux
         self.sigma_coord = sigma_coord
         self.wind_fn = wind_fn
         self.config = config or TracerTransportMPASConfig()
@@ -325,6 +328,10 @@ class TracerTransportMPASModel(IntegrationMixin):
         if self.config.horizontal_scheme == "mpas_fct":
             from legoesm.core.operators_voronoi import mpas_advection_coefficients
             self.adv_coefs = mpas_advection_coefficients(mesh)
+        if mass_flux is not None and (self.config.horizontal_scheme != "mpas_fct"
+                                      or self.config.vertical_scheme != "mpas_flux"):
+            raise ValueError("mass_flux runs with horizontal_scheme='mpas_fct' and "
+                             "vertical_scheme='mpas_flux'")
 
     def tendencies(self, state: TracerState) -> TracerState:
         """Compute tendencies (pure function wrapper; ``centred2`` only)."""
@@ -352,7 +359,8 @@ class TracerTransportMPASModel(IntegrationMixin):
         """
         if self.config.horizontal_scheme == "mpas_fct":
             return mpas_rk3_fct_step(state, dt, self.mesh, self.sigma_coord,
-                                     self.wind_fn, self.config, self.adv_coefs)
+                                     self.wind_fn, self.config, self.adv_coefs,
+                                     self.mass_flux)
 
         def tendency_fn(s):
             return tracer_tendencies_mpas(
@@ -613,7 +621,7 @@ def mpas_vertical_flux_ho(q, F, a_v, sigma_coord, coef3):
 
 
 
-def _mpas_stage_fluxes(q, dp, u_edge, mesh, sigma_coord, coefs, config):
+def _mpas_stage_fluxes(q, dp, u_edge, mesh, sigma_coord, coefs, config, mass_flux=None):
     """Fluxes of one MPAS RK3 stage from the stage state ``(q, dp)``.
 
     Returns ``(fm, a, f_ho, div_h, F, a_v, g_ho)``: edge air-mass flux ``fm
@@ -626,12 +634,21 @@ def _mpas_stage_fluxes(q, dp, u_edge, mesh, sigma_coord, coefs, config):
     and its smooth magnitude ``a_v`` (nC, nlev+1, 1); and the high-order
     vertical tracer flux ``g_ho`` (nC, nlev+1, ntr).  The last three are
     ``None`` for ``vertical_scheme="fv3_remap"``, whose stages are
-    horizontal only."""
+    horizontal only.
+
+    ``mass_flux`` (a steady :class:`~legoesm.atmosphere.dynamics.gcm.
+    consistent_mass_flux.PrescribedMassFlux`): ``fm`` and ``F`` are its
+    consistent edge and interface air fluxes (``u_edge`` unused), ``F``
+    open at the top and the surface, where the tracer flux (high and low
+    order alike) is ``F`` times the adjacent layer's value."""
     from legoesm.core.operators_voronoi import mpas_edge_reconstruction
     nC, nlev = dp.shape
     c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
     dp_e = 0.5 * (dp[c1] + dp[c2])
-    fm = (u_edge * dp_e)[..., None]
+    if mass_flux is None:
+        fm = (u_edge * dp_e)[..., None]
+    else:
+        fm = mass_flux.flux_h.astype(dp.dtype)[..., None]
     if config.fct_upwind_width_ms == 0:
         a = jnp.abs(fm)
     else:
@@ -646,13 +663,18 @@ def _mpas_stage_fluxes(q, dp, u_edge, mesh, sigma_coord, coefs, config):
     div_h = divergence_cell_3d(fm[..., 0], mesh)
     if config.vertical_scheme != "mpas_flux":
         return fm, a, f_ho, div_h, None, None, None
-    F = mpas_vertical_mass_flux(div_h, sigma_coord)[..., None]
+    if mass_flux is None:
+        F = mpas_vertical_mass_flux(div_h, sigma_coord)[..., None]
+    else:
+        F = mass_flux.w.astype(dp.dtype)[..., None]
     if config.fct_vertical_upwind_width_pas == 0:
         a_v = jnp.abs(F)
     else:   # smooth |F| from above (as a); zero at top and surface
         a_v = jnp.hypot(F, config.fct_vertical_upwind_width_pas)
         a_v = a_v.at[:, 0].set(0.0).at[:, -1].set(0.0)
     g_ho = mpas_vertical_flux_ho(q, F, a_v, sigma_coord, config.coef_3rd_order)
+    if mass_flux is not None:
+        g_ho = g_ho.at[:, 0].set(F[:, 0] * q[:, 0]).at[:, -1].set(F[:, -1] * q[:, -1])
     return fm, a, f_ho, div_h, F, a_v, g_ho
 
 
@@ -677,15 +699,16 @@ def _cell_bounds(q0, mesh, width, vertical):
 
 
 def mpas_rk3_fct_step(state: TracerAirMassState, dt, mesh, sigma_coord, wind_fn,
-                      config: TracerTransportMPASConfig, coefs) -> TracerAirMassState:
+                      config: TracerTransportMPASConfig, coefs,
+                      mass_flux=None) -> TracerAirMassState:
     """One MPAS-A scalar transport step (``atm_srk3`` RK3 + monotonic limiter).
 
     Wicker-Skamarock RK3 as ``atm_srk3`` / ``atm_advance_scalars_work``: each
     stage from the step's start state ``(q0, dp0)`` over ``dt/3, dt/2, dt``
     with the fluxes of the previous stage's state (wind at that state's
-    time), in flux form on the prognostic layer air mass.  The vertical
-    air-mass flux ``F`` is NOT the wind function's ``sigma_dot`` (ignored
-    here): it is diagnosed each stage from the discrete column continuity of
+    time), in flux form on the prognostic layer air mass.  By default
+    (``mass_flux=None``) the vertical air-mass flux ``F`` is NOT the wind
+    function's ``sigma_dot`` (ignored here): it is diagnosed each stage from the discrete column continuity of
     the horizontal mass flux actually applied
     (:func:`mpas_vertical_mass_flux`, zero at top and surface), so the air
     mass is exactly compatible with the transport (user decision
@@ -715,6 +738,20 @@ def mpas_rk3_fct_step(state: TracerAirMassState, dt, mesh, sigma_coord, wind_fn,
     shared FV3 tracer remap
     (:func:`legoesm.grids.vertical.vertical_remap_sigma_fv3`, kord 9) in the
     normalised coordinate ``sigma_top + cumsum(dp_h) / p_s'``.
+
+    ``mass_flux`` (steady prescribed air fluxes of
+    :func:`legoesm.atmosphere.dynamics.gcm.consistent_mass_flux.
+    consistent_mass_flux_mpas`, DCMIP 1-3; needs ``vertical_scheme=
+    "mpas_flux"``): the edge flux ``fm`` and the interface flux ``F`` are
+    the prescribed consistent ones (``div fm + delta F = 0`` to round-off,
+    so ``dp`` stays at its steady value and a uniform tracer stays uniform;
+    the wind function is not called; ponytail: the state's ``air_mass`` must
+    equal ``mass_flux.dp``, not checked inside the traced step -- the matrix
+    row builds both from one ``dp``); a nonzero ``F`` at the top or the
+    surface is an open boundary, where the tracer flux is ``F`` times the
+    adjacent layer's ``q`` in the low-order flux (no antidiffusive part
+    there), and the tracer mass changes only by that boundary flux (the
+    DCMIP 1-3 row's fluxes are closed there: zero).
 
     KNOWN DIFFERENCES from MPAS-A (each recorded with its reason):
     * MPAS copies back ``max(0, q)``; dropped (it creates tracer mass, RULE
@@ -778,6 +815,8 @@ def mpas_rk3_fct_step(state: TracerAirMassState, dt, mesh, sigma_coord, wind_fn,
         raise ValueError(f"mpas_rk3_fct_step: vertical_scheme {config.vertical_scheme!r}; "
                          f"expected one of {MPAS_FCT_VERTICAL_SCHEMES}")
     flux_vertical = config.vertical_scheme == "mpas_flux"
+    if mass_flux is not None and not flux_vertical:
+        raise ValueError("mass_flux needs vertical_scheme='mpas_flux'")
     width = config.fct_smoothing_width
     t0 = state.time.data
     # working precision: the default float (fp64 under x64), whatever the
@@ -796,9 +835,9 @@ def mpas_rk3_fct_step(state: TracerAirMassState, dt, mesh, sigma_coord, wind_fn,
     qdp0 = q0 * dp0[..., None]
     q, dp, t = q0, dp0, t0
     for tau in (dt / 3.0, dt / 2.0):
-        u_edge, _ = wind_fn(t, mesh, sigma_coord)
+        u_edge = None if mass_flux is not None else wind_fn(t, mesh, sigma_coord)[0]
         fm, a, f_ho, div_h, F, a_v, g_ho = _mpas_stage_fluxes(q, dp, u_edge, mesh, sigma_coord,
-                                                              coefs, config)
+                                                              coefs, config, mass_flux)
         if flux_vertical:
             dp = dp0 + tau * (-div_h - vdiv(F)[..., 0])
             q = (qdp0 + tau * (-div(f_ho) - vdiv(g_ho))) / dp[..., None]
@@ -808,9 +847,9 @@ def mpas_rk3_fct_step(state: TracerAirMassState, dt, mesh, sigma_coord, wind_fn,
         t = t0 + tau
 
     # stage 3: monotonic limiter over the full step (atm_advance_scalars_mono)
-    u_edge, _ = wind_fn(t, mesh, sigma_coord)
+    u_edge = None if mass_flux is not None else wind_fn(t, mesh, sigma_coord)[0]
     fm, a, f_ho, div_h, F, a_v, g_ho = _mpas_stage_fluxes(q, dp, u_edge, mesh, sigma_coord,
-                                                          coefs, config)
+                                                          coefs, config, mass_flux)
     c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
     q1, q2 = q0[c1], q0[c2]
     # donor/acceptor weights first (no cancellation of a small donor value);
@@ -822,8 +861,18 @@ def mpas_rk3_fct_step(state: TracerAirMassState, dt, mesh, sigma_coord, wind_fn,
         qa, qb = q0[:, :-1], q0[:, 1:]                       # layer above / below interface
         g_up = 0.5 * (F[:, 1:-1] + a_v[:, 1:-1]) * qa - 0.5 * (a_v[:, 1:-1] - F[:, 1:-1]) * qb
         zero = jnp.zeros_like(q0[:, :1])
-        g_up = jnp.concatenate([zero, g_up, zero], axis=1)
+        if mass_flux is None:
+            g_up = jnp.concatenate([zero, g_up, zero], axis=1)
+        else:   # open top / surface: F times the adjacent layer (low order only;
+            # ponytail: first order in time there (step-start q0); the RK
+            # stage value + limited correction is the ceiling.  The DCMIP 1-3
+            # row's fluxes are closed (F = 0) at both boundaries)
+            g_up = jnp.concatenate([F[:, :1] * q0[:, :1], g_up, F[:, -1:] * q0[:, -1:]],
+                                   axis=1)
         anti_v = g_ho - g_up
+        if mass_flux is not None:
+            # the open top / surface carry the low-order flux F q0 only
+            anti_v = anti_v.at[:, 0].set(0.0).at[:, -1].set(0.0)
         dp_new = dp0 + dt * (-div_h - vdiv(F)[..., 0])
         dp_lim = dp_new
         qdp_td = qdp0 - dt * (div(f_up) + vdiv(g_up))

@@ -552,9 +552,19 @@ def test_matrix_runner_selects_scheme_and_audits_mass(
         np.testing.assert_allclose([float(x[1]) for x in got], m0_ref,
                                    rtol=1e-6)
         wind = {12: D.dcmip12_wind_geo, 13: D.dcmip13_wind_geo}[test_num]
-        m = TracerTransportLatLonModel(
-            g, sc, wind, TracerTransportLatLonConfig(vertical_scheme=scheme))
+        mass_flux = None
         st = init(g, sc)
+        if test_num == 13:   # the row's 1-3 model: consistent air fluxes, fp64
+            from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+                consistent_mass_flux_latlon)
+            mass_flux = consistent_mass_flux_latlon(
+                g, sc, D.dcmip13_wind_geo_banded,
+                D._p0 * jnp.exp(-D._mountain_height(g.lon2d, g.lat2d) / D._H))
+            st = st._replace(tracers=st.tracers.replace(
+                data=st.tracers.data.astype(jnp.float64)))
+        m = TracerTransportLatLonModel(
+            g, sc, wind, TracerTransportLatLonConfig(vertical_scheme=scheme),
+            mass_flux=mass_flux)
         dt_run = 120.0 if test_num == 13 else dt   # the row's lat-lon 1-3 dt
         for _ in range(int(2 * dt / 86400.0 * 86400.0 / dt_run)):
             st = m.step(st, dt_run)

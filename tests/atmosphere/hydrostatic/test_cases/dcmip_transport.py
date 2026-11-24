@@ -487,6 +487,48 @@ def dcmip13_wind_geo(
     return u_east_3d, v_north_3d, sigma_dot
 
 
+def dcmip13_flow_fraction(lon, lat, sigma_coord: SigmaCoordinate):
+    """Active-flow fractions of the DCMIP 1-3 flow restricted to heights
+    ``h0 <= z <= z_top`` (user decision 2026-11-24, codex vote): Kent et al.
+    (2014, Sec. 5) allow ``u = v = 0`` for ``z < h0`` ("a valid modification
+    ... that will not impact the characteristics of the tracer transport
+    test"); the ``z > z_top`` cut is its analogue for this sigma coordinate,
+    whose top follows the terrain (``z = z_s + 12 km``) where DCMIP's is flat,
+    so no air crosses the model top or the surface.
+
+    Returns ``(frac, mask_half)``: ``frac`` (*spatial, nlev) the fraction of
+    each layer's ``dsigma`` (= of its air mass, ``p = p_s sigma``) inside the
+    band, by which the height-independent horizontal wind is multiplied (the
+    exact layer air flux); ``mask_half`` (*spatial, nlev+1) 1 where the
+    interface height lies in the band, multiplying ``sigma_dot``.  With
+    ``p_s sigma`` at the band edges constant (``p0 exp(-h0/H)``, ``p0
+    exp(-z_top/H)``) these keep the layer continuity analytically closed.
+    Static geometry (not model state): exact steps (RULE 5 out of scope)."""
+    zs = _mountain_height(lon, lat)[..., None]
+    sh = jnp.asarray(sigma_coord.sigma_half, jnp.result_type(zs))
+    s_lo = jnp.exp(-(_ztop - zs) / _H)          # sigma at z = z_top
+    s_hi = jnp.exp(-(_h0_mt - zs) / _H)         # sigma at z = h0
+    clipped = jnp.clip(sh, s_lo, s_hi)
+    frac = (clipped[..., 1:] - clipped[..., :-1]) / (sh[1:] - sh[:-1])
+    z_half = zs - _H * jnp.log(sh)
+    mask_half = ((z_half >= _h0_mt) & (z_half <= _ztop)).astype(frac.dtype)
+    # the surface (z = z_s <= h0) and the top (z = z_s + z_top >= z_top) lie
+    # outside the band by construction; set them exactly (a top interface
+    # within float32 rounding of z_top over z_s ~ 1e-4 m otherwise kept a
+    # tiny sigma_dot, which the solvability mean removal spread to every column)
+    mask_half = mask_half.at[..., 0].set(0.0).at[..., -1].set(0.0)
+    return frac, mask_half
+
+
+def dcmip13_wind_geo_banded(t, lon, lat, sigma_coord: SigmaCoordinate):
+    """:func:`dcmip13_wind_geo` restricted to ``h0 <= z <= z_top``
+    (:func:`dcmip13_flow_fraction`): ``(u frac, v frac, sigma_dot
+    mask_half)``."""
+    u, v, sd = dcmip13_wind_geo(t, lon, lat, sigma_coord)
+    frac, mask_half = dcmip13_flow_fraction(lon, lat, sigma_coord)
+    return u * frac, v * frac, sd * mask_half
+
+
 # ============================================================================
 # MPAS edge-normal winds: rotational part from the analytic streamfunction
 # ============================================================================
@@ -554,10 +596,12 @@ def dcmip_air_mass_state_mpas(test_num, state: TracerState, mesh,
     1-1/1-2: flat surface, ``p_s = p0``.  1-3: the isothermal atmosphere over
     the Schaer-type mountains, ``p_s = p0 exp(-z_s/H)``, the surface pressure
     of the coordinate the 1-3 IC uses (``z = z_s - H ln(sigma)``, so ``sigma
-    = p / p_s``; DCMIP 2012 spec).  This is the initial condition only: the
-    mpas_fct model then diagnoses the vertical air-mass flux from the
-    discrete column continuity of its horizontal mass flux (the analytic
-    sigma_dot is not used), so ``p_s`` evolves with the column mass.
+    = p / p_s``; DCMIP 2012 spec).  Without prescribed air fluxes the
+    mpas_fct model diagnoses the vertical air-mass flux from the discrete
+    column continuity of its horizontal mass flux (the analytic sigma_dot is
+    not used), so ``p_s`` evolves with the column mass; the matrix 1-3 row
+    instead passes the steady consistent fluxes of
+    ``consistent_mass_flux_mpas`` built on this ``dp``, which stays steady.
     Raises unless JAX x64 is on (the state is stored in float64)."""
     from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import air_mass_state
     # benchmark state in fp64 (user decision 2026-11-24): fp32 storage
