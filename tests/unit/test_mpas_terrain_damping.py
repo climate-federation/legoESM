@@ -107,8 +107,11 @@ def _fct(case, width=1.0e-4, upwind=1.0e-3):
 # relative to max q) at the default.
 _CASES = {"r0": dict(seed=0), "r1": dict(seed=1), "b2": dict(seed=2, band=True),
           "b3": dict(seed=3, band=True)}
-_FCT_GAPS = {"r0": 0.003462604087337507, "r1": 0.003449479153346413,
-             "b2": 0.00689659509245864, "b3": 0.0037763303124857556}
+# Re-measured 2026-11-24 when the bounds moved inside the hard interval
+# (fct_bound_toward; was 3.46e-3 / 3.45e-3 / 6.90e-3 / 3.78e-3 with the
+# outside max_rel/min_rel); undershoots unchanged.
+_FCT_GAPS = {"r0": 0.0017496232018240348, "r1": 2.015681466366885e-05,
+             "b2": 0.0023019717204286485, "b3": 0.0011857150259738985}
 # all from the smooth upwind: the smooth limiter with the hard upwind gives 0.0
 _FCT_UNDERSHOOT = {"r0": -8.097241276928989e-19, "r1": -5.697561895741597e-19,
                    "b2": -1.9647838550013313e-08, "b3": -2.0417052776945792e-08}
@@ -157,14 +160,36 @@ def test_fct_gradient_at_the_default(kw):
 
     assert float(jnp.abs(jax.grad(f, argnums=1)(q, u)).max()) > 0.0
     # the step must stay inside the bands (relative 1e-4 of q ~ 5e-7, upwind
-    # 1e-3 m/s) for the difference quotient to resolve the C1 forms
-    check_grads(f, (q, u), order=1, modes=("fwd", "rev"), eps=1e-11, atol=1e-6, rtol=1e-4)
+    # 1e-3 m/s) for the difference quotient to resolve the C1 forms.  eps
+    # 1e-13 since the inside-the-interval bounds (2026-11-24): their C1 ramp
+    # curves 4x more than max_rel's, and the band case's difference quotient
+    # converges to AD as 3.7e-2, 3.3e-3, 1.0e-4, 6.6e-6 (relative) at eps
+    # 1e-10 ... 1e-13 (measured), i.e. AD is right, 1e-11 was too coarse
+    check_grads(f, (q, u), order=1, modes=("fwd", "rev"), eps=1e-13, atol=1e-6, rtol=1e-4)
     if kw.get("band"):
-        # non-vacuous: the hard limiter's kinks inside the step fail it here
-        # (measured: AD 0.0256 vs difference quotient 0.0336)
+        # non-vacuous at the SAME eps: the hard limiter sits on a kink here
+        # (measured along a random direction: AD 0.0616 vs difference
+        # quotient 0.0463 at every eps 1e-10 ... 1e-13)
         with pytest.raises(AssertionError):
             check_grads(lambda q, u: f(q, u, 0.0, 0.0), (q, u), order=1, modes=("fwd",),
-                        eps=1e-11, atol=1e-6, rtol=1e-4)
+                        eps=1e-13, atol=1e-6, rtol=1e-4)
+
+
+def test_fct_plateau_does_not_creep_at_the_default():
+    """A 0/1 field under a rotational wind, 200 forward-Euler steps at the
+    default widths: stays <= 1 (the smooth bounds are taken inside the hard
+    interval; with the outside max_rel/min_rel it reached 1.0081, measured)."""
+    from legoesm.core.operators_voronoi import edge_normal_velocity_from_streamfunction
+    nl = 4
+    psi = 2e7 * jax.random.normal(jax.random.PRNGKey(0), (MESH.nVertices,))
+    u = edge_normal_velocity_from_streamfunction(psi[:, None] * jnp.ones(nl), MESH)
+    q = jnp.where(jax.random.uniform(jax.random.PRNGKey(5), (MESH.nCells, nl, 1)) > 0.5, 1.0, 0.0)
+    dp, dpe = 2.5e4 * jnp.ones((MESH.nCells, nl)), 2.5e4 * jnp.ones((MESH.nEdges, nl))
+    step = jax.jit(lambda qq: qq + DT * tracer_horizontal_flux_fct(qq, u, dp, dpe, MESH, DT))
+    for _ in range(200):
+        q = step(q)
+    assert float(q.max()) <= 1.0 + 1e-12
+    assert float(q.min()) >= -1e-12          # measured -2.5e-17 (round-off)
 
 
 def test_fct_in_out_sums_bound_the_hard_sums_from_above():
@@ -244,12 +269,15 @@ def test_fct_hard_limit_keeps_the_low_order_bounds():
 @pytest.mark.parametrize("depth,match", [(3, True), (2, False)])
 def test_fct_partition_parity_needs_two_complete_rings(depth, match):
     from legoesm.parallel.voronoi_mpi import make_voronoi_partition_layout
-    # sparse spikes: a halo cell's low-order update is an extremum of its
-    # neighbour's bounds only next to an isolated value (measured: depth 2 off
-    # by 2.8e-4 of the largest tendency at 16 ranks, 0 at 4 and 8)
-    q, u, dp, dpe = _fct_case(6)
-    q = jnp.asarray(1e-2 * (np.random.default_rng(6).random(q.shape) < 0.08))
-    case = (q, u, dp, dpe)
+    # the outer ring's (wrong) low-order update reaches an owned cell through
+    # a neighbour's bounds.  Since the bounds are taken from inside the hard
+    # interval (2026-11-24) the sparse-spike fixture (seed 6, 8 % spikes)
+    # happens to match at depth 2 too (measured; fixture-specific, not a
+    # general property); the band case (slow winds) still needs depth 3
+    # (measured at depth 2, 16 ranks: off by 1.5e-2 / 3.6e-2 / 1.7e-2 /
+    # 7.0e-4 of the largest tendency, seeds 0-3)
+    case = _fct_case(1, band=True)
+    q, u, dp, dpe = case
     glob = _fct(case)
     worst = 0.0
     for rank in range(16):

@@ -415,10 +415,13 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
     ``width = upwind_width_ms = 0`` the fork's hard limiter: the upwind
     selection is ``|F| -> F tanh(F / (upwind_width_ms dp_e))`` (no flux at
     rest, less upwind diffusion for ``|u| < ~upwind_width_ms``, so ``q_td``
-    can leave the range of ``q`` there); the neighbour bounds and the clips
-    ``min(1, R)`` are ``core.smooth`` min/max with a band ``width`` relative
-    to the operands (the smooth max is never below the hard one, the min
-    never above); the inflow/outflow sums are a C1 positive part from above
+    can leave the range of ``q`` there); the neighbour bounds are extrema
+    taken from INSIDE the hard interval, C1 at ``width > 0`` except where
+    both compared values are exactly 0 (see the helper) (:func:`fct_bound_toward`, between
+    ``q_td`` and the hard max/min; changed 2026-11-24 from the outside
+    ``max_rel``/``min_rel``, which let a 0/1 plateau creep to 1.0081 in 200
+    steps); the clips ``min(1, R)`` are ``core.smooth`` min with a band
+    ``width`` relative to the operands; the inflow/outflow sums are a C1 positive part from above
     (``(x + W)^2 / 4W`` on ``|x| < W``, ``W`` = width times the L2 norm of
     the cell's fluxes)
     so they over-count; the donor/acceptor factor ramps (``step_rel``,
@@ -438,8 +441,6 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
     nlev) and ``dp_edge`` (nEdges, nlev) [Pa]; ``dt`` [s] the step the limiter
     guards (> 0).  Returns (nCells, nlev, ntr).
     """
-    from legoesm.core.smooth import max_rel, min_rel
-
     if isinstance(dt, (int, float)) and not dt > 0:
         raise ValueError(f"tracer_horizontal_flux_fct needs dt > 0 (got {dt!r})")
     if not 0.0 <= width <= FCT_MAX_SMOOTHING_WIDTH:
@@ -468,14 +469,18 @@ def tracer_horizontal_flux_fct(q, u_edge, dp, dp_edge, mesh, dt, width=1.0e-4,
     coc = mesh.cellsOnCell
     ok = (coc >= 0)[..., None, None]
     coc_s = jnp.maximum(coc, 0)
-    lo, hi = min_rel(q, q_td, width), max_rel(q, q_td, width)
+    # smooth extrema from INSIDE the hard interval (fct_bound_toward), folded
+    # from q_td so the rooms stay >= 0; max_rel/min_rel (from outside) let a
+    # 0/1 plateau creep up (measured: 1.0081 after 200 steps, 1.0 now)
+    lo, hi = fct_bound_toward(q_td, q, -1, width), fct_bound_toward(q_td, q, 1, width)
     nb_lo, nb_hi = jnp.where(ok, lo[coc_s], lo), jnp.where(ok, hi[coc_s], hi)
     q_min, q_max = lo, hi
     for k in range(coc.shape[0]):
-        q_min, q_max = min_rel(q_min, nb_lo[k], width), max_rel(q_max, nb_hi[k], width)
+        q_min = fct_bound_toward(q_min, nb_lo[k], -1, width)
+        q_max = fct_bound_toward(q_max, nb_hi[k], 1, width)
     p_in, p_out = fct_in_out_sums(fct_cell_outflow(anti, mesh, q.dtype), width)
-    # rooms are >= 0: the bounds include q_td and the smooth max (min) is
-    # never below (above) the hard one
+    # rooms are >= 0: the bounds are folded from q_td and only move outward
+    # from it (never past the hard extremes)
     room_in = (q_max - q_td) * dp_c / dt
     room_out = (q_td - q_min) * dp_c / dt
     lim = fct_flux_factor(anti, a, q1, q2, room_in, p_in, room_out, p_out, mesh, width)
@@ -546,7 +551,11 @@ def fct_flux_factor(anti, a, q1, q2, room_in, p_in, room_out, p_out, mesh, width
 
 def fct_bound_toward(s, n, sign, width):
     """Running FCT bound folded toward ``n`` (``sign`` +1: max, -1: min),
-    C1 and from INSIDE the hard interval: ``s + sign pp(sign (n - s))`` with
+    from INSIDE the hard interval.  ``width = 0`` is the hard max/min (a kink
+    at every tie); for ``width > 0`` it is C1 except where ``|s| + |n| = 0`` (both
+    operands exactly zero: the band collapses and the hard max/min is taken,
+    e.g. ``max(s, 0)`` at an empty-cell tie) and, for widths > 1, where an
+    operand crosses zero inside the ramp (the ``|.|`` of the scale): ``s + sign pp(sign (n - s))`` with
     ``pp`` the C1 positive part from below (:func:`positive_part_rel`, band
     relative to ``|s| + |n|``), so the result lies between ``s`` and the
     hard ``max/min(s, n)``; outside the band (and at ``width = 0``) the
