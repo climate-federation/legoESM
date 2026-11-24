@@ -6841,3 +6841,31 @@ def test_clubb_mf_cldfrac_fac_flag_reaches_the_cloud_config():
                 cloud_scheme="cam6_clubb").validate_strict()
         except ValueError as e:
             assert "cloud_clubb_mf_cldfrac_fac" not in str(e)
+
+
+def test_clubb_mf_alphturb_flag_reaches_the_clubb_config():
+    """--clubb-mf-alphturb round-trips to CLUBBConfig.mf_alphturb (unset = 0,
+    off); refused without clubb_mf and outside 0..6 (vote 2026-11-24)."""
+    import pytest
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--turbulence", "clubb", "--clubb-prognostic",
+            "--clubb-mf"]
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--clubb-mf-alphturb", "3"]), parser))
+    assert cfg.clubb_mf_alphturb == 3.0
+    assert turbulence_config_for(cfg).clubb.mf_alphturb == 3.0
+    plain = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert plain.clubb_mf_alphturb is None
+    tc = turbulence_config_for(plain)
+    assert tc.clubb is None or tc.clubb.mf_alphturb == 0.0
+    for bad in (dict(clubb_mf_alphturb=3.0), dict(clubb_mf_alphturb=7.0, clubb_mf=True)):
+        with pytest.raises(ValueError, match="clubb_mf_alphturb"):
+            ExperimentConfig()._replace(**bad).validate_strict()
+    for edge in (0.0, 6.0):
+        try:
+            ExperimentConfig()._replace(clubb_mf_alphturb=edge, clubb_mf=True).validate_strict()
+        except ValueError as e:
+            assert "clubb_mf_alphturb" not in str(e)

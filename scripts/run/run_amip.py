@@ -1566,6 +1566,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=None,
                         help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
                              "None = 0.01 (CAM6 namelist)")
+    parser.add_argument("--clubb-mf-alphturb", dest="clubb_mf_alphturb",
+                        type=float, default=None,
+                        help="CAM7 CLUBB-MF TKE-enhanced entrainment "
+                             "clubb_mf_alphturb (bounds 0..6); None = 0 (off), "
+                             "CAM7 uses 3. Needs --clubb-mf.")
     parser.add_argument("--cloud-clubb-mf-cldfrac-fac",
                         dest="cloud_clubb_mf_cldfrac_fac", type=float,
                         default=None,
@@ -3532,6 +3537,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
         cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
         cloud_clubb_mf_cldfrac_fac=args.cloud_clubb_mf_cldfrac_fac,
+        clubb_mf_alphturb=args.clubb_mf_alphturb,
         cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,
         cloud_cam6_snow_optics_file=args.cloud_cam6_snow_optics_file,
         cloud_cam6_rad_specified_nc=args.cloud_cam6_rad_specified_nc,

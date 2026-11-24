@@ -8,49 +8,49 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 7586)
+Table of contents (sections, in order; flag reference table at line 7599)
 -----------------------------------------------------------------------------
-  1. [line  371] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2. [line  492] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+  1. [line  372] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2. [line  493] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3. [line  823] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3. [line  827] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4. [line  1154] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4. [line  1158] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5. [line  1210] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5. [line  1214] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6. [line  1384] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6. [line  1388] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7. [line  1832] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8. [line  1944] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7. [line  1836] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8. [line  1948] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9. [line  2125] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9. [line  2129] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line  2313] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line  2394] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2317] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2398] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line  2716] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2720] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``) + the two-level-set reconciliation
       (``calc_trapezoid_zt`` / ``calc_trapezoid_zm`` / ``clip_rcm`` /
       ``compute_cloud_cover``). Every routine in this section is
       grid-agnostic: CAM evaluates the closure once per level set, so all
       regridding is the caller's.
-  13. [line  3077] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  3081] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line  4042] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  4046] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line  4107] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  4111] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line  4779] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4783] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line  5073] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  5077] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line  5488] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  5492] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
       the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  6290] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  6294] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -361,6 +361,7 @@ __param_spec__ = {
             "q_flux_scale_sigma_lo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "lower sigma of the face band q_flux_scale acts on", "shape": None},
             "q_flux_scale_sigma_hi": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "upper sigma of the face band q_flux_scale acts on", "shape": None},
             "pdf_variance_scale": {"units": "1", "bounds": (0.25, 8.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_pdf", "reference": "multiplier on the DIAGNOSED sub-grid variance entering the PDF closure; 1.0 is the closure's own mixing-length estimate", "shape": None},
+            "mf_alphturb": {"units": "1", "bounds": (0.0, 6.0), "tunable_tier": 2, "transform": "softplus", "category": "clubb_mf_entrainment", "reference": "CAM7 atmos_phys clubb_mf.F90:1113 clubb_mf_alphturb (CAM7 3.0); 0 = off; bounds/tier/transform voted 2026-11-24", "shape": None},
         },
     },
 }
@@ -788,6 +789,9 @@ class CLUBBConfig(NamedTuple):
     mf_kspan_sharpness: float = 100.0
     mf_conv_sharpness: float = 1.0e7
     mf_cfl_sharpness: float = 100.0
+    # CAM7 CLUBB-MF TKE-enhanced entrainment clubb_mf_alphturb (eturb = 1 +
+    # alphturb*sqrt(tke)/w); 0 = off (default, vote 2026-11-24), CAM7 = 3.
+    mf_alphturb: float = 0.0
     # TODO-VOTE: same defaults/units as MFSmoothing.bsort_* (clubb_mf.py).
     mf_bsort_case_sharpness: float = 1.0e10
     mf_bsort_sat_sharpness: float = 1.0e5
@@ -6722,6 +6726,7 @@ def clubb_step(
     clubb_mf: bool = False,
     mf_pblh: jax.Array | None = None,
     mf_lts: jax.Array | None = None,
+    mf_tke: jax.Array | None = None,
     clubb_mf_bsort: bool = False,
     mf_ztopm1: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
@@ -6965,6 +6970,10 @@ def clubb_step(
             mf_lts = jax.vmap(_mf_lts_col)(T, q_liq, p_full, p_half[:, -1])
         mf_in = dict(
             zm=gr.zm, dzt=dzt, thl=thlm, qt=rtm, thv=thv_ds_zt, u=um, v=vm,
+            # CAM's tke_zm = 0.5 (up2 + vp2 + wp2), held over the sub-cycle
+            # (pbuf read :1524 before the loop, written :2836 after it)
+            tke=(0.5 * (moments.up2 + moments.vp2 + moments.wp2) if mf_tke is None
+                 else mf_tke),
             p_zm=p_zm, iex_zm=iex_zm, ths=T_sfc * iex_zm[:, 0],
             wthl_sfc=wpthlp_sfc * jnp.ones((ncol,), T.dtype),
             wqt_sfc=wprtp_sfc * jnp.ones((ncol,), T.dtype),
@@ -6982,12 +6991,13 @@ def clubb_step(
             thlm_forcing, rtm_forcing, _mf_out = jax.vmap(
                 lambda c, rzm, irzt, idz, z: clubb_mf_forcing(
                     c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness,
-                    bsort=True, ztopm1=z))(
+                    alphturb=config.mf_alphturb, bsort=True, ztopm1=z))(
                 mf_in, rho_ds_zm, invrs_rho_ds_zt, 1.0 / dzt, memory)
         else:
             thlm_forcing, rtm_forcing, _mf_out = jax.vmap(
                 lambda c, rzm, irzt, idz: clubb_mf_forcing(
-                    c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness))(
+                    c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness,
+                    alphturb=config.mf_alphturb))(
                 mf_in, rho_ds_zm, invrs_rho_ds_zt, 1.0 / dzt)
     mf_cloud = {}
     if clubb_mf:
@@ -7343,13 +7353,16 @@ def clubb_turbulence_prognostic(
         from legoesm.atmosphere.physics.turbulence.clubb_mf import mf_lts as _mf_lts_col
         _mf_lts_host = jax.vmap(_mf_lts_col)(
             T, jnp.zeros_like(T) if q_c is None else q_c, p_full, p_half[:, -1])
+    # and its TKE input, CAM's tke_pbuf: the moments before the sub-cycle
+    _mf_tke_host = (0.5 * (moments.up2 + moments.vp2 + moments.wp2)
+                    if clubb_mf else None)
 
     if n_sub == 1:
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
             radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
-            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
+            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host, mf_tke=_mf_tke_host,
             clubb_mf_bsort=clubb_mf_bsort, mf_ztopm1=mf_ztopm1,
             omega_cam_layer_density=omega_cam_layer_density, **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
@@ -7388,7 +7401,7 @@ def clubb_turbulence_prognostic(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
                 radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
-                clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
+                clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host, mf_tke=_mf_tke_host,
                 clubb_mf_bsort=clubb_mf_bsort, mf_ztopm1=z_c,
                 omega_cam_layer_density=omega_cam_layer_density, **_top_kw,
                 **({"q_c": ql_c} if _liq_on else {}))

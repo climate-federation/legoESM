@@ -106,6 +106,20 @@ def test_halo_equiv_momentum_advection_split(scheme, mscheme, halo):
     _serial_vs_halo(state, grid, hc, tm, cfg, layout)
 
 
+def test_halo_theta_prime_advection_matches_serial_bitwise():
+    """The halo path advects θ′ (as serial does), not θ_ref + θ′: differencing
+    ~300 K totals cost ~9 bits of θ′ (production deck: float32 halo-vs-serial
+    dθ′/dt gap 4.8e-5 vs a 1.4e-5 fp32-vs-fp64 truncation gap; float64 9e-14).
+    With the same operand the two paths are bit-identical."""
+    grid, hc, tm, cfg, state, layout = _setup(
+        with_tracers=True, scheme="van_leer", halo=2)
+    expected = plane_compressible_euler_slow_tendencies(state, grid, hc, tm, cfg)
+    actual = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg, layout)
+    np.testing.assert_array_equal(np.asarray(actual.dtheta_prime_dt.data),
+                                  np.asarray(expected.dtheta_prime_dt.data))
+
+
 def test_halo_rejects_halo_narrower_than_momentum_scheme():
     grid, hc, tm, cfg, state, layout = _setup(scheme="van_leer", halo=2)
     cfg = cfg._replace(horizontal_momentum_advection_scheme="weno5")

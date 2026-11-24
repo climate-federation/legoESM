@@ -40,10 +40,33 @@ def test_driver_imports_positivity_filter():
     )
 
 
-def _step_calls(scope):
+def _direct_step_calls(scope):
     return [n for n in ast.walk(scope) if isinstance(n, ast.Call)
             and isinstance(n.func, ast.Attribute) and n.func.attr == "step"
             and isinstance(n.func.value, ast.Name) and n.func.value.id == "model"]
+
+
+def _step_wrappers():
+    # local functions whose body calls model.step(...), e.g. ``_step_once``
+    return {n.name for n in ast.walk(_driver_ast())
+            if isinstance(n, ast.FunctionDef) and _direct_step_calls(n)
+            and n.name != "main"}
+
+
+def _step_calls(scope):
+    wrappers = _step_wrappers()
+    # a wrapper counts only where it is called: _step_once(s) or
+    # staggered_first_call(_step_once, s) (first positional argument)
+    via_wrapper = []
+    for n in ast.walk(scope):
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)):
+            continue
+        if n.func.id in wrappers:
+            via_wrapper.append(n)
+        elif (n.func.id == "staggered_first_call" and n.args
+              and isinstance(n.args[0], ast.Name) and n.args[0].id in wrappers):
+            via_wrapper.append(n)
+    return _direct_step_calls(scope) + via_wrapper
 
 
 def _filter_calls(scope):

@@ -2444,6 +2444,10 @@ class ExperimentConfig(NamedTuple):
     # (CloudConfig.mf_cldfrac_fac, clubb_mf_cldfrac_fac).  None = 10 (CAM7).
     # Needs clubb_mf with cloud_scheme='cam6_clubb'.
     cloud_clubb_mf_cldfrac_fac: float | None = None
+    # APPENDED LAST.  CAM7 CLUBB-MF TKE-enhanced entrainment
+    # (CLUBBConfig.mf_alphturb, clubb_mf_alphturb).  None = 0 (off); CAM7 = 3.
+    # Needs clubb_mf.
+    clubb_mf_alphturb: float | None = None
     # Opt-in CAM buoyancy sorting on the CLUBB-MF plumes.
     clubb_mf_bsort: bool = False
 
@@ -5168,6 +5172,10 @@ class ExperimentConfig(NamedTuple):
                 "needs cloud_scheme='cam6_clubb', microphysics='morrison', "
                 "morrison_prognostic_droplet_number=False and aerosol_ccn "
                 "(nc_from_aerosol) off.")
+        if self.clubb_mf_alphturb is not None and not self.clubb_mf:
+            errors.append(
+                "clubb_mf_alphturb needs clubb_mf=True (it scales the plume "
+                "entrainment); got clubb_mf=False.")
         if not isinstance(self.clubb_mf_bsort, bool):
             errors.append(f"clubb_mf_bsort must be a bool, got {self.clubb_mf_bsort!r}")
         if self.clubb_mf_bsort and not self.clubb_mf:
@@ -5344,6 +5352,8 @@ class ExperimentConfig(NamedTuple):
             ("cloud_cam6_conv_water_frac_limit", 1.0e-4, 0.1),
             # CloudConfig.__param_spec__ mf_cldfrac_fac bounds (vote 2026-11-24).
             ("cloud_clubb_mf_cldfrac_fac", 1.0, 20.0),
+            # CLUBBConfig.__param_spec__ mf_alphturb bounds (vote 2026-11-24).
+            ("clubb_mf_alphturb", 0.0, 6.0),
             ("cloud_cap_floor_lat_deg", 40.0, 89.0),
             ("cloud_cap_floor_p_max_pa", 20000.0, 100000.0),
             ("cloud_cap_floor_cf", 0.1, 1.0),
