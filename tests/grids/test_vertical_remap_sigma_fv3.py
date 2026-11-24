@@ -493,14 +493,14 @@ def test_nan_boundary_sigma_dot_reports_nonfinite():
 @x64
 @pytest.mark.parametrize("grid_type,res,test_num,scheme", [
     ("latlon", "18x36", 12, "fv3_remap"),
-    ("icosahedral", "ico2", 11, "upwind"),   # MPAS rows: mpas_fct coupling (merge of work/mpas-transport)
+    ("icosahedral", "ico2", 11, "mpas_flux"),   # MPAS rows: MPAS-A 3-D flux form
     ("latlon", "18x36", 13, "upwind"),
     ("spectral", "T10", 12, "fv3_remap"),
 ])
 def test_matrix_runner_selects_scheme_and_audits_mass(
         tmp_path, monkeypatch, grid_type, res, test_num, scheme):
     """Runner level: the matrix row selects the vertical scheme explicitly
-    (1-1/1-2 remap, 1-3 upwind) through its own wind adapter -- the model
+    (lat-lon/spectral 1-1/1-2 remap, 1-3 upwind; MPAS mpas_flux) through its own wind adapter -- the model
     really calls (or skips) the remap -- and writes a per-tracer global mass
     audit that matches an independent recomputation."""
     import re
@@ -592,11 +592,12 @@ def test_matrix_runner_selects_scheme_and_audits_mass(
         np.testing.assert_allclose([float(x[1]) for x in got], m0_ref,
                                    rtol=1e-10)
         # the runner's jitted MPAS step and this eager one differ in
-        # summation order (measured 3.7e-10 relative); the drift being
-        # audited is far larger (non-vacuity below)
+        # summation order; the masses are recomputed independently here
         np.testing.assert_allclose([float(x[2]) for x in got], m1_ref,
                                    rtol=1e-8)
-        assert np.max(np.abs(m1_ref - m0_ref) / np.abs(m0_ref)) > 1e-7
+        # RULE 0: the MPAS-A flux form conserves sum(area q dp) to round-off
+        np.testing.assert_allclose(m1_ref, m0_ref, rtol=1e-12)
+        np.testing.assert_allclose([float(x[3]) for x in got], 0.0, atol=1e-12)
     else:
         # spectral: independent M1/M0 per tracer with the Gaussian
         # quadrature weights (normalization-free ratio)

@@ -547,18 +547,26 @@ def dcmip_wind_mpas(test_num, t, mesh, sigma_coord):
 
 def dcmip_air_mass_state_mpas(test_num, state: TracerState, mesh,
                               sigma_coord: SigmaCoordinate):
-    """The DCMIP state with its layer air mass ``dp = p_s dsigma`` for
+    """The DCMIP state (tracers cast to float64, the default float under
+    x64) with its layer air mass ``dp = p_s dsigma`` for
     ``horizontal_scheme="mpas_fct"``.
 
     1-1/1-2: flat surface, ``p_s = p0``.  1-3: the isothermal atmosphere over
     the Schaer-type mountains, ``p_s = p0 exp(-z_s/H)``, the surface pressure
-    of the coordinate the 1-3 IC and wind use (``z = z_s - H ln(sigma)``, so
-    ``sigma = p / p_s``).  With it the analytic vertical mass flux ``p_s
-    sigma_dot`` (eq. 220) balances the horizontal mass divergence ``v . grad
-    p_s`` of the solid-body flow, and ``dp`` stays steady up to truncation
-    error; with ``p_s = p0`` it would not (``sigma_dot`` then creates and
-    destroys air mass over the mountains)."""
+    of the coordinate the 1-3 IC uses (``z = z_s - H ln(sigma)``, so ``sigma
+    = p / p_s``; DCMIP 2012 spec).  This is the initial condition only: the
+    mpas_fct model then diagnoses the vertical air-mass flux from the
+    discrete column continuity of its horizontal mass flux (the analytic
+    sigma_dot is not used), so ``p_s`` evolves with the column mass.
+    Raises unless JAX x64 is on (the state is stored in float64)."""
     from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import air_mass_state
+    # benchmark state in fp64 (user decision 2026-11-24): fp32 storage
+    # rounding drifted the tracer mass (-1.7e-6 over 384 steps of 1-3)
+    state = state._replace(tracers=state.tracers.replace(
+        data=state.tracers.data.astype(jnp.float64)))
+    if state.tracers.data.dtype != jnp.float64:
+        raise ValueError("the MPAS DCMIP benchmark state is stored in float64: enable "
+                         "JAX x64 (JAX_ENABLE_X64=1)")
     if test_num in (11, 12):
         return air_mass_state(state, _p0, sigma_coord)
     if test_num == 13:

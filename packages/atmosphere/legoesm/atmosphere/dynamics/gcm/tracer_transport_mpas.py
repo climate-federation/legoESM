@@ -68,8 +68,10 @@ class TracerTransportMPASConfig(NamedTuple):
     #: "upwind" (in-tendency) | "fv3_remap": the horizontal SSP-RK step runs
     #: alone, then a split FV3 Lagrangian vertical remap
     #: (``grids.vertical.vertical_remap_sigma_fv3``, sigma_dot at mid-step).
-    #: ``horizontal_scheme="mpas_fct"`` runs with "upwind" only (its own
-    #: coupling, see :func:`mpas_rk3_fct_step`).
+    #: ``horizontal_scheme="mpas_fct"`` takes "mpas_flux" (MPAS-A flux-form
+    #: vertical transport inside the 3-D monotone limiter) or "fv3_remap"
+    #: (horizontal-only stages, then the FV3 remap of the Lagrangian layers);
+    #: see :func:`mpas_rk3_fct_step`.
     vertical_scheme: str = "upwind"
     # Horizontal scheme: "centred2" (advective form, centred two-cell edge
     # average, any ``dispatch_integrator`` scheme) or "mpas_fct" (MPAS-A
@@ -80,22 +82,32 @@ class TracerTransportMPASConfig(NamedTuple):
     # centred, 1 = 3rd-order upwind edge reconstruction.
     coef_3rd_order: float = 0.25
     # RULE 5 widths of the mpas_fct limiter switches (as the PE dycore's
-    # ``fct_smoothing_width`` / ``fct_upwind_width_ms``); both 0 = hard MPAS.
+    # ``fct_smoothing_width`` / ``fct_upwind_width_ms``); these two and
+    # ``fct_vertical_upwind_width_pas`` all 0 = hard MPAS.
     fct_smoothing_width: float = 1.0e-4
     fct_upwind_width_ms: float = 1.0e-3
+    # RULE 5 width [Pa/s] of the smooth |F| of the mpas_fct vertical air-mass
+    # flux (upwind split and 3rd-order term); 0 = hard MPAS.
+    fct_vertical_upwind_width_pas: float = 1.0e-5
 
 
 HORIZONTAL_SCHEMES = ("centred2", "mpas_fct")
+MPAS_FCT_VERTICAL_SCHEMES = ("mpas_flux", "fv3_remap")
 # atm_advance_scalars_mono's eps in the scale factors' denominators
 MPAS_MONO_EPS = 1.0e-20
+# ulps by which mpas_rk3_fct_step shrinks the limiter's cell factors (a
+# floating-point margin, not a physical parameter)
+FCT_ROUNDOFF_MARGIN = 16
 
 
 def validate_tracer_transport_mpas_config(config: TracerTransportMPASConfig) -> None:
     """Raise on an unknown horizontal scheme or an integrator it cannot use."""
-    check_tracer_vertical_scheme(config.vertical_scheme)
-    if config.horizontal_scheme == "mpas_fct" and config.vertical_scheme != "upwind":
-        raise ValueError("horizontal_scheme='mpas_fct' couples its own vertical transport; "
-                         f"vertical_scheme must be 'upwind' (got {config.vertical_scheme!r})")
+    if config.horizontal_scheme == "mpas_fct":
+        if config.vertical_scheme not in MPAS_FCT_VERTICAL_SCHEMES:
+            raise ValueError("horizontal_scheme='mpas_fct' takes vertical_scheme in "
+                             f"{MPAS_FCT_VERTICAL_SCHEMES}; got {config.vertical_scheme!r}")
+    else:
+        check_tracer_vertical_scheme(config.vertical_scheme)
     if config.horizontal_scheme not in HORIZONTAL_SCHEMES:
         raise ValueError(f"unknown horizontal_scheme {config.horizontal_scheme!r}; "
                          f"expected one of {HORIZONTAL_SCHEMES}")
@@ -114,6 +126,10 @@ def validate_tracer_transport_mpas_config(config: TracerTransportMPASConfig) -> 
     if not (math.isfinite(config.fct_upwind_width_ms) and config.fct_upwind_width_ms >= 0.0):
         raise ValueError("fct_upwind_width_ms must be finite and >= 0; got "
                          f"{config.fct_upwind_width_ms!r}")
+    if not (math.isfinite(config.fct_vertical_upwind_width_pas)
+            and config.fct_vertical_upwind_width_pas >= 0.0):
+        raise ValueError("fct_vertical_upwind_width_pas must be finite and >= 0; got "
+                         f"{config.fct_vertical_upwind_width_pas!r}")
 
 
 class TracerAirMassState(NamedTuple):
@@ -477,18 +493,15 @@ def fct_cell_outflow(anti, mesh, dtype):
     return w * anti[jnp.maximum(eoc, 0)]
 
 
-def fct_flux_factor(anti, a, q1, q2, room_in, p_in, room_out, p_out, mesh, width,
-                    mpas_eps=None):
-    """Zalesak limiting factor of each edge's antidiffusive flux ``anti``
-    (positive c1 -> c2): the cell factors ``R+ = min(1, room_in / p_in)`` and
+def fct_cell_factors(room_in, p_in, room_out, p_out, width, mpas_eps=None):
+    """Zalesak cell factors ``(R+, R-)``: ``R+ = min(1, room_in / p_in)``,
     ``R- = min(1, room_out / p_out)`` (1 where no antidiffusive inflow /
-    outflow), then ``min(R-[c1], R+[c2])`` for ``anti > 0`` and
-    ``min(R+[c1], R-[c2])`` for ``anti < 0``.  With ``mpas_eps`` the cell
-    factor is MPAS ``atm_advance_scalars_mono``'s ``min(1, max(0, room / (p +
-    eps)))`` instead (no switch on ``p``; the max as a C1 positive part).
-    The smooth forms (RULE 5, ``width``) are those documented on
+    outflow).  With ``mpas_eps`` the factor is MPAS
+    ``atm_advance_scalars_mono``'s ``min(1, max(0, room / (p + eps)))``
+    instead (no switch on ``p``; the max as a C1 positive part).  Smooth
+    forms (RULE 5, ``width``) as documented on
     :func:`tracer_horizontal_flux_fct`; ``width = 0`` is the hard limiter."""
-    from legoesm.core.smooth import min_rel, positive_part_rel, stable_div, step_rel
+    from legoesm.core.smooth import min_rel, positive_part_rel, stable_div
 
     def ratio(room, p):
         if mpas_eps is not None:
@@ -497,14 +510,21 @@ def fct_flux_factor(anti, a, q1, q2, room_in, p_in, room_out, p_out, mesh, width
             return min_rel(1.0, r, width)
         return jnp.where(p > 0, min_rel(1.0, room / jnp.where(p > 0, p, 1.0), width), 1.0)
 
-    c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
-    r_plus, r_minus = ratio(room_in, p_in), ratio(room_out, p_out)
-    # donor/acceptor pair by the flux direction: c1 -> c2 for anti > 0.  Each
+    return ratio(room_in, p_in), ratio(room_out, p_out)
+
+
+def fct_pair_factor(anti, a, q1, q2, r_plus_1, r_minus_1, r_plus_2, r_minus_2, width):
+    """Limiting factor of an antidiffusive flux ``anti`` between a cell pair
+    (positive 1 -> 2): ``min(R-_1, R+_2)`` for ``anti > 0`` and ``min(R+_1,
+    R-_2)`` for ``anti < 0``; ``a`` the flux's smooth magnitude scale and
+    ``q1, q2`` the pair's values (the RULE 5 direction blend)."""
+    from legoesm.core.smooth import min_rel, step_rel
+    # donor/acceptor pair by the flux direction: 1 -> 2 for anti > 0.  Each
     # direction's factor only ramps in on its own side of anti = 0 above the
     # common lower bound, so the factor never exceeds the bound of the side
     # the flux actually takes.
-    fwd = min_rel(r_minus[c1], r_plus[c2], width)
-    bwd = min_rel(r_plus[c1], r_minus[c2], width)
+    fwd = min_rel(r_minus_1, r_plus_2, width)
+    bwd = min_rel(r_plus_1, r_minus_2, width)
     if width == 0:
         return jnp.where(anti >= 0, fwd, bwd)
     se = 0.5 * a * (jnp.abs(q1) + jnp.abs(q2))
@@ -513,25 +533,96 @@ def fct_flux_factor(anti, a, q1, q2, room_in, p_in, room_out, p_out, mesh, width
             + step_rel(-anti, se, width) * (bwd - both))
 
 
-def _mpas_mass_fluxes(q, dp, u_edge, sigma_dot, mesh, sigma_coord, coefs, config):
-    """Fluxes of one MPAS RK3 stage from the stage state ``(q, dp)``;
-    ``sigma_dot`` on the nlev+1 interfaces, (nCells, nlev+1).
-
-    Returns ``(fm, a, f_ho, vm, vt)``: edge air-mass flux ``fm = u dp_e``
-    (``dp_e`` the two-cell mean, as MPAS ``ru``) and its smooth magnitude
-    ``a`` (RULE 5, ``|fm|`` at ``fct_upwind_width_ms = 0``), (nE, nlev, 1);
-    the high-order tracer-mass flux ``f_ho = fm q4 + coef_3rd a q3`` (MPAS
-    ``uhAvg (adv_coefs + sign(u) coef_3rd adv_coefs_3rd) q``), (nE, nlev,
-    ntr); the vertical air-mass tendency ``vm = -p_s (sdot_{k+1/2} -
-    sdot_{k-1/2})`` (nC, nlev) with ``p_s = sum(dp) / sum(dsigma)``; and the vertical
-    tracer-mass tendency ``vt = dp V(q) + q vm`` with ``V`` the shared
-    sigma vertical advection (so a constant ``q`` stays constant)."""
-    from legoesm.core.operators_voronoi import mpas_edge_reconstruction
-    if sigma_dot.shape != dp.shape[:-1] + (dp.shape[-1] + 1,):
-        raise ValueError("sigma_dot must be on the nlev+1 interfaces, shape "
-                         f"{dp.shape[:-1] + (dp.shape[-1] + 1,)}; got {sigma_dot.shape}")
+def fct_flux_factor(anti, a, q1, q2, room_in, p_in, room_out, p_out, mesh, width,
+                    mpas_eps=None):
+    """Zalesak limiting factor of each edge's antidiffusive flux ``anti``
+    (positive c1 -> c2): :func:`fct_cell_factors` per cell, then
+    :func:`fct_pair_factor` over ``cellsOnEdge``."""
     c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
-    fm = (u_edge * 0.5 * (dp[c1] + dp[c2]))[..., None]
+    r_plus, r_minus = fct_cell_factors(room_in, p_in, room_out, p_out, width, mpas_eps)
+    return fct_pair_factor(anti, a, q1, q2, r_plus[c1], r_minus[c1], r_plus[c2],
+                           r_minus[c2], width)
+
+
+def fct_bound_toward(s, n, sign, width):
+    """Running FCT bound folded toward ``n`` (``sign`` +1: max, -1: min),
+    C1 and from INSIDE the hard interval: ``s + sign pp(sign (n - s))`` with
+    ``pp`` the C1 positive part from below (:func:`positive_part_rel`, band
+    relative to ``|s| + |n|``), so the result lies between ``s`` and the
+    hard ``max/min(s, n)``; outside the band (and at ``width = 0``) the
+    winning endpoint is selected directly, never rebuilt as ``s + (n - s)``
+    (round-off could leave the interval).  Outside-smoothed bounds
+    (``max_rel``/``min_rel``) let a 0/1 plateau creep up step after step
+    (measured on DCMIP 1-3 q3, 12 d: max 1.0188 vs 1.0 hard)."""
+    from legoesm.core.smooth import positive_part_rel
+    if width == 0:
+        return jnp.maximum(s, n) if sign > 0 else jnp.minimum(s, n)
+    x, scale = sign * (n - s), jnp.abs(s) + jnp.abs(n)
+    return jnp.where(x >= width * scale, n, s + sign * positive_part_rel(x, scale, width))
+
+
+def mpas_vertical_mass_flux(div_h, sigma_coord):
+    """Interface air-mass fluxes ``F`` (..., nlev+1) [Pa/s], positive toward
+    larger sigma (downward), from the DISCRETE column continuity of the sigma
+    coordinate with the horizontal air-mass divergence ``div_h`` (..., nlev)
+    [Pa/s] the scheme actually applies: the layer tendency ``-div_h_k + F_k
+    - F_{k+1}`` equals ``dsigma_k dp_s/dt`` with ``dp_s/dt sum(dsigma) =
+    -sum_k div_h_k``, and ``F = 0`` at the top and the surface (no air
+    leaves the column).  So a state with ``dp = p_s dsigma`` keeps that
+    profile at every stage (an off-profile offset is carried unchanged), and
+    the column air mass changes only by the horizontal divergence."""
+    dsig = jnp.asarray(sigma_coord.dsigma, div_h.dtype)
+    tend_ps = -jnp.sum(div_h, axis=-1, keepdims=True) / jnp.sum(dsig)
+    inner = -jnp.cumsum(div_h[..., :-1] + dsig[:-1] * tend_ps, axis=-1)
+    zero = jnp.zeros_like(div_h[..., :1])
+    return jnp.concatenate([zero, inner, zero], axis=-1)
+
+
+def mpas_vertical_flux_ho(q, F, a_v, sigma_coord, coef3):
+    """MPAS-A high-order vertical tracer flux at the nlev+1 interfaces
+    (``atm_advance_scalars`` / ``_mono`` ``wdtn``), positive downward:
+    interior interfaces ``flux3`` (4th-order ``F (7 (q_{i-1} + q_i) -
+    (q_{i-2} + q_{i+1})) / 12`` plus ``coef3 |F| ((q_{i+1} - q_{i-2}) - 3
+    (q_i - q_{i-1})) / 12``, the uniform-grid formula MPAS applies), the
+    interfaces next to the top and the surface layer the linear
+    interpolation ``F (dsigma_i q_{i-1} + dsigma_{i-1} q_i) / (dsigma_{i-1}
+    + dsigma_i)`` (MPAS ``fzm/fzp``, ``config_interface_projection =
+    linear_interpolation``), zero at top and surface.  ``|F|`` is the smooth
+    ``a_v`` (RULE 5).  ``q`` (nC, nlev, ntr); ``F``, ``a_v`` (nC, nlev+1, 1)."""
+    nlev = q.shape[1]
+    dsig = jnp.asarray(sigma_coord.dsigma, q.dtype)[None, :, None]
+    # linear interpolation at every interior interface i = 1..nlev-1
+    lin = (dsig[:, 1:] * q[:, :-1] + dsig[:, :-1] * q[:, 1:]) / (dsig[:, :-1] + dsig[:, 1:])
+    g = F[:, 1:-1] * lin
+    if nlev >= 4:
+        qm2, qm1, q0_, qp1 = q[:, :-3], q[:, 1:-2], q[:, 2:-1], q[:, 3:]   # i = 2..nlev-2
+        f3 = (F[:, 2:-2] * (7.0 * (qm1 + q0_) - (qm2 + qp1)) / 12.0
+              + coef3 * a_v[:, 2:-2] * ((qp1 - qm2) - 3.0 * (q0_ - qm1)) / 12.0)
+        g = jnp.concatenate([g[:, :1], f3, g[:, -1:]], axis=1)
+    zero = jnp.zeros_like(q[:, :1])
+    return jnp.concatenate([zero, g, zero], axis=1)
+
+
+
+def _mpas_stage_fluxes(q, dp, u_edge, mesh, sigma_coord, coefs, config):
+    """Fluxes of one MPAS RK3 stage from the stage state ``(q, dp)``.
+
+    Returns ``(fm, a, f_ho, div_h, F, a_v, g_ho)``: edge air-mass flux ``fm
+    = u dp_e`` (``dp_e`` the two-cell mean, as MPAS ``ru``) and its smooth
+    magnitude ``a`` (RULE 5, ``|fm|`` at ``fct_upwind_width_ms = 0``), (nE,
+    nlev, 1); the high-order horizontal tracer-mass flux ``f_ho = fm q4 +
+    coef_3rd a q3`` (MPAS ``uhAvg (adv_coefs + sign(u) coef_3rd
+    adv_coefs_3rd) q``), (nE, nlev, ntr); ``div_h`` = div(fm) (nC, nlev);
+    the interface air-mass flux ``F`` of :func:`mpas_vertical_mass_flux`
+    and its smooth magnitude ``a_v`` (nC, nlev+1, 1); and the high-order
+    vertical tracer flux ``g_ho`` (nC, nlev+1, ntr).  The last three are
+    ``None`` for ``vertical_scheme="fv3_remap"``, whose stages are
+    horizontal only."""
+    from legoesm.core.operators_voronoi import mpas_edge_reconstruction
+    nC, nlev = dp.shape
+    c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
+    dp_e = 0.5 * (dp[c1] + dp[c2])
+    fm = (u_edge * dp_e)[..., None]
     if config.fct_upwind_width_ms == 0:
         a = jnp.abs(fm)
     else:
@@ -539,83 +630,149 @@ def _mpas_mass_fluxes(q, dp, u_edge, sigma_dot, mesh, sigma_coord, coefs, config
         # 0.5 a (q2 - q1) keeps non-negative donor/acceptor weights 0.5 (a +-
         # fm) (positivity under the upwind CFL); at rest it is a diffusion
         # at the speed fct_upwind_width_ms
-        dp_e = 0.5 * (dp[c1] + dp[c2])
         wa = (config.fct_upwind_width_ms * jnp.where(dp_e > 0, dp_e, 1.0))[..., None]
         a = jnp.hypot(fm, wa)
     q4, q3 = mpas_edge_reconstruction(q, coefs)
     f_ho = fm * q4 + config.coef_3rd_order * a * q3
-    # p = sigma p_s with a model top at sigma_half[0] > 0 (DCMIP: p_top/p0):
-    # the column holds sum(dp) = p_s (1 - sigma_top) = p_s sum(dsigma)
-    p_s = (jnp.sum(dp, axis=-1, keepdims=True)
-           / jnp.sum(jnp.asarray(sigma_coord.dsigma, dp.dtype)))
-    vm = -p_s * (sigma_dot[..., 1:] - sigma_dot[..., :-1])
-    vt = dp[..., None] * tracer_vertical_advection(q, sigma_dot, sigma_coord) + q * vm[..., None]
-    return fm, a, f_ho, vm, vt
+    div_h = divergence_cell_3d(fm[..., 0], mesh)
+    if config.vertical_scheme != "mpas_flux":
+        return fm, a, f_ho, div_h, None, None, None
+    F = mpas_vertical_mass_flux(div_h, sigma_coord)[..., None]
+    if config.fct_vertical_upwind_width_pas == 0:
+        a_v = jnp.abs(F)
+    else:   # smooth |F| from above (as a); zero at top and surface
+        a_v = jnp.hypot(F, config.fct_vertical_upwind_width_pas)
+        a_v = a_v.at[:, 0].set(0.0).at[:, -1].set(0.0)
+    g_ho = mpas_vertical_flux_ho(q, F, a_v, sigma_coord, config.coef_3rd_order)
+    return fm, a, f_ho, div_h, F, a_v, g_ho
+
+
+def _cell_bounds(q0, mesh, width, vertical):
+    """MPAS ``s_min``/``s_max``: extremes of ``q0`` over the cell, its
+    horizontal neighbours at the same level and (``vertical``) the layers
+    directly above and below (``atm_advance_scalars_mono_work``), folded
+    with :func:`fct_bound_toward`; a padded (pentagon) slot leaves the bound."""
+    coc = mesh.cellsOnCell
+    ok = (coc >= 0)[..., None, None]
+    nb = q0[jnp.maximum(coc, 0)]
+    s_min, s_max = q0, q0
+    if vertical:
+        up = jnp.concatenate([q0[:, :1], q0[:, :-1]], axis=1)    # top layer: itself
+        dn = jnp.concatenate([q0[:, 1:], q0[:, -1:]], axis=1)    # surface layer: itself
+        for n in (up, dn):
+            s_min, s_max = fct_bound_toward(s_min, n, -1, width), fct_bound_toward(s_max, n, 1, width)
+    for k in range(coc.shape[0]):
+        s_min = jnp.where(ok[k], fct_bound_toward(s_min, nb[k], -1, width), s_min)
+        s_max = jnp.where(ok[k], fct_bound_toward(s_max, nb[k], 1, width), s_max)
+    return s_min, s_max
 
 
 def mpas_rk3_fct_step(state: TracerAirMassState, dt, mesh, sigma_coord, wind_fn,
                       config: TracerTransportMPASConfig, coefs) -> TracerAirMassState:
     """One MPAS-A scalar transport step (``atm_srk3`` RK3 + monotonic limiter).
 
-    Wicker-Skamarock RK3, each stage from the step's start state ``(q0,
-    dp0)`` over ``dt/3, dt/2, dt`` with the fluxes of the previous stage's
-    state (wind at that state's time), in flux form on the prognostic air
-    mass: ``dp' = dp0 + tau (-div(fm) + vm)``, ``(q dp)' = q0 dp0 + tau
-    (-div(F) + vt)``.  Stages 1-2 use the high-order flux (MPAS
-    ``atm_advance_scalars``).  Stage 3 is ``atm_advance_scalars_mono``
-    (Wang, Skamarock & Feingold 2009, doi:10.1175/2009MWR2869.1) applied to
-    the HORIZONTAL flux: first-order upwind flux from ``q0``, antidiffusive
-    flux ``F_ho - F_up``, cell bounds ``s_max/s_min`` = extremes of ``q0``
-    over the cell and its neighbours, scale factors ``R+ = clip((s_max dp_h
-    - Q_td) / Q_in, 0, 1)``, ``R- = clip((Q_td - s_min dp_h) / Q_out, 0,
-    1)`` with ``Q_td = q0 dp0 - dt div(F_up)`` and ``dp_h = dp0 - dt
-    div(fm)``, and each edge flux scaled by the donor/acceptor minimum; the
-    vertical tracer-mass tendency of the stage-2 state is added unlimited.
+    Wicker-Skamarock RK3 as ``atm_srk3`` / ``atm_advance_scalars_work``: each
+    stage from the step's start state ``(q0, dp0)`` over ``dt/3, dt/2, dt``
+    with the fluxes of the previous stage's state (wind at that state's
+    time), in flux form on the prognostic layer air mass.  The vertical
+    air-mass flux ``F`` is NOT the wind function's ``sigma_dot`` (ignored
+    here): it is diagnosed each stage from the discrete column continuity of
+    the horizontal mass flux actually applied
+    (:func:`mpas_vertical_mass_flux`, zero at top and surface), so the air
+    mass is exactly compatible with the transport (user decision
+    2026-11-24; the analytic DCMIP 1-3 sigma_dot drove dp to zero).
+
+    ``vertical_scheme="mpas_flux"`` (MPAS-A): ``dp' = dp0 + tau (-div(fm) +
+    F_k - F_{k+1})``, ``(q dp)' = q0 dp0 + tau (-div(f_ho) - (G_{k+1} -
+    G_k))`` with the high-order vertical flux ``G`` of
+    :func:`mpas_vertical_flux_ho`.  Stage 3 is ``atm_advance_scalars_mono``
+    (Wang, Skamarock & Feingold 2009, doi:10.1175/2009MWR2869.1) in 3-D:
+    first-order upwind horizontal AND vertical fluxes from ``q0`` with the
+    stage mass fluxes, antidiffusive fluxes ``f_ho - f_up`` and ``G_ho -
+    G_up``, bounds ``s_max/s_min`` = extremes of ``q0`` over the cell, its
+    horizontal neighbours and the layers above and below, ONE in/out budget
+    per cell from both flux sets, ``R+ = clip((s_max dp_new - Q_td) / Q_in,
+    0, 1)``, ``R- = clip((Q_td - s_min dp_new) / Q_out, 0, 1)`` with ``Q_td
+    = q0 dp0 - dt (div(f_up) + delta G_up)``, each edge flux scaled by its
+    cell pair's minimum and each interface flux by its layer pair's.
+
+    ``vertical_scheme="fv3_remap"`` (opt-in comparison, FV3 style): the
+    three stages are horizontal only (``dp`` moves by ``-div(fm)``,
+    Lagrangian layers), stage 3 is the horizontal limiter (bounds over the
+    cell and its horizontal neighbours, ``dp_h = dp0 - dt div(fm)``), then
+    the column is remapped from the Lagrangian layers ``dp_h`` to the
+    target layers ``dp_new = p_s' dsigma``, ``p_s' = sum(dp_h) / sum(dsigma)``
+    (returned as the new air mass, whatever profile ``dp0`` had) with the
+    shared FV3 tracer remap
+    (:func:`legoesm.grids.vertical.vertical_remap_sigma_fv3`, kord 9) in the
+    normalised coordinate ``sigma_top + cumsum(dp_h) / p_s'``.
 
     KNOWN DIFFERENCES from MPAS-A (each recorded with its reason):
-    * MPAS limits the horizontal and vertical antidiffusive fluxes jointly in
-      3-D (bounds over the vertical neighbours too); here only the
-      horizontal one, the vertical scheme being the shared sigma operator.
     * MPAS copies back ``max(0, q)``; dropped (it creates tracer mass, RULE
-      0); the limited horizontal update is positive without it.
+      0); instead the cell factors carry a ``FCT_ROUNDOFF_MARGIN``-ulp
+      margin on the antidiffusive correction (measured: exactly
+      non-negative on the tested fields; bounds hold to round-off).
+    * MPAS takes ``wwAvg`` from its dynamics; here the prescribed-wind model
+      diagnoses ``F`` from the column continuity above (DCMIP's analytic
+      ``sigma_dot`` is not used).
     * RULE 5: the hard ``min``/``max``/clips of the limiter are the smooth
-      forms of :func:`fct_flux_factor` (relative band ``fct_smoothing_width``,
-      the scale-factor clip ``max(0, .)`` a C1 positive part; the bounds
-      ``s_max``/``s_min`` as C1 extrema taken from INSIDE the hard interval,
-      so the smooth limiter never admits values beyond the hard bounds); ``|u|`` of the
-      upwind split and of the 3rd-order term is ``hypot(fm, w dp_e)``,
-      ``w = fct_upwind_width_ms`` (from above, so the low-order update keeps
-      non-negative weights; at rest a diffusion at speed ``w``).  Both widths
-      0 is the hard MPAS limiter (tested against a loop transcription).  The
-      donor/acceptor blend's scale ``a (|q1| + |q2|)/2`` vanishes where both
-      cells are exactly empty, leaving a one-sided derivative there (as on
-      the PE dycore's limiter).  Likewise every relative band (bounds, blend,
-      in/out sums) collapses where the values it compares are exactly 0, so
-      the step is NOT differentiable at exact zeros of ``q`` (a 0/1 field on
-      ico2, default widths: AD directional derivative 667 vs one-sided finite
-      differences 297 / 549 at eps 1e-6 / 1e-8, measured); an absolute floor
-      on the bands would fix it (open design question, not done).
-    * The vertical tracer-mass tendency ``dp V(q) + q vm`` telescopes only if
-      the shared vertical operator ``V`` is in face-minus-cell form on the
-      interface mass flux ``p_s sigma_dot``; the default advective upwind
-      ``V`` is not, so with vertical motion the column tracer mass is NOT
-      conserved (measured: -0.50 % over DCMIP 1-1 at ico5, 12 days).  The
-      horizontal transport conserves to round-off.
+      forms of :func:`fct_cell_factors` / :func:`fct_pair_factor` (relative
+      band ``fct_smoothing_width``, the scale-factor clip ``max(0, .)`` a C1
+      positive part; the bounds as C1 extrema taken from INSIDE the hard
+      interval, :func:`fct_bound_toward`); ``|u|`` of the upwind split and
+      of the 3rd-order term is ``hypot(fm, w dp_e)``, ``w =
+      fct_upwind_width_ms``, and ``|F|`` is ``hypot(F,
+      fct_vertical_upwind_width_pas)`` (from above, so the low-order update
+      keeps non-negative weights; at rest a diffusion at that speed).  All
+      widths 0 is the hard MPAS limiter (tested against a loop
+      transcription).  Every relative band collapses where the values it
+      compares are exactly 0 (both operands zero, e.g. two empty cells),
+      where the switch is the hard one: there the step CAN be
+      non-differentiable (flux products or cancellation may still remove the
+      kink), and AD returns the derivative of the branch taken, which can
+      differ from the one-sided directional derivatives (a 0/1 field on ico2, default widths:
+      AD directional derivative 667 vs one-sided finite differences 297 /
+      549 at eps 1e-6 / 1e-8, measured).  The direction blend's scale
+      ``a (|q1| + |q2|) / 2`` also has a kink where ONE of the pair's values
+      is exactly 0, even with the band open, so one-sided derivatives can
+      differ there too.  User decision 2026-11-24: no absolute floor.
 
-    Conservation: every horizontal flux is one value per edge, so the global
-    tracer mass ``sum areaCell q dp`` changes only through ``vt``.
+    Positivity / monotonicity of the low-order (upwind) update, and so of the
+    limited one, need in every cell at every stage ``tau * (total donor
+    outflow of that stage's fluxes, horizontal plus vertical, smooth
+    magnitudes included) < dp0`` (the update's base, ``tau = dt/3, dt/2,
+    dt``) with a margin of a few ulps (the low-order update is the
+    subtraction ``q0 dp0 - dt (div f_up + delta g_up)``, which can round
+    below 0 when the outflow is within round-off of ``dp0``; the limiter's
+    margin below protects only the antidiffusive correction), so every
+    stage and final layer mass stays strictly positive; not enforced (as in MPAS-A, where ``dt`` is the user's).  The limiter's cell
+    factors are shrunk by ``FCT_ROUNDOFF_MARGIN`` ulps, which keeps the
+    antidiffusive correction from spending more than a cell's room through
+    round-off (a 0/1 field stays >= 0 exactly; -3.5e-18 without it,
+    measured); local bounds in general hold to round-off.  MPAS's max(0, q)
+    copy-back, which creates mass, is dropped.
+
+    Conservation (RULE 0): every horizontal flux is one value per edge and
+    every vertical flux one value per interface (zero at top and surface),
+    so the global tracer mass ``sum areaCell q dp`` is conserved to
+    round-off, and the global air mass likewise; the FV3 remap conserves
+    the column tracer mass over the Lagrangian layers.
     """
-    from legoesm.core.smooth import positive_part_rel
+    from legoesm.grids.vertical import vertical_remap_sigma_fv3
 
     if isinstance(dt, (int, float)) and not dt > 0:
         raise ValueError(f"mpas_rk3_fct_step needs dt > 0 (got {dt!r})")
     if not isinstance(state, TracerAirMassState):
         raise TypeError("horizontal_scheme='mpas_fct' carries the air mass: pass a "
                         "TracerAirMassState (see air_mass_state)")
+    if config.vertical_scheme not in MPAS_FCT_VERTICAL_SCHEMES:
+        raise ValueError(f"mpas_rk3_fct_step: vertical_scheme {config.vertical_scheme!r}; "
+                         f"expected one of {MPAS_FCT_VERTICAL_SCHEMES}")
+    flux_vertical = config.vertical_scheme == "mpas_flux"
     width = config.fct_smoothing_width
     t0 = state.time.data
     # working precision: the default float (fp64 under x64), whatever the
-    # state stores (the DCMIP MPAS IC is float32)
+    # state stores
     wdt = jnp.promote_types(state.tracers.data.dtype, jax.dtypes.canonicalize_dtype(jnp.float64))
     q0, dp0 = state.tracers.data.astype(wdt), state.air_mass.data.astype(wdt)
     nC, nlev, ntr = q0.shape
@@ -624,59 +781,96 @@ def mpas_rk3_fct_step(state: TracerAirMassState, dt, mesh, sigma_coord, wind_fn,
     def div(f):   # (nE, nlev, k) per unit length -> (nC, nlev, k) per area
         return divergence_cell_3d(f.reshape(nE, -1), mesh).reshape(nC, nlev, -1)
 
+    def vdiv(g):  # interface flux (nC, nlev+1, k), positive down -> layer net outflow
+        return g[:, 1:] - g[:, :-1]
+
     qdp0 = q0 * dp0[..., None]
     q, dp, t = q0, dp0, t0
     for tau in (dt / 3.0, dt / 2.0):
-        u_edge, sigma_dot = wind_fn(t, mesh, sigma_coord)
-        fm, a, f_ho, vm, vt = _mpas_mass_fluxes(q, dp, u_edge, sigma_dot, mesh,
-                                                sigma_coord, coefs, config)
-        dp = dp0 + tau * (-div(fm)[..., 0] + vm)
-        q = (qdp0 + tau * (-div(f_ho) + vt)) / dp[..., None]
+        u_edge, _ = wind_fn(t, mesh, sigma_coord)
+        fm, a, f_ho, div_h, F, a_v, g_ho = _mpas_stage_fluxes(q, dp, u_edge, mesh, sigma_coord,
+                                                              coefs, config)
+        if flux_vertical:
+            dp = dp0 + tau * (-div_h - vdiv(F)[..., 0])
+            q = (qdp0 + tau * (-div(f_ho) - vdiv(g_ho))) / dp[..., None]
+        else:
+            dp = dp0 - tau * div_h
+            q = (qdp0 - tau * div(f_ho)) / dp[..., None]
         t = t0 + tau
 
     # stage 3: monotonic limiter over the full step (atm_advance_scalars_mono)
-    u_edge, sigma_dot = wind_fn(t, mesh, sigma_coord)
-    fm, a, f_ho, vm, vt = _mpas_mass_fluxes(q, dp, u_edge, sigma_dot, mesh,
-                                            sigma_coord, coefs, config)
+    u_edge, _ = wind_fn(t, mesh, sigma_coord)
+    fm, a, f_ho, div_h, F, a_v, g_ho = _mpas_stage_fluxes(q, dp, u_edge, mesh, sigma_coord,
+                                                          coefs, config)
     c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
     q1, q2 = q0[c1], q0[c2]
     # donor/acceptor weights first (no cancellation of a small donor value);
     # at a = |fm| exactly MPAS max(0, uh) q1 + min(0, uh) q2
     f_up = 0.5 * (fm + a) * q1 - 0.5 * (a - fm) * q2
     anti = f_ho - f_up
-    dp_h = dp0 - dt * div(fm)[..., 0]
-    qdp_td = qdp0 - dt * div(f_up)
-    coc = mesh.cellsOnCell
-    ok = (coc >= 0)[..., None, None]
-    nb = q0[jnp.maximum(coc, 0)]
-    # smooth extrema from INSIDE the hard interval: s + pp(nb - s) with pp the
-    # C1 positive part from below (exact outside its band), so q0 <= s_max <=
-    # the hard max and q0 >= s_min >= the hard min.  max_rel/min_rel (from
-    # outside) let a plateau creep up step after step (measured, DCMIP 1-3
-    # step-function tracer, 12 d: max 1.0188 vs 1.0 hard).
-    # Outside the band (and at width 0) the winning endpoint is selected
-    # directly, never rebuilt as s + (nb - s) (round-off could leave the
-    # neighbour interval).
-    def toward(s, n, sign):          # sign +1: max side, -1: min side
-        if width == 0:
-            return jnp.maximum(s, n) if sign > 0 else jnp.minimum(s, n)
-        x, scale = sign * (n - s), jnp.abs(s) + jnp.abs(n)
-        return jnp.where(x >= width * scale, n, s + sign * positive_part_rel(x, scale, width))
-
-    s_min, s_max = q0, q0
-    for k in range(coc.shape[0]):     # a padded slot (pentagon) leaves the bound as is
-        s_min = jnp.where(ok[k], toward(s_min, nb[k], -1), s_min)
-        s_max = jnp.where(ok[k], toward(s_max, nb[k], 1), s_max)
-    # per-step amounts, as MPAS scale_arr (its eps = 1e-20 in those units)
-    p_in, p_out = fct_in_out_sums(fct_cell_outflow(dt * anti, mesh, wdt), width)
-    room_in = s_max * dp_h[..., None] - qdp_td
-    room_out = qdp_td - s_min * dp_h[..., None]
-    lim = fct_flux_factor(anti, a, q1, q2, room_in, p_in, room_out, p_out, mesh, width,
-                          mpas_eps=MPAS_MONO_EPS)
-    dp_new = dp_h + dt * vm
-    qdp_new = qdp_td - dt * div(lim * anti) + dt * vt
-    # stored in the state's precision (as the dispatch integrators do)
+    out_h = fct_cell_outflow(dt * anti, mesh, wdt)           # per-step amounts, as MPAS
+    if flux_vertical:
+        qa, qb = q0[:, :-1], q0[:, 1:]                       # layer above / below interface
+        g_up = 0.5 * (F[:, 1:-1] + a_v[:, 1:-1]) * qa - 0.5 * (a_v[:, 1:-1] - F[:, 1:-1]) * qb
+        zero = jnp.zeros_like(q0[:, :1])
+        g_up = jnp.concatenate([zero, g_up, zero], axis=1)
+        anti_v = g_ho - g_up
+        dp_new = dp0 + dt * (-div_h - vdiv(F)[..., 0])
+        dp_lim = dp_new
+        qdp_td = qdp0 - dt * (div(f_up) + vdiv(g_up))
+        # one budget per cell: horizontal edges, then the top and bottom faces
+        # (> 0 leaves the layer: up through its top if anti_v_k < 0, down
+        # through its bottom if anti_v_{k+1} > 0)
+        out_v = jnp.stack([-dt * anti_v[:, :-1], dt * anti_v[:, 1:]])
+        p_in, p_out = fct_in_out_sums(jnp.concatenate([out_h, out_v], axis=0), width)
+    else:
+        dp_lim = dp0 - dt * div_h
+        qdp_td = qdp0 - dt * div(f_up)
+        p_in, p_out = fct_in_out_sums(out_h, width)
+    s_min, s_max = _cell_bounds(q0, mesh, width, flux_vertical)
+    room_in = s_max * dp_lim[..., None] - qdp_td
+    room_out = qdp_td - s_min * dp_lim[..., None]
+    r_plus, r_minus = fct_cell_factors(room_in, p_in, room_out, p_out, width,
+                                       mpas_eps=MPAS_MONO_EPS)
+    # floating-point margin (FCT_ROUNDOFF_MARGIN ulps) on the antidiffusive
+    # correction only: its limited in/out sums then do not spend more than a
+    # cell's room through round-off (measured: a 0/1 field stays >= 0
+    # exactly, where -3.5e-18 appeared without it).  Local bounds in general
+    # hold to round-off; the low-order update is not covered (see the
+    # docstring).  Replaces MPAS's mass-creating max(0, q) copy-back.
+    safety = 1.0 - FCT_ROUNDOFF_MARGIN * jnp.finfo(wdt).eps
+    r_plus, r_minus = r_plus * safety, r_minus * safety
+    lim = fct_pair_factor(anti, a, q1, q2, r_plus[c1], r_minus[c1], r_plus[c2],
+                          r_minus[c2], width)
+    qdp_new = qdp_td - dt * div(lim * anti)
+    if flux_vertical:
+        lim_v = fct_pair_factor(anti_v[:, 1:-1], a_v[:, 1:-1], qa, qb,
+                                r_plus[:, :-1], r_minus[:, :-1], r_plus[:, 1:], r_minus[:, 1:],
+                                width)
+        lim_anti_v = jnp.concatenate([zero, lim_v * anti_v[:, 1:-1], zero], axis=1)
+        qdp_new = qdp_new - dt * vdiv(lim_anti_v)
+        q_new = qdp_new / dp_new[..., None]
+    else:
+        q_h = qdp_new / dp_lim[..., None]
+        # remap the Lagrangian layers dp_lim onto dp_new in the normalised
+        # coordinate s = sigma_top + cumsum(dp) / p_s'.  Target interfaces
+        # sigma_top + cumsum(dsigma): the coordinate's dsigma, which dp_new is
+        # proportional to (its stored sigma_half may differ from them by
+        # float32 rounding, which would break the column budget at 1e-8).
+        dsig = jnp.asarray(sigma_coord.dsigma, wdt)
+        s0 = jnp.asarray(sigma_coord.sigma_half, wdt)[:1]
+        s_tgt = jnp.concatenate([s0, s0 + jnp.cumsum(dsig)])
+        p_s_new = jnp.sum(dp_lim, axis=-1, keepdims=True) / jnp.sum(dsig)
+        s_src = s0 + jnp.concatenate(
+            [jnp.zeros_like(dp_lim[:, :1]), jnp.cumsum(dp_lim, axis=-1)], axis=-1) / p_s_new
+        disp = (s_src - s_tgt).at[:, 0].set(0.0).at[:, -1].set(0.0)
+        q_new = vertical_remap_sigma_fv3(q_h, disp / dt, sigma_coord._replace(sigma_half=s_tgt), dt)
+        # the state returns on the remap's target layers (FV3: back to the
+        # reference coordinate), so sum(q dp) is the remapped column mass
+        # even for a state whose dp0 is off the p_s dsigma profile
+        dp_new = p_s_new * dsig[None, :]
+    # stored in the state's precision
     return TracerAirMassState(
-        tracers=state.tracers.replace(data=(qdp_new / dp_new[..., None]).astype(state.tracers.data.dtype)),
+        tracers=state.tracers.replace(data=q_new.astype(state.tracers.data.dtype)),
         air_mass=state.air_mass.replace(data=dp_new.astype(state.air_mass.data.dtype)),
         time=state.time.replace(data=jnp.asarray(t0 + dt, jnp.result_type(t0))))

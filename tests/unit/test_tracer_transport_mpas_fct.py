@@ -9,13 +9,17 @@ and the MPAS edge-reconstruction / streamfunction helpers of
   for cell means (point-sampled, the 4th-order edge value differs from the
   midpoint value by -1/3 of the centred average's error, to O(dx^4));
 * the streamfunction edge wind is discretely non-divergent;
+* the vertical air-mass flux from the discrete column continuity: zero at
+  top and surface, layer tendency dsigma_k dp_s/dt (column budget closes);
 * RULE 0: global tracer mass ``sum areaCell q dp`` is conserved to round-off
-  with a DIVERGENT horizontal wind (fails for the advective centred2 form);
-* a constant mixing ratio stays constant (divergent wind + vertical motion);
+  with a DIVERGENT, vertically varying horizontal wind (so a nonzero vertical
+  flux), both vertical schemes (fails for the advective centred2 form);
+* a constant mixing ratio stays constant; no negative tracer;
 * RULE 5: at the hard limit the step matches a literal loop transcription of
   MPAS ``atm_srk3`` / ``atm_advance_scalars`` / ``atm_advance_scalars_mono``
-  and is monotone; at the smooth default the gap to it is pinned per case;
-  ``check_grads`` through the limiter at the default.
+  (3-D: horizontal and vertical fluxes in one limiter) and is monotone; at the
+  smooth default the gap to it is pinned per case; ``check_grads`` through the
+  limiter at the default.
 """
 
 from __future__ import annotations
@@ -45,10 +49,11 @@ from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
     TracerTransportMPASModel,
     air_mass_state,
     mpas_rk3_fct_step,
+    mpas_vertical_mass_flux,
     validate_tracer_transport_mpas_config,
 )
 
-NLEV = 3
+NLEV = 6
 DT = 1800.0
 P_S = 1.0e5
 
@@ -68,10 +73,14 @@ def sigma():
     return create_sigma_coordinate(NLEV)
 
 
-def _cfg(width=1.0e-4, uwidth=1.0e-3, coef3=0.25):
+def _cfg(width=1.0e-4, uwidth=1.0e-3, coef3=0.25, vwidth=None, vertical="mpas_flux"):
+    """mpas_fct config; ``vwidth`` defaults to 0 with ``uwidth = 0`` (hard)."""
+    if vwidth is None:
+        vwidth = 1.0e-5 if uwidth else 0.0
     return TracerTransportMPASConfig(time_integrator="mpas_rk3", horizontal_scheme="mpas_fct",
-                                     coef_3rd_order=coef3, fct_smoothing_width=width,
-                                     fct_upwind_width_ms=uwidth)
+                                     vertical_scheme=vertical, coef_3rd_order=coef3,
+                                     fct_smoothing_width=width, fct_upwind_width_ms=uwidth,
+                                     fct_vertical_upwind_width_pas=vwidth)
 
 
 def _rot_wind(mesh, amp=2.0e7, seed=0):
@@ -80,8 +89,11 @@ def _rot_wind(mesh, amp=2.0e7, seed=0):
 
 
 def _div_wind(mesh, amp=1.0e7, seed=3):
+    """Divergent wind with a vertical profile (so the column continuity gives
+    a nonzero vertical air-mass flux)."""
     phi = amp * jax.random.normal(jax.random.PRNGKey(seed), (mesh.nCells,))
-    return gradient_edge_3d(phi[:, None] * jnp.ones(NLEV), mesh)
+    prof = 0.5 + jnp.cos(jnp.linspace(0.0, np.pi, NLEV))     # not column-neutral
+    return gradient_edge_3d(phi[:, None] * prof[None, :], mesh)
 
 
 def _const_wind(u_edge, sigma_dot):
@@ -104,6 +116,13 @@ def _blocky(mesh, seed=1, ntr=2):
 def _mass(st, mesh):
     return jnp.sum(mesh.areaCell[:, None, None] * st.air_mass.data[..., None] * st.tracers.data,
                    axis=(0, 1))
+
+
+def _vflux(st, u, mesh, sigma):
+    """Max |F| of the step's first stage (non-vacuity of vertical tests)."""
+    dp = st.air_mass.data
+    fm = u * 0.5 * (dp[mesh.cellsOnEdge[0]] + dp[mesh.cellsOnEdge[1]])
+    return float(jnp.max(jnp.abs(mpas_vertical_mass_flux(divergence_cell_3d(fm, mesh), sigma))))
 
 
 def _run(st, n, mesh, sigma, wind, cfg, coefs):
@@ -210,6 +229,16 @@ def test_dcmip13_air_mass_balances_the_analytic_vertical_flux():
     assert rms_tendency(4, True) / rms_tendency(5, True) < 1.1
 
 
+def test_dcmip_benchmark_state_is_float64(mesh):
+    """User decision 2026-11-24: the MPAS DCMIP benchmark state (tracers and
+    air mass) is stored in float64 (fp32 storage drifted the tracer mass)."""
+    import tests.atmosphere.hydrostatic.test_cases.dcmip_transport as D
+    sc = D.create_dcmip_sigma(8)
+    for tn, init in ((11, D.dcmip11_init_mpas), (13, D.dcmip13_init_mpas)):
+        st = D.dcmip_air_mass_state_mpas(tn, init(mesh, sc), mesh, sc)
+        assert st.tracers.data.dtype == jnp.float64 and st.air_mass.data.dtype == jnp.float64
+
+
 def test_streamfunction_wind_is_discretely_nondivergent(mesh):
     u = _rot_wind(mesh)
     div = divergence_cell_3d(u, mesh)
@@ -221,14 +250,18 @@ def test_streamfunction_wind_is_discretely_nondivergent(mesh):
 # RULE 0 and consistency
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("vertical", ["mpas_flux", "fv3_remap"])
 @pytest.mark.parametrize("width,uwidth", [(1.0e-4, 1.0e-3), (0.0, 0.0)])
-def test_tracer_mass_conserved_divergent_wind(mesh, sigma, coefs, width, uwidth):
-    """RULE 0: one flux per edge -> sum areaCell q dp conserved to round-off
-    with a divergent horizontal wind (sigma_dot = 0)."""
+def test_tracer_mass_conserved_divergent_wind(mesh, sigma, coefs, width, uwidth, vertical):
+    """RULE 0: one flux per edge and one per interface (zero at top and
+    surface), or the column-conservative remap -> sum areaCell q dp conserved
+    to round-off with a divergent, vertically varying wind (nonzero vertical
+    air-mass flux, asserted)."""
     u = _rot_wind(mesh) + _div_wind(mesh)
     wind = _const_wind(u, jnp.zeros((mesh.nCells, NLEV + 1)))
     st0 = _state(_blocky(mesh), sigma)
-    st = _run(st0, 10, mesh, sigma, wind, _cfg(width, uwidth), coefs)
+    assert _vflux(st0, u, mesh, sigma) > 1.0e-3
+    st = _run(st0, 10, mesh, sigma, wind, _cfg(width, uwidth, vertical=vertical), coefs)
     m0, m1 = _mass(st0, mesh), _mass(st, mesh)
     np.testing.assert_allclose(np.asarray(m1), np.asarray(m0), rtol=1e-13)
     # and the air mass itself
@@ -253,49 +286,161 @@ def test_centred2_advective_form_fails_the_mass_check(mesh, sigma):
     assert rel > 1e-6, rel
 
 
-@pytest.mark.parametrize("width,uwidth", [(1.0e-4, 1.0e-3), (0.0, 0.0)])
-def test_constant_mixing_ratio_preserved(mesh, sigma, coefs, width, uwidth):
-    """Air mass and tracer mass use the same fluxes: q = const stays const with
-    a divergent wind and a vertical motion."""
+@pytest.mark.parametrize("vertical", ["mpas_flux", "fv3_remap"])
+def test_prescribed_sigma_dot_is_not_used(mesh, sigma, coefs, vertical):
+    """mpas_fct diagnoses the vertical air-mass flux from the column
+    continuity: a nonzero prescribed sigma_dot changes nothing."""
     u = _rot_wind(mesh) + _div_wind(mesh)
-    sd = 1.0e-6 * jnp.sin(jnp.linspace(0.0, np.pi, NLEV + 1))[None, :] \
-        * jnp.cos(mesh.latCell)[:, None]
+    sd = 1.0e-6 * jnp.sin(jnp.linspace(0.0, np.pi, NLEV + 1))[None, :] * jnp.cos(mesh.latCell)[:, None]
+    st0 = _state(_blocky(mesh), sigma)
+    a = mpas_rk3_fct_step(st0, DT, mesh, sigma, _const_wind(u, jnp.zeros((mesh.nCells, NLEV + 1))),
+                          _cfg(vertical=vertical), coefs)
+    b = mpas_rk3_fct_step(st0, DT, mesh, sigma, _const_wind(u, sd), _cfg(vertical=vertical), coefs)
+    assert bool(jnp.all(a.tracers.data == b.tracers.data))
+    assert bool(jnp.all(a.air_mass.data == b.air_mass.data))
+
+
+@pytest.mark.parametrize("vertical", ["mpas_flux", "fv3_remap"])
+def test_tracer_mass_conserved_off_profile_air_mass(mesh, sigma, coefs, vertical):
+    """A state whose dp is NOT p_s dsigma (e.g. a restart): tracer and air
+    mass still conserved to round-off (the remap returns its target layers)."""
+    u = _rot_wind(mesh) + _div_wind(mesh)
+    st0 = _state(_blocky(mesh), sigma)
+    bump = 1.0 + 0.1 * jax.random.uniform(jax.random.PRNGKey(7), st0.air_mass.data.shape)
+    st0 = st0._replace(air_mass=st0.air_mass.replace(data=st0.air_mass.data * bump))
+    st = _run(st0, 3, mesh, sigma, _const_wind(u, jnp.zeros((mesh.nCells, NLEV + 1))),
+              _cfg(vertical=vertical), coefs)
+    np.testing.assert_allclose(np.asarray(_mass(st, mesh)), np.asarray(_mass(st0, mesh)), rtol=1e-13)
+    am = lambda s_: float(jnp.sum(mesh.areaCell[:, None] * s_.air_mass.data))  # noqa: E731
+    np.testing.assert_allclose(am(st), am(st0), rtol=1e-13)
+
+
+@pytest.mark.parametrize("vertical", ["mpas_flux", "fv3_remap"])
+@pytest.mark.parametrize("width,uwidth", [(1.0e-4, 1.0e-3), (0.0, 0.0)])
+def test_constant_mixing_ratio_preserved(mesh, sigma, coefs, width, uwidth, vertical):
+    """Air mass and tracer mass use the same fluxes: q = const stays const with
+    a divergent wind and the vertical motion it implies."""
+    u = _rot_wind(mesh) + _div_wind(mesh)
     st0 = _state(0.7 * jnp.ones((mesh.nCells, NLEV, 2)), sigma)
-    st = _run(st0, 5, mesh, sigma, _const_wind(u, sd), _cfg(width, uwidth), coefs)
+    st = _run(st0, 5, mesh, sigma, _const_wind(u, jnp.zeros((mesh.nCells, NLEV + 1))),
+              _cfg(width, uwidth, vertical=vertical), coefs)
     np.testing.assert_allclose(np.asarray(st.tracers.data), 0.7, rtol=1e-13)
     assert float(jnp.max(jnp.abs(st.air_mass.data - st0.air_mass.data))) > 1.0   # dp did evolve
 
 
-def test_three_d_nondivergent_flow_keeps_air_mass(mesh, sigma, coefs):
-    """Horizontal mass divergence balanced by the vertical one (sigma_dot from
-    the column continuity with p = sigma p_s, model top sigma_top > 0) leaves
-    dp unchanged: the vertical air-mass flux is p_s sigma_dot, p_s = sum(dp) /
-    sum(dsigma) (not sum(dp))."""
-    assert float(sigma.sigma_half[0]) > 0.0
-    dsig = np.asarray(sigma.dsigma, np.float64)
-    c = np.zeros(NLEV)
-    c[0], c[1] = 1.0, -dsig[0] / dsig[1]              # column-integrated divergence 0
-    u = _div_wind(mesh)[:, :1] * jnp.asarray(c)[None, :]
+def test_vertical_mass_flux_closes_the_column_budget(mesh, sigma):
+    """The diagnosed interface flux is exactly zero at top and surface and
+    makes every layer's air-mass tendency dsigma_k dp_s/dt with dp_s/dt
+    sum(dsigma) = -sum(div): no air leaves the column, dp stays p_s dsigma."""
+    u = _rot_wind(mesh) + _div_wind(mesh)
+    dp = _state(_blocky(mesh), sigma).air_mass.data
+    fm = u * 0.5 * (dp[mesh.cellsOnEdge[0]] + dp[mesh.cellsOnEdge[1]])
+    div = divergence_cell_3d(fm, mesh)
+    F = mpas_vertical_mass_flux(div, sigma)
+    assert float(jnp.max(jnp.abs(F[:, 0]))) == 0.0 and float(jnp.max(jnp.abs(F[:, -1]))) == 0.0
+    tend = -div + F[:, :-1] - F[:, 1:]
+    dsig = jnp.asarray(sigma.dsigma, jnp.float64)
+    dps = -jnp.sum(div, axis=1, keepdims=True) / jnp.sum(dsig)
+    scale = float(jnp.max(jnp.abs(div)))
+    np.testing.assert_allclose(np.asarray(tend), np.asarray(dps * dsig[None, :]),
+                               rtol=0, atol=1e-13 * scale)
+    np.testing.assert_allclose(np.asarray(jnp.sum(tend, axis=1)), np.asarray(-jnp.sum(div, axis=1)),
+                               rtol=0, atol=1e-13 * scale)
+    assert float(jnp.max(jnp.abs(F))) > 1.0e-3                     # non-vacuous
+
+
+@pytest.mark.parametrize("vertical", ["mpas_flux", "fv3_remap"])
+def test_air_mass_stays_proportional_to_dsigma(mesh, sigma, coefs, vertical):
+    """After steps with a divergent wind the layer air mass is p_s' dsigma
+    in every column (the column budget does not leak between layers) and
+    the global air mass is conserved."""
+    u = _rot_wind(mesh) + _div_wind(mesh)
     st0 = _state(_blocky(mesh), sigma)
-    dp0 = st0.air_mass.data
-    fm = u * 0.5 * (dp0[mesh.cellsOnEdge[0]] + dp0[mesh.cellsOnEdge[1]])
-    div = divergence_cell_3d(fm, mesh)                # (nC, nlev) [Pa/s]
-    sd = jnp.concatenate([jnp.zeros((mesh.nCells, 1)), -jnp.cumsum(div, axis=1) / P_S], axis=1)
-    assert float(jnp.max(jnp.abs(sd[:, -1]))) < 1e-18
-    st = mpas_rk3_fct_step(st0, DT, mesh, sigma, _const_wind(u, sd), _cfg(), coefs)
-    np.testing.assert_allclose(np.asarray(st.air_mass.data), np.asarray(dp0), rtol=1e-12)
+    st = _run(st0, 3, mesh, sigma, _const_wind(u, jnp.zeros((mesh.nCells, NLEV + 1))),
+              _cfg(vertical=vertical), coefs)
+    ratio = st.air_mass.data / jnp.asarray(sigma.dsigma)[None, :]
+    np.testing.assert_allclose(np.asarray(ratio), np.asarray(ratio[:, :1]) * np.ones((1, NLEV)),
+                               rtol=1e-13)
+    assert float(jnp.max(jnp.abs(ratio[:, 0] - P_S))) > 1.0           # p_s did change
+    am0 = jnp.sum(mesh.areaCell[:, None] * st0.air_mass.data)
+    am1 = jnp.sum(mesh.areaCell[:, None] * st.air_mass.data)
+    np.testing.assert_allclose(float(am1), float(am0), rtol=1e-13)
+
+
+@pytest.mark.parametrize("vertical", ["mpas_flux", "fv3_remap"])
+def test_air_mass_per_column_matches_independent_rk3(mesh, sigma, coefs, vertical):
+    """Column by column and layer by layer, one step's air mass equals an
+    independent RK3 of the continuity alone (horizontal divergence of u dp_e
+    and, for mpas_flux, the column-continuity vertical flux; fv3_remap:
+    Lagrangian stages, then p_s' dsigma), so no column budget error can
+    hide behind the global total."""
+    u = _rot_wind(mesh) + _div_wind(mesh)
+    st0 = _state(_blocky(mesh), sigma)
+    st = mpas_rk3_fct_step(st0, DT, mesh, sigma, _const_wind(u, jnp.zeros((mesh.nCells, NLEV + 1))),
+                           _cfg(vertical=vertical), coefs)
+    dp0 = np.asarray(st0.air_mass.data, np.float64)
+    dsig = np.asarray(sigma.dsigma, np.float64)
+    c1, c2 = np.asarray(mesh.cellsOnEdge)
+
+    def div_of(dp):
+        return np.asarray(divergence_cell_3d(jnp.asarray(np.asarray(u) * 0.5 * (dp[c1] + dp[c2])), mesh))
+
+    dp = dp0
+    for tau in (DT / 3.0, DT / 2.0, DT):
+        d = div_of(dp)
+        if vertical == "mpas_flux":
+            dp = dp0 + tau * dsig[None, :] * (-d.sum(1, keepdims=True) / dsig.sum())
+        else:
+            dp = dp0 - tau * d
+    if vertical == "fv3_remap":
+        dp = dp.sum(1, keepdims=True) / dsig.sum() * dsig[None, :]
+    np.testing.assert_allclose(np.asarray(st.air_mass.data), dp, rtol=1e-13)
+    assert np.max(np.abs(dp.sum(1) - dp0.sum(1))) > 1.0                 # columns did change
+
+
+@pytest.mark.parametrize("vertical", ["mpas_flux", "fv3_remap"])
+@pytest.mark.parametrize("width,uwidth", [(1.0e-4, 1.0e-3), (0.0, 0.0)])
+def test_no_negative_tracer_three_d(mesh, sigma, coefs, width, uwidth, vertical):
+    """A field with exact zeros under a divergent, vertically varying wind
+    (horizontal + vertical transport): never negative, exactly.  The
+    MPAS 3-D limiter also keeps the 0/1 field <= 1; the FV3 remap (kord 9,
+    Huynh's constraint, positive definite) is not strictly monotone: this
+    0/1 field reaches 1.2133 after 10 steps (measured), so only its
+    positivity is asserted."""
+    u = _rot_wind(mesh) + _div_wind(mesh)
+    q = jnp.where(jax.random.uniform(jax.random.PRNGKey(4), (mesh.nCells, NLEV, 1)) > 0.7, 1.0, 0.0)
+    st = _state(q, sigma)
+    for _ in range(10):      # every step checked, not only the last
+        st = mpas_rk3_fct_step(st, DT, mesh, sigma, _const_wind(u, jnp.zeros((mesh.nCells, NLEV + 1))),
+                               _cfg(width, uwidth, vertical=vertical), coefs)
+        # exactly: the limiter's cell factors carry a 16-ulp margin (without
+        # it: -3.5e-18 mpas_flux, -6.6e-19 fv3_remap, measured); no clip
+        assert float(jnp.min(st.tracers.data)) >= 0.0
+        if vertical == "mpas_flux":
+            assert float(jnp.max(st.tracers.data)) <= 1.0 + 1e-14
 
 
 # ---------------------------------------------------------------------------
-# Oracle: literal loop transcription of MPAS-A (hard limiter, sigma_dot = 0)
+# Oracle: literal loop transcription of MPAS-A, hard 3-D limiter (horizontal
+# and continuity-derived vertical fluxes)
 # ---------------------------------------------------------------------------
 
-def _mpas_oracle(q0, dp0, u, mesh, coefs, coef3, dt):
+def _mpas_oracle(q0, dp0, u, mesh, coefs, coef3, dt, dsig):
     """atm_srk3 scalar stages, transcribed loop by loop from
     mpas_atm_time_integration.F (atm_advance_scalars_work for rk_step 1-2 with
     advance_density, atm_advance_scalars_mono_work for rk_step 3, eps=1e-20),
-    horizontal only, without the max(0, .) copy-back (see KNOWN DIFFERENCES)."""
+    horizontal AND vertical (flux3 interior, fzm/fzp linear interpolation at
+    the interfaces next to top and surface, vertical upwind flux, vertical
+    contributions to scale_arr, vertical rescale), without the max(0, .)
+    copy-back (see KNOWN DIFFERENCES).  MPAS's k runs upward and its wwAvg is
+    positive upward (donor k-1, below); here index 0 is the top and F is
+    positive downward (donor i-1, above).  The transcription maps by FLUX
+    DIRECTION: MPAS's donor-side cells (k-2, k-1) become ours (i-2, i-1) and
+    its receiving side (k, k+1) ours (i, i+1); the formulas (flux3, the
+    upwind split, the limiter pairs) are symmetric under that reflection.
+    The vertical air-mass flux is the column-continuity one, loop by loop."""
     q0, dp0, u = (np.asarray(x, np.float64) for x in (q0, dp0, u))
+    dsig = np.asarray(dsig, np.float64)
     coe = np.asarray(mesh.cellsOnEdge)
     eoc, sgn = np.asarray(mesh.edgesOnCell), np.asarray(mesh.edgeSignOnCell, np.float64)
     coc, neoc = np.asarray(mesh.cellsOnCell), np.asarray(mesh.nEdgesOnCell)
@@ -323,27 +468,75 @@ def _mpas_oracle(q0, dp0, u, mesh, coefs, coef3, dt):
             out[c] /= area[c]
         return out
 
+    def ww_of(uh):       # interface air-mass flux, column continuity
+        d = cell_sum(uh * dv[:, None])
+        F = np.zeros((nC, nl + 1))
+        for c in range(nC):
+            tend = -np.sum(d[c]) / np.sum(dsig)
+            for k in range(nl - 1):
+                F[c, k + 1] = F[c, k] - d[c, k] - dsig[k] * tend
+        return F, d
+
+    def flux3(qm2, qm1, qi, qp1, ua):
+        return (ua * (7.0 * (qi + qm1) - (qp1 + qm2)) / 12.0
+                + coef3 * abs(ua) * ((qp1 - qm2) - 3.0 * (qi - qm1)) / 12.0)
+
+    def wdtn_of(qs, F):
+        w = np.zeros((nC, nl + 1))
+        for c in range(nC):
+            for i in range(1, nl):
+                if i == 1 or i == nl - 1:
+                    w[c, i] = F[c, i] * (dsig[i] * qs[c, i - 1] + dsig[i - 1] * qs[c, i]) \
+                        / (dsig[i - 1] + dsig[i])
+                else:
+                    w[c, i] = flux3(qs[c, i - 2], qs[c, i - 1], qs[c, i], qs[c, i + 1], F[c, i])
+        return w
+
     qs, dps = q0, dp0
     for tau in (dt / 3.0, dt / 2.0):
         uh = uh_of(dps)
-        rho_new = dp0 - tau * cell_sum(uh * dv[:, None])
-        qs = (q0 * dp0 - tau * cell_sum(hflux(qs, uh))) / rho_new
+        F, d = ww_of(uh)
+        rho_new = dp0 - tau * (d + F[:, 1:] - F[:, :-1])
+        w = wdtn_of(qs, F)
+        qs = (q0 * dp0 - tau * (cell_sum(hflux(qs, uh)) + w[:, 1:] - w[:, :-1])) / rho_new
         dps = rho_new
     uh = uh_of(dps)
+    F, d = ww_of(uh)
     flux_arr = hflux(qs, uh)
-    rho_int = dp0 - dt * cell_sum(uh * dv[:, None])
+    wdtn = wdtn_of(qs, F)
+    rho_int = dp0 - dt * (d + F[:, 1:] - F[:, :-1])
     s_max, s_min = q0.copy(), q0.copy()
+    for c in range(nC):
+        for k in range(nl):
+            for kk in (k - 1, k + 1):
+                if 0 <= kk < nl:
+                    s_max[c, k] = max(s_max[c, k], q0[c, kk])
+                    s_min[c, k] = min(s_min[c, k], q0[c, kk])
     for c in range(nC):
         for i in range(neoc[c]):
             s_max[c] = np.maximum(s_max[c], q0[coc[i, c]])
             s_min[c] = np.minimum(s_min[c], q0[coc[i, c]])
+    # vertical upwind update and the vertical part of scale_arr
+    snew = q0 * dp0
+    fu = np.zeros((nC, nl + 1))
+    for c in range(nC):
+        for i in range(1, nl):
+            fu[c, i] = dt * (max(0.0, F[c, i]) * q0[c, i - 1] + min(0.0, F[c, i]) * q0[c, i])
+    snew = snew - (fu[:, 1:] - fu[:, :-1])
+    wdtn = dt * wdtn - fu
+    s_in = np.zeros((nC, nl))
+    s_out = np.zeros((nC, nl))
+    for c in range(nC):
+        for k in range(nl):
+            s_in[c, k] = max(0.0, wdtn[c, k]) - min(0.0, wdtn[c, k + 1])
+            s_out[c, k] = -(max(0.0, wdtn[c, k + 1]) - min(0.0, wdtn[c, k]))
+    # horizontal upwind update and the horizontal part of scale_arr
     f_up = np.zeros((nE, nl))
     for e in range(nE):
         c1, c2 = coe[:, e]
         f_up[e] = dv[e] * dt * (np.maximum(0.0, uh[e]) * q0[c1] + np.minimum(0.0, uh[e]) * q0[c2])
     flux_tmp = dt * flux_arr - f_up
-    snew = q0 * dp0 - cell_sum(f_up)
-    s_in, s_out = np.zeros((nC, nl)), np.zeros((nC, nl))
+    snew = snew - cell_sum(f_up)
     for c in range(nC):
         for i in range(neoc[c]):
             ft = sgn[i, c] * flux_tmp[eoc[i, c]]
@@ -358,7 +551,13 @@ def _mpas_oracle(q0, dp0, u, mesh, coefs, coef3, dt):
         f = flux_tmp[e]
         lim[e] = (np.maximum(0.0, f) * np.minimum(sc_out[c1], sc_in[c2])
                   + np.minimum(0.0, f) * np.minimum(sc_in[c1], sc_out[c2]))
-    return (snew - cell_sum(lim)) / rho_int, rho_int
+    wl = np.zeros((nC, nl + 1))
+    for c in range(nC):
+        for i in range(1, nl):
+            f = wdtn[c, i]
+            wl[c, i] = (max(0.0, f) * min(sc_out[c, i - 1], sc_in[c, i])
+                        + min(0.0, f) * min(sc_in[c, i - 1], sc_out[c, i]))
+    return (snew - cell_sum(lim) - (wl[:, 1:] - wl[:, :-1])) / rho_int, rho_int
 
 
 _CASES = {"rot": (2.0e7, 0.0), "rot+div": (2.0e7, 1.0e7)}
@@ -376,29 +575,43 @@ def test_hard_limit_matches_mpas_transcription(mesh, sigma, coefs, name):
     st0 = _state(q[..., None], sigma)
     st = mpas_rk3_fct_step(st0, DT, mesh, sigma, _const_wind(u, jnp.zeros((mesh.nCells, NLEV + 1))),
                            _cfg(0.0, 0.0), coefs)
-    q_ref, dp_ref = _mpas_oracle(q, st0.air_mass.data, u, mesh, coefs, 0.25, DT)
+    q_ref, dp_ref = _mpas_oracle(q, st0.air_mass.data, u, mesh, coefs, 0.25, DT, sigma.dsigma)
+    if name == "rot+div":
+        assert _vflux(st0, u, mesh, sigma) > 1.0e-3           # vertical part exercised
     np.testing.assert_allclose(np.asarray(st.air_mass.data), dp_ref, rtol=1e-13)
     np.testing.assert_allclose(np.asarray(st.tracers.data[..., 0]), q_ref, rtol=0, atol=1e-12)
 
 
 @pytest.mark.parametrize("width,uwidth", [(1.0e-4, 1.0e-3), (0.0, 0.0)])
 def test_local_bounds_held_at_default_and_hard(mesh, sigma, coefs, width, uwidth):
-    """Non-divergent wind, blocky field with fluxes of mixed magnitude and
-    sign: after one step every cell stays within the HARD local bounds
-    (extremes of q0 over the cell and its neighbours) at the smooth default
-    too (smooth extrema inside, smooth in/out budgets from above)."""
-    u, q = _case(mesh, "rot")
+    """Divergent, vertically varying wind (horizontal + vertical fluxes),
+    blocky field with fluxes of mixed magnitude and sign: after one step every
+    cell stays within the HARD local 3-D bounds (extremes of q0 over the cell,
+    its horizontal neighbours and the layers above and below) at the smooth
+    default too (smooth extrema inside, smooth in/out budgets from above).
+    The air mass varies, so the bound is on q = Q / dp_new."""
+    u, q = _case(mesh, "rot+div")
     q = q * jnp.where(jax.random.uniform(jax.random.PRNGKey(9), q.shape) > 0.5, 1.0, 1e-5)
     st = mpas_rk3_fct_step(_state(q[..., None], sigma), DT, mesh, sigma,
                            _const_wind(u, jnp.zeros((mesh.nCells, NLEV + 1))), _cfg(width, uwidth), coefs)
+    lo, hi = _hard_bounds(q, mesh)
+    qnew = np.asarray(st.tracers.data[..., 0])
+    # round-off only (measured: 5.6e-19 below at the default, 2.3e-18 hard)
+    tol = 1e-14 * float(np.max(np.abs(np.asarray(q))))
+    assert np.all(qnew >= lo - tol) and np.all(qnew <= hi + tol)
+
+
+def _hard_bounds(q, mesh):
+    """MPAS s_min/s_max of q (nCells, nlev): cell, horizontal neighbours,
+    layers above and below."""
     coc = np.asarray(mesh.cellsOnCell)
     qn = np.asarray(q)
     nb = np.where((coc >= 0)[..., None], qn[np.maximum(coc, 0)], qn[None])
-    lo, hi = np.minimum(qn, nb.min(0)), np.maximum(qn, nb.max(0))
-    qnew = np.asarray(st.tracers.data[..., 0])
-    # round-off only (measured: 5.6e-19 below at the default, 2.3e-18 hard)
-    tol = 1e-14 * float(np.max(np.abs(qn)))
-    assert np.all(qnew >= lo - tol) and np.all(qnew <= hi + tol)
+    up = np.concatenate([qn[:, :1], qn[:, :-1]], axis=1)
+    dn = np.concatenate([qn[:, 1:], qn[:, -1:]], axis=1)
+    lo = np.minimum.reduce([qn, nb.min(0), up, dn])
+    hi = np.maximum.reduce([qn, nb.max(0), up, dn])
+    return lo, hi
 
 
 def test_hard_limit_is_monotone(mesh, sigma, coefs):
@@ -407,10 +620,7 @@ def test_hard_limit_is_monotone(mesh, sigma, coefs):
     u, q = _case(mesh, "rot")
     st = mpas_rk3_fct_step(_state(q[..., None], sigma), DT, mesh, sigma,
                            _const_wind(u, jnp.zeros((mesh.nCells, NLEV + 1))), _cfg(0.0, 0.0), coefs)
-    coc = np.asarray(mesh.cellsOnCell)
-    qn = np.asarray(q)
-    nb = np.where((coc >= 0)[..., None], qn[np.maximum(coc, 0)], qn[None])
-    lo, hi = np.minimum(qn, nb.min(0)), np.maximum(qn, nb.max(0))
+    lo, hi = _hard_bounds(q, mesh)
     qnew = np.asarray(st.tracers.data[..., 0])
     assert np.all(qnew >= lo - 1e-12) and np.all(qnew <= hi + 1e-12)
     # unlimited high order (coef huge limiter room) is NOT monotone here: the test can fail
@@ -438,21 +648,22 @@ def _unlimited(q, u, mesh, sigma, coefs):
     st0 = _state(q[..., None], sigma)
     q0, dp0 = st0.tracers.data, st0.air_mass.data
     qs, dps = q0, dp0
-    zero = jnp.zeros((mesh.nCells, NLEV + 1))
+    div = lambda f: divergence_cell_3d(f.reshape(mesh.nEdges, -1), mesh).reshape(q0.shape[0], NLEV, -1)  # noqa: E731
     for tau in (DT / 3.0, DT / 2.0, DT):
-        fm, a, f_ho, vm, vt = tm._mpas_mass_fluxes(qs, dps, u, zero, mesh, sigma, coefs, cfg)
-        div = lambda f: divergence_cell_3d(f.reshape(mesh.nEdges, -1), mesh).reshape(qs.shape[0], NLEV, -1)
-        dps = dp0 - tau * div(fm)[..., 0]
-        qs = (q0 * dp0[..., None] - tau * div(f_ho)) / dps[..., None]
+        fm, a, f_ho, div_h, F, a_v, g_ho = tm._mpas_stage_fluxes(qs, dps, u, mesh, sigma, coefs, cfg)
+        dps = dp0 + tau * (-div_h - (F[:, 1:, 0] - F[:, :-1, 0]))
+        qs = (q0 * dp0[..., None] - tau * (div(f_ho) + g_ho[:, 1:] - g_ho[:, :-1])) / dps[..., None]
     return qs[..., 0]
 
 
-# Gap of the smooth default (width 1e-4, upwind width 1e-3 m/s) to the hard
-# limiter, max |q_default - q_hard| after one step, per case.  Measured
-# 2026-11-23 (fp64, CPU) after masking padded (pentagon) neighbour slots out
-# of the smooth bounds (was 2.61e-5 with them); re-measure if the smooth
-# forms or defaults change.
-_DEFAULT_GAP = {"rot": 1.0850146481278244e-06, "rot+div": 1.095331088496465e-06}
+# Gap of the smooth default (widths 1e-4, 1e-3 m/s, 1e-5 Pa/s) to the hard
+# limiter, max |q_default - q_hard| after one step, per case.  Re-measured
+# 2026-11-24 (fp64, CPU) for the 3-D limiter (vertical flux and bounds, NLEV
+# 6; the smooth |F| makes a resting column a vertical diffusion at 1e-5 Pa/s
+# that the limiter may not fully undo); was 1.085e-6 / 1.095e-6 for the
+# horizontal-only limiter at NLEV 3.  Re-measure if the smooth forms or
+# defaults change.
+_DEFAULT_GAP = {"rot": 3.1141892001596005e-05, "rot+div": 1.4808060162962988e-05}
 
 
 @pytest.mark.parametrize("name", sorted(_CASES))
@@ -527,7 +738,8 @@ co = mpas_advection_coefficients(m)
 psi = 2e7 * jax.random.normal(jax.random.PRNGKey(0), (m.nVertices,))
 u = edge_normal_velocity_from_streamfunction(psi[:, None] * jnp.ones(3), m).astype(jnp.float32)
 wind = lambda t, mm, s: (u, jnp.zeros((m.nCells, 4), jnp.float32))
-cfg = TM.TracerTransportMPASConfig(time_integrator="mpas_rk3", horizontal_scheme="mpas_fct")
+cfg = TM.TracerTransportMPASConfig(time_integrator="mpas_rk3", horizontal_scheme="mpas_fct",
+                                   vertical_scheme="mpas_flux")
 def f(qq):
     st = TM.air_mass_state(TracerState(tracers=Field(data=qq, name="t", dims=()),
                                        time=Field(data=jnp.float32(0), name="t", dims=())), 1e5, sg)
@@ -559,7 +771,14 @@ def test_config_validation():
     with pytest.raises(ValueError, match="unknown horizontal_scheme"):
         validate_tracer_transport_mpas_config(TracerTransportMPASConfig(horizontal_scheme="ppm"))
     with pytest.raises(ValueError, match="mpas_rk3"):
-        validate_tracer_transport_mpas_config(TracerTransportMPASConfig(horizontal_scheme="mpas_fct"))
+        validate_tracer_transport_mpas_config(TracerTransportMPASConfig(
+            horizontal_scheme="mpas_fct", vertical_scheme="mpas_flux"))
+    with pytest.raises(ValueError, match="vertical_scheme"):
+        validate_tracer_transport_mpas_config(_cfg()._replace(vertical_scheme="upwind"))
+    with pytest.raises(ValueError, match="vertical_scheme"):
+        validate_tracer_transport_mpas_config(TracerTransportMPASConfig(vertical_scheme="mpas_flux"))
+    with pytest.raises(ValueError, match="fct_vertical_upwind_width_pas"):
+        validate_tracer_transport_mpas_config(_cfg(vwidth=-1.0))
     with pytest.raises(ValueError, match="mpas_rk3"):
         validate_tracer_transport_mpas_config(TracerTransportMPASConfig(time_integrator="mpas_rk3"))
     with pytest.raises(ValueError, match="coef_3rd_order"):
@@ -570,20 +789,6 @@ def test_config_validation():
         validate_tracer_transport_mpas_config(_cfg()._replace(hyperdiff_coeff=1.0))
     validate_tracer_transport_mpas_config(TracerTransportMPASConfig())
     validate_tracer_transport_mpas_config(_cfg())
-
-
-@pytest.mark.parametrize("nlev", [2, NLEV])
-def test_sigma_dot_must_be_on_interfaces(mesh, coefs, nlev):
-    """A (nCells, nlev) sigma_dot is refused; at nlev = 2 it would otherwise
-    broadcast silently (nlev - 1 = 1)."""
-    sg = create_sigma_coordinate(nlev)
-    q = jnp.ones((mesh.nCells, nlev, 1))
-    st = air_mass_state(TracerState(tracers=Field(data=q, name="tracers", dims=("cell", "level", "tracer")),
-                                    time=Field(data=jnp.asarray(0.0), name="time", dims=())), P_S, sg)
-    psi = 2.0e7 * jax.random.normal(jax.random.PRNGKey(0), (mesh.nVertices,))
-    u = edge_normal_velocity_from_streamfunction(psi[:, None] * jnp.ones(nlev), mesh)
-    with pytest.raises(ValueError, match="nlev\\+1 interfaces"):
-        mpas_rk3_fct_step(st, DT, mesh, sg, _const_wind(u, jnp.zeros((mesh.nCells, nlev))), _cfg(), coefs)
 
 
 def test_centred2_tendency_refuses_mpas_fct(mesh, sigma):

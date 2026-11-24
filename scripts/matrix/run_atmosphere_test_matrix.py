@@ -4872,7 +4872,11 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         # streamfunction (discretely non-divergent) plus the projected
         # divergent part; flux form on a prognostic air mass, Skamarock-
         # Gassmann 3rd/4th-order reconstruction, RK3 with the monotonic
-        # limiter on the last stage.
+        # limiter on the last stage.  Vertical (user decision 2026-11-24):
+        # "mpas_flux" = MPAS-A flux-form vertical transport inside the 3-D
+        # monotone limiter, the vertical air-mass flux diagnosed from the
+        # discrete column continuity (the analytic sigma_dot is not used);
+        # "fv3_remap" is the opt-in comparison.  Benchmark state fp64.
         from tests.test_cases.dcmip_transport import (
             dcmip_wind_mpas, dcmip_air_mass_state_mpas)
 
@@ -4889,7 +4893,8 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         model = TracerTransportMPASModel(
             grid, sigma_coord, mpas_wind,
             TracerTransportMPASConfig(
-                hyperdiff_coeff=0.0, time_integrator="mpas_rk3", vertical_scheme="upwind",
+                hyperdiff_coeff=0.0, time_integrator="mpas_rk3", vertical_scheme="mpas_flux",
+                fct_vertical_upwind_width_pas=1.0e-5,
                 horizontal_scheme="mpas_fct", coef_3rd_order=0.25,
                 fct_smoothing_width=1.0e-4, fct_upwind_width_ms=1.0e-3))
         coord_kind = "icosa"
