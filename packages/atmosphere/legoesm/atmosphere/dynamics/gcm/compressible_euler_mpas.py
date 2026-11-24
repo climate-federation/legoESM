@@ -462,7 +462,8 @@ def mpas_conservative_tracer_stage(
     the acoustic density change (vertical acoustic continuity is a pure flux
     divergence between rigid lids). Edge and interface tracer values are
     the 2-point averages the advective scheme used. ``dq_slow`` carries
-    physics. ``sum(area*J*dz*rho*q)`` is conserved to round-off; a uniform
+    physics, the only tracer source. Without it ``sum(area*J*dz*rho*q)``
+    is conserved to round-off; a uniform
     ``q`` stays uniform unless a rho-only term (sponge, physics, mass fixer)
     changes ``rho``.
     """
@@ -704,7 +705,8 @@ class MPASCompressibleEulerModel(IntegrationMixin):
             n_substeps=self.config.n_acoustic_substeps,
             outer_integrator=self.config.outer_integrator,
         )
-        conservative = state.tracers.data.shape[-1] > 0
+        conservative = (state.tracers.data.ndim == 3
+                        and state.tracers.data.shape[-1] > 0)
 
         def slow_tendency_fn(s):
             phys = None
