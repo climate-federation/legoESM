@@ -5748,6 +5748,24 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             _rotating = True
             sponge_w, sponge_c = 10000.0, 0.05
 
+        # TC3 resolution note (2026-11-24 diagnosis): the warm bubbles are
+        # 10 km wide on this radius/60 planet, which this core under-resolves
+        # (nominal shortest wavelength 2*pi*a/N: T42 16 km, T85 7.8 km; the
+        # slow horizontal tendencies are further masked to
+        # n <= floor(2N/3): 24 / 12 km).  An offline dry Boussinesq initial
+        # vertical acceleration of the bubbles low-passed at
+        # 2*pi*a/floor(2N/3) is 0.0007 (T42) / 0.0038 (T85) m/s^2 vs 0.027
+        # unfiltered; times 240 s that is 0.17 / 0.9 m/s, the same scale as
+        # (but below) the model's |w| at 4 min (T42 0.23, T85 1.44 m/s).
+        # Horizontal under-resolution is the leading explanation; the
+        # tested damping and acoustic controls have small effects at T42
+        # (hyperdiffusion off, sponge off, explicit acoustics, 2x substeps:
+        # each < 7 % on |w|), while halving dt moves it -16 %
+        # (timestep convergence not established).  A separate, resolved
+        # test (one 40 km x 8 km bubble, dry) gives spectral T42 1.60 vs
+        # MPAS ico5 1.45 m/s at 120 s.  Not measured: the share of the 2/3
+        # mask vs the nominal truncation, and the resolution at which
+        # spectral matches MPAS on the standard bubbles.
         _dt_scale_sp = 3.0 if test_case == "tc3" else 6.0
         dt = max(0.25 if test_case == "tc3" else 0.5,
                  _dt_scale_sp * (21.0 / n_max))
