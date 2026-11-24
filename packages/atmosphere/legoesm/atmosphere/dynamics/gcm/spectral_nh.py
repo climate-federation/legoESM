@@ -25,6 +25,16 @@ J-weighted integral (TC2a T21: +4.5e-11 of the dry mass per 6 s step).
 Grid-space rho' and rho*q are recovered by dividing by J; for flat terrain
 (J = 1) everything is bit-identical to the unweighted form.
 
+Known representation limit (user decision: kept, documented): J is the
+untruncated grid terrain, so J*rho_ref*q is not band-limited and a UNIFORM
+mixing ratio q0 over terrain is represented only to the spectral projection
+of J*rho_ref*q0 -- measured max|q/q0 - 1| = 3.8e-3 at t = 0 on TC2a T21
+(transport then changes that q by 7.8e-7 in 5 steps).  Any terrain-tracer
+diagnostic must therefore report errors against the t = 0 (projected) q
+baseline, not against the analytic q0, or it will book this initialization
+error as transport error (see test_tc2a_terrain_dry_and_tracer_mass_close_
+without_fixer).
+
 Time integration: split-explicit RK3.
     Slow mode  : spectral horizontal operators (SSP-RK3 outer)
     Fast mode  : forward-backward acoustic substeps in grid space
@@ -780,6 +790,123 @@ def _tracer_vertical_transport(rq, rho_total, mass_flux, dz, jacobian):
         dz[:, None] * jacobian[..., None, None])
 
 
+#: Tracer-tendency encoding a spectral-NH ``physics_fn`` must declare: its
+#: ``tracers_hat`` tendency is d(J rho q)/dt (and its ``rho_prime_hat``
+#: tendency d(J rho')/dt).  A mixing-ratio tendency has the same shape, so
+#: the encoding cannot be inferred -- it is an explicit attribute, checked
+#: by :meth:`SpectralCompressibleEulerModel.step`.
+TRACER_TENDENCY_ENCODING = "J_rho_q"
+#: The legacy encoding :func:`mixing_ratio_physics_adapter` converts from
+#: (q and unweighted rho' in, dq/dt and drho'/dt out).  An untagged legacy
+#: function is accepted by the (explicit, opt-in) adapter too.
+MIXING_RATIO_ENCODING = "mixing_ratio"
+
+
+def tag_tracer_tendency_encoding(physics_fn):
+    """Declare that ``physics_fn`` returns J-weighted tendencies
+    (:data:`TRACER_TENDENCY_ENCODING`) and return the DECLARED callable.
+
+    A plain Python function is tagged in place and returned.  Anything else
+    (partial, bound method, callable instance, proxy) is wrapped in a plain
+    forwarding function (``functools.wraps``, so the stateful-physics marker
+    stays reachable through ``__wrapped__``) that carries the declaration --
+    ``step()`` reads declarations only from plain functions, the one kind
+    of callable whose own attribute storage cannot be redirected.  Use the
+    RETURN value.  Physics written for mixing ratios must go through
+    :func:`mixing_ratio_physics_adapter` instead."""
+    import functools
+    import types
+
+    if type(physics_fn) is types.FunctionType:
+        physics_fn.tracer_tendency_encoding = TRACER_TENDENCY_ENCODING
+        return physics_fn
+
+    @functools.wraps(physics_fn)
+    def tagged(*args, **kwargs):
+        return physics_fn(*args, **kwargs)
+    tagged.tracer_tendency_encoding = TRACER_TENDENCY_ENCODING
+    return tagged
+
+
+def _physics_encoding_tag(physics_fn):
+    """The encoding DECLARED on ``physics_fn`` itself, or None.
+
+    Only a plain Python function (``types.FunctionType``, exact type) can
+    carry a declaration, read from its own attribute storage through the
+    built-in function ``__dict__`` descriptor -- no ``__getattr__`` /
+    ``__getattribute__`` / ``__dict__``-property delegation and no inference
+    through ``functools.partial`` / ``__wrapped__`` links: what a wrapper
+    runs cannot be verified by introspection, so anything else must be
+    (re-)declared with :func:`tag_tracer_tendency_encoding`, which wraps it
+    in a plain function.  ``functools.wraps`` copies the attribute, i.e. a
+    pass-through wrapper inherits its target's declaration by construction."""
+    import types
+
+    if type(physics_fn) is not types.FunctionType:
+        return None
+    local = types.FunctionType.__dict__["__dict__"].__get__(physics_fn)
+    return local.get("tracer_tendency_encoding")
+
+
+def _chain_encoding_tags(physics_fn):
+    """Every encoding tag reachable from ``physics_fn`` through
+    ``__wrapped__`` and ``functools.partial.func`` links (cycle-guarded) --
+    used CONSERVATIVELY by :func:`mixing_ratio_physics_adapter` to refuse
+    anything that may already return J-weighted tendencies.  Also follows
+    bound methods' ``__func__`` and callable instances' type-resolved
+    ``__call__``."""
+    import functools
+    import types
+
+    queue, seen, tags, keep = [physics_fn], set(), set(), []
+    while queue and len(seen) < 256:        # bounded: bound-method / method-
+        fn = queue.pop(0)                    # wrapper __call__ chains mint new
+        if fn is None or id(fn) in seen:     # objects at every lookup
+            continue
+        seen.add(id(fn))
+        keep.append(fn)                      # keep ids alive while searching
+        for tag in (getattr(fn, "tracer_tendency_encoding", None),
+                    _physics_encoding_tag(fn)):
+            if tag is not None:
+                tags.add(tag)
+        queue.append(getattr(fn, "__wrapped__", None))
+        if issubclass(type(fn), functools.partial):
+            # The STORED target (what partial.__call__ runs), immune to a
+            # subclass shadowing ``.func``; plus the visible attribute.
+            queue.append(functools.partial.func.__get__(fn))
+            queue.append(getattr(fn, "func", None))
+        # What actually runs for bound methods and callable instances.
+        queue.append(getattr(fn, "__func__", None))
+        if type(fn) is not types.FunctionType and not isinstance(
+                fn, (types.MethodWrapperType, types.WrapperDescriptorType,
+                     types.BuiltinFunctionType)):
+            queue.append(getattr(type(fn), "__call__", None))
+            try:                           # instance-bound call target
+                queue.append(getattr(fn, "__call__", None))
+            except Exception:              # noqa: BLE001 -- best effort
+                pass
+    return tags
+
+
+def _require_physics_encoding(physics_fn) -> None:
+    """Reject a ``physics_fn`` without, or with an incompatible, explicit
+    tracer-tendency encoding tag."""
+    if physics_fn is None:
+        return
+    tag = _physics_encoding_tag(physics_fn)
+    if tag is None:
+        raise ValueError(
+            "spectral NH physics_fn has no tracer_tendency_encoding tag: "
+            "tendencies must be d(J rho q)/dt, d(J rho')/dt -- declare it "
+            "with tag_tracer_tendency_encoding(fn), or wrap physics written "
+            "for mixing ratios (dq/dt) with mixing_ratio_physics_adapter(fn)")
+    if tag != TRACER_TENDENCY_ENCODING:
+        raise ValueError(
+            f"spectral NH physics_fn tracer_tendency_encoding={tag!r} is "
+            f"incompatible with {TRACER_TENDENCY_ENCODING!r}; wrap mixing-"
+            "ratio physics with mixing_ratio_physics_adapter(fn)")
+
+
 def mixing_ratio_physics_adapter(legacy_physics_fn):
     """Explicit opt-in wrapper for a ``physics_fn`` written for the former
     spectral-NH convention: it receives a state whose ``rho_prime_hat`` is
@@ -796,11 +923,34 @@ def mixing_ratio_physics_adapter(legacy_physics_fn):
         d(J rho q)/dt = J * (rho * dq/dt + q * drho'/dt)
 
     Vorticity, divergence and theta' tendencies pass through unchanged; a
-    ``(tendencies, diagnostics)`` tuple return is preserved.  The
+    ``(tendencies, diagnostics)`` tuple return is preserved.  NOTE: with
+    ``fix_mass`` + ``anchor_mass_to_initial`` the anchored fixer removes any
+    net dry-mass source (it anchors dry mass by design), while the
+    corresponding ``J q drho'/dt`` tracer source stays: physics that
+    changes the DRY mass must run with the anchor off.  The
     ``_requires_phys_state`` tag of a stateful legacy function is still
-    found through ``__wrapped__`` (``functools.wraps``).
+    found through ``__wrapped__`` (``functools.wraps``).  The wrapper is
+    tagged :data:`TRACER_TENDENCY_ENCODING`; a function that already
+    declares that encoding is refused (it would be converted twice).
     """
     import functools
+
+    _tags = _chain_encoding_tags(legacy_physics_fn)
+    _own = _physics_encoding_tag(legacy_physics_fn)
+    if _own is not None:
+        _tags.add(_own)
+    if TRACER_TENDENCY_ENCODING in _tags:
+        raise ValueError(
+            "mixing_ratio_physics_adapter: the function (or something it "
+            "wraps) declares J-weighted tendencies (tracer_tendency_encoding="
+            f"{TRACER_TENDENCY_ENCODING!r}); do not adapt it")
+    _other = _tags - {MIXING_RATIO_ENCODING}
+    if _other:
+        raise ValueError(
+            f"mixing_ratio_physics_adapter: tracer_tendency_encoding "
+            f"{sorted(_other)} (on the function or its wrapper chain) is not "
+            f"the mixing-ratio convention ({MIXING_RATIO_ENCODING!r} or "
+            "untagged) this adapter converts from")
 
     @functools.wraps(legacy_physics_fn)
     def physics_fn(state, grid, height_coord, terrain_metric):
@@ -832,20 +982,30 @@ def mixing_ratio_physics_adapter(legacy_physics_fn):
         dq = sh_synthesis_3d(
             grid, tend.tracers_hat.data.reshape(n_sh, nlev * n_tr),
         ).reshape(grid.n_lat, grid.n_lon, nlev, n_tr)
-        d_jrq = J[..., None, None] * (rho[..., None] * dq
-                                      + q * drho[..., None])
+        # Conservative conversion with the PROGNOSTIC density (J rho =
+        # J rho_ref + J rho', exactly what compute_dry_mass integrates) in
+        # BOTH product-rule terms; the sanitized rho only forms the q the
+        # legacy code sees.  Where the raw density is not positive (a
+        # column the sanitizer floors) q falls back to the sanitized ratio.
+        rho_raw = height_coord.rho_ref + rho_p
+        q_raw = jnp.where(rho_raw[..., None] > 0.0,
+                          rq / jnp.where(rho_raw > 0.0, rho_raw, 1.0)[..., None],
+                          q)
+        d_jrq = J[..., None, None] * (rho_raw[..., None] * dq
+                                      + q_raw * drho[..., None])
         tend = tend._replace(            # back to the J-weighted encoding
             rho_prime_hat=tend.rho_prime_hat.replace(
                 data=sh_analysis_3d(grid, J[..., None] * drho),
-                name=_JRHO_NAME, units="kg/m^3"),
+                name=_JRHO_NAME, units="kg/m^3/s"),
             tracers_hat=tend.tracers_hat.replace(
                 data=sh_analysis_3d(
                     grid, d_jrq.reshape(grid.n_lat, grid.n_lon, nlev * n_tr),
                 ).reshape(n_sh, nlev, n_tr),
-                name=_JRQ_NAME, units="kg/m^3"),
+                name=_JRQ_NAME, units="kg/m^3/s"),
         )
         return (tend,) + tuple(result[1:]) if is_tuple else tend
 
+    physics_fn.tracer_tendency_encoding = TRACER_TENDENCY_ENCODING
     return physics_fn
 
 
@@ -1025,9 +1185,11 @@ class SpectralCompressibleEulerModel:
         PROGNOSTIC variables: ``rho_prime_hat`` -> ``d(J rho')/dt`` and
         ``tracers_hat`` -> ``d(J rho q)/dt`` [kg/m^3/s] (for physics that
         leaves rho unchanged, ``J * rho * dq/dt``), not ``dq/dt``; the
-        state it receives is J-weighted too.  Physics written for the
-        former convention (q and unweighted rho' in, ``dq/dt`` out) is run
-        through :func:`mixing_ratio_physics_adapter`.
+        state it receives is J-weighted too.  The callable must declare
+        this with ``tracer_tendency_encoding == TRACER_TENDENCY_ENCODING``
+        (:func:`tag_tracer_tendency_encoding`; checked in :meth:`step`).
+        Physics written for the former convention (q and unweighted rho'
+        in, ``dq/dt`` out) is run through :func:`mixing_ratio_physics_adapter`.
         """
         def slow_tendency_fn(s):
             phys = None
@@ -1139,6 +1301,7 @@ class SpectralCompressibleEulerModel:
         # physics_fn rather than silently reseeding it every step.
         refuse_unthreaded_stateful_physics(
             physics_fn, None, where="spectral NH step()")
+        _require_physics_encoding(physics_fn)
         _require_tracer_density(state)
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
@@ -1632,20 +1795,10 @@ def dcmip25_tc3_init_spectral(
     w_hat = jnp.zeros((n_sh, nlev + 1), dtype=jnp.complex128)
     if balanced:
         from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (
-            cyclostrophic_balance_theta_exner,
+            tc3_balanced_perturbations,
         )
-        th_bal, ex_bal = cyclostrophic_balance_theta_exner(
-            small_grid.lat, z_full, height_coord.theta_ref,
-            height_coord.exner_ref, u_profile)
-        th_bal = jnp.asarray(th_bal)                     # (n_lat, nlev)
-        ex_bal = jnp.asarray(ex_bal)
-        theta_bal_p = th_bal - height_coord.theta_ref[None, :]
-        # rho from the equation of state exner = (R_d rho theta/p0)^(R_d/c_v),
-        # as a ratio to the reference (exact zero at the equator).
-        rho_bal_p = height_coord.rho_ref[None, :] * (
-            (ex_bal / height_coord.exner_ref[None, :])
-            ** (constants.c_vd / constants.R_d)
-            * height_coord.theta_ref[None, :] / th_bal - 1.0)
+        theta_bal_p, rho_bal_p = tc3_balanced_perturbations(   # (n_lat, nlev)
+            small_grid.lat, height_coord, u_profile)
         ones = jnp.ones((1, n_lon, 1))
         theta_bal_p = theta_bal_p[:, None, :] * ones     # (n_lat, n_lon, nlev)
         rho_bal_p = rho_bal_p[:, None, :] * ones
@@ -1683,6 +1836,9 @@ def dcmip25_tc3_init_spectral(
             r_norm <= 1.0, jnp.cos(0.5 * jnp.pi * r_norm) ** 2, 0.0)
 
     theta_p_hat = sh_analysis_3d(small_grid, theta_bal_p + theta_pert)
+    # Vapour mixing ratio q_v(z) is latitude-independent ON PURPOSE in the
+    # balanced state too: DCMIP2016 Eq. 13, q(z, lat) = q_eq(z) (the RH
+    # profile is prescribed on the equatorial column only).
     # Prognostic tracer = J * rho * q with the (balanced) total rho; J = 1.
     jrho_3d = terrain_metric.jacobian[..., None] * (
         height_coord.rho_ref[None, None, :] + rho_bal_p)

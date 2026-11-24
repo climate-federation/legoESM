@@ -135,3 +135,56 @@ def test_balance_rejects_degenerate_inputs():
     with pytest.raises(RuntimeError, match="exner"):
         cyclostrophic_balance_theta_exner(
             np.linspace(-1.5, 1.5, 9), z, th, ex_small, 300.0 * np.ones_like(z))
+
+
+def test_mpas_and_cube_tc3_use_the_same_balanced_state():
+    """The MPAS and cube TC3 builders discretize the SAME balanced state on
+    their native points: theta', rho' = tc3_balanced_perturbations(lat) at
+    the cell centres (no bubble), and u_east = u_eq(z) cos(lat)."""
+    from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (
+        tc3_balanced_perturbations,
+    )
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3 import (
+        dcmip25_tc3_init,
+    )
+    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3_mpas import (
+        dcmip25_tc3_init_mpas,
+    )
+    nob = {"bubble_dtheta": 0.0}
+    p = TC3_PARAMS
+    # MPAS
+    st, hc, _, mesh = dcmip25_tc3_init_mpas(create_voronoi_mesh(3), n_levels=20,
+                                            params=nob)
+    u_eq = p["U_c"] + p["U_s"] * jnp.minimum(hc.z_full / p["z_s"], 1.0)
+    th, rh = tc3_balanced_perturbations(mesh.latCell, hc, u_eq)
+    np.testing.assert_allclose(np.asarray(st.theta_prime.data), np.asarray(th), atol=1e-12)
+    np.testing.assert_allclose(np.asarray(st.rho_prime.data), np.asarray(rh), atol=1e-15)
+    assert float(jnp.max(jnp.abs(st.rho_prime.data))) > 1e-4      # non-trivial
+    u_exp = (jnp.cos(mesh.angleEdge) * jnp.cos(mesh.latEdge))[:, None] * u_eq[None, :]
+    np.testing.assert_allclose(np.asarray(st.u.data), np.asarray(u_exp), atol=1e-12)
+    # Cube
+    stc, hcc, _, g = dcmip25_tc3_init(create_cubed_sphere(8), n_levels=20, params=nob)
+    thc, rhc = tc3_balanced_perturbations(g.lat.reshape(-1), hcc, u_eq)
+    np.testing.assert_allclose(np.asarray(stc.theta_prime.data).reshape(thc.shape),
+                               np.asarray(thc), atol=1e-12)
+    np.testing.assert_allclose(np.asarray(stc.rho_prime.data).reshape(rhc.shape),
+                               np.asarray(rhc), atol=1e-15)
+    speed = jnp.sqrt(stc.u.data ** 2 + stc.v.data ** 2)
+    np.testing.assert_allclose(np.asarray(speed),
+                               np.asarray(jnp.abs(jnp.cos(g.lat))[..., None] * jnp.abs(u_eq)),
+                               atol=1e-9)
+
+
+def test_balance_hydrostatic_check_is_resolution_aware():
+    """A hydrostatic column sampled very coarsely (theta 300 -> 600 K over
+    10 km, two levels) is accepted; a constant exner profile is not."""
+    z = np.array([0.0, 10000.0])
+    for ratio in (2.0, 4.0):                     # 300->600 K and 300->1200 K
+        th = 300.0 * np.exp(np.log(ratio) * z / 10000.0)
+        H = 10000.0 / np.log(ratio)
+        ex = 1.0 - c.g / c.c_pd * H / 300.0 * (1.0 - np.exp(-z / H))   # exact
+        cyclostrophic_balance_theta_exner(np.zeros(1), z, th, ex, np.zeros(2))
+    with pytest.raises(ValueError, match="hydrostatic"):
+        cyclostrophic_balance_theta_exner(np.zeros(1), z, th, np.ones(2), np.zeros(2))

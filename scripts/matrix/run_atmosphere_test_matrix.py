@@ -5449,7 +5449,10 @@ def _make_kessler_spectral_nh_physics_fn(height_coord, dt_phys):
             hcoord.theta_ref + theta_p, hcoord.rho_ref + rho_p)
         rho = rho[..., None]
         dtheta_dt, dq_dt = grid_fn(theta_p, rho_p, rq / rho)
-        dtracers = J[..., None, None] * rho * dq_dt
+        # Tracer-mass tendency with the PROGNOSTIC density (J rho_ref +
+        # J rho', what the budget integrates); sanitized rho only forms q.
+        dtracers = J[..., None, None] * (
+            hcoord.rho_ref + rho_p)[..., None] * dq_dt
         dtheta_hat = sh_analysis_3d(grid, dtheta_dt)
         dtr_hat = sh_analysis_3d(
             grid, dtracers.reshape(grid.n_lat, grid.n_lon, nlev * n_tr),
@@ -5463,11 +5466,17 @@ def _make_kessler_spectral_nh_physics_fn(height_coord, dt_phys):
             div_hat=_zero(state.div_hat),
             w_hat=_zero(state.w_hat),
             theta_prime_hat=state.theta_prime_hat.replace(data=dtheta_hat),
-            rho_prime_hat=_zero(state.rho_prime_hat),
+            rho_prime_hat=_zero(state.rho_prime_hat).replace(units="kg/m^3/s"),
             phis_hat=_zero(state.phis_hat),
-            tracers_hat=state.tracers_hat.replace(data=dtr_hat),
+            tracers_hat=state.tracers_hat.replace(data=dtr_hat,
+                                                  units="kg/m^3/s"),
         )
 
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
+        tag_tracer_tendency_encoding,
+    )
+    # Returns d(J rho q)/dt: declare it (checked by the dycore's step()).
+    physics_fn = tag_tracer_tendency_encoding(physics_fn)
     return physics_fn
 
 
@@ -5892,8 +5901,12 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
     # next to the global max (see ``_tc3_bubble_box``).
     _w_bub = (scalar_fn(state).get("max_abs_w_bubble")
               if ok and test_case == "tc3" else None)
-    _bub_note = (f", |w|_bubble={_w_bub:.4f} m/s"
-                 if _w_bub is not None else "")
+    if _w_bub is not None:
+        _bub_note = f", |w|_bubble={_w_bub:.4f} m/s"
+    elif ok and test_case == "tc3":
+        _bub_note = ", |w|_bubble=N/A (no column centre in the bubble box)"
+    else:
+        _bub_note = ""
     # iter-10: surface mass drift in the NH notes line (parallel to the
     # SW / hydro runners).  ``diag`` is the dict accumulated from
     # ``scalar_fn``; iter-7..9 added ``"mass"`` to every NH grid path.

@@ -97,8 +97,17 @@ def dcmip25_tc3_init_mpas(
     mesh: VoronoiMesh,
     n_levels: int = 40,
     params: dict | None = None,
+    balanced: bool = True,
 ) -> tuple[MPASNonHydrostaticState, HeightCoordinate, TerrainMetric, VoronoiMesh]:
     """Initialize DCMIP-2025 Test Case 3 (squall line) on MPAS Voronoi mesh.
+
+    ``balanced=True`` (default): the same DCMIP2016 / Klemp et al. (2015)
+    balanced state as the spectral arm, discretized on the MPAS mesh --
+    edge-normal ``u = u_eq(z) cos(latEdge) cos(angleEdge)`` and the
+    hydrostatic + cyclostrophic theta', rho' at the cell centres
+    (:func:`~legoesm.atmosphere.dynamics.gcm.dcmip2025_ic.tc3_balanced_perturbations`).
+    ``balanced=False``: the former latitude-independent ``u_eq(z)`` with
+    rho' = theta' = 0 (not balanceable near the poles).
 
     Parameters
     ----------
@@ -153,6 +162,8 @@ def dcmip25_tc3_init_mpas(
     # Edge-normal velocity: project zonal wind onto edge normals
     # u_n = u_east(z) * cos(angleEdge) (since v_north = 0)
     cos_angle = jnp.cos(small_mesh.angleEdge)  # (nEdges,)
+    if balanced:
+        cos_angle = cos_angle * jnp.cos(small_mesh.latEdge)
     u_data = cos_angle[:, None] * u_profile[None, :]  # (nEdges, nlev)
 
     # Vertical velocity: w = 0
@@ -204,8 +215,18 @@ def dcmip25_tc3_init_mpas(
         )
         theta_pert = theta_pert + bubble
 
-    theta_prime_data = theta_pert
-    rho_prime_data = jnp.zeros((nCells, n_levels))
+    if balanced:
+        from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (
+            tc3_balanced_perturbations,
+        )
+        theta_bal_p, rho_bal_p = tc3_balanced_perturbations(
+            small_mesh.latCell, height_coord, u_profile)
+    else:
+        theta_bal_p = jnp.zeros((nCells, n_levels))
+        rho_bal_p = jnp.zeros((nCells, n_levels))
+    # Bubbles on top of the balanced theta' at fixed rho' (as before).
+    theta_prime_data = theta_bal_p + theta_pert
+    rho_prime_data = rho_bal_p
 
     # Stack tracers: vapor, cloud, rain
     tracers_data = jnp.stack([q_v_data, q_c_data, q_r_data], axis=-1)
