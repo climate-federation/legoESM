@@ -76,7 +76,8 @@ def _varying_q(shape):
     q1 = (1.0 + 0.3 * jnp.cos(2 * jnp.pi * x)[None, :, None] * jnp.sin(jnp.pi * z)
           + 0.2 * jnp.sin(2 * jnp.pi * y)[:, None, None])
     q2 = 1e-3 * jnp.exp(-((z - 0.3) ** 2) / 0.01) * jnp.ones((ny, nx, 1))
-    return jnp.stack([jnp.broadcast_to(q1, shape), q2], axis=-1)
+    # Slot 0 is read as vapour by the moist buoyancy: keep it at mixing-ratio size.
+    return jnp.stack([1e-2 * jnp.broadcast_to(q1, shape), q2], axis=-1)
 
 
 def _tracer_mass(model, state):
@@ -134,11 +135,11 @@ def test_mass_fixer_holds_tracer_mass():
 @pytest.mark.parametrize("method", sorted(METHODS))
 def test_uniform_tracer_stays_uniform(method):
     model, state = _model(**METHODS[method])
-    q = jnp.full(state.u.data.shape + (1,), 0.7)
+    q = jnp.full(state.u.data.shape + (1,), 7e-3)
     state = _perturbed(model, state, q)
     for _ in range(20):
         state = model.step(state, dt=2.0)
-    assert float(jnp.max(jnp.abs(state.tracers.data - 0.7))) < 1e-13
+    assert float(jnp.max(jnp.abs(state.tracers.data / 7e-3 - 1.0))) < 1e-13
 
 
 def test_rk54_with_tracers_refused():
@@ -180,13 +181,13 @@ def test_tracer_blob_moves_with_the_wind():
     model, state = _model(n=16, nlev=6)
     nx = state.u.data.shape[1]
     x = jnp.arange(nx) / nx
-    blob = 1.0 + jnp.exp(-((x - 0.3) ** 2) / 0.005)
+    blob = 1e-6 * (1.0 + jnp.exp(-((x - 0.3) ** 2) / 0.005))
     q = jnp.broadcast_to(blob[None, :, None], state.u.data.shape)[..., None]
     state = state._replace(u=state.u.replace(data=jnp.full_like(state.u.data, 10.0)),
                            tracers=state.tracers.replace(data=q))
 
     def centroid(s):
-        a = s.tracers.data[..., 0] - 1.0
+        a = s.tracers.data[..., 0] - 1e-6
         return float(jnp.sum(a * x[None, :, None]) / jnp.sum(a))
 
     c0 = centroid(state)
