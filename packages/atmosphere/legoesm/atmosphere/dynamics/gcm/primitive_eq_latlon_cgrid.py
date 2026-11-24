@@ -282,7 +282,8 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # sloping eta surfaces (~140 K/day at the lowest level of DCMIP 2012 2-0-0
     # on 72x144).  OPT-IN (user decision 2026-11-24): False (default) is the
     # eta-surface Laplacian, bit-identical to commit 97ddee4056; the
-    # atmosphere matrix sets it explicitly.  Needs A_h > 0 to act.
+    # atmosphere matrix sets it explicitly; drivers via
+    # DycoreConfig.latlon_ah_pressure_surfaces.  Needs A_h > 0 to act.
     A_h_pressure_surfaces: bool = False
 
 

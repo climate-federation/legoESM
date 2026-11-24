@@ -403,7 +403,8 @@ class SpectralPEConfig(NamedTuple):
     # K/day (uncorrected 5.3 / 101).  The moment fit is not used: its 3x3
     # system can be singular on hybrid columns.
     # The top sponges are not corrected.  OPT-IN (user decision 2026-11-24):
-    # False (default) is bit-identical to commit 97ddee4056.
+    # False (default) is bit-identical to commit 97ddee4056; drivers select it
+    # via DycoreConfig.spectral_t_damping_pressure_surfaces.
     T_damping_pressure_surfaces: bool = False
 
 

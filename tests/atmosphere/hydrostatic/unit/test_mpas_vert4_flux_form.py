@@ -193,7 +193,7 @@ def test_new_fields_are_appended_last():
         "tracer_horizontal_scheme", "fct_smoothing_width", "fct_upwind_width_ms",
         "K_h_pressure_surfaces", "edge_scaled_damping", "damping_exp_del2",
         "damping_exp_del4", "damping_ref_stiffness")
-    assert DycoreConfig._fields[-16:] == (
+    assert DycoreConfig._fields[-18:-2] == (
         "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers", "vertical_form",
         "spectral_sponge_nu_top_m2s",
         "tracer_vertical_scheme", "tracer_van_leer_width", "tracer_van_leer_flux_width",
@@ -201,6 +201,9 @@ def test_new_fields_are_appended_last():
         "mpas_tracer_horizontal_scheme", "mpas_fct_smoothing_width",
         "mpas_fct_upwind_width_ms", "mpas_kh_pressure_surfaces",
         "mpas_edge_scaled_damping", "mpas_damping_exp_del2", "mpas_damping_exp_del4")
+    # appended after them (2026-11-24): the pressure-surface T-damping options
+    assert DycoreConfig._fields[-2:] == (
+        "latlon_ah_pressure_surfaces", "spectral_t_damping_pressure_surfaces")
 
 
 def test_every_builder_forwarding_the_filter_forwards_the_form():
