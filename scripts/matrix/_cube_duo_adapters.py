@@ -742,8 +742,8 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     return SimpleNamespace(
         model=model, grid=grid, state=bundle, dt=dt, step=step, ps=ps,
         temperature=temperature, winds=winds, lon_deg=lon_deg,
-        lat_deg=lat_deg, area=area, km=km, level_values=level_values,
-        note=note)
+        lat_deg=lat_deg, area=area, km=km, eta=eta,
+        level_values=level_values, note=note)
 
 
 # ---------------------------------------------------------------------------
