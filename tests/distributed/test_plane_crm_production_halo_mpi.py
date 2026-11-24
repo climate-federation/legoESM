@@ -114,7 +114,6 @@ def _layout_or_skip(nry, nrx, halo):
 
 DECOMPS = [(2, 1), (1, 2), (2, 2), (4, 2), (2, 4)]
 MIXED_HALO_RTOL = 1e-5   # measured max 5.3e-7 (voted 2-1)
-MIXED_HALO_DRY_TOL = 1e-12      # = the serial mixed dry-mass test tolerance
 MIXED_HALO_TRACER_TOL = 1e-7    # = the serial mixed tracer-mass test tolerance
 
 
@@ -273,19 +272,28 @@ def test_mixed_precision_step_halo_matches_single_rank(nry, nrx):
             rel = np.max(np.abs(a - b)) / max(np.max(np.abs(b)), 1e-300)
             print(f"MIXED_HALO {nry}x{nrx} {f} step {n} rel={rel:.3e}")
             assert rel <= MIXED_HALO_RTOL, (f, n, rel)
-    # RULE 0 on the multi-rank mixed run (fp32 storage, fp64 sums): dry mass
-    # held by the fp64 anomaly fixer, tracer mass to fp32 storage round-off.
+    # RULE 0 on the multi-rank mixed run (fp32 storage, fp64 sums). Dry mass:
+    # the fp64 fixer sets the fp64 sum to the anchor every step, then storing
+    # rho' in fp32 moves it by at most sum_i ulp32(rho'_i)/2 dz_i (vote B16:
+    # this derived bound, for the multi-rank and the single-rank change
+    # alike). Tracer mass: fp32 storage round-off (serial tolerance).
     dz = np.asarray(hc.dz, np.float64)
     rho_ref = np.asarray(hc.rho_ref, np.float64)
 
     def masses(g):
-        rho = rho_ref + np.asarray(g["rho_prime"], np.float64)
+        rho_p = np.asarray(g["rho_prime"])
+        rho = rho_ref + rho_p.astype(np.float64)
         q = np.asarray(g["tracers"], np.float64)
-        return (rho * dz).sum(), (rho[..., None] * q * dz[:, None]).sum((0, 1, 2))
-    d0, t0 = masses(gathered[0])
+        bound = (0.5 * np.spacing(np.abs(rho_p)).astype(np.float64) * dz).sum()
+        return ((rho * dz).sum(), (rho[..., None] * q * dz[:, None]).sum((0, 1, 2)),
+                bound)
+    d0, t0, _ = masses(gathered[0])
     for n in range(1, N_STEPS + 1):
-        d, t = masses(gathered[n])
+        d, t, bound = masses(gathered[n])
+        ds, _, bound_s = masses({f: getattr(ref[n], f).data for f in FIELDS})
         print(f"MIXED_HALO {nry}x{nrx} step {n} dry={abs(d - d0) / d0:.3e} "
+              f"serial_dry={abs(ds - d0) / d0:.3e} bound={bound / d0:.3e} "
               f"tracer={np.max(np.abs(t - t0) / t0):.3e}")
-        assert abs(d - d0) / d0 <= MIXED_HALO_DRY_TOL, (n, d, d0)
+        assert abs(d - d0) <= bound + 1e-14 * d0, (n, d, d0, bound)
+        assert abs(ds - d0) <= bound_s + 1e-14 * d0, (n, ds, d0, bound_s)
         assert np.max(np.abs(t - t0) / t0) <= MIXED_HALO_TRACER_TOL, (n, t, t0)
