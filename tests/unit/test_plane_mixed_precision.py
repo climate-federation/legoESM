@@ -1,7 +1,9 @@
 """Plane CRM mixed-precision mode (``--precision mixed``).
 
 fp32 state and dynamics; fp64 for radiation inputs, microphysics tracer
-inputs and dry-mass fixer sums; rounding-safe SSP-RK3 combinations.
+inputs, acoustic substeps and dry-mass fixer sums; increment-form SSP-RK3
+combinations. Tracers are stored fp32 and carried fp64 through every RK stage
+of the mass-conserving transport (#2641), rounded to fp32 once per step.
 Run with ``JAX_ENABLE_X64=1`` (the fp64 pieces need x64 on).
 """
 from __future__ import annotations
@@ -15,6 +17,7 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO / "scripts" / "run"))
+sys.path.insert(0, str(_REPO / "tests" / "unit"))
 
 jax = pytest.importorskip("jax")
 if not jax.config.jax_enable_x64:
@@ -23,6 +26,7 @@ if not jax.config.jax_enable_x64:
 import jax.numpy as jnp  # noqa: E402
 
 import run_rcemip_plane as rcp  # noqa: E402
+import test_plane_tracer_mass_conservation as _tm  # noqa: E402
 from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (  # noqa: E402
     PlaneCompressibleEulerModel,
     make_flat_plane_terrain_metric,
@@ -34,10 +38,16 @@ from legoesm.timestepping.split_explicit import (  # noqa: E402
 )
 
 NX, NLEV, STEPS = 16, 32, 30
+TRACER_STEPS = 50
 # Tolerances (measured on this setup; votes in the commit body).
-DRY_MASS_TOL = 1e-11          # mixed 1.3e-13; fp32 fixer sums: see commit
-WATER_VS_FP64_TOL = 1.5e-7    # mixed 3e-8; plain RK combinations 6.4e-7
+DRY_MASS_TOL = 1e-12          # mixed 1.8e-13; fp32 fixer sums 6.6e-12 (voted 3-0)
+WATER_VS_FP64_TOL = 1.5e-7    # mixed 3.0e-8 on the #2641 transport
 MICRO_WATER_TOL = 1e-12        # mixed 4.2e-16; fp32 tracer inputs 3.2e-6 (pre-fix)
+# Tracer mass, 50 steps: mixed max 2.4e-8 (van_leer); tracers rounded to fp32
+# every stage with fp32 stage arithmetic 4.1e-7 on the fixer case (voted 3-0).
+MIXED_TRACER_MASS_TOL = 1e-7
+_FIXER_CASE = {"fix_mass": True, "anchor_mass_to_initial": True,
+               "hyperdiff_rho_coeff": 1.0e7, "sponge_coeff": 0.01}
 MICRO_FP32_TOL = 1e-7           # fp32 inputs after the satadj fix 5.7e-9; before it 3.2e-6 (voted 3-0)
 
 
@@ -121,18 +131,107 @@ def test_mixed_total_water_matches_fp64(runs):
     assert abs(wmx - w64) <= WATER_VS_FP64_TOL, (wmx, w64)
 
 
-def test_mixed_total_water_needs_rounding_safe_combinations(runs):
-    """Non-vacuity: plain SSP-RK3 combinations in fp32 storage lose water."""
+def _mixed_transport_case(**overrides):
+    """#2641's tracer-mass case (no physics, no sponge/hyperdiffusion) in
+    mixed precision: fp32 grid, reference state and stored fields."""
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
+        CompressibleEulerConfig)
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        make_rest_state)
+    from legoesm.grids.vertical import create_height_coordinate
+    cfg = dict(sponge_coeff=0.0, hyperdiff_coeff=0.0, hyperdiff_rho_coeff=0.0,
+               hyperdiff_w_coeff=0.0, use_coriolis=False, fix_mass=False,
+               semi_implicit_acoustic=True, substep_horizontal_acoustic=True,
+               mixed_precision=True)
+    cfg.update(overrides)
+    n, nlev = 8, 10
+    hc = create_height_coordinate(nlev, H=20.0e3)
+    g64 = create_plane_grid(nx=n, ny=n, nlev=nlev, dx=1e3, dy=1e3,
+                            dtype=jnp.float64)
+    m64 = PlaneCompressibleEulerModel(
+        g64, hc, make_flat_plane_terrain_metric(g64, hc),
+        CompressibleEulerConfig(**{**cfg, "mixed_precision": False}))
+    s64 = _tm._perturbed(m64, make_rest_state(g64, hc, dtype=jnp.float64),
+                         _tm._varying_q((n, n, nlev)))
+    hc32 = hc._replace(**{k: v.astype(jnp.float32) for k, v in hc._asdict().items()
+                          if isinstance(v, jax.Array)
+                          and jnp.issubdtype(v.dtype, jnp.floating)})
+    g32 = create_plane_grid(nx=n, ny=n, nlev=nlev, dx=1e3, dy=1e3,
+                            dtype=jnp.float32)
+    model = PlaneCompressibleEulerModel(
+        g32, hc32, make_flat_plane_terrain_metric(g32, hc32),
+        CompressibleEulerConfig(**cfg))
+    state = jax.tree.map(lambda a: a.astype(jnp.float32)
+                         if jnp.issubdtype(a.dtype, jnp.floating) else a, s64)
+    return model, state
+
+
+def _fp64_masses(model, state):
+    rho = (np.asarray(model.height_coord.rho_ref, np.float64)
+           + np.asarray(state.rho_prime.data, np.float64))
+    dz = np.asarray(model.height_coord.dz, np.float64)
+    q = np.asarray(state.tracers.data, np.float64)
+    return (float((rho * dz).sum()),
+            np.array([(rho * q[..., i] * dz).sum() for i in range(q.shape[-1])]))
+
+
+def _tracer_mass_drift(overrides=None, steps=TRACER_STEPS):
+    model, state = _mixed_transport_case(**(overrides or {}))
+    d0, m0 = _fp64_masses(model, state)
+    for _ in range(steps):
+        state = model.step(state, dt=2.0)
+    assert state.tracers.data.dtype == jnp.float32
+    d1, m1 = _fp64_masses(model, state)
+    return float(np.max(np.abs(m1 - m0) / m0)), abs(d1 - d0) / d0
+
+
+def _fp32_stage_tracers(monkeypatch):
+    """The fix reverted: tracers stay fp32 through the step and the
+    conservative stage update runs in fp32 (densities, fluxes, products),
+    rounding the tracers at every RK stage."""
     import legoesm.atmosphere.dynamics.les.compressible_euler_plane as cep
-    orig = cep.SplitExplicitConfig
-    try:
-        cep.SplitExplicitConfig = lambda **kw: orig(
-            **{**kw, "rounding_safe_combinations": False})
-        _, _, wplain = _run("mixed")
-    finally:
-        cep.SplitExplicitConfig = orig
-    _, _, w64 = runs["float64"]
-    assert abs(wplain - w64) > WATER_VS_FP64_TOL, (wplain, w64)
+    from legoesm.timestepping.split_explicit import split_explicit_step as _se
+
+    def _split_step(self, state, slow_fn, ac_fn, dt, se_config, tracer_mass):
+        tdt = state.tracers.data.dtype
+        tm = tracer_mass
+
+        def finish(base, ev, slow, out, tend, dte):
+            if not isinstance(out, cep.PlaneNonHydrostaticState):
+                out = (out[0], jax.tree.map(lambda a: a.astype(tdt), out[1]))
+            r = tm.finish_stage(base, ev, slow, out, tend, dte)
+            return r._replace(tracers=r.tracers.replace(
+                data=r.tracers.data.astype(tdt)))
+
+        hooks = tm._replace(
+            with_tracers=lambda s, q: s._replace(
+                tracers=s.tracers.replace(data=q.astype(tdt))),
+            finish_stage=finish)
+        return _se(state, lambda x: cep._cast_like(slow_fn(x), x),
+                   cep._acoustic_fp64(ac_fn), dt, se_config, tracer_mass=hooks)
+
+    monkeypatch.setattr(cep.PlaneCompressibleEulerModel, "_split_step",
+                        _split_step)
+
+
+@pytest.mark.parametrize("overrides", [
+    {}, {"horizontal_advection_scheme": "van_leer",
+         "vertical_tracer_advection": "van_leer"},
+    _FIXER_CASE])
+def test_mixed_tracer_mass_conserved(overrides):
+    """RULE 0: tracer mass sum(rho q dV) of the fp32-stored state (summed in
+    fp64) holds to fp32 storage round-off over the steps."""
+    rel, _ = _tracer_mass_drift(overrides)
+    assert rel <= MIXED_TRACER_MASS_TOL, rel
+
+
+def test_mixed_tracer_mass_needs_fp64_stage_tracers(monkeypatch):
+    """Non-vacuity: with tracers rounded to fp32 at every stage and fp32
+    stage arithmetic (the fix reverted), the fixer case fails the budget.
+    Without the fixer both forms sit at fp32 storage round-off (~1e-8)."""
+    _fp32_stage_tracers(monkeypatch)
+    rel, _ = _tracer_mass_drift(_FIXER_CASE)
+    assert rel > MIXED_TRACER_MASS_TOL, rel
 
 
 def _micro_water_tendency(precision, fp64_inputs):

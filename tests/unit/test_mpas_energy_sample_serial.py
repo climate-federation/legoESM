@@ -20,7 +20,8 @@ from legoesm.diagnostics.energy_budget import (  # noqa: E402
     EnergyBudgetTracker,
     area_weighted_mean,
 )
-from legoesm.driver.model_driver import _cell_winds  # noqa: E402
+from legoesm import constants  # noqa: E402
+from legoesm.driver.model_driver import _cell_winds, _sfc_diag_slot  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -65,7 +66,36 @@ def test_serial_sample_equals_direct_tracker_update(drv):
     assert got["hfss"] == float(area_weighted_mean(sd[6].data, awt))
     assert got["hfls"] == float(area_weighted_mean(sd[7].data, awt))
     assert got["evspsbl"] == float(
-        area_weighted_mean(sd[mpi_case.N_SLOTS - 1].data, awt))
+        area_weighted_mean(sd[_sfc_diag_slot("evap_sfc")].data, awt))
+    # The two closure terms: delivered from their own slots, nonzero.
+    a_top = float(area_weighted_mean(
+        sd[_sfc_diag_slot("rad_absorbed_above_top")].data, awt))
+    lfs = constants.L_f * float(area_weighted_mean(
+        sd[_sfc_diag_slot("precip_frozen")].data, awt))
+    assert a_top != 0.0 and lfs != 0.0
+    assert got["energy_rad_above_top"] == pytest.approx(a_top, rel=1e-12)
+    assert got["energy_snowfall_fusion"] == pytest.approx(lfs, rel=1e-12)
+
+
+def test_serial_sample_without_above_top_term_keeps_the_rest(drv):
+    """A backend that publishes no above-top absorption: that term is NaN,
+    every other channel unchanged (never a silent zero)."""
+    i = _sfc_diag_slot("rad_absorbed_above_top")
+    drv.diagnostics.energy_tracker = EnergyBudgetTracker()
+    full = drv._mpas_energy_sample(drv.state.p_s.data, 0.0)
+    sd = list(drv.model._sfc_diag)
+    saved, sd[i] = sd[i], None
+    drv.model._sfc_diag = tuple(sd)
+    try:
+        drv.diagnostics.energy_tracker = EnergyBudgetTracker()
+        out = drv._mpas_energy_sample(drv.state.p_s.data, 0.0)
+    finally:
+        sd[i] = saved
+        drv.model._sfc_diag = tuple(sd)
+    assert np.isnan(out["energy_rad_above_top"])
+    for k, v in full.items():
+        if k != "energy_rad_above_top":
+            assert out[k] == v or (np.isnan(out[k]) and np.isnan(v)), k
 
 
 def test_serial_sample_without_toa_flux_is_nan_and_unstamped(drv):

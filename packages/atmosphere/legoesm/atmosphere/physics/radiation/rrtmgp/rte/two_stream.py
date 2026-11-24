@@ -630,6 +630,7 @@ def compute_sw_optical_props_gpt(
     aerosol_single_scattering_albedo: float | Array,
     aerosol_asymmetry_factor: float | Array,
     cloud_snow=None,
+    aerosol_volcanic_moments: Array | None = None,
 ) -> dict[str, Array]:
   """Per-g-point shortwave optical properties (optical_depth / ssa / asymmetry).
 
@@ -653,7 +654,8 @@ def compute_sw_optical_props_gpt(
   )
   return _mix_sw_aerosol_and_clip(
       igpt, optics_lib, sw_optical_props, aerosol_optical_depth,
-      aerosol_single_scattering_albedo, aerosol_asymmetry_factor)
+      aerosol_single_scattering_albedo, aerosol_asymmetry_factor,
+      aerosol_volcanic_moments)
 
 
 def _mix_sw_aerosol_and_clip(
@@ -663,8 +665,18 @@ def _mix_sw_aerosol_and_clip(
     aerosol_optical_depth: Array | None,
     aerosol_single_scattering_albedo: float | Array,
     aerosol_asymmetry_factor: float | Array,
+    aerosol_volcanic_moments: Array | None = None,
 ) -> dict[str, Array]:
-  """Mix aerosol into one g-point's SW gas(+cloud) optics, then clip ssa/g."""
+  """Mix aerosol into one g-point's SW gas(+cloud) optics, then clip ssa/g.
+
+  ``aerosol_volcanic_moments`` ``(3, n_bnd_sw, *layer_shape)``: a second
+  aerosol component with its OWN per-band optics, given as scattering
+  moments ``(tau, tau*ssa, tau*ssa*g)`` (stratospheric volcanic sulfate from
+  the CMIP6 file); added to the same tau / tau*ssa / tau*ssa*g sums as the
+  grey aerosol, so the mix is the exact optical-depth-weighted combination.
+  """
+  if aerosol_optical_depth is None and aerosol_volcanic_moments is not None:
+    aerosol_optical_depth = jnp.zeros_like(sw_optical_props['optical_depth'])
   if aerosol_optical_depth is not None:
     # Per-band aerosol optics: ``aerosol_single_scattering_albedo`` /
     # ``aerosol_asymmetry_factor`` may be a SCALAR (grey aerosol, historical
@@ -687,6 +699,10 @@ def _mix_sw_aerosol_and_clip(
     w_bg = sw_optical_props['ssa']
     g_bg = sw_optical_props['asymmetry_factor']
     w_num = tau_bg * w_bg + tau_aer * ssa_aer
+    if aerosol_volcanic_moments is not None:
+      volc = aerosol_volcanic_moments[:, optics_lib.gas_optics_sw.g_point_to_bnd[igpt]]
+      tau_tot = tau_tot + volc[0]
+      w_num = w_num + volc[1]
     # AD-safe SW optical-property mixing (restored from commit 59407953
     # after AIMIP-#312 merge reverted it).  ``a / jnp.maximum(b, eps)``
     # has a ``-a/b**2`` VJP that overflows when ``b`` is at the floor —
@@ -705,6 +721,8 @@ def _mix_sw_aerosol_and_clip(
         tau_bg * w_bg * g_bg
         + tau_aer * ssa_aer * g_aer
     )
+    if aerosol_volcanic_moments is not None:
+      g_num = g_num + volc[2]
     g_denom = tau_tot * jnp.maximum(w_tot, 1.0e-12)
     g_tot = jnp.clip(
         safe_divide(g_num, g_denom, eps=1.0e-12, fill=0.0),
@@ -748,6 +766,7 @@ def compute_sw_optical_field(
     aerosol_optical_depth: Array | None = None,
     aerosol_single_scattering_albedo: float | Array = _AEROSOL_SSA_DEFAULT,
     aerosol_asymmetry_factor: float | Array = _AEROSOL_ASYM_DEFAULT,
+    aerosol_volcanic_moments: Array | None = None,
 ) -> dict[str, Array]:
   """Stack per-g-point shortwave optical fields for the 3D MC ray tracer.
 
@@ -770,6 +789,7 @@ def compute_sw_optical_field(
         cloud_r_eff_liq, cloud_path_liq, cloud_r_eff_ice, cloud_path_ice,
         cloud_fraction, aerosol_optical_depth,
         aerosol_single_scattering_albedo, aerosol_asymmetry_factor,
+        aerosol_volcanic_moments=aerosol_volcanic_moments,
     )
     # Gas Rayleigh scattering optical depth (the gas scatter is ALL Rayleigh) as
     # a fraction of TOTAL scattering (gas + cloud + aerosol) -> the per-cell
@@ -866,6 +886,7 @@ def solve_sw(
     cloud_path_fn=None,
     clear_sky: bool = False,
     cloud_snow=None,
+    aerosol_volcanic_moments: Array | None = None,
 ) -> dict[str, Array]:
   """Solves the two-stream radiative transfer equation for shortwave.
 
@@ -899,6 +920,9 @@ def solve_sw(
       shape as `temperature`), added to SW extinction.
     aerosol_single_scattering_albedo: Bulk aerosol single-scattering albedo.
     aerosol_asymmetry_factor: Bulk aerosol asymmetry factor.
+    aerosol_volcanic_moments: Optional second aerosol component with per-band
+      optics, ``(3, n_bnd_sw, *temperature.shape)`` moments
+      ``(tau, tau*ssa, tau*ssa*g)`` (see ``_mix_sw_aerosol_and_clip``).
     solar_fraction_by_gpt: Optional external spectral solar weights by g-point.
     use_scan: Whether to use scan or for loops for the recurrent operation.
 
@@ -997,6 +1021,7 @@ def solve_sw(
           cloud_r_eff_liq, liq_g, cloud_r_eff_ice, ice_g,
           cloud_fraction, aerosol_optical_depth,
           aerosol_single_scattering_albedo, aerosol_asymmetry_factor,
+          aerosol_volcanic_moments=aerosol_volcanic_moments,
           **snow_kw,
       )
       sw_fluxes = _sw_gpoint_fluxes(igpt, sw_optical_props)
@@ -1009,7 +1034,7 @@ def solve_sw(
           igpt, gas_props, False, cloud_r_eff_liq, liq_g,
           cloud_r_eff_ice, ice_g, cloud_fraction=cloud_fraction, **snow_kw)
       _aer = (aerosol_optical_depth, aerosol_single_scattering_albedo,
-              aerosol_asymmetry_factor)
+              aerosol_asymmetry_factor, aerosol_volcanic_moments)
       sw_fluxes = _sw_gpoint_fluxes(
           igpt, _mix_sw_aerosol_and_clip(igpt, optics_lib, cloudy_props, *_aer))
       sw_fluxes_clr = _sw_gpoint_fluxes(

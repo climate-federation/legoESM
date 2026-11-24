@@ -2876,6 +2876,8 @@ class PhysicsPipeline:
                 self, "_cloud_saturation_scheme", None),
             cover_condensate_q_ref=getattr(
                 self, "_cloud_cover_condensate_q_ref", None),
+            clubb_mf_cloud=getattr(self, "_clubb_mf_cloud", None),
+            mf_cldfrac_fac=getattr(self, "_cloud_clubb_mf_cldfrac_fac", None),
         )
 
     def _sundqvist_kwargs(self, ad, q_i, cell_area=None):
@@ -2896,6 +2898,7 @@ class PhysicsPipeline:
                                solar_weights, s_0,
                                o3_vmr_precomputed, aerosol_od_precomputed,
                                aerosol_lw_od_precomputed=None,
+                               aerosol_sw_volc_precomputed=None,
                                aerosol_ccn_aod=None,
                                o3_top_vmr=None,
                                tau_equator=None, tau_pole=None,
@@ -3318,6 +3321,7 @@ class PhysicsPipeline:
             o3_vmr_precomputed = _shard(o3_vmr_precomputed)
             aerosol_od_precomputed = _shard(aerosol_od_precomputed)
             aerosol_lw_od_precomputed = _shard(aerosol_lw_od_precomputed)
+            aerosol_sw_volc_precomputed = _shard(aerosol_sw_volc_precomputed)
             o3_top_vmr = _shard(o3_top_vmr)
             if cloud_kwargs:
                 cloud_kwargs = {k: (v if k == "cloud_rho_ice" else _shard(v))
@@ -3334,6 +3338,8 @@ class PhysicsPipeline:
             ghg_vmr_override=ghg_vmr_override,
             aerosol_lw_od_col=aerosol_lw_od_precomputed,
             o3_top_vmr_col=o3_top_vmr,
+            **({} if aerosol_sw_volc_precomputed is None
+               else {"aerosol_sw_volc_col": aerosol_sw_volc_precomputed}),
             # only the rrtmgp radiation_fn takes it (cesm_ocean_albedo)
             **({} if open_ocean_frac_col is None
                else {"open_ocean_frac_col": open_ocean_frac_col}),
@@ -3545,6 +3551,7 @@ class PhysicsPipeline:
                          albedo_ocean=pipeline.albedo_ocean,
                          ghg_vmr_override=None,
                          aerosol_lw_od=None,
+                         aerosol_sw_volc=None,
                          aerosol_ccn_aod=None,
                          o3_top_vmr=None,
                          T_land=None,
@@ -3626,6 +3633,7 @@ class PhysicsPipeline:
                         day_of_year, seconds_of_day,
                         solar_weights, s_0, o3_vmr, aerosol_od,
                         aerosol_lw_od_precomputed=aerosol_lw_od,
+                        aerosol_sw_volc_precomputed=aerosol_sw_volc,
                         aerosol_ccn_aod=aerosol_ccn_aod,
                         o3_top_vmr=o3_top_vmr,
                         tau_equator=tau_equator, tau_pole=tau_pole,
@@ -3841,8 +3849,11 @@ def _build_none_radiation_fn(config):
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_rho_ice=None,
-                     cloud_fraction=None):
+                     cloud_fraction=None, aerosol_sw_volc_col=None):
         del aerosol_lw_od_col, o3_top_vmr_col  # zero-radiation: no-ops
+        if aerosol_sw_volc_col is not None:
+            raise ValueError("zero radiation cannot consume the volcanic SW "
+                             "per-band aerosol optics; use rrtmgp radiation.")
         ncol, nlev = T_col.shape
         z_full = jnp.zeros((ncol, nlev), dtype=T_col.dtype)
         z_half = jnp.zeros((ncol, nlev + 1), dtype=T_col.dtype)
@@ -3896,9 +3907,12 @@ def _build_gray_radiation_fn(config):
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_rho_ice=None,
-                     cloud_fraction=None):
+                     cloud_fraction=None, aerosol_sw_volc_col=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
         del aerosol_lw_od_col, o3_top_vmr_col  # gray: no aerosol LW od / ozone
+        if aerosol_sw_volc_col is not None:
+            raise ValueError("gray radiation cannot consume the volcanic SW "
+                             "per-band aerosol optics; use rrtmgp radiation.")
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
         del cloud_rho_ice
         del cloud_path_liq_lw, cloud_path_ice_lw  # gray: no cloud optics
@@ -4026,7 +4040,8 @@ def _build_rrtmgp_radiation_fn(config):
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_rho_ice=None,
-                     cloud_fraction=None, open_ocean_frac_col=None):
+                     cloud_fraction=None, open_ocean_frac_col=None,
+                     aerosol_sw_volc_col=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
         _sw_scale = None
         # Eccentricity scales the incident SW *flux* by (a/r)^2; the orbital
@@ -4092,6 +4107,8 @@ def _build_rrtmgp_radiation_fn(config):
             o3_vmr=o3_vmr_col,
             aerosol_optical_depth=aerosol_od_col,
             aerosol_absorption_optical_depth_lw=aerosol_lw_od_col,
+            **({} if aerosol_sw_volc_col is None
+               else {"aerosol_volcanic_moments_sw": aerosol_sw_volc_col}),
             solar_spectral_fraction=solar_weights if solar_weights.size > 0 else None,
             ghg_vmr_override=ghg_vmr_override,
             cloud_path_liq=cloud_path_liq,
@@ -5260,6 +5277,16 @@ def turbulence_config_for(config):
                     "clubb_host_omega=True requires clubb_prognostic=True: only "
                     "the prognostic closure takes the host omega.")
             tc = tc._replace(host_omega=True)
+        # CAM7 CLUBB-MF on the prognostic closure.  Same threading and refusals.
+        if getattr(config, "clubb_mf", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_mf=True requires turbulence='clubb', got {tc.scheme!r}.")
+            if not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    "clubb_mf=True requires clubb_prognostic=True: the plume "
+                    "flux is the prognostic closure's thl/rt forcing.")
+            tc = tc._replace(clubb_mf=True)
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => the scheme's own default stands (CLUBBConfig, CAM6 100 Pa).
@@ -5403,6 +5430,13 @@ def turbulence_config_for(config):
                 f"{getattr(tc, 'host_omega', None)!r}). The override is "
                 "authoritative, so set TurbulenceConfig(host_omega=True) on it "
                 "rather than relying on the experiment-level flag.")
+    if getattr(config, "clubb_mf", False):
+        if tc.scheme != "clubb" or not getattr(tc, "clubb_mf", False):
+            raise ValueError(
+                "clubb_mf=True but an explicit turbulence_override is in force "
+                f"and does not select it (override scheme={tc.scheme!r}, "
+                f"clubb_mf={getattr(tc, 'clubb_mf', None)!r}). Set "
+                "TurbulenceConfig(clubb_mf=True) on the override.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the
@@ -5929,6 +5963,10 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
         config, 'cloud_diagnostic_condensate_scheme', None)
     pipeline._cloud_adiabatic_lwc_rate = getattr(
         config, 'cloud_adiabatic_lwc_rate', None)
+    # CAM7 CLUBB-MF plume cloud into the cam6_clubb deep cloud (opt-in).
+    pipeline._clubb_mf_cloud = bool(getattr(config, 'clubb_mf', False)) or None
+    pipeline._cloud_clubb_mf_cldfrac_fac = getattr(
+        config, 'cloud_clubb_mf_cldfrac_fac', None)
     pipeline._cloud_saturation_scheme = getattr(
         config, 'cloud_saturation_scheme', None)
     pipeline._cloud_cover_condensate_q_ref = getattr(

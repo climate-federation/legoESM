@@ -348,6 +348,7 @@ __param_spec__ = {
         "excluded": {
             "cloud_mask_sharpness": "inert: belonged to the replaced T_moist >= T layer mask; the Isca qe_moist_convection port has no such mask and raises on a non-default value",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the smooth CAPE trigger",
+            "dry_parcel_gate_width": "numerics: RULE 5 smoothing width of the below-LCL-table dry-parcel gate; 0 = hard step",
         },
         "params": {
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Frierson (2007)", "shape": None},
@@ -409,6 +410,12 @@ class SBMConfig(NamedTuple):
     # The oracle's convecting layer is kLZB..surface; sbm_convection raises
     # if this is set to anything but its default.
     cloud_mask_sharpness: float = 5.0
+    # RULE 5 width of the dry-parcel gate in the LCL lookup value
+    # log(e / T**(1/kappa)) (dimensionless, natural-log units): a parcel whose
+    # value lies below the table (LCL T < 173 K, the oracle's FATAL) does not
+    # convect; above it the outputs ramp in with sigmoid((v - v_min)/width - 4).
+    # 0 = the hard step.  Numerics, excluded from __param_spec__.
+    dry_parcel_gate_width: float = 0.1
 
 
 class AhmedNeelinDCAConfig(NamedTuple):

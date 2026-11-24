@@ -290,3 +290,15 @@ def test_cloud_config_module_compiles_not_merely_parses():
                 f"{node.name}() declares {dupes} more than once — the module "
                 "cannot be imported. This is what a merge produces when two "
                 "branches add the same keyword independently.")
+
+
+def test_pipeline_resolver_threads_the_clubb_mf_cldfrac_fac() -> None:
+    """The FV pipeline's own resolver (not a reconstruction) carries
+    cloud_clubb_mf_cldfrac_fac into CloudConfig.mf_cldfrac_fac; unset = 10."""
+    grid = create_cubed_sphere(4)
+    sigma = make_hybrid_levels(NLEV)
+    for val, want in ((3.5, 3.5), (None, 10.0)):
+        pipe = build_physics_pipeline(grid, sigma,
+                                      _config(cloud_clubb_mf_cldfrac_fac=val))
+        cc = pipe.resolved_cloud_config("sundqvist", False)
+        assert cc.mf_cldfrac_fac == want

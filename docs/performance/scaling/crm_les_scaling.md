@@ -566,6 +566,14 @@ unimplemented or unvalidated.
 
 ## Derecho CPU, 1–4 nodes (2026-11-20 → 11-23): CRM weak + strong, fp32 / mixed / fp64
 
+> **Status.** Every CRM number in this section was measured before main's
+> mass-conserving tracer transport (#2641) landed, so they time the previous
+> tracer advection. The **mixed** columns time a mode that is NOT in this
+> code: it is being rebuilt on the conserving transport in PR #2684, and its
+> numbers here are PENDING re-measurement there. The fp32 / fp64 columns are
+> the pre-#2641 code as well; re-timing them on the current transport is
+> part of the same follow-up.
+
 Plane CRM `step_halo`, RCEMIP1 production deck (`scripts/run/run_rcemip1_crm.sh`
 numerics, nlev 64, semi-implicit, substepped horizontal acoustics, Morrison),
 one rank per core, single-threaded XLA, `scripts/cluster/crm_les_scaling/crm_les_ladder.pbs`

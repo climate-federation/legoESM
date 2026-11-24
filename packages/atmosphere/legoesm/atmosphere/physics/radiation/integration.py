@@ -760,7 +760,8 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                  sw_up_toa=None, lw_up_toa=None,
                                  sw_down_toa=None,
                                  sw_down_sfc=None, lw_down_sfc=None,
-                                 sw_up_toa_clr=None, lw_up_toa_clr=None):
+                                 sw_up_toa_clr=None, lw_up_toa_clr=None,
+                                 rad_absorbed_above_top=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
@@ -843,6 +844,10 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
         # sw_up_toa/lw_up_toa above).  None (the default) => leaf absent.
         sw_up_toa_clr=_toa_field(sw_up_toa_clr, "sw_up_toa_clr_rad"),
         lw_up_toa_clr=_toa_field(lw_up_toa_clr, "lw_up_toa_clr_rad"),
+        # Net radiation absorbed above the model top [W/m^2] (energy-budget
+        # sink, CAM overhead layer); None when the backend does not compute it.
+        rad_absorbed_above_top=_toa_field(rad_absorbed_above_top,
+                                          "rad_absorbed_above_top"),
     )
 
 
@@ -977,6 +982,7 @@ def _call_radiation_backend(
     o3_top_vmr: jnp.ndarray | None = None,
     aerosol_od: jnp.ndarray | None = None,
     aerosol_lw_od: jnp.ndarray | None = None,
+    aerosol_sw_volc: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
     eccf: float | jnp.ndarray = 1.0,
     tsi: jnp.ndarray | None = None,
@@ -984,6 +990,8 @@ def _call_radiation_backend(
     conv_precip: jnp.ndarray | None = None,
     conv_mass_flux_up: jnp.ndarray | None = None,
     conv_icwmr: jnp.ndarray | None = None,
+    mf_cloudfrac: jnp.ndarray | None = None,
+    mf_qc: jnp.ndarray | None = None,
     clear_sky_toa: bool = False,
     column_mesh=None,
     clubb_config=None,
@@ -1045,6 +1053,10 @@ def _call_radiation_backend(
         ``aerosol_absorption_optical_depth_lw``.  ``None`` (default) is a
         no-op in the solver — byte-identical to no volcanic LW aerosol.
         Ignored by gray radiation.
+    aerosol_sw_volc : jnp.ndarray or None
+        Volcanic SHORTWAVE aerosol with its own per-band optics from the
+        CMIP6 file, (ncol, nlev, 3, n_bnd_sw) moments (tau, tau*ssa,
+        tau*ssa*g), passed to the solver as ``aerosol_volcanic_moments_sw``.
     solar_spectral_fraction : jnp.ndarray or None
         Per-g-point solar weights for spectral solar-cycle forcing,
         passed through to ``solve_columns``.
@@ -1061,6 +1073,11 @@ def _call_radiation_backend(
             "open_ocean_frac (direct/diffuse ocean albedo split) is wired for "
             f"the rrtmgp solver only; scheme {radiation_config.scheme!r} has a "
             "single surface albedo and would silently drop the direct beam.")
+    if aerosol_sw_volc is not None and radiation_config.scheme != "rrtmgp":
+        raise ValueError(
+            "aerosol_sw_volc (volcanic SW per-band optics) is wired for the "
+            f"rrtmgp solver only; scheme {radiation_config.scheme!r} would "
+            "silently drop the volcanic shortwave aerosol.")
     if radiation_config.scheme == "simple_lw":
         return _simple_lw_radiation(
             T=T, p_half=p_half, q_v=q_v, q_cloud=q_cloud, q_ice=q_ice,
@@ -1181,6 +1198,8 @@ def _call_radiation_backend(
             lat=lat,
             conv_mass_flux_up=conv_mass_flux_up,
             conv_icwmr=conv_icwmr,
+            mf_cloudfrac=mf_cloudfrac,
+            mf_qc=mf_qc,
             p_half=p_half,
             clubb_config=clubb_config,
             subcolumn_inhomogeneity=(getattr(cloud_config, "cloud_vertical_overlap_optics",
@@ -1225,6 +1244,8 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    if aerosol_sw_volc is not None:
+        _rad_kwargs["aerosol_volcanic_moments_sw"] = aerosol_sw_volc
     if cloud_config is not None:
         # One bulk ice density for the PSD radius and the optics size (CAM6).
         _rad_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
@@ -1368,6 +1389,9 @@ def _call_radiation_backend(
             lw_flux_up_toa_clr=result.lw_flux_up_toa_clr,
             sw_flux_up_toa_clr=(None if result.sw_flux_up_toa_clr is None
                                 else result.sw_flux_up_toa_clr * _sw_scale),
+            sw_absorbed_above_top=(None if result.sw_absorbed_above_top is None
+                                   else result.sw_absorbed_above_top * _sw_scale),
+            lw_absorbed_above_top=result.lw_absorbed_above_top,
         )
 
     # Carry the prescribed TOA insolation (this scope's per-column
@@ -1814,6 +1838,9 @@ def _make_hydrostatic_radiation(
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
         )
+        _aer_volc_ext = (
+            forcing.get("aerosol_sw_volc") if forcing is not None else None
+        )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
         # Tile-blended SURFACE SHORTWAVE ALBEDO as a per-step TRACED forcing
         # (same channel as T_sfc / o3 / ghg above, so the JIT'd step never
@@ -2028,6 +2055,7 @@ def _make_hydrostatic_radiation(
         # CAM6 deepcu inputs (lagged carry, same convention as conv_precip).
         _conv_mf_col = None
         _conv_icwmr_col = None
+        _mf_cf_col = _mf_qc_col = None
         if _cam6_cf_active and phys_state is not None:
             _conv_mf_col = getattr(phys_state, "conv_mass_flux_up", None)
             _conv_icwmr_col = getattr(phys_state, "conv_icwmr", None)
@@ -2035,6 +2063,11 @@ def _make_hydrostatic_radiation(
                 _conv_mf_col = _conv_mf_col.reshape(ncol, nlev + 1)
             if _conv_icwmr_col is not None:
                 _conv_icwmr_col = _conv_icwmr_col.reshape(T_col.shape)
+            # CAM7 CLUBB-MF plume cloud (lagged carry, read only when the
+            # cloud config's hookup is on).
+            if getattr(radiation_config.cloud_config, "clubb_mf_cloud", False):
+                _mf_cf_col = phys_state.mf_cloudfrac.reshape(T_col.shape)
+                _mf_qc_col = phys_state.mf_qc.reshape(T_col.shape)
 
         # Issue #273 follow-up: optionally shard the per-column radiation
         # workload across ``column_mesh`` so a 4×A100 (or any device
@@ -2088,6 +2121,8 @@ def _make_hydrostatic_radiation(
                 _aer_ext = shard_columns(_aer_ext, column_mesh)
             if _aer_lw_ext is not None:
                 _aer_lw_ext = shard_columns(_aer_lw_ext, column_mesh)
+            if _aer_volc_ext is not None:
+                _aer_volc_ext = shard_columns(_aer_volc_ext, column_mesh)
             if _cf_ovr is not None:
                 _cf_ovr = shard_columns(_cf_ovr, column_mesh)
             if q_snow_col is not None:
@@ -2133,11 +2168,14 @@ def _make_hydrostatic_radiation(
             o3_top_vmr=_o3_top_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
+            aerosol_sw_volc=_aer_volc_ext,
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
             conv_precip=_conv_precip_col,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            mf_cloudfrac=_mf_cf_col,
+            mf_qc=_mf_qc_col,
             solar_spectral_fraction=_ssf_ext,
             tsi=_tsi_ext,
             clear_sky_toa=_clr_sky_fused,
@@ -2193,6 +2231,7 @@ def _make_hydrostatic_radiation(
                 o3_top_vmr=_o3_top_ext,
                 aerosol_od=_aer_ext,
                 aerosol_lw_od=_aer_lw_ext,
+                aerosol_sw_volc=_aer_volc_ext,
                 ghg_vmr_override=_ghg_ext,
                 cloud_fraction_override=None,
                 conv_precip=None,
@@ -2231,7 +2270,12 @@ def _make_hydrostatic_radiation(
             sw_down_sfc=rad_out.sw_flux_down[:, -1],
             lw_down_sfc=rad_out.lw_flux_down[:, -1],
             sw_up_toa_clr=sw_up_toa_clr,
-            lw_up_toa_clr=lw_up_toa_clr)
+            lw_up_toa_clr=lw_up_toa_clr,
+            rad_absorbed_above_top=(
+                None if (rad_out.sw_absorbed_above_top is None
+                         or rad_out.lw_absorbed_above_top is None)
+                else rad_out.sw_absorbed_above_top
+                + rad_out.lw_absorbed_above_top))
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override
@@ -3264,6 +3308,9 @@ def _make_spectral_pe_radiation(
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
         )
+        _aer_volc_ext = (
+            forcing.get("aerosol_sw_volc") if forcing is not None else None
+        )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
 
         # Surface albedo / emissivity overrides: a per-step TRACED
@@ -3392,6 +3439,7 @@ def _make_spectral_pe_radiation(
                 _cf_ovr = _cf_ovr.reshape(T_col.shape)
         _conv_mf_col = None
         _conv_icwmr_col = None
+        _mf_cf_col = _mf_qc_col = None
         if _cam6_cf_active and phys_state is not None:
             _conv_mf_col = getattr(phys_state, "conv_mass_flux_up", None)
             _conv_icwmr_col = getattr(phys_state, "conv_icwmr", None)
@@ -3399,6 +3447,11 @@ def _make_spectral_pe_radiation(
                 _conv_mf_col = _conv_mf_col.reshape(ncol, nlev + 1)
             if _conv_icwmr_col is not None:
                 _conv_icwmr_col = _conv_icwmr_col.reshape(T_col.shape)
+            # CAM7 CLUBB-MF plume cloud (lagged carry, read only when the
+            # cloud config's hookup is on).
+            if getattr(radiation_config.cloud_config, "clubb_mf_cloud", False):
+                _mf_cf_col = phys_state.mf_cloudfrac.reshape(T_col.shape)
+                _mf_qc_col = phys_state.mf_qc.reshape(T_col.shape)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -3427,10 +3480,13 @@ def _make_spectral_pe_radiation(
             tsi=_tsi_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
+            aerosol_sw_volc=_aer_volc_ext,
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            mf_cloudfrac=_mf_cf_col,
+            mf_qc=_mf_qc_col,
             column_mesh=column_mesh,
             clubb_config=clubb_config,
         )

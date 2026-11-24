@@ -369,5 +369,127 @@ def main():
     )
 
 
+def paired_column_budget(m, q, dq, dm):
+    """Per-column instantaneous product rule, without a denominator floor."""
+    import numpy as np
+    a, b = np.asarray(m) * np.asarray(dq), np.asarray(q) * np.asarray(dm)
+    if not (np.isfinite(a).all() and np.isfinite(b).all()):
+        raise ValueError("nonfinite model budget; no conservation verdict")
+    numerator = np.abs(np.sum(a + b, axis=-1))
+    denominator = np.sum(np.abs(a) + np.abs(b), axis=-1)
+    relative = np.divide(numerator, denominator, out=np.zeros_like(numerator),
+                         where=denominator != 0)
+    relative = np.where((denominator == 0) & (numerator != 0), np.inf, relative)
+    return {"numerator": numerator.tolist(), "denominator": denominator.tolist(),
+            "max_relative": float(relative.max()),
+            "verdict": "CONSERVES" if np.all(relative <= 1e-12) else "LEAKS"}
+
+
+def realistic_ocean_columns():
+    """32 layers, 5--300 m, temperature/salinity, varying column stretch."""
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.ocean import vertical as ov
+
+    zc = ov.create_z_star_from_thicknesses(np.geomspace(5.0, 300.0, 32))
+    J = jnp.asarray([0.97, 1.0, 1.03])
+    h = zc.dz_ref * J[:, None]
+    depth = -zc.z_full_ref * J[:, None]
+    T = 2.0 + 18.0 * jnp.exp(-depth / 500.0)
+    S = 34.0 + 0.7 * (1.0 - jnp.exp(-depth / 1000.0))
+    phase = jnp.linspace(0.0, 2.0 * jnp.pi, 33)
+    w = 1e-5 * jnp.asarray([1.0, -0.7, 0.4])[:, None] * jnp.sin(phase)
+    w = w.at[:, 0].set(0.0).at[:, -1].set(0.0)
+    return zc, J, h, T, S, w
+
+
+def all_vertical_paths(out):
+    """Reuse the original paired statistic and ocean controls only."""
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64())
+    from legoesm.ocean import vertical as ov
+    from legoesm.ocean.dynamics import ocean_pe_cdgrid as cd
+    from legoesm.ocean.dynamics import spectral_ocean_pe as so
+
+    assert os.environ.get("PBS_JOBID"), "PBS required"
+    assert jax.config.x64_enabled and all(d.platform == "cpu" for d in jax.devices())
+    out.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parents[2]
+    sources = {mod.__name__: str(Path(mod.__file__).resolve()) for mod in (ov, cd, so)}
+    assert all(Path(path).is_relative_to(root) for path in sources.values()), sources
+    provenance = {
+        "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+        "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "PBS_JOBID": os.environ["PBS_JOBID"], "precision": "fp64", "device": "cpu",
+        "tolerance": 1e-12, "complete": False, "module_sources": sources,
+        "source_sha256": {name: hashlib.sha256(Path(path).read_bytes()).hexdigest() for name, path in sources.items()},
+        "scope": "ocean vertical subsystem only; closed lids; positive-up w; dh=diff(w)",
+        "fixture": "PR2597 _column(32,seed=0); 32-layer 5--300 m T/S; J=[0.97,1,1.03]",
+    }
+    (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+    (out / "measured_source.patch").write_text(subprocess.check_output(["git", "diff", "HEAD"], cwd=root, text=True))
+    rows = []
+
+    def record(path, scheme, m, q, dq, dm, statistic="instantaneous"):
+        for value in (m, q, dq, dm):
+            if np.ndim(value):
+                assert np.asarray(value).dtype == np.float64, "fp64 arrays required"
+        r = paired_column_budget(m, q, dq, dm)
+        assert np.any(np.asarray(r["denominator"]) > 0), f"vacuous route {path}"
+        r.update(path=path, scheme=scheme, statistic=statistic,
+                 boundary_budget=0.0, scope="vertical subsystem; per column")
+        rows.append(r)
+        print(path, scheme, statistic, r["max_relative"], r["verdict"], flush=True)
+        (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
+        return r
+
+    qo, wo, m = runpy.run_path(str(root / "tests/ocean/unit/test_adaptive_implicit_vertadv.py"))["_column"](32, seed=0)
+    np.testing.assert_array_equal(np.asarray(wo)[..., [0, -1]], 0.0)
+    zc = ov.create_z_star_from_thicknesses(np.asarray(m[0]))
+    # The builder recovers dz from snapped interfaces: use its actual thickness.
+    np.testing.assert_allclose(zc.dz_ref, m[0], rtol=1e-12, atol=0.0)
+    m = zc.dz_ref[None, :]
+    J = jnp.ones(1)
+    # These are the actual tracer bindings used by the two tendency functions.
+    operators = (("CD-grid", cd._vertical_advection_ocean),
+                 ("spectral", so.vertical_advection_ocean))
+    provenance["operators"] = {path: op.__module__ + "." + op.__qualname__ for path, op in operators}
+    for path, op in operators:
+        record(path + " original", op.__name__, m, qo, op(qo, wo, zc, J), jnp.diff(wo))
+    zc, J, h, T, S, w = realistic_ocean_columns()
+    np.savez(out / "inputs.npz", h=h, T=T, S=S, w=w, J=J, original_q=qo, original_w=wo, original_h=m)
+    provenance["inputs_sha256"] = hashlib.sha256((out / "inputs.npz").read_bytes()).hexdigest()
+    for path, op in operators:
+        for name, q in (("T", T), ("S", S)):
+            record(path + " realistic " + name, op.__name__, h, q, op(q, w, zc, J), jnp.diff(w))
+    qnew = ov.implicit_vertical_advection_ocean(qo, wo, m, 600.0)
+    control = record("ocean", "implicit flux form fixed thickness", 1.0, qo,
+                     m*qnew-m*qo, 0.0, "finite product increment")
+    assert control["verdict"] == "CONSERVES"
+    dq = ov.vertical_advection_ocean(T, w, zc, J)
+    # Add a nonzero unbalanced source, independent of the model's own residual.
+    leak = jnp.zeros_like(T).at[:, 0].set(1e-3)
+    control = record("planted leak", "surface source 1e-3 K/s", h, T, dq+leak, jnp.diff(w))
+    assert control["verdict"] == "LEAKS"
+    # Momentum shares the paired tracer operator (#2662); wiring is checked separately.
+    momentum_op = cd._vertical_advection_ocean
+    spectral_momentum = so.vertical_advection_ocean
+    provenance["momentum_operators"] = {"CD-grid": momentum_op.__module__ + "." + momentum_op.__qualname__,
+                                        "spectral": spectral_momentum.__module__ + "." + spectral_momentum.__qualname__}
+    np.savez(out / "momentum.npz", cd=momentum_op(T,w,zc,J), spectral=spectral_momentum(T,w,zc,J))
+    provenance["complete"] = True
+    (out / "provenance.json").write_text(json.dumps(provenance, indent=2))
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--all-vertical-paths" in sys.argv:
+        parser = argparse.ArgumentParser(description="Ocean-only vertical census (T28)")
+        parser.add_argument("--all-vertical-paths", action="store_true", required=True)
+        parser.add_argument("--out", type=Path, required=True)
+        all_vertical_paths(parser.parse_args().out)
+    else:
+        main()

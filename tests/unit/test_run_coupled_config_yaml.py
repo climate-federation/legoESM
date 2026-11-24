@@ -48,13 +48,14 @@ def test_configs_carry_the_tuned_parameters():
     the run configs inherit the physics from the shared base."""
     parser = mod.build_parser()
     slab = load_yaml_config(str(CMIP_CONFIGS[0]), parser)
-    assert slab["radiation"] == "rrtmgp"
-    assert slab["surface_bulk_scheme"] == "coare3"       # from the base
-    assert slab["surface_gustiness_zi"] == 300.0         # from the base
+    assert slab["radiation"] == "rrtmg"                   # production copied
+    assert slab["surface_bulk_scheme"] == "large_yeager_cesm"  # production
+    assert slab["surface_gustiness_zi"] is None          # production: unset
     # the slab deck overrides the base's 3e-4 floor: CLUBB's liquid partition
     # requires 0 (user 2026-11-22, production turbulence copied)
     assert slab["cloud_q_c_diagnostic"] == 0.0
-    assert slab["convective_cloud"] is True
+    # production's clouds (cam6_clubb refuses the convective cloud source)
+    assert slab["convective_cloud"] is False
     assert slab["snow_albedo_feedback"] is True
     assert slab["ocean"] == "two_layer"                  # slab's own
 
@@ -163,7 +164,7 @@ def test_config_sets_defaults_cli_overrides():
     parser = mod.build_parser()
     parser.set_defaults(**load_yaml_config(str(CMIP_CONFIGS[0]), parser))
     args = parser.parse_args(["--days", "90"])
-    assert args.surface_bulk_scheme == "coare3"   # from the base via include
+    assert args.surface_bulk_scheme == "large_yeager_cesm"  # run config overrides base
     assert args.ocean == "two_layer"              # from the run config
     assert args.days == 90                        # explicit CLI overrides config
 
@@ -301,8 +302,20 @@ def test_slab_deck_runs_the_atmosphere_owned_column_lane():
     # land model's solved surface fluxes)
     assert slab["turbulence"] == "clubb" and slab["clubb_prognostic"] is True
     assert slab["clubb_liquid_partition"] is True
+    # the lat-lon AMIP production clouds, verbatim
+    prod = load_yaml_config(
+        str(REPO / "config" / "amip" / "amip_production.yaml"), parser)
+    cloud_rows = ("clouds", "use_clubb_cloud_fraction", "convective_cloud",
+                  "cloud_saturation_scheme", "cloud_cam6_rhmini",
+                  "cloud_cam6_rhmaxi", "cloud_cam6_rhminis",
+                  "cloud_cam6_rhmaxis", "cloud_partial_coverage_optics",
+                  "cloud_optics_inhomogeneity", "cloud_inhomogeneity_factor",
+                  "cloud_fsd", "cloud_vertical_overlap_optics",
+                  "cloud_n_subcolumns")
+    assert {r: slab[r] for r in cloud_rows} == {r: prod[r] for r in cloud_rows}
+    assert slab["clouds"] == "cam6_clubb"
     assert (slab["physics_update_steps"], slab["rad_update_steps"],
-            slab["cld_macmic_num_steps"]) == (6, 12, 3)
+            slab["cld_macmic_num_steps"]) == (2, 4, 3)
     d3 = load_yaml_config(str(CMIP_CONFIGS[1]), parser)
     assert not d3.get("column_lane") and not d3.get("atm_owns_surface")
     assert not d3.get("use_multilayer_land")

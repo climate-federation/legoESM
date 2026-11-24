@@ -8,49 +8,49 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 7318)
+Table of contents (sections, in order; flag reference table at line 7586)
 -----------------------------------------------------------------------------
-  1. [line  355] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2. [line  476] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+  1. [line  371] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2. [line  492] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3. [line  785] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3. [line  823] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4. [line  1116] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4. [line  1154] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5. [line  1172] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5. [line  1210] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6. [line  1346] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6. [line  1384] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7. [line  1794] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8. [line  1848] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7. [line  1832] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8. [line  1944] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9. [line  2029] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9. [line  2125] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line  2217] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line  2298] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2313] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2394] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line  2620] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2716] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``) + the two-level-set reconciliation
       (``calc_trapezoid_zt`` / ``calc_trapezoid_zm`` / ``clip_rcm`` /
       ``compute_cloud_cover``). Every routine in this section is
       grid-agnostic: CAM evaluates the closure once per level set, so all
       regridding is the caller's.
-  13. [line  2981] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  3077] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line  3944] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  4042] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line  4009] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  4107] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line  4682] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4779] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line  4976] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  5073] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line  5359] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  5488] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
       the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  6137] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  6290] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -333,6 +333,16 @@ __param_spec__ = {
             "routec_m_width": "numerics: route C (RULE 5) ramp width [1] of the mass-fraction bounds and slope-pair choice (value voted 2026-11-21)",
             "routec_lock_m_width": "numerics: route C (RULE 5) ramp width [1] in m of Lock's double-jump switch at m = 0.1 (value voted 2026-11-21)",
             "routec_E_width": "numerics: route C (RULE 5) width [1] of the smooth [0, 1] clip of the evaporative enhancement (value voted 2026-11-21)",
+            "mf_alive_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/s2/m2] of the plume-alive wn2 > 0 switch (inf = CAM; value voted)",
+            "mf_qc_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/kg/kg] of the cloudy qt - qs > 0 switch (inf = CAM; value voted)",
+            "mf_trig_wthv_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/K m/s] of the trigger w'thv'_sfc > 0 switch (inf = CAM; value voted)",
+            "mf_trig_wqt_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/kg/kg m/s] of the trigger w'qt'_sfc > 0 switch (inf = CAM; value voted)",
+            "mf_trig_lts_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/K] of the trigger LTS < 20 K switch (inf = CAM; value voted)",
+            "mf_wstar_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/m3/s3] of the w* floor switch (inf = CAM; value voted)",
+            "mf_convh_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/m] of the PBL-height floor switch (inf = CAM; value voted)",
+            "mf_kspan_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/level] of the plume cull at >= 4 levels switch (inf = CAM; value voted)",
+            "mf_conv_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/kg/kg] of the condensation fixed-point exit switch (inf = CAM; value voted)",
+            "mf_cfl_sharpness": "numerics: CLUBB-MF (RULE 5) sharpness [1/1] of the Courant limiter switch (inf = CAM; value voted)",
             "trop_cloud_top_press": "domain definition [Pa]: CAM ref_pres trop_cloud_top_press — where the scheme runs, not a closure coefficient",
             "trop_cloud_taper_lnp_width": "numerics: smooth log-pressure taper width replacing CAM's hard top_lev slice",
             "w_tol": "numerics: w-moment tolerance/floor [m/s]",
@@ -759,6 +769,18 @@ class CLUBBConfig(NamedTuple):
     routec_m_width: float = 0.01
     routec_lock_m_width: float = 0.005
     routec_E_width: float = 0.01
+    # RULE 5 sharpness [1/argument unit] of each CLUBB-MF switch on traced
+    # state (clubb_mf.MFSmoothing, same order; inf = CAM's hard form).
+    mf_alive_sharpness: float = 1.0e4
+    mf_qc_sharpness: float = 1.0e5
+    mf_trig_wthv_sharpness: float = 1.0e4
+    mf_trig_wqt_sharpness: float = 1.0e7
+    mf_trig_lts_sharpness: float = 100.0
+    mf_wstar_sharpness: float = 1.0e11
+    mf_convh_sharpness: float = 1.0
+    mf_kspan_sharpness: float = 100.0
+    mf_conv_sharpness: float = 1.0e7
+    mf_cfl_sharpness: float = 100.0
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -6682,6 +6704,9 @@ def clubb_step(
     omega: jax.Array | None = None,
     routec_inversion: bool = False,
     omega_cam_layer_density: bool = False,
+    clubb_mf: bool = False,
+    mf_pblh: jax.Array | None = None,
+    mf_lts: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6897,8 +6922,50 @@ def clubb_step(
 
     # ---- Advance the full prognostic moment set ----
     zeros_zm = jnp.zeros((ncol, nlev + 1), dtype=T.dtype)
+    thlm_forcing, rtm_forcing = zeros_zt, zeros_zt
+    if clubb_mf:
+        # CAM7 CLUBB-MF (clubb_mf.py; clubb.F90 compute_mf_plumes): the plume
+        # mass-flux convergence of thl and qt is CLUBB's explicit forcing.
+        # pblh: the host's carried PBL height (CAM pblh_pbuf, previous step);
+        # 0 where none is carried yet (CAM's cold-start pbuf).  LTS is the
+        # caller's, taken once before the CLUBB sub-cycle as CAM does
+        # (clubb.F90:999-1007); computed here only for a direct call.
+        # KNOWN DIFFERENCE: thl is this bridge's CLUBB thlm (CAM6 host
+        # convention, T/exner - (L/cp) qc with the liquid partition); CAM7's
+        # host thl is (T - (L/cpv) qc)/exner (clubb.F90:1460).
+        from legoesm.atmosphere.physics.turbulence.clubb_mf import (
+            MFSmoothing, clubb_mf_forcing)
+        from legoesm.atmosphere.physics.turbulence.clubb_mf import (
+            mf_lts as _mf_lts_col)
+        p_zm = flip_vertical(p_half)
+        iex_zm = 1.0 / exner_function(p_zm)
+        dzt = jnp.diff(gr.zm, axis=1)
+        if mf_lts is None:
+            q_liq = jnp.zeros_like(T) if q_c is None else q_c
+            mf_lts = jax.vmap(_mf_lts_col)(T, q_liq, p_full, p_half[:, -1])
+        mf_in = dict(
+            zm=gr.zm, dzt=dzt, thl=thlm, qt=rtm, thv=thv_ds_zt, u=um, v=vm,
+            p_zm=p_zm, iex_zm=iex_zm, ths=T_sfc * iex_zm[:, 0],
+            wthl_sfc=wpthlp_sfc * jnp.ones((ncol,), T.dtype),
+            wqt_sfc=wprtp_sfc * jnp.ones((ncol,), T.dtype),
+            pblh=(jnp.zeros((ncol,), T.dtype) if mf_pblh is None
+                  else jnp.reshape(mf_pblh, (ncol,))),
+            lts=jnp.reshape(mf_lts, (ncol,)))
+        sm = MFSmoothing(*(getattr(config, f"mf_{f}_sharpness")
+                           for f in MFSmoothing._fields))
+        thlm_forcing, rtm_forcing, _mf_out = jax.vmap(
+            lambda c, rzm, irzt, idz: clubb_mf_forcing(
+                c, dt, rzm, irzt, idz, sm, config.mf_cfl_sharpness))(
+            mf_in, rho_ds_zm, invrs_rho_ds_zt, 1.0 / dzt)
+    mf_cloud = {}
+    if clubb_mf:
+        # CAM7 clubb.F90:2566-2568: plume cloud from zm to zt (mf_cloudfrac_zt,
+        # mf_qc_zt), returned top-down for the cloud lane.
+        mf_cloud = dict(
+            mf_cloudfrac=flip_vertical(zm2zt(_mf_out["moist_a"], gr)),
+            mf_qc=flip_vertical(zm2zt(_mf_out["moist_qc"], gr)))
     forcing = CLUBBForcing(
-        rtm=zeros_zt, thlm=zeros_zt, um=zeros_zt, vm=zeros_zt, wprtp=zeros_zm,
+        rtm=rtm_forcing, thlm=thlm_forcing, um=zeros_zt, vm=zeros_zt, wprtp=zeros_zm,
         wpthlp=zeros_zm, rtp2=zeros_zm, thlp2=zeros_zm, rtpthlp=zeros_zm)
     sfc_elevation = flip_vertical(z_half)[:, 0]
     if omega is None:
@@ -7030,6 +7097,7 @@ def clubb_step(
                                + constants.L_v * wprtp_sfc)  # latent-ok: CAM6 clubb_intr energy-fix reference constant
     diags = dict(diags, ustar=ustar, shflx=shflx, lhflx=lhflx,
                  sfc_energy_in=sfc_energy_in)
+    diags.update(mf_cloud)
     return du_dt, dv_dt, dT_dt, dq_v_dt, new_state, diags
 
 
@@ -7060,6 +7128,8 @@ def clubb_turbulence_prognostic(
     omega: jax.Array | None = None,
     routec_inversion: bool = False,
     omega_cam_layer_density: bool = False,
+    clubb_mf: bool = False,
+    mf_pblh: jax.Array | None = None,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -7227,12 +7297,20 @@ def clubb_turbulence_prognostic(
     # The liquid exchange is on iff the factory supplied the host's q_c
     # (TurbulenceConfig.liquid_partition); forwarded only then.
     _liq_kw = {"q_c": q_c} if q_c is not None else {}
+    # CLUBB-MF's LTS: once, from the host state, before the sub-cycle
+    # (clubb.F90:999-1007 precedes the do tt loop).
+    _mf_lts_host = None
+    if clubb_mf:
+        from legoesm.atmosphere.physics.turbulence.clubb_mf import mf_lts as _mf_lts_col
+        _mf_lts_host = jax.vmap(_mf_lts_col)(
+            T, jnp.zeros_like(T) if q_c is None else q_c, p_full, p_half[:, -1])
 
     if n_sub == 1:
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
             radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
+            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
             omega_cam_layer_density=omega_cam_layer_density, **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         sfc_energy_in = diags["sfc_energy_in"]
@@ -7243,6 +7321,7 @@ def clubb_turbulence_prognostic(
         rcp2_a = diags["rcp2_zt"]
         rcm_relvar_a = diags.get("rcm_relvar")
         dq_c_dt = diags.get("dq_c_dt")
+        mf_cf_a, mf_qc_a = diags.get("mf_cloudfrac"), diags.get("mf_qc")
     else:
         dt_sub = dt / n_sub
 
@@ -7267,6 +7346,7 @@ def clubb_turbulence_prognostic(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
                 radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
+            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
                 omega_cam_layer_density=omega_cam_layer_density, **_top_kw,
                 **({"q_c": ql_c} if _liq_on else {}))
             ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c
@@ -7300,6 +7380,11 @@ def clubb_turbulence_prognostic(
         rcp2_a = diag_stk["rcp2_zt"][-1]
         rcm_relvar_a = (diag_stk["rcm_relvar"][-1] if "rcm_relvar" in diag_stk
                         else None)
+        # CAM7 averages the plume cloud over the sub-cycle (clubb.F90:2489-2491)
+        mf_cf_a = (jnp.mean(diag_stk["mf_cloudfrac"], axis=0)
+                   if "mf_cloudfrac" in diag_stk else None)
+        mf_qc_a = (jnp.mean(diag_stk["mf_qc"], axis=0)
+                   if "mf_qc" in diag_stk else None)
 
     # With an injected tiled flux, report the surface diagnostics as the INJECTED
     # dynamic values directly (Louis-equivalent), rather than clubb_step's
@@ -7365,7 +7450,8 @@ def clubb_turbulence_prognostic(
         # CAM6 activation inputs (microp_aero/dropmixnuc): khzm_out of the LAST
         # sub-step's advance (clubb_intr.F90:1915, :1997, surface interface
         # included) and the end-of-sub-cycle wp2 left in WP2_nadv (:1987).
-        Kh_iface=Kh_iface, wp2_iface=flip_vertical(new_moments.wp2))
+        Kh_iface=Kh_iface, wp2_iface=flip_vertical(new_moments.wp2),
+        mf_cloudfrac=mf_cf_a, mf_qc=mf_qc_a)
     return output, pack_clubb_moments(new_moments)
 
 

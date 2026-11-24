@@ -216,6 +216,10 @@ class HydrostaticTendencies(NamedTuple):
     # Convective part of ``precip`` [kg/m^2/s, +into surface] (CMOR prc), set
     # by the hydrostatic convection bridge.  Appended LAST.
     precip_conv_sfc: Field | None = None
+    # Net radiation absorbed ABOVE the model top [W/m^2] (RRTMGP overhead
+    # layer, heating discarded as in CAM): the energy budget's explicit sink.
+    # Set by the radiation bridge only; None otherwise.  Appended LAST.
+    rad_absorbed_above_top: Field | None = None
 
 
 # Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
@@ -263,6 +267,9 @@ MPAS_SFC_DIAG_EXTRA_KEYS = (
     # slots 22-24: surface stress (CMOR tauu/tauv) and convective precip
     # (CMOR prc).  Appended at the END, no index moves.
     "taux_sfc", "tauy_sfc", "precip_conv_sfc",
+    # slot 25: net radiation absorbed above the model top [W/m^2] (energy
+    # budget sink).  Appended at the END, no index moves.
+    "rad_absorbed_above_top",
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their

@@ -274,6 +274,12 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # Hybrid only; sigma retains its existing upwind tracer operator.
     tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
     tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
+    # APPENDED LAST.  Tracers advance through the RK step as layer mass Q = dp*q (q = Q/dp
+    # after the step): each stage's mass-form tendency then sums exactly, so
+    # sum(q dp) is conserved across the stages.  False = the legacy
+    # mixing-ratio update, which creates or destroys tracer mass at second
+    # order in dt (KNOWN DIFFERENCE; gaps in test_latlon_mass_weighted_rk).
+    tracer_mass_weighted_rk: bool = True
 
 
 # CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
@@ -1370,6 +1376,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             # tolerate) would crash on the unfiltered transport.
             # Codex review of Stage 3-E BLOCK #1 + #2 caught this.
             if polar_mask is not None:
+                dps_raw = dps
                 dT = fourier_filter_3d(dT, grid, polar_mask)
                 dps = fourier_filter(dps, grid, polar_mask)
 
@@ -1403,9 +1410,24 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 # applies directly.  Without this loop, the lifted
                 # equatorial-CFL dt would race the (un-filtered)
                 # polar tracer advection past its CFL.
+                # Filtered as layer-MASS tendencies, dp*dq + q*dB*dps, and
+                # rebuilt with the filtered dps: the filter keeps each row's
+                # zonal sum, so the tracer mass sum(q dp) is conserved;
+                # filtering dq and dps separately keeps neither weighted sum.
                 if dq:
+                    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+                        dp_t = dp_from_hybrid(sigma_coord, s.p_s)
+                        dB = sigma_coord.dB
+                    else:
+                        dB = sigma_coord.dsigma
+                        dp_t = s.p_s[..., jnp.newaxis] * dB
                     dq = {
-                        name: fourier_filter_3d(dq_field, grid, polar_mask)
+                        name: (fourier_filter_3d(
+                            dp_t * dq_field
+                            + s.tracers[name] * dB * dps_raw[..., jnp.newaxis],
+                            grid, polar_mask)
+                            - s.tracers[name] * dB * dps[..., jnp.newaxis]
+                        ) / dp_t
                         for name, dq_field in dq.items()
                     }
 
@@ -1415,9 +1437,41 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 tracers=dq,
             )
 
-        state_new = dispatch_integrator(
-            state_c, tendency_fn, dt, self.config.time_integrator,
-        )
+        if self.config.tracer_mass_weighted_rk and state_c.tracers:
+            if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+                dB_m = sigma_coord.dB
+
+                def _dp(p_s):
+                    return dp_from_hybrid(sigma_coord, p_s)
+            else:
+                dB_m = sigma_coord.dsigma
+
+                def _dp(p_s):
+                    return p_s[..., jnp.newaxis] * dB_m
+            q_tendency_fn = tendency_fn
+
+            def tendency_fn(sQ):
+                dp_s = _dp(sQ.p_s)
+                s_q = sQ._replace(tracers={k: Q / dp_s
+                                           for k, Q in sQ.tracers.items()})
+                d = q_tendency_fn(s_q)
+                return d._replace(tracers={
+                    k: dp_s * dq_k
+                    + s_q.tracers[k] * dB_m * d.p_s[..., jnp.newaxis]
+                    for k, dq_k in d.tracers.items()})
+
+            dp0 = _dp(state_c.p_s)
+            out_Q = dispatch_integrator(
+                state_c._replace(tracers={k: dp0 * q for k, q
+                                          in state_c.tracers.items()}),
+                tendency_fn, dt, self.config.time_integrator)
+            dp1 = _dp(out_Q.p_s)
+            state_new = out_Q._replace(tracers={k: Q / dp1 for k, Q
+                                                in out_Q.tracers.items()})
+        else:
+            state_new = dispatch_integrator(
+                state_c, tendency_fn, dt, self.config.time_integrator,
+            )
 
         # Enforce v = 0 at poles via the rank-aware helper (matches the
         # tendency-side rewrite above).  Serial config has

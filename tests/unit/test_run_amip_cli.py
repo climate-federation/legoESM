@@ -5946,6 +5946,52 @@ def test_land_canopy_snow_masking_round_trip_and_refusal():
         bad.validate_strict()
 
 
+def test_land_canopy_snow_round_trip_widths_and_refusal():
+    """Canopy snow (CLM5 ON_RAD): off by default and absent from the production
+    deck; the switch and both widths reach ExperimentConfig and the land
+    config; it is refused without the masking, and a width without the switch
+    or outside the RULE 5 range is refused."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land",
+            "--snow-albedo-feedback", "--land-surface-scheme", "two_leaf"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_canopy_snow is False
+    assert cfg0.land_canopy_snow_temperature_width_K is None
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-canopy-snow-masking", "--land-canopy-snow",
+                "--land-canopy-snow-temperature-width-K", "0",
+                "--land-canopy-snow-relative-width", "0.02"]), parser))
+    assert cfg1.land_canopy_snow is True
+    assert cfg1.land_canopy_snow_temperature_width_K == 0.0
+    assert cfg1.land_canopy_snow_relative_width == 0.02
+    p = build_arg_parser()
+    rows = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert "land_canopy_snow" not in rows
+    p.set_defaults(**rows)
+
+    def prod(*flags):
+        return build_config_from_args(_postprocess_args(
+            p.parse_args(_AMIP_DUMMY_PATHS + list(flags)), p))
+
+    prod("--land-canopy-snow-masking", "--land-canopy-snow").validate_strict()
+    with pytest.raises(ValueError, match="land_canopy_snow requires"):
+        prod("--land-canopy-snow").validate_strict()
+    with pytest.raises(ValueError, match="land_canopy_snow is off"):
+        prod("--land-canopy-snow-relative-width", "0.02").validate_strict()
+    with pytest.raises(ValueError, match="relative_width"):
+        prod("--land-canopy-snow-masking", "--land-canopy-snow",
+             "--land-canopy-snow-relative-width", "1e-30").validate_strict()
+    with pytest.raises(ValueError, match="relative_width must be <= 1"):
+        prod("--land-canopy-snow-masking", "--land-canopy-snow",
+             "--land-canopy-snow-relative-width", "3").validate_strict()
+    ramp = prod("--land-canopy-snow-masking", "--land-canopy-snow",
+                "--land-canopy-snow-fcansno-ramp", "0")
+    assert ramp.land_canopy_snow_fcansno_ramp == 0.0
+    ramp.validate_strict()
+
+
 def test_land_canopy_smoothing_widths_round_trip_and_validate():
     parser = build_arg_parser()
     cfg0 = build_config_from_args(_postprocess_args(
@@ -6736,3 +6782,62 @@ def test_mpas_nu_vert4_tracer_rejects_invalid(bad):
          "--discretization", "mpas", "--mpas-nu-vert4-tracer", bad]), parser))
     with pytest.raises(ValueError, match="mpas_nu_vert4_tracer"):
         cfg.validate_strict()
+
+
+def test_clubb_mf_flag_reaches_the_turbulence_config():
+    """--clubb-mf round-trips to TurbulenceConfig.clubb_mf; default off; refused
+    without prognostic CLUBB."""
+    import pytest
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--turbulence", "clubb",
+            "--clubb-prognostic"]
+    cfg_plain = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser))
+    assert cfg_plain.clubb_mf is False
+    assert materialize_sub_config(turbulence_config_for(cfg_plain)).clubb_mf is False
+    cfg_on = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--clubb-mf"]), parser))
+    assert cfg_on.clubb_mf is True
+    assert turbulence_config_for(cfg_on).clubb_mf is True
+    diag = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb", "--clubb-mf"]), parser))
+    with pytest.raises(ValueError, match="clubb_prognostic"):
+        turbulence_config_for(diag)
+
+
+def test_clubb_mf_cldfrac_fac_flag_reaches_the_cloud_config():
+    """--cloud-clubb-mf-cldfrac-fac round-trips to CloudConfig.mf_cldfrac_fac
+    (unset = CAM7's 10); refused without clubb_mf + cam6_clubb and outside the
+    spec bounds 1..20 (vote 2026-11-24)."""
+    import pytest
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import _standalone_cloud_config
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--turbulence", "clubb", "--clubb-prognostic",
+            "--clubb-mf"]
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--cloud-clubb-mf-cldfrac-fac", "3.5"]), parser))
+    assert cfg.cloud_clubb_mf_cldfrac_fac == 3.5
+    assert build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser)).cloud_clubb_mf_cldfrac_fac is None
+    assert _standalone_cloud_config(cfg, "cam6_clubb").mf_cldfrac_fac == 3.5
+    assert _standalone_cloud_config(
+        cfg._replace(cloud_clubb_mf_cldfrac_fac=None), "cam6_clubb").mf_cldfrac_fac == 10.0
+    for bad in (dict(cloud_clubb_mf_cldfrac_fac=3.5),
+                dict(cloud_clubb_mf_cldfrac_fac=25.0, clubb_mf=True,
+                     cloud_scheme="cam6_clubb")):
+        with pytest.raises(ValueError, match="cloud_clubb_mf_cldfrac_fac"):
+            ExperimentConfig()._replace(**bad).validate_strict()
+    for edge in (1.0, 20.0):  # spec bounds are inclusive
+        try:
+            ExperimentConfig()._replace(
+                cloud_clubb_mf_cldfrac_fac=edge, clubb_mf=True,
+                cloud_scheme="cam6_clubb").validate_strict()
+        except ValueError as e:
+            assert "cloud_clubb_mf_cldfrac_fac" not in str(e)

@@ -28,7 +28,6 @@ from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     make_rest_state,
 )
 from legoesm.atmosphere.dynamics.crm.rce_mpi import (
-    _plane_volume_weight_mpi,
     compute_dry_mass_plane_mpi,
     compute_rho_prime_mass_plane_mpi,
     fix_mass_nonhydrostatic_plane_mpi,
@@ -119,14 +118,6 @@ def test_fix_mass_restores_target_mass_single_rank():
         np.asarray(restored_mass), np.asarray(target),
         rtol=1e-12, atol=1e-8,
     )
-
-
-def test_volume_weight_single_rank_matches_serial():
-    grid, hc, tm, state, layout, mask = _setup()
-    weight_h = (tm.jacobian * grid.area_T)[:, :, None]
-    expected = float(jnp.sum(weight_h * hc.dz))
-    actual = float(_plane_volume_weight_mpi(grid, hc, tm, layout, mask))
-    assert abs(actual - expected) < 1e-12 * abs(expected)
 
 
 def test_fix_mass_correction_is_spatially_uniform():
@@ -243,3 +234,60 @@ def test_step_halo_with_fix_mass_anchored_single_rank():
         rtol=1e-12, atol=1e-6,
         err_msg="step_halo + owned_mask + fix_mass must anchor mass",
     )
+
+
+def test_serial_step_honours_caller_target_without_anchor():
+    """anchor_mass_to_initial=False: a caller-set ``_target_mass`` total (no
+    cached anomaly) still drives the anomaly-form fixer, via target - B; and
+    precompute_target_mass's cached anomaly is used for its own total. Only
+    an unset target falls back to holding the pre-step mass."""
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
+        PlaneCompressibleEulerModel,
+    )
+    grid, hc, tm, state, _, _ = _setup()
+    cfg = CompressibleEulerConfig(fix_mass=True, anchor_mass_to_initial=False,
+                                  hyperdiff_coeff=0.0, hyperdiff_rho_coeff=0.0,
+                                  hyperdiff_w_coeff=0.0)
+    dry0 = compute_dry_mass_plane(state, grid, hc, tm)
+
+    model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
+    model._target_mass = dry0 * (1.0 + 1e-6)          # caller-replaced total
+    out = model.step(state, 2.0)
+    assert abs(float(compute_dry_mass_plane(out, grid, hc, tm) / dry0) - 1.0
+               - 1e-6) < 1e-12
+
+    model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
+    model.precompute_target_mass(state)                # cached anomaly path
+    out = model.step(out, 2.0)
+    assert abs(float(compute_dry_mass_plane(out, grid, hc, tm) / dry0) - 1.0) < 1e-12
+
+
+def test_multi_rank_fixer_validates_mask_shape():
+    """The fused multi-rank fixer and the rho' integral keep the shape checks
+    of compute_dry_mass_plane_mpi (a broadcastable (ny, 1) mask is refused
+    before any MPI call)."""
+    grid, hc, tm, state, _, mask = _setup()
+    layout = make_plane_pencil_layout(
+        rank=0, n_ranks=2, n_ranks_y=1, n_ranks_x=2,
+        ny_global=6, nx_global=16,
+    )
+    bad = mask[:, :1]
+    with pytest.raises(ValueError, match="owned_mask shape"):
+        compute_rho_prime_mass_plane_mpi(state, grid, hc, tm, layout, bad)
+    with pytest.raises(ValueError, match="owned_mask shape"):
+        fix_mass_nonhydrostatic_plane_mpi(
+            state, jnp.zeros(()), grid, hc, tm, layout, bad)
+
+
+def test_single_rank_anomaly_integral_ignores_mask_like_the_fixer():
+    """Single rank: the rho' integral follows the serial (unmasked) contract
+    of compute_dry_mass_plane_mpi and the single-rank fixer, so fixing an
+    unchanged state to its own anomaly is a no-op even with a partial mask."""
+    grid, hc, tm, state, layout, mask = _setup()
+    partial = mask.at[0, :].set(0.0)
+    target = compute_rho_prime_mass_plane_mpi(state, grid, hc, tm, layout, partial)
+    fixed = fix_mass_nonhydrostatic_plane_mpi(
+        state, target, grid, hc, tm, layout, partial)
+    np.testing.assert_allclose(np.asarray(fixed.rho_prime.data),
+                               np.asarray(state.rho_prime.data),
+                               rtol=0, atol=1e-15)

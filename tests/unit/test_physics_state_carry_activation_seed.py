@@ -29,3 +29,24 @@ def test_mpas_checkpoint_without_activation_fields_seeds_them(tmp_path, allow_ve
     driver_b.setup()
     driver_b.load_checkpoint(old)
     assert driver_b.run() == "COMPLETED"
+
+
+def test_mpas_checkpoint_without_plume_cloud_fields_seeds_them(tmp_path, allow_version_drift):
+    """Vote W1 (A, 3/3), 2026-11-23: a checkpoint written before the CLUBB-MF
+    plume-cloud carries restarts with them seeded at zero (no plume cloud)."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _mpas_driver_cfg()
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+    drop = {"physstate_mf_cloudfrac", "physstate_mf_qc"}
+    old = tmp_path / "pre_plume_cloud.npz"
+    with np.load(ckpt) as d:
+        assert drop <= set(d.files)
+        np.savez(old, **{k: d[k] for k in d.files if k not in drop})
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(old)
+    assert driver_b.run() == "COMPLETED"

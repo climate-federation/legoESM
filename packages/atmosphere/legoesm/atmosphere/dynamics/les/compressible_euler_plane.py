@@ -63,6 +63,7 @@ from legoesm.grids.plane import PlaneGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
 from legoesm.timestepping.split_explicit import (
     SplitExplicitConfig,
+    TracerMassHooks,
     split_explicit_step,
 )
 from legoesm.timestepping.integration import (
@@ -378,8 +379,12 @@ def _acoustic_fp64(acoustic_update_fn):
     tendency, result stored back in the state's dtypes. fp32 acoustics miss the
     1 h RCEMIP1 acceptance (w 4.6e-3, rho' 1.7e-4 vs fp64); fp64 passes."""
     def wrapped(state, slow_tend, *rest):
-        return _cast_like(
-            acoustic_update_fn(_to_fp64(state), _to_fp64(slow_tend), *rest), state)
+        out = acoustic_update_fn(_to_fp64(state), _to_fp64(slow_tend), *rest)
+        if isinstance(out, PlaneNonHydrostaticState):
+            return _cast_like(out, state)
+        # (state, (Fx, Fy)): the time-integrated mass fluxes stay fp64, they
+        # carry the tracers in the conservative stage update.
+        return _cast_like(out[0], state), out[1]
     return wrapped
 
 
@@ -1928,8 +1933,14 @@ def plane_compressible_euler_slow_tendencies(
     height_coord: HeightCoordinate,
     terrain_metric: TerrainMetric,
     config: CompressibleEulerConfig,
+    conservative_tracers: bool = False,
 ) -> PlaneNonHydrostaticTendencies:
     """Slow (advective + PG + Coriolis) tendencies for the plane NH dycore.
+
+    ``conservative_tracers=True`` (the model step, #2641): tracer advection
+    is left to :func:`plane_conservative_tracer_stage`, and the SGS tracer
+    tendency is returned as ``rho_ref*tend/rho`` so that multiplying by the
+    stage density gives the SGS operator's own conserved mass flux.
 
     Evaluated once per outer SSP-RK3 stage and held constant for the
     acoustic substeps. See the module docstring for the equations
@@ -2423,7 +2434,15 @@ def plane_compressible_euler_slow_tendencies(
             f"Expected 'centered' or 'van_leer'."
         )
     tracers = state.tracers.data
-    if tracers.shape[-1] > 0:
+    if conservative_tracers:
+        dtracers_dt = jnp.zeros_like(tracers)
+        if tracer_sgs_tend is not None:
+            # Both SGS operators conserve sum(rho_ref * tend * dV).
+            # The density the stage update multiplies back by (fp64 in
+            # mixed precision), so the SGS mass flux cancels exactly.
+            rho_raw = plane_total_density(state, height_coord)[..., None]
+            tracer_sgs_tend = tracer_sgs_tend * rho_0[:, None] / rho_raw
+    elif tracers.shape[-1] > 0:
         def _tracer_tend_one(q):
             # tadv_* = van_leer under weno5 (positivity guard above);
             # == adv_* for every monotone scheme.
@@ -2644,8 +2663,13 @@ def plane_acoustic_substeps_si_horizontal(
     euler_config: CompressibleEulerConfig,
     grid: PlaneGrid,
     layout=None,
-) -> PlaneNonHydrostaticState:
+    return_mass_flux: bool = False,
+):
     """Full Skamarock-Klemp split-explicit acoustic substep on the plane.
+
+    ``return_mass_flux=True`` also returns the time-integrated horizontal
+    mass fluxes ``(Fx, Fy)`` [kg/m^2] the continuity update applied, for
+    :func:`plane_conservative_tracer_stage`.
 
     Unlike :func:`plane_acoustic_substeps_semi_implicit` (vertical-only),
     this integrates BOTH the horizontal and vertical acoustic terms on the
@@ -2700,6 +2724,8 @@ def plane_acoustic_substeps_si_horizontal(
 
     b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
     u_c, v_c, w_c, theta_p_c, rho_p_c = u, v, w, theta_p, rho_p
+    flux_x = jnp.zeros_like(u)
+    flux_y = jnp.zeros_like(v)
     for _ in range(int(n_substeps)):
         theta_total, rho_total = sanitize_theta_rho(
             theta_0 + theta_p_c, rho_0 + rho_p_c,
@@ -2753,12 +2779,15 @@ def plane_acoustic_substeps_si_horizontal(
         # the off-centering blend once on the combined result.
         if beta != 0.0:
             rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
+        if return_mass_flux:
+            flux_x = flux_x + (1.0 + beta) * dt_s * rho_xface * u_new
+            flux_y = flux_y + (1.0 + beta) * dt_s * rho_yface * v_new
 
         u_c, v_c, w_c, theta_p_c, rho_p_c = (
             u_new, v_new, w_new, theta_p_new, rho_p_new,
         )
 
-    return PlaneNonHydrostaticState(
+    out = PlaneNonHydrostaticState(
         u=state.u.replace(data=u_c),
         v=state.v.replace(data=v_c),
         w=state.w.replace(data=w_c),
@@ -2767,6 +2796,141 @@ def plane_acoustic_substeps_si_horizontal(
         phis=state.phis,
         tracers=state.tracers,
     )
+    return (out, (flux_x, flux_y)) if return_mass_flux else out
+
+
+def _tracer_face_value(f, flux, axis, scheme):
+    """Tracer value on the C-grid faces between cells ``i-1`` and ``i`` along
+    ``axis`` (periodic), upwinded by the sign of the transporting ``flux``."""
+    f_im1 = jnp.roll(f, 1, axis=axis)
+    if scheme == "centered":
+        return 0.5 * (f_im1 + f)
+    if scheme == "upwind1":
+        return jnp.where(flux >= 0.0, f_im1, f)
+    from legoesm.core.flux_limiters import van_leer_face_values
+    phi_pos, phi_neg = van_leer_face_values(
+        jnp.roll(f, 2, axis=axis), f_im1, f, jnp.roll(f, -1, axis=axis))
+    return jnp.where(flux >= 0.0, phi_pos, phi_neg)
+
+
+def _tracer_vertical_face_value(f, flux, scheme):
+    """Tracer value at the ``nlev+1`` interfaces (index 0 = top). ``flux`` is
+    the upward mass flux; its sign picks the donor cell. Lid values are unused
+    (zero flux there)."""
+    nlev = f.shape[-2]
+    pad = ((0, 0),) * (f.ndim - 2) + ((2, 2), (0, 0))
+    fp = jnp.pad(f, pad, mode="edge")
+    f_above, f_below = fp[..., 1:nlev + 2, :], fp[..., 2:nlev + 3, :]
+    if scheme == "centered" or nlev <= 2:
+        return 0.5 * (f_above + f_below)
+    from legoesm.core.flux_limiters import van_leer_face_values
+    # Increasing index is downward, so downward flow (flux <= 0) is the
+    # positive-velocity branch of the shared reconstruction.
+    phi_pos, phi_neg = van_leer_face_values(
+        fp[..., 0:nlev + 1, :], f_above, f_below, fp[..., 3:nlev + 4, :])
+    return jnp.where(flux <= 0.0, phi_pos, phi_neg)
+
+
+def plane_conservative_tracer_stage(
+    base: PlaneNonHydrostaticState,
+    eval_state: PlaneNonHydrostaticState,
+    state_slow: PlaneNonHydrostaticState,
+    acoustic_out,
+    slow_tend: PlaneNonHydrostaticState,
+    dt_eff: float,
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+    config: CompressibleEulerConfig,
+    layout=None,
+) -> PlaneNonHydrostaticState:
+    """Mass-conserving tracer update of one split-explicit RK stage (#2641).
+
+    MPAS-A / WRF: tracers ride the mass flux continuity used over the stage,
+    reconstructed from the evaluation state, in flux form::
+
+        (rho q)_out = rho_base q_base - div_h(F_h q_f)
+                      + [G q_f]_below - [G q_f]_above + dt_eff rho_eval dq_slow
+
+    ``F_h`` is ``dt_eff * rho_face * u`` at the evaluation state (the slow
+    continuity flux), or the acoustic accumulation ``(Fx, Fy)`` returned
+    with the state when the horizontal is substepped; ``G`` is the
+    time-integrated upward mass flux, recovered exactly from the acoustic
+    density change because vertical acoustic continuity is a pure flux
+    divergence between rigid lids. ``dq_slow`` carries SGS and physics.
+    Tracer mass ``sum(rho q dV)`` is conserved to round-off; a uniform ``q``
+    stays uniform unless a non-flux term (sponge, rho' hyperdiffusion,
+    physics, mass fixer) changes ``rho``. Flat terrain only (J = 1, asserted
+    at model construction). ``layout`` (multi-rank) pads with the packed halo
+    exchange; serial pads periodically.
+    """
+    from legoesm.atmosphere.dynamics.les import plane_operators_halo as oh
+    if layout is None:
+        h = 2
+
+        def pad(*arrs):
+            return [jnp.pad(a, ((h, h), (h, h)) + ((0, 0),) * (a.ndim - 2),
+                            mode="wrap") for a in arrs]
+    else:
+        from legoesm.parallel.plane_mpi import packed_exchange_halo_plane_yxz
+        h = layout.halo
+
+        def pad(*arrs):
+            return packed_exchange_halo_plane_yxz(*arrs, layout=layout)
+
+    rho_0 = height_coord.rho_ref
+    dz = height_coord.dz
+    q_e = eval_state.tracers.data
+    ny, nx, nlev, n_tr = q_e.shape
+    q_flat = q_e.reshape(ny, nx, nlev * n_tr)
+    if isinstance(acoustic_out, PlaneNonHydrostaticState):
+        out = acoustic_out
+        _, rho_e_flux = sanitize_theta_rho(
+            height_coord.theta_ref + eval_state.theta_prime.data,
+            rho_0 + eval_state.rho_prime.data,
+        )
+        rho_pad, u_pad, v_pad = pad(
+            rho_e_flux, eval_state.u.data, eval_state.v.data)
+        fx_pad = dt_eff * interp_cell_to_xface_vlast(rho_pad, grid) * u_pad
+        fy_pad = dt_eff * interp_cell_to_yface_vlast(rho_pad, grid) * v_pad
+        # The slow horizontal flux already reached rho via the slow tendency.
+        drho_vert = out.rho_prime.data - state_slow.rho_prime.data
+    else:
+        out, (flux_x, flux_y) = acoustic_out
+        fx_pad, fy_pad = pad(flux_x, flux_y)
+        drho_vert = (out.rho_prime.data - state_slow.rho_prime.data
+                     + oh.divergence_vlast_halo(fx_pad, fy_pad, grid, h))
+    # The packed exchange needs equal-shape slabs: tracers go separately.
+    q_pad, = pad(q_flat)
+    # Upward mass through interface j (0 = top) = column gain above it.
+    g_inner = jnp.cumsum(drho_vert * dz, axis=-1)[..., :-1]
+    pad_w = ((0, 0),) * (g_inner.ndim - 1) + ((1, 1),)
+    g_flux = jnp.pad(g_inner, pad_w)[..., None]          # (ny, nx, nlev+1, 1)
+
+    scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
+    h_scheme = "van_leer" if scheme == "weno5" else scheme
+    v_scheme = getattr(config, "vertical_tracer_advection", "centered")
+    if h_scheme == "van_leer" and h < 2:
+        # A narrower halo would give the two ranks of a seam face different
+        # face values, and tracer mass would leak at rank boundaries.
+        raise ValueError(
+            f"van_leer tracer faces need a halo of 2; layout.halo={h}.")
+    q_pad = q_pad.reshape(q_pad.shape[:2] + (nlev, n_tr))
+    fx = fx_pad[..., None]
+    fy = fy_pad[..., None]
+    # Roll-based faces on the padded slab: only the outer ring wraps wrongly,
+    # and the interior divergence never reads it (halo >= stencil reach).
+    tx = fx * _tracer_face_value(q_pad, fx, 1, h_scheme)
+    ty = fy * _tracer_face_value(q_pad, fy, 0, h_scheme)
+    div_h = jax.vmap(lambda a, b: oh.divergence_vlast_halo(a, b, grid, h),
+                     in_axes=-1, out_axes=-1)(tx, ty)
+    gq = g_flux * _tracer_vertical_face_value(q_e, g_flux, v_scheme)
+    gain_z = (gq[..., 1:, :] - gq[..., :-1, :]) / dz[:, None]
+    rho_b = plane_total_density(base, height_coord)[..., None]
+    rho_e = plane_total_density(eval_state, height_coord)[..., None]
+    rho_o = plane_total_density(out, height_coord)[..., None]
+    mq = (rho_b * base.tracers.data - div_h + gain_z
+          + dt_eff * rho_e * slow_tend.tracers.data)
+    return out._replace(tracers=out.tracers.replace(data=mq / rho_o))
 
 
 def plane_acoustic_substeps_si_horizontal_halo(
@@ -2780,8 +2944,12 @@ def plane_acoustic_substeps_si_horizontal_halo(
     euler_config: CompressibleEulerConfig,
     grid: PlaneGrid,
     layout,
-) -> PlaneNonHydrostaticState:
+    return_mass_flux: bool = False,
+):
     """Halo-aware full Skamarock-Klemp split-explicit acoustic substep.
+
+    ``return_mass_flux`` as in :func:`plane_acoustic_substeps_si_horizontal`
+    (interior-shape fluxes).
 
     Multi-rank counterpart of
     :func:`plane_acoustic_substeps_si_horizontal`: same forward-backward
@@ -2841,6 +3009,8 @@ def plane_acoustic_substeps_si_horizontal_halo(
 
     b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
     u_c, v_c, w_c, theta_p_c, rho_p_c = u, v, w, theta_p, rho_p
+    flux_x = jnp.zeros_like(u)
+    flux_y = jnp.zeros_like(v)
     for _ in range(int(n_substeps)):
         # Exchange 1: θ', ρ'. sanitize + Exner are pointwise, so the
         # padded totals/π' are exact on the halo ring; the reach-1
@@ -2907,12 +3077,15 @@ def plane_acoustic_substeps_si_horizontal_halo(
         # once, on the combined vertical+horizontal result.
         if beta != 0.0:
             rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
+        if return_mass_flux:
+            flux_x = flux_x + (1.0 + beta) * dt_s * rho_xface * u_new
+            flux_y = flux_y + (1.0 + beta) * dt_s * rho_yface * v_new
 
         u_c, v_c, w_c, theta_p_c, rho_p_c = (
             u_new, v_new, w_new, theta_p_new, rho_p_new,
         )
 
-    return PlaneNonHydrostaticState(
+    out = PlaneNonHydrostaticState(
         u=state.u.replace(data=u_c),
         v=state.v.replace(data=v_c),
         w=state.w.replace(data=w_c),
@@ -2921,11 +3094,29 @@ def plane_acoustic_substeps_si_horizontal_halo(
         phis=state.phis,
         tracers=state.tracers,
     )
+    return (out, (flux_x, flux_y)) if return_mass_flux else out
 
 
 # --------------------------------------------------------------------- #
 # Config validation                                                     #
 # --------------------------------------------------------------------- #
+
+
+def plane_total_density(state, height_coord):
+    """``rho_ref + rho'`` summed in the widest of the two and the tracers'
+    dtype: mixed precision (fp32 storage, fp64 tracers inside the step) gets
+    the fp64 density that ``rho*q`` is measured with; otherwise this is
+    exactly the plain sum."""
+    rho_p = state.rho_prime.data
+    dt = jnp.result_type(height_coord.rho_ref, rho_p, state.tracers.data)
+    return height_coord.rho_ref.astype(dt) + rho_p.astype(dt)
+
+
+def _hold_tracer_mass(state, rho_before, height_coord):
+    """Rescale ``q`` so a density-only mass fix leaves ``rho*q`` unchanged."""
+    rho_after = plane_total_density(state, height_coord)
+    return state._replace(tracers=state.tracers.replace(
+        data=state.tracers.data * (rho_before / rho_after)[..., None]))
 
 
 def validate_plane_config(config: CompressibleEulerConfig) -> None:
@@ -3199,13 +3390,14 @@ class PlaneCompressibleEulerModel:
         ))
 
     def _fixer_target(self, target, state):
-        """Anomaly-form fixer target: the cached anchor anomaly when it
-        belongs to ``target``; the pre-step anomaly when not anchoring;
-        else (``_target_mass`` set by a caller) ``target - B``."""
+        """Anomaly-form fixer target for the total ``target``: the cached
+        anchor anomaly when it belongs to ``target``; the pre-step anomaly of
+        ``state`` when no target is set (``None``: hold the pre-step mass);
+        else (a caller-set total, anchored or not) ``target - B``."""
         cached = getattr(self, "_target_anomaly", None)
         if cached is not None and cached[0] is target:
             return cached[1]
-        if not self.config.anchor_mass_to_initial:
+        if target is None:
             return _plane_weighted_mass_sum(
                 state.rho_prime.data, self.grid, self.height_coord,
                 self.terrain_metric,
@@ -3251,13 +3443,9 @@ class PlaneCompressibleEulerModel:
                     mass_state, self.grid, self.height_coord, self.terrain_metric,
                 )
                 self._cache_target_anomaly(mass_state)
-        target = self._target_mass
-        if target is None and self.config.fix_mass:
-            target = compute_dry_mass_plane(
-                mass_state, self.grid, self.height_coord, self.terrain_metric,
-            )
+        target = None
         if self.config.fix_mass:
-            target = self._fixer_target(target, mass_state)
+            target = self._fixer_target(self._target_mass, mass_state)
         return self._step_jit(state, dt, target, physics_fn)
 
     def step_halo(
@@ -3344,10 +3532,13 @@ class PlaneCompressibleEulerModel:
             rounding_safe_combinations=self.config.mixed_precision,
         )
 
+        conservative = state_local.tracers.data.shape[-1] > 0
+
         def slow_tendency_fn(s):
             tend = plane_compressible_euler_slow_tendencies_halo(
                 s, self.grid, self.height_coord, self.terrain_metric,
                 self.config, layout, f_pad_cached=f_pad_cached,
+                conservative_tracers=conservative,
             )
             # Wrap as state for split_explicit_step (same pytree shape).
             return PlaneNonHydrostaticState(
@@ -3368,7 +3559,7 @@ class PlaneCompressibleEulerModel:
                     return plane_acoustic_substeps_si_horizontal_halo(
                         s, slow_tend, dt_s, n_sub, cfg,
                         self.height_coord, self.terrain_metric, self.config,
-                        self.grid, layout,
+                        self.grid, layout, return_mass_flux=conservative,
                     )
             else:
                 def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
@@ -3406,22 +3597,17 @@ class PlaneCompressibleEulerModel:
             layout,
             float(dt), self.config.n_acoustic_substeps,
             bool(self.config.semi_implicit_acoustic),
-            bool(substep_horiz), id(f_pad_cached),
+            bool(substep_horiz), id(f_pad_cached), conservative,
             bool(self.config.mixed_precision),
         )
+        tracer_mass = (self._tracer_mass_hooks(layout) if conservative
+                       else None)
         if (getattr(self, "_jit_halo_core", None) is None
                 or getattr(self, "_jit_halo_key", None) != _jit_key):
-            if self.config.mixed_precision:
-                def _halo_core(s):
-                    return _cast_like(split_explicit_step(
-                        s, lambda x: _cast_like(slow_tendency_fn(x), x),
-                        _acoustic_fp64(acoustic_update_fn), dt, se_config,
-                    ), s)
-            else:
-                def _halo_core(s):
-                    return split_explicit_step(
-                        s, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-                    )
+            def _halo_core(s):
+                return self._split_step(
+                    s, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+                    tracer_mass)
             self._jit_halo_core = jax.jit(_halo_core)
             self._jit_halo_key = _jit_key
         stepped = self._jit_halo_core(state_local)
@@ -3448,11 +3634,10 @@ class PlaneCompressibleEulerModel:
                     self._target_anomaly = (
                         self._target_mass,
                         compute_rho_prime_mass_plane_mpi(mass_state, *mass_args))
-                target = self._target_mass
-            else:
-                target = None
-            # Anomaly-form target, as in ``_fixer_target`` (serial). A
-            # caller-replaced ``_target_mass`` total is converted once by
+            target = self._target_mass
+            # Anomaly-form target, as in ``_fixer_target`` (serial): no
+            # target holds the pre-step mass; a caller-replaced
+            # ``_target_mass`` total (anchored or not) is converted once by
             # subtracting the global background (carries that total's
             # rounding, as the serial fallback does).
             cached = getattr(self, "_target_anomaly", None)
@@ -3471,11 +3656,49 @@ class PlaneCompressibleEulerModel:
             mpi_fixer = (_fix_mass_fp64(fix_mass_nonhydrostatic_plane_mpi)
                          if self.config.mixed_precision
                          else fix_mass_nonhydrostatic_plane_mpi)
+            rho_before = plane_total_density(stepped, self.height_coord)
             stepped = mpi_fixer(
                 stepped, target, self.grid, self.height_coord,
                 self.terrain_metric, layout, owned_mask,
             )
-        return stepped
+            if conservative:
+                stepped = _hold_tracer_mass(stepped, rho_before, self.height_coord)
+        # Mixed precision: the step carried tracers in fp64; store them (and
+        # every other leaf) in the state's own dtypes once, here.
+        return (_cast_like(stepped, state_local) if self.config.mixed_precision
+                else stepped)
+
+    def _split_step(self, state, slow_tendency_fn, acoustic_update_fn, dt,
+                    se_config, tracer_mass):
+        """``split_explicit_step``; mixed precision runs it with the tracers
+        promoted to fp64 for the whole step (all RK stages, conservative
+        transport and blends), fp64 acoustic substeps, and slow tendencies
+        stored in the state's dtypes. The caller casts the result back to the
+        storage dtypes after the dry-mass fixer, so tracers are rounded to
+        fp32 once per step."""
+        if not self.config.mixed_precision:
+            return split_explicit_step(
+                state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+                tracer_mass=tracer_mass)
+        state = state._replace(tracers=state.tracers.replace(
+            data=state.tracers.data.astype(jnp.float64)))
+        return split_explicit_step(
+            state, lambda x: _cast_like(slow_tendency_fn(x), x),
+            _acoustic_fp64(acoustic_update_fn), dt, se_config,
+            tracer_mass=tracer_mass)
+
+    def _tracer_mass_hooks(self, layout=None) -> TracerMassHooks:
+        """Conservative tracer transport for the split-explicit step (#2641)."""
+        return TracerMassHooks(
+            density=lambda s: plane_total_density(s, self.height_coord),
+            tracers=lambda s: s.tracers.data,
+            with_tracers=lambda s, q: s._replace(
+                tracers=s.tracers.replace(data=q)),
+            finish_stage=functools.partial(
+                plane_conservative_tracer_stage, grid=self.grid,
+                height_coord=self.height_coord, config=self.config,
+                layout=layout),
+        )
 
     # ------------------------------------------------------------------
     # JIT boundary
@@ -3494,11 +3717,12 @@ class PlaneCompressibleEulerModel:
             outer_integrator=self.config.outer_integrator,
             rounding_safe_combinations=self.config.mixed_precision,
         )
+        conservative = state.tracers.data.shape[-1] > 0
 
         def slow_tendency_fn(s: PlaneNonHydrostaticState):
             tend = plane_compressible_euler_slow_tendencies(
                 s, self.grid, self.height_coord, self.terrain_metric,
-                self.config,
+                self.config, conservative_tracers=conservative,
             )
             if physics_fn is not None:
                 phys = physics_fn(
@@ -3549,7 +3773,7 @@ class PlaneCompressibleEulerModel:
                     return plane_acoustic_substeps_si_horizontal(
                         s, slow_tend, dt_s, n_sub, cfg,
                         self.height_coord, self.terrain_metric, self.config,
-                        self.grid,
+                        self.grid, return_mass_flux=conservative,
                     )
             else:
                 def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
@@ -3564,15 +3788,10 @@ class PlaneCompressibleEulerModel:
                     self.height_coord, self.terrain_metric, self.config,
                 )
 
-        if self.config.mixed_precision:
-            state_new = _cast_like(split_explicit_step(
-                state, lambda s: _cast_like(slow_tendency_fn(s), s),
-                _acoustic_fp64(acoustic_update_fn), dt, se_config,
-            ), state)
-        else:
-            state_new = split_explicit_step(
-                state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-            )
+        tracer_mass = self._tracer_mass_hooks() if conservative else None
+        state_new = self._split_step(
+            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+            tracer_mass)
 
         if self.config.fix_mass and target_mass is not None:
             # ``target_mass`` is already the anomaly target (see
@@ -3580,9 +3799,14 @@ class PlaneCompressibleEulerModel:
             fixer = (_fix_mass_fp64(fix_mass_nonhydrostatic_plane)
                      if self.config.mixed_precision
                      else fix_mass_nonhydrostatic_plane)
+            rho_before = plane_total_density(state_new, self.height_coord)
             state_new = fixer(
                 state_new, target_mass, self.grid, self.height_coord,
                 self.terrain_metric,
                 background_mass=jnp.zeros((), target_mass.dtype),
             )
-        return state_new
+            if conservative:
+                state_new = _hold_tracer_mass(
+                    state_new, rho_before, self.height_coord)
+        return (_cast_like(state_new, state) if self.config.mixed_precision
+                else state_new)

@@ -1362,6 +1362,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "the subsidence. MPAS lane. Requires --turbulence "
                              "clubb and --clubb-prognostic. Default off = wm 0, "
                              "the historical bridge (byte-identical).")
+    parser.add_argument("--clubb-mf", dest="clubb_mf",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM7 CLUBB-MF: a stochastic plume ensemble whose "
+                             "mass-flux convergence of thl and qt forces "
+                             "prognostic CLUBB (fixed L0 = 200 m, CAM's random "
+                             "draws). Requires --turbulence clubb and "
+                             "--clubb-prognostic. Default off = no mass flux.")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -1437,6 +1444,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "increment only, no canopy snow). Default off. "
                              "Requires the two-leaf multilayer land with snow "
                              "albedo feedback.")
+    parser.add_argument("--land-canopy-snow",
+                        dest="land_canopy_snow",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow,
+                        help="Intercepted canopy snow (CLM5 snowveg_flag ON_RAD): "
+                             "canopy snow store, unloading, sublimation and "
+                             "snow-whitened canopy albedo. Default off. Requires "
+                             "--land-canopy-snow-masking and the bulk snowpack.")
+    parser.add_argument("--land-canopy-snow-temperature-width-K",
+                        dest="land_canopy_snow_temperature_width_K", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_temperature_width_K,
+                        help="RULE 5 width [K] of the canopy-snow temperature "
+                             "switches (0 = CLM5 hard). Default: CanopySnowConfig.")
+    parser.add_argument("--land-canopy-snow-relative-width",
+                        dest="land_canopy_snow_relative_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_relative_width,
+                        help="RULE 5 relative width of the canopy-snow caps "
+                             "(0 = CLM5 hard, <= 1). Default: CanopySnowConfig.")
+    parser.add_argument("--land-canopy-snow-fcansno-ramp",
+                        dest="land_canopy_snow_fcansno_ramp", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_fcansno_ramp,
+                        help="RULE 5 store fraction below which the canopy snow "
+                             "fraction's 0.15 power is a C1 quadratic (0 = CLM5 "
+                             "hard, <= 1). Default: CanopySnowConfig.")
     parser.add_argument("--land-canopy-rh-cap-smoothing-width",
                         dest="land_canopy_rh_cap_smoothing_width", type=float,
                         default=_EXPERIMENT_DEFAULTS.land_canopy_rh_cap_smoothing_width,
@@ -1531,6 +1562,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=None,
                         help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
                              "None = 0.01 (CAM6 namelist)")
+    parser.add_argument("--cloud-clubb-mf-cldfrac-fac",
+                        dest="cloud_clubb_mf_cldfrac_fac", type=float,
+                        default=None,
+                        help="CAM7 CLUBB-MF plume-area to deep-cloud-fraction "
+                             "factor (bounds 1..20); None = 10 (CAM7). Needs "
+                             "--clubb-mf and cloud_scheme cam6_clubb.")
     parser.add_argument("--cloud-cam6-do-subgrid-growth",
                         dest="cloud_cam6_do_subgrid_growth",
                         action=argparse.BooleanOptionalAction, default=False,
@@ -3430,6 +3467,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_prognostic=args.clubb_prognostic,
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_host_omega=args.clubb_host_omega,
+        clubb_mf=args.clubb_mf,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
            for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS,
@@ -3488,6 +3526,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_do_subgrid_growth=args.cloud_cam6_do_subgrid_growth,
         cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
         cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
+        cloud_clubb_mf_cldfrac_fac=args.cloud_clubb_mf_cldfrac_fac,
         cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,
         cloud_cam6_snow_optics_file=args.cloud_cam6_snow_optics_file,
         cloud_cam6_rad_specified_nc=args.cloud_cam6_rad_specified_nc,
@@ -3507,6 +3546,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
         land_canopy_snow_masking=args.land_canopy_snow_masking,
+        land_canopy_snow=args.land_canopy_snow,
+        land_canopy_snow_temperature_width_K=args.land_canopy_snow_temperature_width_K,
+        land_canopy_snow_relative_width=args.land_canopy_snow_relative_width,
+        land_canopy_snow_fcansno_ramp=args.land_canopy_snow_fcansno_ramp,
         land_snow_insulation=args.land_snow_insulation,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
