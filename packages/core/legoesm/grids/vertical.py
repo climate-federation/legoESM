@@ -2363,6 +2363,12 @@ def cam_pi_B_dT_dp(
     else:
         B = coord.sigma_half.astype(T.dtype)
         dp = p_s[..., None] * coord.dsigma.astype(T.dtype)
+    if B.shape != (T.shape[-1] + 1,):
+        # A full-level (nlev) array here would silently shift every
+        # interface weight by half a level; the shapes are static.
+        raise ValueError(
+            f"cam_pi_B_dT_dp: half-level B must have nlev+1 = "
+            f"{T.shape[-1] + 1} entries, got shape {B.shape}")
     jump = B[1:-1] * (T[..., 1:] - T[..., :-1])          # B_{k+1/2}(T_{k+1}-T_k)
     pad = ((0, 0),) * (T.ndim - 1)
     below = jnp.pad(jump, (*pad, (0, 1)))                # interface k+1/2

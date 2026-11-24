@@ -10,7 +10,9 @@ diffusion kept) the run stayed below 0.1 m/s.
 
 The fix applies CAM3's partial correction to pressure surfaces (Collins et al.
 2004, NCAR/TN-464+STR, eq. 3.80 with the vertical differences of eqs.
-3.194-3.196): ``lap_p T = lap_eta T - (pi B dT/dp) lap(ln pi)``.
+3.194-3.196): ``lap_p T = lap_eta T - (pi B dT/dp) lap(ln pi)``.  It is
+OPT-IN (``A_h_pressure_surfaces``, user decision 2026-11-24): the default keeps
+the eta-surface Laplacian unchanged.
 """
 from __future__ import annotations
 
@@ -34,7 +36,7 @@ _N_LAT, _N_LON, _NLEV = 36, 72, 20
 _DAY = 86400.0
 
 
-def _dT_dt(stratified: bool, A_h: float, coord):
+def _dT_dt(stratified: bool, A_h: float, coord, pressure_surfaces: bool = True):
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationConfig, hydrostatic_to_cgrid)
@@ -46,8 +48,9 @@ def _dT_dt(stratified: bool, A_h: float, coord):
     init = (lapse_rate_state_topography_init_latlon if stratified
             else rest_state_topography_init_latlon)(grid, coord)
     st = hydrostatic_to_cgrid(init, grid)
-    cfg = CGridLatLonPrimitiveEquationConfig(A_h=A_h, fix_mass=True,
-                                             anchor_mass_to_initial=True)
+    cfg = CGridLatLonPrimitiveEquationConfig(
+        A_h=A_h, fix_mass=True, anchor_mass_to_initial=True,
+        A_h_pressure_surfaces=pressure_surfaces)
     _du, _dv, dT, dps, _ = cgrid_latlon_pe_tendencies(st, grid, coord, cfg,
                                                      vertical_form="legacy")
     return np.asarray(dT), np.asarray(dps)
@@ -73,11 +76,58 @@ def test_stratified_rest_state_diffusion_heating_is_corrected(coord_name):
     coord = (standard_hybrid_levels if coord_name == "hybrid"
              else create_sigma_coordinate)(_NLEV)
     dT, _ = _dT_dt(True, _matrix_A_h(), coord)
+    dT_eta, _ = _dT_dt(True, _matrix_A_h(), coord, pressure_surfaces=False)
     per_level = np.abs(dT).max(axis=(0, 1)) * _DAY
+    per_level_eta = np.abs(dT_eta).max(axis=(0, 1)) * _DAY
+    corr = np.abs(dT - dT_eta).max(axis=(0, 1)) * _DAY
     # measured (fp64) interior peak: hybrid 3.4, sigma 3.3 K/day corrected;
-    # 136 / 144 K/day with the correction reverted.
+    # 143 / 145 K/day uncorrected (eta-surface Laplacian).
     assert per_level[1:-1].max() < 10.0, (
         f"interior diffusion heating at rest {per_level[1:-1].max():.1f} K/day")
+    # Non-vacuity: the correction must actually act (a silently zeroed
+    # correction would leave the uncorrected ~140 K/day).
+    assert per_level_eta[1:-1].max() > 10.0 * per_level[1:-1].max()
+    # CAM's one-sided end differences are present, not dropped: the bottom
+    # level is corrected by about half (measured 143 -> 74 K/day hybrid,
+    # 146 -> 74 sigma) and both end levels carry a nonzero correction
+    # (measured top / bottom: hybrid 3.3 / 70, sigma 44 / 72 K/day).
+    assert per_level[-1] < 0.7 * per_level_eta[-1]
+    assert corr[0] > 1.0 and corr[-1] > 10.0, corr
+
+
+def test_default_off_is_the_eta_surface_laplacian():
+    """Default (opt-out): over terrain with a stratified T the A_h tendency is
+    exactly A_h lap_eta T, i.e. the operator of commit 97ddee4056 (the
+    bitwise check against the base commit is out-of-tree, see the commit)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.operators_latlon_cgrid import laplacian_cgrid
+    from legoesm.grids.vertical import standard_hybrid_levels
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationConfig, hydrostatic_to_cgrid)
+    from tests.test_cases.dcmip2012.rest_state_topography import (
+        lapse_rate_state_topography_init_latlon)
+    assert CGridLatLonPrimitiveEquationConfig().A_h_pressure_surfaces is False
+    coord = standard_hybrid_levels(_NLEV)
+    dT_off, _ = _dT_dt(True, _matrix_A_h(), coord, pressure_surfaces=False)
+    dT_0, _ = _dT_dt(True, 0.0, coord, pressure_surfaces=False)
+    dT_on, _ = _dT_dt(True, _matrix_A_h(), coord, pressure_surfaces=True)
+    grid = create_latlon_grid(_N_LAT, _N_LON)
+    init = lapse_rate_state_topography_init_latlon(grid, coord)
+    T = np.asarray(hydrostatic_to_cgrid(init, grid).T)
+    want = _matrix_A_h() * np.asarray(laplacian_cgrid(T, grid))
+    np.testing.assert_allclose(dT_off - dT_0, want, rtol=1e-9,
+                               atol=1e-12 * np.abs(want).max())
+    assert np.abs(dT_on - dT_off).max() * _DAY > 10.0
+
+
+def test_cam_pi_B_dT_dp_rejects_a_full_level_B():
+    """The vertical coefficient must be the nlev+1 half-level array."""
+    import jax.numpy as jnp
+    from legoesm.grids.vertical import cam_pi_B_dT_dp, create_sigma_coordinate
+    coord = create_sigma_coordinate(2)          # sigma_half: 3 entries
+    T = jnp.full((1, 1), 250.0)                 # nlev = 1: B[1:-1] would broadcast
+    with pytest.raises(ValueError, match="nlev\\+1"):
+        cam_pi_B_dT_dp(T, jnp.array([1.0e5]), coord)
 
 
 def test_isothermal_rest_state_unchanged():

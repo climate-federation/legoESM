@@ -1242,6 +1242,17 @@ def _laplacian_visc_cube_v2(n: int) -> float:
     return float(10.0 ** log_a)
 
 
+# Lat-lon A_h temperature diffusion partially corrected to pressure surfaces
+# (CAM3 eq. 3.80; ``A_h_pressure_surfaces``, opt-in, default off).  The matrix
+# selects it EXPLICITLY on every lat-lon PE row (user decision 2026-11-24) and
+# records the setting in results.txt notes.  Without it DCMIP 2012 2-0-0 is
+# heated ~140 K/day along the sloping eta surfaces and spins up 3.6 m/s/day.
+_LATLON_A_H_PRESSURE_SURFACES = True
+_LATLON_A_H_PRESSURE_SURFACES_NOTE = (
+    "A_h T diffusion on pressure surfaces (CAM3 eq. 3.80): "
+    + ("on" if _LATLON_A_H_PRESSURE_SURFACES else "off"))
+
+
 def _laplacian_visc_latlon(n_lat: int, frac: float = 0.1) -> float:
     """Laplacian viscosity A_h = frac * c_gw * dy for lat-lon grid."""
     import math
@@ -3965,6 +3976,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                     f"this grid.")
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            A_h_pressure_surfaces=_LATLON_A_H_PRESSURE_SURFACES,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
             sb81_omega_conversion=True,
             # del-4 on u, v, T (lat-lon shallow-water lane's law and per-row
@@ -4254,6 +4266,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
     if tc.grid_type == "cubed_sphere":
         notes = f"{notes}; {_duo_note}"
+    elif tc.grid_type == "latlon":
+        notes = f"{notes}; {_LATLON_A_H_PRESSURE_SURFACES_NOTE}"
 
     _write_results_txt(output_dir, _augment_with_rrtmgp_overrides({
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -4459,6 +4473,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            A_h_pressure_surfaces=_LATLON_A_H_PRESSURE_SURFACES,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
             sb81_omega_conversion=True,
         )
@@ -4716,6 +4731,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
     if tc.grid_type == "cubed_sphere":
         notes = f"{notes}; {_duo_note}"
+    elif tc.grid_type == "latlon":
+        notes = f"{notes}; {_LATLON_A_H_PRESSURE_SURFACES_NOTE}"
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -5064,6 +5081,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            A_h_pressure_surfaces=_LATLON_A_H_PRESSURE_SURFACES,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
             sb81_omega_conversion=True,
         )
@@ -5258,6 +5276,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     ok, notes = _apply_mass_drift_tolerance(
         ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
+    if tc.grid_type == "latlon":
+        notes = f"{notes}; {_LATLON_A_H_PRESSURE_SURFACES_NOTE}"
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)

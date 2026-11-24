@@ -275,6 +275,15 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # Hybrid only; sigma retains its existing upwind tracer operator.
     tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
     tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
+    # A_h temperature diffusion partially corrected to pressure surfaces
+    # (CAM3, Collins et al. 2004, eq. 3.80 with the eq. 3.194-3.196 vertical
+    # differences): lap_p T = lap_eta T - (pi B dT/dp) lap(ln pi).  Without it
+    # a stratified atmosphere at rest over terrain is heated / cooled along the
+    # sloping eta surfaces (~140 K/day at the lowest level of DCMIP 2012 2-0-0
+    # on 72x144).  OPT-IN (user decision 2026-11-24): False (default) is the
+    # eta-surface Laplacian, bit-identical to commit 97ddee4056; the
+    # atmosphere matrix sets it explicitly.  Needs A_h > 0 to act.
+    A_h_pressure_surfaces: bool = False
 
 
 # CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
@@ -559,16 +568,13 @@ def latlon_dissipation(du_dt, dv_dt, dT_dt, u, v, T, p_s, grid, sigma_coord,
         lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
         du_dt = du_dt + config.A_h * lap_u
         dv_dt = dv_dt + config.A_h * lap_v
-        # T diffusion partially corrected to pressure surfaces (CAM3,
-        # Collins et al. 2004, eq. 3.80 with the eq. 3.194-3.196 vertical
-        # differences): lap_p T = lap_eta T - (pi B dT/dp) lap(ln pi).
-        # Without it a stratified atmosphere at rest over terrain is heated /
-        # cooled along the sloping eta surfaces (~160 K/day at the lowest level
-        # of DCMIP 2012 2-0-0 on 72x144) and the winds grow without bound.
-        # Isothermal columns: dT/dp = 0, unchanged.
         lap_T = laplacian_cgrid(T, grid)
-        lap_lnps = laplacian_cgrid(jnp.log(p_s)[..., jnp.newaxis], grid)
-        lap_T = lap_T - cam_pi_B_dT_dp(T, p_s, sigma_coord) * lap_lnps
+        if config.A_h_pressure_surfaces:
+            # Opt-in partial correction to pressure surfaces (CAM3 eq. 3.80,
+            # see the config field): lap_p T = lap_eta T - (pi B dT/dp)
+            # lap(ln pi).  Isothermal columns: dT/dp = 0, unchanged.
+            lap_lnps = laplacian_cgrid(jnp.log(p_s)[..., jnp.newaxis], grid)
+            lap_T = lap_T - cam_pi_B_dT_dp(T, p_s, sigma_coord) * lap_lnps
         dT_dt = dT_dt + config.A_h * lap_T
 
     # --- 13a. Biharmonic hyperdiffusion (optional) ---
