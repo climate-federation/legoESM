@@ -4747,6 +4747,156 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 # Runner: DCMIP Transport
 # ===========================================================================
 
+# DCMIP 1-3 acceptance criteria (codex-voted user decision 2026-11-24):
+# thresholds of the per-row audit below.
+_DCMIP13_CLOSURE_TOL = 1.0e-6    # max |continuity residual| * period / dp
+_DCMIP13_UNIFORM_TOL = 1.0e-12   # max |q - 1| after one step from q = 1
+_DCMIP13_MASS_TOL = 1.0e-12      # |global tracer mass rel change| (RULE 0)
+_DCMIP13_CROSS_TOL = 0.5         # cloud height shift / terrain shift under it
+_DCMIP13_TERRAIN_MIN_M = 50.0    # terrain shift below which crossing is untested
+
+
+def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
+                   snapshots, to_grid, area, dt, wind_geo_fn, period_s, mass_samples=()):
+    """DCMIP 1-3 acceptance criteria with the row's own discrete fluxes.
+
+    Returns ``(notes, failed)``.  The analytic 1-3 atmosphere has ``p_s =
+    p0 exp(-z_s/H)`` and ``z = z_s - H ln(sigma)``; its flow is horizontal
+    at fixed HEIGHT, so tracers must cross sigma surfaces over the terrain.
+
+    * local air-mass closure: the core's own horizontal flux divergence of
+      ``dp = p_s dsigma`` plus the analytic vertical mass flux ``p_s
+      sigma_dot``; reported as ``max |residual| * period / dp`` (the
+      relative layer-mass drift a flux-form model on these fluxes would
+      accumulate).  MPAS (continuity-derived flux): closed by construction.
+    * uniform-tracer preservation: one model step from q = 1 (a round-off
+      check: an advective or flux-form scheme keeps q = 1 exactly).
+    * global tracer conservation: ``sum area p_s dsigma q`` (MPAS: its own
+      prognostic ``dp``, the row's mass[q dp] line).
+    * terrain crossing: q1-weighted mean height ``z`` of the cloud and mean
+      terrain ``z_s`` under it at every saved snapshot; at the snapshot of
+      largest terrain shift the ratio (cloud height shift / terrain shift)
+      is ~0 when the cloud keeps its height (crosses sigma surfaces, the
+      DCMIP design) and ~1 when it follows sigma surfaces."""
+    from tests.test_cases.dcmip_transport import _H, _mountain_height, _p0
+    notes, failed = [], []
+    if tc.grid_type == "icosahedral":
+        lon, lat = grid.lonCell, grid.latCell
+    else:
+        lon, lat = grid.lon2d, grid.lat2d
+    zs = np.asarray(_mountain_height(lon, lat), np.float64)
+    ps = _p0 * np.exp(-zs / _H)
+    dsig = np.asarray(sigma_coord.dsigma, np.float64)
+    sig = np.asarray(sigma_coord.sigma_full, np.float64)
+    w = np.asarray(area, np.float64)[..., None] * ps[..., None] * dsig
+
+    # local air-mass closure
+    if tc.grid_type == "icosahedral":
+        notes.append("air-mass closure: by construction (continuity-derived flux)")
+    else:
+        dp = jnp.asarray(ps[..., None] * dsig)
+        if tc.grid_type == "latlon":
+            from legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon import (
+                _uface_coords, _vface_coords)
+            from legoesm.core.operators_fv_latlon_3d import (
+                cgrid_fv_flux_divergence_latlon_3d)
+            lon_u, lat_u = _uface_coords(grid)
+            u_int = wind_geo_fn(0.0, lon_u, lat_u, sigma_coord)[0]
+            u_face = jnp.concatenate([u_int, u_int[:, 0:1]], axis=1)
+            lon_v, lat_v = _vface_coords(grid)
+            v_face = wind_geo_fn(0.0, lon_v, lat_v, sigma_coord)[1]
+            neg_div = cgrid_fv_flux_divergence_latlon_3d(dp, u_face, v_face, grid)
+        else:
+            from legoesm.grids.gaussian import (
+                sh_analysis_dmu_3d, sh_analysis_oc2_3d, sh_synthesis_3d)
+            u, v, _ = wind_geo_fn(0.0, grid.lon2d, grid.lat2d, sigma_coord)
+            cosl = grid.cos_lat[:, None, None]
+            ims = 1j * grid.ms.astype(jnp.float64)[:, None] / grid.radius
+            div_hat = (ims * sh_analysis_oc2_3d(grid, dp * u * cosl)
+                       - sh_analysis_dmu_3d(grid, dp * v * cosl) / grid.radius)
+            neg_div = -sh_synthesis_3d(grid, div_hat)
+        sd = np.asarray(wind_geo_fn(0.0, lon, lat, sigma_coord)[2], np.float64)
+        resid = np.asarray(neg_div, np.float64) - ps[..., None] * (sd[..., 1:] - sd[..., :-1])
+        drift = float(np.max(np.abs(resid) / np.asarray(dp)) * period_s)
+        notes.append(f"air-mass closure drift {drift:.3e}")
+        if not drift <= _DCMIP13_CLOSURE_TOL:          # NaN fails too
+            failed.append(f"local air-mass closure (drift {drift:.3e} > {_DCMIP13_CLOSURE_TOL:g})")
+
+    # uniform-tracer preservation (one step from q = 1)
+    if tc.grid_type == "spectral":
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_spectral import (
+            spectral_tracer_state)
+        q_grid = to_grid(state_init).tracers.data
+        st_u = model._truncate(spectral_tracer_state(grid, jnp.ones_like(q_grid)))
+    else:
+        st_u = state_init._replace(tracers=state_init.tracers.replace(
+            data=jnp.ones_like(state_init.tracers.data)))
+    q_u = np.asarray(to_grid(model.step(st_u, dt)).tracers.data, np.float64)
+    unif = float(np.max(np.abs(q_u - 1.0))) if np.all(np.isfinite(q_u)) else float("nan")
+    notes.append(f"uniform-tracer max|q-1| {unif:.3e}")
+    if not unif <= _DCMIP13_UNIFORM_TOL:              # NaN fails too
+        failed.append(f"uniform-tracer preservation (max|q-1| {unif:.3e})")
+
+    # global tracer conservation with the 1-3 air mass (non-MPAS rows)
+    if tc.grid_type != "icosahedral":
+        q0 = np.asarray(to_grid(state_init).tracers.data, np.float64)
+        q1 = np.asarray(to_grid(state_final).tracers.data, np.float64)
+        m0 = (w[..., None] * q0).reshape(-1, q0.shape[-1]).sum(axis=0)
+        m1 = (w[..., None] * q1).reshape(-1, q1.shape[-1]).sum(axis=0)
+        rel = np.where(m0 != 0, (m1 - m0) / np.where(m0 != 0, m0, 1.0), np.nan)
+        # every tracer at every diagnostic sample (mass_samples, recorded
+        # during the run), against the initial masses: a drift that cancels
+        # by the end of the rotation is caught; non-finite -> NaN -> failure
+        samp = np.asarray(list(mass_samples), np.float64).reshape(-1, m0.size)
+        if samp.size and np.all(m0 != 0) and np.all(np.isfinite(samp)):
+            dev = np.abs(samp / m0 - 1.0)
+            k_w, t_w = np.unravel_index(int(np.argmax(dev)), dev.shape)
+            peak, peak_txt = float(dev[k_w, t_w]), (
+                f"peak over {samp.shape[0]} samples q{t_w + 1} {dev[k_w, t_w]:.3e} "
+                f"(sample {k_w})")
+        else:
+            peak, peak_txt = float("nan"), "peak over samples unavailable"
+        worst = float(np.max(np.abs(np.append(rel, peak))))
+        notes.append("mass[q p_s(z_s) dsigma] rel " + ", ".join(
+            f"q{i + 1} {r:+.3e}" for i, r in enumerate(rel)) + ", " + peak_txt)
+        if not worst <= _DCMIP13_MASS_TOL:            # NaN (zero mass) fails too
+            failed.append(f"global tracer conservation (max |rel| {worst:.3e})")
+
+    # terrain crossing from the saved q1 snapshots
+    z = zs[..., None] - _H * np.log(sig)
+    zbar, zsbar = [], []
+    for step in sorted(snapshots):
+        qq = np.asarray(snapshots[step]["q1_3d"], np.float64) * w     # signed q1 weights
+        tot = qq.sum() if qq.sum() > 0 else np.nan     # empty cloud -> non-finite
+        zbar.append(float((qq * z).sum() / tot))
+        zsbar.append(float((qq * zs[..., None]).sum() / tot))
+    dz = np.asarray(zbar) - zbar[0]
+    dzs = np.asarray(zsbar) - zsbar[0]
+    qual = np.abs(dzs) >= _DCMIP13_TERRAIN_MIN_M
+    if not np.all(np.isfinite(dz)) or not np.all(np.isfinite(dzs)):
+        notes.append("terrain crossing: non-finite cloud moments")
+        failed.append("terrain crossing (non-finite measurement)")
+    elif not qual.any():
+        notes.append("terrain crossing untested (max terrain shift under the cloud "
+                     f"{float(np.max(np.abs(dzs))):.1f} m)")
+        failed.append("terrain crossing untested")
+    else:
+        # gate at the snapshot of largest terrain shift (the ratio is noisy
+        # where the shift is small); the worst ratio over all qualifying
+        # snapshots is reported alongside
+        i = int(np.argmax(np.abs(dzs)))
+        ratio = float(dz[i] / dzs[i])
+        worst_r = float(np.max(np.abs(dz[qual] / dzs[qual])))
+        notes.append(f"terrain crossing: cloud height shift {dz[i]:.1f} m at the largest "
+                     f"terrain shift {dzs[i]:.1f} m (ratio {ratio:.3f}; 0 = keeps height, "
+                     f"1 = sigma-following; max |ratio| over {int(qual.sum())} snapshots "
+                     f"with shift >= {_DCMIP13_TERRAIN_MIN_M:g} m: {worst_r:.3f})")
+        if abs(ratio) > _DCMIP13_CROSS_TOL:
+            failed.append(f"terrain crossing (signed ratio {ratio:.3f}, |ratio| > "
+                          f"{_DCMIP13_CROSS_TOL:g}: the cloud height does not stay fixed)")
+    return notes, failed
+
+
 def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
                         radiation: str = "gray") -> tuple[str, float, str]:
     """Run DCMIP-2012 transport test cases (Tests 1-1, 1-2, 1-3).
@@ -4973,8 +5123,22 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
 
     _area_for_mean = _grid_cell_area(grid)
 
+    # DCMIP 1-3 lat-lon / spectral audit: per-tracer global mass with the
+    # 1-3 air mass (p_s(z_s) dsigma) at every diagnostic sample
+    _m13_samples: list = []
+    _w13 = None
+    if test_num == 13 and tc.grid_type in ("latlon", "spectral"):
+        from tests.test_cases.dcmip_transport import _H, _mountain_height, _p0
+        _zs13 = np.asarray(_mountain_height(grid.lon2d, grid.lat2d), np.float64)
+        _w13 = (np.asarray(_area_for_mean, np.float64)[..., None]
+                * (_p0 * np.exp(-_zs13 / _H))[..., None]
+                * np.asarray(sigma_coord.dsigma, np.float64))
+
     def scalar_fn(s):
         q = to_grid(s).tracers.data
+        if _w13 is not None:
+            qq = np.asarray(q, np.float64)
+            _m13_samples.append((_w13[..., None] * qq).reshape(-1, qq.shape[-1]).sum(axis=0))
         return {
             "q1_min": float(jnp.min(q[..., 0])),
             "q1_max": float(jnp.max(q[..., 0])),
@@ -5068,6 +5232,33 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             f"rel={(_m1[i] - _m0[i]) / _m0[i]:+.6e}"
             if _m0[i] != 0.0 else f"q{i + 1} M0=0 M1={_m1[i]:.15e}"
             for i in range(n_tracers)))
+    status = "PASS" if ok else "FAIL"
+    if test_num == 13 and tc.grid_type in ("latlon", "spectral", "icosahedral"):
+        if ok:
+            a_notes, a_failed = _dcmip13_audit(
+                tc, grid, sigma_coord, model, state_init, state_final, snapshots,
+                to_grid, _area_for_mean, dt, cfg["wind_geo"], cfg["period"] * 86400.0,
+                _m13_samples)
+            notes_parts += a_notes
+            # acceptance criteria gate the lat-lon / spectral rows only; the
+            # MPAS variant's numbers are information about the variant
+            if a_failed and tc.grid_type != "icosahedral":
+                notes_parts.append("CRITERION FAIL: " + "; ".join(a_failed))
+        else:
+            notes_parts.append("1-3 audit not run: the run failed")
+        if tc.grid_type == "icosahedral":
+            # codex-voted user decision 2026-11-24: the official MPAS 1-3
+            # row is UNSUPPORTED with the current discrete fluxes (whatever
+            # the variant's outcome); the run is kept only as the labelled
+            # sigma-following variant, excluded from cross-grid comparisons
+            status = "SKIP"
+            if not ok:
+                notes_parts.append("the sigma-following variant run FAILED")
+            notes_parts.insert(0, (
+                "UNSUPPORTED as DCMIP 1-3: the continuity-derived vertical air-mass "
+                "flux keeps the tracers on sigma surfaces, so the row cannot test "
+                "terrain crossing; below: '1-3 sigma-following variant' (NOT DCMIP 1-3, "
+                "not comparable with published 1-3 errors)"))
     notes = ", ".join(notes_parts)
 
     # --- Diagnostics output ---
@@ -5083,12 +5274,15 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
                             else model.config.vertical_scheme
                             if tc.grid_type == "icosahedral"
                             else cfg["vertical"]),
-        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "status": status, "notes": notes,
         "wall_time": f"{wall:.1f}s"},
         diag=diag)  # iter-99: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir,
-        f"DCMIP transport {test_num} {tc.grid_type} {tc.resolution}",
+        ("DCMIP 1-3 sigma-following VARIANT (not DCMIP 1-3) "
+         f"{tc.grid_type} {tc.resolution}"
+         if test_num == 13 and tc.grid_type == "icosahedral" else
+         f"DCMIP transport {test_num} {tc.grid_type} {tc.resolution}"),
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=field_specs_2d,
         field_3d_key="q1_3d", level_values=level_values,
@@ -5096,7 +5290,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         scalar_units={"q1_min": "kg/kg", "q1_max": "kg/kg",
                       "q1_mean": "kg/kg"})
 
-    return "PASS" if ok else "FAIL", wall, notes
+    return status, wall, notes
 
 
 # ===========================================================================
@@ -6329,6 +6523,10 @@ def _collect_grid_results_atmosphere(
                     if ":" in line:
                         k, v = line.split(":", 1)
                         metadata[k.strip()] = v.strip()
+            if metadata.get("status") == "SKIP":
+                # e.g. the MPAS DCMIP 1-3 sigma-following variant: its
+                # artifacts never enter a cross-grid comparison
+                continue
             grid_results[grid_dir.name] = {
                 "timeseries": timeseries_df,
                 "snapshots":  snapshots,
