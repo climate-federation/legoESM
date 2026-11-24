@@ -8,9 +8,8 @@ relative change of dry mass and total water (vapour + condensate slots 1-5).
 Acceptance (user-proposed, recorded in the commit): theta', rho' <= 1e-4 and
 u, w <= 1e-3 relative RMS after 1 h of the RCEMIP1 deck; and (voted 3-0) the
 budgets: |total-water difference| <= 4e-8 (the previous mixed result, the
-user's bar) and |dry-mass difference| <= 1e-11. ``--run-precision mixed``
-evaluates the run's budgets with rho_ref / dz as the mixed model stores them
-(fp32), summed in fp64.
+user's bar) and |dry-mass difference| <= 1e-11. Both runs' budgets use the
+same fp64 geometry: the metric the bar was measured with (vote B13').
 
     python scripts/validate/crm_mixed_precision_accuracy.py REF_DIR RUN_DIR \
         --nlev 64 --dx 4000
@@ -46,12 +45,9 @@ def budgets(ckpt, rho_ref: np.ndarray, dz: np.ndarray) -> dict:
             "water": float((rho * water * dz).sum())}
 
 
-def compare(ref, run, rho_ref, dz, run_geometry=None) -> dict:
-    """``run_geometry=(rho_ref, dz)`` for the run when it stores its own
-    (e.g. fp32 in mixed precision); default: the reference geometry."""
+def compare(ref, run, rho_ref, dz) -> dict:
     out = {k: relative_rms(run[k], ref[k]) for k in ("u", "v", "w", "theta_prime", "rho_prime")}
-    b_ref = budgets(ref, rho_ref, dz)
-    b_run = budgets(run, *(run_geometry or (rho_ref, dz)))
+    b_ref, b_run = budgets(ref, rho_ref, dz), budgets(run, rho_ref, dz)
     for k in b_ref:
         out[f"{k}_rel_diff"] = (b_run[k] - b_ref[k]) / b_ref[k]
     finite = all(np.isfinite(np.asarray(run[k], np.float64)).all()
@@ -78,9 +74,6 @@ def main(argv=None) -> int:
     p.add_argument("--nlev", type=int, required=True)
     p.add_argument("--dx", type=float, required=True)
     p.add_argument("--T-sfc", type=float, default=300.0)
-    p.add_argument("--run-precision", choices=["float64", "mixed"], default="float64",
-                   help="mixed: the run's budgets use rho_ref/dz rounded to fp32, "
-                        "as the mixed model stores them (summed in fp64).")
     a = p.parse_args(argv)
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "run"))
     import jax
@@ -90,12 +83,9 @@ def main(argv=None) -> int:
                             "--T-sfc", str(a.T_sfc), "--precision", "float64"])
     hc, _, _ = rcp.build_rcemip_height_coord(rargs, rcp.P_SFC_RCEMIP, np.float64)
     name = _last_common(a.ref_dir, a.run_dir)
-    geo = (np.asarray(hc.rho_ref, np.float64), np.asarray(hc.dz, np.float64))
-    run_geo = (tuple(g.astype(np.float32).astype(np.float64) for g in geo)
-               if a.run_precision == "mixed" else None)
     res = compare(np.load(a.ref_dir / "checkpoints" / name),
-                  np.load(a.run_dir / "checkpoints" / name), *geo,
-                  run_geometry=run_geo)
+                  np.load(a.run_dir / "checkpoints" / name),
+                  np.asarray(hc.rho_ref, np.float64), np.asarray(hc.dz, np.float64))
     res["checkpoint"] = name
     t_ref = float(np.load(a.ref_dir / "checkpoints" / name)["t_s"])
     t_run = float(np.load(a.run_dir / "checkpoints" / name)["t_s"])

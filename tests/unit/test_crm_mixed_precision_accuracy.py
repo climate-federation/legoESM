@@ -71,9 +71,3 @@ def test_budget_violations_fail_even_with_matching_fields():
     res = acc.compare(ref, shifted, rho_ref, dz)
     assert abs(res["dry_mass_rel_diff"]) > 1e-11 and not res["pass"]
 
-
-def test_run_geometry_is_used_for_the_run_budgets():
-    rho_ref, dz = np.array([1.0, 0.8, 0.6]), np.array([100.0, 100.0, 100.0])
-    ref = _ckpt()
-    res = acc.compare(ref, ref, rho_ref, dz, run_geometry=(rho_ref * 2.0, dz))
-    assert res["dry_mass_rel_diff"] > 0.5
