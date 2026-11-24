@@ -109,7 +109,8 @@ def fetch(out):
         t2h = dh["2m_temperature"].sel(time=stamps(y)[e]).sel(**_BOX).transpose(
             "time", "latitude", "longitude").values
         check_alignment(six, {v: h[v].values for v in _HOURLY}, t2h, e)
-        np.savez(fh, time=six["time"], **{v: h[v].values for v in _HOURLY})
+        np.savez(fh, time=six["time"], src=_WB2_1H, t2_ends=t2h,
+                 **{v: h[v].values for v in _HOURLY})
         print(f"# saved {fh}", flush=True)
     st = ds["land_sea_mask"].sel(**_BOX).transpose("latitude", "longitude").load()
     np.savez(os.path.join(out, "static.npz"), lsm=st.values,
@@ -121,16 +122,24 @@ def check_alignment(six, hourly, t2h, ends):
     d = np.abs(t2h - six["2m_temperature"][ends]).max()
     assert d < _ALIGN_TOL_K, f"1h vs 6h 2 m temperature differ by {d} K at December ends"
     a, b = hourly["sea_surface_temperature"], six["sea_surface_temperature"]
+    assert a.shape == b.shape, (a.shape, b.shape)
     m = np.isfinite(a) & np.isfinite(b)
+    assert m.any(), "no SST cell finite in both stores"
     d = np.abs(a - b)[m].max()
     assert d < _ALIGN_TOL_K, f"1h vs 6h SST differ by {d} K"
 
 
 def load_year(out, y):
-    """6-hourly fields with dewpoint and SST replaced by the hourly store's."""
+    """6-hourly fields with dewpoint and SST replaced by the hourly store's.
+
+    The alignment guard is re-run on load, so a cached hourly file that does not
+    match the 6-hourly cache it sits beside is refused.
+    """
     f, fh = np.load(os.path.join(out, f"era5_dec{y}.npz")), \
         np.load(os.path.join(out, f"era5_dec{y}_1h.npz"))
     assert np.array_equal(f["time"], fh["time"]), y
+    assert str(fh["src"]) == _WB2_1H, (y, str(fh["src"]))
+    check_alignment(f, fh, fh["t2_ends"], [0, -1])
     return {**{k: f[k] for k in f.files}, **{v: fh[v] for v in _HOURLY}}
 
 

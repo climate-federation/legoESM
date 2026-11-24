@@ -47,3 +47,19 @@ def test_alignment_guard_refuses_offset_hourly_store():
         mod.check_alignment(six, {"sea_surface_temperature": sst1}, t2h + 4.0, ends)
     with pytest.raises(AssertionError, match="SST"):
         mod.check_alignment(six, {"sea_surface_temperature": sst1 + 0.01}, t2h, ends)
+
+
+def test_stale_hourly_cache_is_refused_on_load(tmp_path):
+    import pytest
+    six = {"time": np.arange(124), "2m_temperature": np.full((124, 2, 2), 290.0),
+           "sea_surface_temperature": np.full((124, 2, 2), 300.0)}
+    np.savez(tmp_path / "era5_dec1997.npz", **six)
+    hour = dict(time=six["time"], src=mod._WB2_1H, t2_ends=six["2m_temperature"][[0, -1]],
+                **{"2m_dewpoint_temperature": np.full((124, 2, 2), 295.0),
+                   "sea_surface_temperature": np.full((124, 2, 2), 300.0)})
+    np.savez(tmp_path / "era5_dec1997_1h.npz", **hour)
+    assert mod.load_year(str(tmp_path), 1997)["2m_dewpoint_temperature"][0, 0, 0] == 295.0
+    hour["sea_surface_temperature"] = hour["sea_surface_temperature"] + 10.0
+    np.savez(tmp_path / "era5_dec1997_1h.npz", **hour)
+    with pytest.raises(AssertionError, match="SST"):
+        mod.load_year(str(tmp_path), 1997)
