@@ -76,6 +76,14 @@ VOTE B = A, voted 3-0 (codex/GLM/Claude), 2026-11-24: mask the large
 quadratic root before division when its soft-min weight underflows (dtype
 tiny), with exact winner selection at the hard limit and no floor on a.
 
+At finite alive sharpness, bsort interprets Knuth's zero-rate ``-1``
+artifact as zero mixing and omits the inactive TKE reciprocal there.
+Otherwise the host's zero-rate top row can produce negative entrainment,
+an overflowing mixing exponential, and ``-inf + inf`` in plume water.
+HARD and non-bsort retain their historical arithmetic; the non-bsort
+alphturb path shares this exposure. Flux boundaries and convergence are
+unchanged, so column water/heat conservation retains the same flux budget.
+
 User-supplied compute-node finding (2026-11-24): combined bsort+alphturb=3
 hard limit matches compiled CAM to 3.1e-9 per column, not 1e-10. A one-ulp
 input perturbation moves upa by up to 1.45e-9 in those same columns, consistent
@@ -415,6 +423,12 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing(),
     def step(carry, xk):
         w, thl, qt, thv, u, v = carry[:6]
         dz, qt_e, thl_e, thv_e, u_e, v_e, p_n, iex_n, tke_k, ent_k = xk[:10]
+        # The host's zero-rate top row gives Knuth's k-1 = -1. With
+        # smooth survival this becomes negative entrainment: exp(-entn*
+        # eturb*dz) overflows, and qtn adds -inf + inf. A zero-rate
+        # Poisson draw is zero; retain historical HARD/off arithmetic.
+        if bsort and not math.isinf(sm.alive):
+            ent_k = jnp.where(ent_k == -1, 0.0, ent_k)
         mix = ent_k * ENT0 / dz
         entn = mix
         qtn, thln, wn = qt, thl, w
@@ -433,6 +447,10 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing(),
                 # CAM uses the incoming upw(k,i), never the averaged trial wn.
                 # Preserve main's mask for dead (w = 0) plume lanes.
                 w_ok = w > 0.0
+                # Discrete zero mixing makes eturb inactive. Avoid its
+                # tiny-w reciprocal in reverse mode as well as forward.
+                if bsort and not math.isinf(sm.alive):
+                    w_ok = w_ok & (mix != 0.0)
                 eturb = jnp.where(w_ok, 1.0 + alphturb * jnp.sqrt(tke_k) / jnp.where(w_ok, w, 1.0), 1.0)
                 entn = entn * eturb
             entexp = jnp.exp(-entn * eturb * dz)

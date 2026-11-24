@@ -21,8 +21,8 @@ import numpy as np
 import pytest
 from jax.test_util import check_grads
 from legoesm.atmosphere.physics.turbulence.clubb_mf import (
-    HARD, NUP, MFSmoothing, bsort_choose, bsort_clip, bsort_roots,
-    buoyancy_sort_mixfrac, clubb_mf_forcing, integrate_mf, limit_bsort_area,
+    HARD, KSEED, L0, NUP, MFSmoothing, bsort_choose, bsort_clip, bsort_roots,
+    buoyancy_sort_mixfrac, clubb_mf_forcing, entrainment_draws, integrate_mf, limit_bsort_area,
 )
 from legoesm.core.smooth import expm1_over_x
 
@@ -178,6 +178,77 @@ def test_second_call_uses_first_calls_memory(fx):
         assert max(_rel_columns(np.asarray(second[k]), fx[f"ora2_{k}"])) <= TOL, k
     reset = _run(fx, HARD, 2, jnp.asarray(fx["ora1_ztopm1_in"]))
     assert np.any(np.asarray(second["upa"]) != np.asarray(reset["upa"]))
+
+
+@pytest.fixture(scope="module")
+def scm_nan_column():
+    """BOMEX SCM step 1, first host call; draws built exactly as the host."""
+    with np.load(FIXTURE.with_name("clubb_mf_bsort_alphturb_scm_nan_column.npz")) as fx:
+        c = {k[2:]: jnp.asarray(fx[k]) for k in fx.files if k.startswith("c_")}
+        memory = jnp.asarray(fx["ztopm1"])
+    assert all(np.all(np.isfinite(np.asarray(v))) for v in (*c.values(), memory))
+    nzt = c["dzt"].shape[0]
+    lam = (c["dzt"] / L0).at[nzt - 1].set(0.0)[:, None] * jnp.ones((1, NUP))
+    u = c["u"]
+    draws = entrainment_draws(lam, jnp.stack([u[0], u[KSEED], u[1 + KSEED], u[2 + KSEED]]))
+    np.testing.assert_array_equal(np.asarray(draws[-1]), -np.ones(NUP, dtype=np.int32))
+    assert np.all(np.asarray(draws[:-1]) >= 0)
+    return c, draws, memory
+
+
+@pytest.fixture(scope="module")
+def before_zero_rate_fix():
+    """Revert just this fix for HARD bit comparison and a planted NaN control.
+
+    Both deletions are required, and the smooth control must actually fail;
+    this is not a second call of the same, fixed implementation.
+    """
+    source = (REPO / SOURCE).read_text()
+    for guard in (
+        "        if bsort and not math.isinf(sm.alive):\n"
+        "            ent_k = jnp.where(ent_k == -1, 0.0, ent_k)\n",
+        "                if bsort and not math.isinf(sm.alive):\n"
+        "                    w_ok = w_ok & (mix != 0.0)\n",
+    ):
+        assert source.count(guard) == 1
+        source = source.replace(guard, "")
+    assert source != (REPO / SOURCE).read_text()
+    mod = types.ModuleType("clubb_mf_before_zero_rate_fix")
+    exec(compile(source, str(REPO / SOURCE), "exec"), mod.__dict__)
+    return mod
+
+
+@pytest.mark.parametrize("sm", [HARD._replace(alive=MFSmoothing().alive), MFSmoothing()],
+                         ids=["alive_only", "default"])
+def test_scm_zero_rate_top_values_and_thl_gradient_are_finite(scm_nan_column, sm):
+    c, draws, memory = scm_nan_column
+
+    def loss(thl):
+        out = integrate_mf(dict(c, thl=thl), draws, memory, sm, alphturb=3.0, bsort=True)
+        return jnp.sum(out["qtflx"]), out
+
+    (value, out), grad = jax.jit(jax.value_and_grad(loss, has_aux=True))(c["thl"])
+    for name, x in dict(out, loss=value, thl_grad=grad).items():
+        assert np.all(np.isfinite(np.asarray(x))), name
+    assert np.any(np.asarray(grad) != 0.0), "detached regression observable"
+    for field in ("qtflx", "thlflx"):
+        np.testing.assert_array_equal(np.asarray(out[field])[[0, -1]], 0.0)
+
+
+def test_scm_zero_rate_fix_preserves_hard_bits_and_control_fails(scm_nan_column, before_zero_rate_fix):
+    c, draws, memory = scm_nan_column
+    old = before_zero_rate_fix
+    before = jax.jit(lambda: old.integrate_mf(c, draws, memory, old.HARD, alphturb=3.0, bsort=True))()
+    after = jax.jit(lambda: integrate_mf(c, draws, memory, HARD, alphturb=3.0, bsort=True))()
+    assert before.keys() == after.keys()
+    for field in before:
+        a, b = np.asarray(before[field]), np.asarray(after[field])
+        assert np.all(np.isfinite(a)), field
+        assert a.shape == b.shape and a.dtype == b.dtype
+        assert a.tobytes() == b.tobytes(), field
+    broken = jax.jit(lambda: old.integrate_mf(
+        c, draws, memory, old.MFSmoothing(), alphturb=3.0, bsort=True))()
+    assert not np.all(np.isfinite(np.asarray(broken["qtflx"]))), "planted original defect did not fire"
 
 
 def _gaps(fx):
