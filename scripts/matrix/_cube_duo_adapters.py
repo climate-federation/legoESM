@@ -744,3 +744,492 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
         temperature=temperature, winds=winds, lon_deg=lon_deg,
         lat_deg=lat_deg, area=area, km=km, level_values=level_values,
         note=note)
+
+
+# ---------------------------------------------------------------------------
+# DCMIP 2012 prescribed-wind tracer transport (tests 1-1 / 1-2)
+# ---------------------------------------------------------------------------
+
+#: The explicitly selected duo vertical table of the DCMIP 2012 transport
+#: rows (Appendix F.3 L30, fixed lid at ~25.5 kPa).  CAM6 L32 stays the
+#: default of every other duo row.
+DUO_DCMIP_TRANSPORT_ETA = "dcmip2012_l30"
+DUO_DCMIP_TRANSPORT_KM = 30
+
+
+class _DgridProjection:
+    """Geographic winds -> duo D-grid covariant edge components, with the
+    certified ``analytic_swcore_state`` recipe (unit tangent at the edge's
+    great-circle midpoint dotted with the local east/north vectors,
+    ``get_unit_vect2`` / ``mid_pt_sphere`` / ``get_latlon_vector``), the
+    geometry precomputed ONCE so a time-dependent wind is one JAX
+    multiply-add per step.  Only the compute-window edges are written
+    (``u[sl, ng:ng+n+1]``, ``v[ng:ng+n+1, sl]``, as every duo IC builder);
+    the halos are filled by the step's own duo exchange."""
+
+    def __init__(self, ctx_np):
+        import jax.numpy as jnp
+        from legoesm.grids.fv3_native_gridstruct import (
+            _get_unit_vect2, _latlon_vectors)
+        from legoesm.grids.fv3_native_metrics import mid_pt_sphere
+        n, ng = ctx_np["n"], ctx_np["ng"]
+        self.n, self.ng = n, ng
+        sl = slice(ng, ng + n)
+        se = slice(ng, ng + n + 1)
+        acc = {k: [] for k in ("ulon", "ulat", "uex", "uey",
+                               "vlon", "vlat", "vex", "vey")}
+        for gs in ctx_np["gs6"]:
+            ll = np.stack([gs["grid_lon"], gs["grid_lat"]], axis=-1)
+            for name, a, b, win in (("u", ll[:-1, :], ll[1:, :], (sl, se)),
+                                    ("v", ll[:, :-1], ll[:, 1:], (se, sl))):
+                e = _get_unit_vect2(a, b)
+                mid = mid_pt_sphere(a, b)
+                ex, ey = _latlon_vectors(mid)
+                acc[name + "lon"].append(mid[..., 0][win])
+                acc[name + "lat"].append(mid[..., 1][win])
+                acc[name + "ex"].append(np.einsum("...i,...i", e, ex)[win])
+                acc[name + "ey"].append(np.einsum("...i,...i", e, ey)[win])
+        for k, v in acc.items():
+            setattr(self, k, jnp.asarray(np.stack(v), dtype=jnp.float64))
+
+    def __call__(self, geo_fn, u_tmpl, v_tmpl):
+        """``geo_fn(lon, lat) -> (u_east, v_north)`` each ``(..., km)``;
+        returns D-grid ``(u6, v6)`` shaped like the templates, compute
+        edges filled, halos zero."""
+        import jax.numpy as jnp
+        n, ng = self.n, self.ng
+        ue, vn = geo_fn(self.ulon, self.ulat)
+        uc = (ue * self.uex[..., None] + vn * self.uey[..., None])
+        ue, vn = geo_fn(self.vlon, self.vlat)
+        vc = (ue * self.vex[..., None] + vn * self.vey[..., None])
+        u6 = jnp.zeros_like(u_tmpl).at[:, ng:ng + n, ng:ng + n + 1, :].set(
+            uc.astype(u_tmpl.dtype))
+        v6 = jnp.zeros_like(v_tmpl).at[:, ng:ng + n + 1, ng:ng + n, :].set(
+            vc.astype(v_tmpl.dtype))
+        return u6, v6
+
+
+def tangent_gradient_sixface(f, X, radius):
+    """Tangent-plane gradient [per m] of cell-centre fields on the six duo
+    faces: ``f`` (6, n, n[, K]), ``X`` (6, n, n, 3) unit position vectors.
+    Per face: index derivatives (``np.gradient``: centred inside the face,
+    one-sided at its edges -- a diagnostic, no cross-seam stencil) of f and
+    of X, then per cell the 3x3 solve ``g . dX/di = df/di``,
+    ``g . dX/dj = df/dj``, ``g . X = 0``; divided by ``radius``.  Returns
+    (6, n, n[, K], 3)."""
+    f = np.asarray(f, dtype=np.float64)
+    extra = f.shape[3:]
+    fk = f.reshape(6, f.shape[1], f.shape[2], -1)
+    g = np.empty(fk.shape + (3,))
+    for t in range(6):
+        dfi, dfj = np.gradient(fk[t], axis=(0, 1))          # (n, n, K)
+        dXi = np.gradient(X[t], axis=0)
+        dXj = np.gradient(X[t], axis=1)
+        A = np.stack([dXi, dXj, X[t]], axis=-2)              # (n, n, 3, 3)
+        b = np.stack([dfi, dfj, np.zeros_like(dfi)], -1)     # (n, n, K, 3)
+        Ainv = np.linalg.inv(A)                              # (n, n, 3, 3)
+        g[t] = np.einsum("ijab,ijkb->ijka", Ainv, b)
+    return g.reshape(f.shape + (3,)) / radius
+
+
+def interface_pressure_advection(u, v, pe, X, e_east, e_north, radius):
+    """``V . grad(pe)`` [Pa/s] at the interior interfaces: ``u``, ``v``
+    (6, n, n, km) cell-centre geographic winds averaged to the interior
+    interfaces, ``pe`` (6, n, n, km-1) the interface pressures,
+    ``tangent_gradient_sixface`` for the gradient, projected on the local
+    east/north unit vectors (6, n, n, 3)."""
+    g = tangent_gradient_sixface(pe, X, radius)
+    ui = 0.5 * (u[..., 1:] + u[..., :-1])
+    vi = 0.5 * (v[..., 1:] + v[..., :-1])
+    return (ui * np.einsum("fijkx,fijx->fijk", g, e_east)
+            + vi * np.einsum("fijkx,fijx->fijk", g, e_north))
+
+
+def build_duo_dcmip_transport(n: int, *, wind_geo, init_latlon, sigma_coord,
+                              n_tracers: int, dt: float,
+                              n_sub: int | None = None,
+                              period_s: float | None = None,
+                              courant_target: float = 0.8):
+    """DCMIP 2012 1-1 / 1-2 prescribed-wind transport through FV3 duo's OWN
+    tracer machinery, composed from the public duo phases (adapter only,
+    the shallow-water case-1 precedent; user decision Q5-A).  Per outer
+    step of ``dt`` (winds frozen at the step MID-time ``t + dt/2``):
+
+    1. DCMIP ``(u, v)`` at the D-edge midpoints of every level (the
+       ``sigma_coord`` reference levels, as every other grid's row),
+       projected onto the edge tangents (:class:`_DgridProjection`);
+    2. duo entry exchange (``exchange_state_halos_3d``: delp/pt, D winds);
+    3. ``csw_phase_3d`` at ``dt2 = 0`` -- the pure D->C interpolation,
+       no half-step advance, no ``p_grad_c`` (frozen winds);
+    4. ``n_sub`` x ``dsw_transport_phase_3d(dt/n_sub, flux_cap)`` (its
+       own post-``p_grad_c`` exchanges, ``d_sw1`` accumulating the mass /
+       Courant capacitors, barrier 1, ``d_sw2`` delp update), with the
+       post-``d_sw`` delp exchange between sub-steps, as the acoustic loop;
+    5. ``tracer_2d_1l_sixface`` on the accumulated capacitors with
+       ``dp1`` = delp before step 4 (fv_dynamics.F90:472-478 / :534);
+    6. Lagrangian -> Eulerian: the Lagrangian interfaces ``pe1 = ptop +
+       cumsum(delp)``, ``ps = pe1[km]`` (p_s EVOLVES with the discrete
+       column mass divergence, user decision Q7-b, never reset), target
+       ``pe2 = ak + bk ps``; tracers remapped with the certified FV3
+       kernel (:func:`legoesm.grids.vertical.remap_tracers_fv3_pressure`,
+       map1_q2 kord_tr 9), delp := diff(pe2).
+
+    VERTICAL MOTION (user decision Q6-a): implicit -- the horizontal mass
+    flux divergence moves the Lagrangian layers and the remap returns
+    them to the eta levels, FV3's own mechanism.  The DCMIP omega /
+    sigma_dot is NOT used; ``effective_omega()`` compares, for the first
+    and the last ACCEPTED step, two estimates of the implicit vertical
+    motion with the analytic ``p0 * sigma_dot`` (DCMIP's omega at the
+    eta reference interfaces, cell centres, step mid-time): (i) the
+    fixed-cell Lagrangian interface tendency ``(pe_lag - pe_eul) / dt``
+    (``*_fixed_cell`` keys) and (ii) the MATERIAL omega, (i) plus the
+    advection of interface pressure along the eta surface,
+    ``V . grad(pe_eul)`` (= bk V . grad(p_s); unsuffixed keys;
+    ``rms_interface_advection`` its size).
+
+    ``n_sub`` (None = automatic): d_sw sub-steps per outer step.  The
+    automatic choice is ``ceil(Cmax / courant_target)`` with ``Cmax`` the
+    largest ``|V| dt / min(dx, dy)`` of the prescribed winds over the cell
+    centres at every 4th step mid-time of ``[0, period_s]``; the realised
+    per-sub-step C-grid Courant number is checked every step and >= 1 is
+    refused; in automatic mode an over-Courant step is recomputed with
+    more sub-steps before its remap (see ``step``).
+
+    pt rides as a uniform 300 K passenger (the DCMIP isothermal
+    atmosphere); w = 0; hydrostatic deck; ``nq`` passive tracers.
+    """
+    import jax
+    import jax.numpy as jnp
+    if not jax.config.jax_enable_x64:
+        # the duo lane is fp64-only; refuse rather than flip the process'
+        # precision (the matrix sets it from JAX_ENABLE_X64 at import)
+        raise RuntimeError("duo DCMIP transport needs JAX_ENABLE_X64=1")
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, FV3DuoDynamicsModel, duo_sw_deck)
+    from legoesm.core.fv3_acoustic_3d import exchange_state_halos_3d
+    from legoesm.core.fv3_cgrid_phase_3d import csw_phase_3d
+    from legoesm.core.fv3_dsw_phase_3d import dsw_transport_phase_3d
+    from legoesm.core.fv3_tracer2d import (
+        alloc_flux_capacitors, check_nsplt_schedule, tracer_2d_1l_sixface)
+    from legoesm.grids.factory import create_fv3_duo_grid
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_RADIUS_M, analytic_swcore_state)
+    from legoesm.grids.vertical import (
+        dcmip2012_transport_eta_table, remap_tracers_fv3_pressure)
+
+    km = DUO_DCMIP_TRANSPORT_KM
+    if not (np.isfinite(dt) and dt > 0):
+        raise ValueError(f"dt must be finite and positive, got {dt!r}")
+    if int(sigma_coord.n_levels) != km:
+        raise ValueError(f"DCMIP duo transport runs L{km}; the row's sigma "
+                         f"coordinate has {sigma_coord.n_levels} levels")
+    grid = create_fv3_duo_grid(n)
+    cfg = FV3DuoConfig(km=km, eta=DUO_DCMIP_TRANSPORT_ETA, hydrostatic=True)
+    model = FV3DuoDynamicsModel(grid, cfg)
+    ak, bk, ptop = (np.asarray(model.ak), np.asarray(model.bk),
+                    float(model.ptop))
+    # NO L32 leak: the model's table must be the DCMIP L30 one, and its
+    # p0 interfaces the row's sigma levels (to the latter's float32)
+    ak_ref, bk_ref, ptop_ref = dcmip2012_transport_eta_table(km)
+    if not (ak.shape == (km + 1,) and np.array_equal(ak, ak_ref)
+            and np.array_equal(bk, bk_ref) and ptop == ptop_ref):
+        raise ValueError("duo DCMIP transport: the model's eta table is not "
+                         "the DCMIP 2012 L30 table")
+    p0 = 1.0e5
+    if not np.allclose((ak + bk * p0) / p0,
+                       np.asarray(sigma_coord.sigma_half, np.float64),
+                       rtol=0, atol=1e-6):
+        raise ValueError("duo DCMIP transport: eta interfaces at p0 are not "
+                         "the row's DCMIP sigma levels")
+    deck = duo_sw_deck(nord=cfg.nord, d4_bg=cfg.d4_bg,
+                       sponge_del2_top_layers=cfg.sponge_del2_top_layers,
+                       sponge_del2_top_factor=cfg.sponge_del2_top_factor,
+                       sponge_d2_top=cfg.sponge_d2_top)
+    ctx = grid.ctx_jax
+    ctx_np = grid.ctx_np
+    ng = grid.ng
+    sl = _compute_window(ctx_np)
+
+    # template bundle (shapes/halo conventions of the lane), then the
+    # DCMIP state: ps = p0 everywhere, isothermal pt, w = 0, no wind yet
+    tmpl = model.dcmip16_initial_state(do_pert=False)
+    st0 = dict(tmpl["state"])
+    m_a = st0["delp"].shape[1]
+    delp0 = np.broadcast_to(np.diff(ak + bk * p0), (6, m_a, m_a, km)).copy()
+    st0 = {"delp": jnp.asarray(delp0),
+           "pt": jnp.full_like(st0["pt"], 300.0),
+           "w": jnp.zeros_like(st0["w"]),
+           "u": jnp.zeros_like(st0["u"]),
+           "v": jnp.zeros_like(st0["v"])}
+
+    lon_deg, lat_deg, area = duo_cell_geometry(ctx_np)
+    lon = np.radians(lon_deg)
+    lat = np.radians(lat_deg)
+    cells = SimpleNamespace(lon2d=jnp.asarray(lon.reshape(6 * n, n)),
+                            lat2d=jnp.asarray(lat.reshape(6 * n, n)),
+                            n_lat=6 * n, n_lon=n)
+    q_ic = np.asarray(init_latlon(cells, sigma_coord).tracers.data,
+                      dtype=np.float64).reshape(6, n, n, km, n_tracers)
+    q6 = np.zeros((6, n_tracers, m_a, m_a, km))
+    q6[:, :, sl, sl, :] = np.moveaxis(q_ic, -1, 1)
+
+    proj = _DgridProjection(ctx_np)
+
+    auto_sub = n_sub is None
+    if n_sub is None:
+        if period_s is None:
+            raise ValueError("n_sub=None (automatic) needs period_s")
+        dmin = min(float(np.min(np.asarray(g[k])[sl, sl]))
+                   for g in ctx_np["gs6"] for k in ("dx", "dy")
+                   if np.asarray(g[k]).ndim == 2)
+        jl, jt = jnp.asarray(lon), jnp.asarray(lat)
+        vmax = 0.0
+        for k in range(0, max(1, int(round(period_s / dt))), 4):
+            u_, v_, _ = wind_geo((k + 0.5) * dt, jl, jt, sigma_coord)
+            vmax = max(vmax, float(jnp.max(jnp.hypot(u_, v_))))
+        n_sub = max(1, int(np.ceil(vmax * dt / dmin / courant_target)))
+    n_sub = int(n_sub)
+    if n_sub < 1:
+        raise ValueError(f"n_sub must be >= 1, got {n_sub}")
+
+    def geo_at(t):
+        def fn(lo, la):
+            u, v, _ = wind_geo(t, lo, la, sigma_coord)
+            return (jnp.asarray(u, jnp.float64), jnp.asarray(v, jnp.float64))
+        return fn
+
+    # consistency gate: the precomputed projection == the certified
+    # analytic_swcore_state recipe (level 0, t = dt/2, compute edges)
+    u_chk, v_chk = proj(geo_at(0.5 * dt), st0["u"], st0["v"])
+    for t, gs in enumerate(ctx_np["gs6"][:2]):
+        def wf(ll):
+            u, v, _ = wind_geo(0.5 * dt, jnp.asarray(ll[..., 0]),
+                               jnp.asarray(ll[..., 1]), sigma_coord)
+            return np.asarray(u)[..., 0], np.asarray(v)[..., 0]
+        d = analytic_swcore_state(gs, wind_fn=wf)
+        if not (np.allclose(np.asarray(u_chk)[t, sl, ng:ng + n + 1, 0],
+                            d["u"][sl, ng:ng + n + 1], rtol=1e-10,
+                            atol=1e-10)
+                and np.allclose(np.asarray(v_chk)[t, ng:ng + n + 1, sl, 0],
+                                d["v"][ng:ng + n + 1, sl], rtol=1e-10,
+                                atol=1e-10)):
+            raise ValueError("duo DCMIP transport: D-grid projection differs "
+                             "from analytic_swcore_state")
+
+    def _dynamics(delp, t, dt_, n_sub):
+        """Steps 1-4: the d_sw mass transport; returns the Lagrangian delp,
+        the capacitors, dp1 and the realised per-sub-step Courant number.
+        The tracer kernel runs only for an ACCEPTED attempt (``step``)."""
+        u6, v6 = proj(geo_at(t + 0.5 * dt_), st0["u"], st0["v"])
+        st = {**st0, "delp": delp, "u": u6, "v": v6}
+        st = exchange_state_halos_3d(ctx, st, km, scalars=True, winds=True)
+        csw = csw_phase_3d(ctx, st, dt2=0.0, km=km, nord=2, batched=True,
+                           hydrostatic=True, remap_follows=True)
+        dp1 = st["delp"]
+        fc = alloc_flux_capacitors(n, ng, km)
+        # csw (uc/vc/divg_d, the only csw fields d_sw reads) depends on the
+        # frozen D winds only, so one c_sw serves every sub-step
+        cmax = jnp.asarray(0.0)
+        bad = jnp.asarray(False)
+        for _ in range(n_sub):
+            dsw = dsw_transport_phase_3d(ctx, st, csw, dt_ / n_sub, km,
+                                         cfg=deck, hydrostatic=True,
+                                         remap_follows=True, flux_cap=fc,
+                                         batched=True)
+            # this sub-step's own C-grid Courant numbers (increments)
+            cmax = jnp.maximum(cmax, jnp.maximum(
+                jnp.max(jnp.abs(dsw["cx"] - fc["cx"])),
+                jnp.max(jnp.abs(dsw["cy"] - fc["cy"]))))
+            fc = {k: dsw[k] for k in fc}
+            # every intermediate d_sw2 layer mass must be finite and > 0
+            dpc = dsw["delp"][:, sl, sl, :]
+            bad = bad | jnp.any(~jnp.isfinite(dpc)) | jnp.any(~(dpc > 0))
+            # post-d_sw delp/pt exchange before the next sub-step, as the
+            # acoustic loop (pt: the uniform passenger d_sw2 carries)
+            st = exchange_state_halos_3d(
+                ctx, {**st, "delp": dsw["delp"], "pt": dsw["pt"]},
+                km, scalars=True, winds=False)
+        return st["delp"], fc, dp1, cmax, bad
+
+    def _tracer(q, dp1, fc, dt_):
+        """Step 5: tracer_2d_1L on the accepted capacitors."""
+        return tracer_2d_1l_sixface(ctx, q, dp1, fc, km=km, nq=n_tracers,
+                                    hord_tr=deck.hord_tr, dt=dt_,
+                                    batched=True)
+
+    def _remap(delp, q, delp_lag, q_lag):
+        """Lagrangian -> Eulerian (step 6): p_s from the Lagrangian column,
+        tracers by the FV3 kernel, delp onto the eta levels."""
+        dpl = delp_lag[:, sl, sl, :]
+        pe1 = jnp.concatenate(
+            [jnp.full(dpl.shape[:-1] + (1,), ptop),
+             ptop + jnp.cumsum(dpl, axis=-1)], axis=-1)
+        ps = pe1[..., -1]
+        pe2 = ak + bk * ps[..., None]
+        pe2 = pe2.at[..., 0].set(ptop).at[..., -1].set(ps)
+        qc = jnp.moveaxis(q_lag[:, :, sl, sl, :], 1, -1)
+        q2 = remap_tracers_fv3_pressure(qc, pe1, pe2, kord=cfg.kord_tr)
+        q_new = q.at[:, :, sl, sl, :].set(jnp.moveaxis(q2, -1, 1))
+        delp_new = delp.at[:, sl, sl, :].set(jnp.diff(pe2, axis=-1))
+        return delp_new, q_new
+
+    def _omega_pair(delp, delp_lag, t, dt_):
+        """Implicit vertical motion of an accepted step: the Lagrangian
+        interface-pressure change at FIXED cells, (pe_lag - pe_eul)/dt, at
+        the interior interfaces [Pa/s], and the analytic p0 * sigma_dot
+        (which the transport never uses) at the cell centres, step
+        mid-time.  Also returns the cell-centre winds and the Eulerian
+        (start-of-step) interfaces pe_eul, from whose tangent-plane gradient
+        ``_omega_stats`` adds the advection of interface pressure along the
+        eta surface, V . grad(pe_eul) = bk V . grad(p_s), to form the
+        material omega.  (The step-midpoint Lagrangian surface was tried
+        and REJECTED by measurement: its slope is (dt/2) grad(omega), an
+        O(dt) artefact of the finite step -- C36 1-2: material rel err
+        1.08e-2 with it vs 2.64e-3 with pe_eul, fixed-cell 2.65e-3.)"""
+        pe_e = ptop + jnp.cumsum(delp[:, sl, sl, :], axis=-1)[..., :-1]
+        pe_l = ptop + jnp.cumsum(delp_lag[:, sl, sl, :], axis=-1)[..., :-1]
+        u, v, sd = wind_geo(t + 0.5 * dt_, jnp.asarray(lon),
+                            jnp.asarray(lat), sigma_coord)
+        return ((pe_l - pe_e) / dt_,
+                p0 * jnp.asarray(sd, jnp.float64)[..., 1:-1],
+                jnp.asarray(u, jnp.float64), jnp.asarray(v, jnp.float64),
+                pe_e)
+
+    dyn_jit = jax.jit(_dynamics, static_argnums=(2, 3))
+    tracer_jit = jax.jit(_tracer)
+    remap_jit = jax.jit(_remap)
+    omega_jit = jax.jit(_omega_pair, static_argnums=(3,))
+    cmax_seen = [0.0]
+    ns_cur = [n_sub]
+    omega_rec = {}
+    last_phase = {}
+
+    # unit position vectors of the cell centres and east/north unit vectors
+    _X = np.stack([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon),
+                   np.sin(lat)], -1)
+    _ee = np.stack([-np.sin(lon), np.cos(lon), np.zeros_like(lon)], -1)
+    _en = np.stack([-np.sin(lat) * np.cos(lon), -np.sin(lat) * np.sin(lon),
+                    np.cos(lat)], -1)
+
+    def _omega_stats(eff, ana, u, v, pe_ref, t_sample):
+        eff, ana = np.asarray(eff), np.asarray(ana)
+        u, v = np.asarray(u), np.asarray(v)
+        adv = interface_pressure_advection(u, v, np.asarray(pe_ref), _X,
+                                           _ee, _en, FV3_RADIUS_M)
+        mat = eff + adv
+        w = area[..., None] * np.ones_like(eff)
+        rms = lambda x: float(np.sqrt(np.sum(w * x * x) / np.sum(w)))  # noqa: E731
+        ra = rms(ana)
+        out = {"t_sample": t_sample, "rms_analytic": ra,
+               "rms_effective": rms(mat), "rms_effective_fixed_cell": rms(eff),
+               "rms_interface_advection": rms(adv)}
+        for key, x in (("", mat), ("_fixed_cell", eff)):
+            out["abs_rms_err" + key] = rms(x - ana)
+            out["rel_rms_err" + key] = (rms(x - ana) / ra if ra > 0
+                                        else float("nan"))
+            out["corr" + key] = (
+                float(np.corrcoef(x.ravel(), ana.ravel())[0, 1])
+                if ra > 0 and np.std(x) > 0 else float("nan"))
+        return out
+
+    def step(carry, dt_):
+        """One outer step.  The horizontal phase (steps 1-5) runs first and
+        its realised per-sub-step C-grid Courant number is checked on the
+        host BEFORE the remap: < 1 is required (d_sw's delp transport is a
+        Courant < 1 scheme).  With an explicit ``n_sub`` a violation is
+        refused; in automatic mode the horizontal phase is RECOMPUTED from
+        the same input with ``max(n_sub + 1, ceil(n_sub * C / 0.8))``
+        sub-steps (at most 3 times, then refused), never clipped, and that
+        count is kept for later steps."""
+        (delp0_, q0_), t = carry
+        dt_ = float(dt_)
+        if not (np.isfinite(dt_) and dt_ > 0):
+            raise ValueError(f"duo DCMIP transport: dt must be finite and "
+                             f"positive, got {dt_!r}")
+        ns_try = ns_cur[0]
+        for _attempt in range(4):
+            delp_lag, fc, dp1, cmax, bad = dyn_jit(delp0_, t, dt_, ns_try)
+            cmax = float(cmax)
+            ok = (not bool(bad)) and np.isfinite(cmax) and cmax < 1.0
+            if ok:
+                break
+            # rejected attempt (over-Courant, or a non-finite / non-positive
+            # intermediate d_sw2 layer mass -- its later sub-steps are then
+            # garbage and the whole attempt is discarded)
+            if not auto_sub or _attempt == 3:
+                raise RuntimeError(
+                    f"duo DCMIP transport: rejected step at t={float(t):g} s "
+                    f"(dt={dt_:g} s, n_sub={ns_try}): sub-step Courant "
+                    f"{cmax:.3f}, invalid intermediate delp={bool(bad)}; "
+                    f"refusing")
+            c_eff = cmax if (np.isfinite(cmax) and cmax >= 1.0) else 2.0
+            ns_try = max(ns_try + 1, int(np.ceil(ns_try * c_eff / 0.8)))
+        tr = tracer_jit(q0_, dp1, fc, dt_)
+        check_nsplt_schedule({"nsplt": tr["nsplt"],
+                              "nsplt_exceeded": tr["nsplt_exceeded"]})
+        delp, q = remap_jit(delp0_, q0_, delp_lag, tr["q"])
+        jax.block_until_ready((delp, q))         # remap refusals surface here
+        if not (bool(jnp.all(jnp.isfinite(q[:, :, sl, sl, :])))
+                and bool(jnp.all(jnp.isfinite(delp[:, sl, sl, :])))):
+            raise RuntimeError(f"duo DCMIP transport: non-finite tracer or "
+                               f"delp after the step at t={float(t):g} s; "
+                               f"refusing")
+        # diagnostics staged FIRST; step metadata published only for an
+        # ACCEPTED step whose diagnostics also succeeded
+        pair = jax.block_until_ready(omega_jit(delp0_, delp_lag, t, dt_))
+        if not all(bool(np.all(np.isfinite(np.asarray(x)))) for x in pair):
+            raise RuntimeError(f"duo DCMIP transport: non-finite omega "
+                               f"diagnostic at t={float(t):g} s; refusing")
+        ts = float(t) + 0.5 * dt_
+        first = (_omega_stats(*pair, ts) if "first" not in omega_rec
+                 else None)
+        ns_cur[0] = ns_try
+        last_phase.clear()
+        last_phase.update(delp_in=delp0_, dp1=dp1, delp_lag=delp_lag, tr=tr)
+        cmax_seen[0] = max(cmax_seen[0], cmax)
+        if first is not None:
+            omega_rec["first"] = first
+        omega_rec["last_pair"] = (pair, ts)
+        return ((delp, q), t + dt_)
+
+    def effective_omega():
+        """Implicit vs analytic omega stats of the first and the last
+        ACCEPTED steps (``{}`` before any step)."""
+        if "first" not in omega_rec:
+            return {}
+        pair, ts = omega_rec["last_pair"]
+        return {"first": omega_rec["first"], "last": _omega_stats(*pair, ts)}
+
+    def tracers(carry):
+        (_, q), _ = carry
+        return np.moveaxis(np.asarray(q)[:, :, sl, sl, :], 1, -1)
+
+    def layer_mass(carry):
+        """delp [Pa] on the compute cells, (6, n, n, km)."""
+        (delp, _), _ = carry
+        return np.asarray(delp)[:, sl, sl, :]
+
+    def ps(carry):
+        (delp, _), _ = carry
+        return ptop + np.sum(np.asarray(delp)[:, sl, sl, :], axis=-1)
+
+    def air_mass(carry):
+        """sum(delp * area) over the modelled column (below the lid)."""
+        return float(np.sum(layer_mass(carry).sum(-1) * area))
+
+    note = (f"fv3_duo transport adapter (csw dt2=0 -> n_sub (initial "
+            f"{n_sub}, accepted count reported per row) x dsw_transport"
+            f"(flux_cap) -> tracer_2d_1l -> map1_q2 kord_tr={cfg.kord_tr}), "
+            f"eta={DUO_DCMIP_TRANSPORT_ETA} km={km} ptop={ptop:.1f} Pa, "
+            f"hord_tr={deck.hord_tr} hord_dp={deck.hord_dp}; vertical motion "
+            f"implicit (Lagrangian delp + remap, DCMIP omega unused); p_s "
+            f"evolves (no reset)")
+    carry0 = ((jnp.asarray(delp0), jnp.asarray(q6)), 0.0)
+    return SimpleNamespace(
+        grid=grid, model=model, carry=carry0, step=step, tracers=tracers,
+        layer_mass=layer_mass, ps=ps, effective_omega=effective_omega,
+        air_mass=air_mass, n_sub_fn=lambda: ns_cur[0],
+        last_phase=last_phase,
+        lon_deg=lon_deg, lat_deg=lat_deg, area=area, radius=FV3_RADIUS_M,
+        courant_max=lambda: cmax_seen[0],
+        ak=ak, bk=bk, ptop=ptop, q_ic=q_ic, note=note)

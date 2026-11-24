@@ -1133,7 +1133,6 @@ def vertical_remap_sigma_fv3(
     (..., nlev, n_tracers) remapped tracers.
     """
     import equinox as eqx
-    from legoesm.core.fv3_mapz import map1_q2
 
     *lead, nlev, ntr = q.shape
     if sigma_dot.shape != (*lead, nlev + 1):
@@ -1250,19 +1249,115 @@ def vertical_remap_sigma_fv3(
         pe1, ~nonfinite & jnp.any(~(dp1 > 0)),
         "vertical_remap_sigma_fv3: Lagrangian interfaces cross/touch "
         "(vertical CFL); refusing")
-    # Fold tracers into the column axis: one rezone for all tracers.
-    qc = jnp.moveaxis(q.astype(cdt).reshape(im, nlev, ntr), -1, 1).reshape(
-        im * ntr, nlev)
+    q2 = _fv3_tracer_rezone_columns(q.astype(cdt).reshape(im, nlev, ntr),
+                                    pe1, pe2, kord, "vertical_remap_sigma_fv3")
+    return q2.astype(dtype).reshape(*lead, nlev, ntr)
+
+
+def _fv3_tracer_rezone_columns(q, pe1, pe2, kord: int, who: str):
+    """The FV3 tracer remap of ``q`` (im, nlev, ntr) from source interfaces
+    ``pe1`` to target interfaces ``pe2`` (both (im, nlev+1), same dtype as
+    ``q``) with the certified kernel :func:`legoesm.core.fv3_mapz.map1_q2`
+    (``fv_mapz.F90`` tracer branch, nq <= 5: ``iv=0`` ``scalar_profile``,
+    ``kord``, ``q_min=0``, no ``fillz``).  Tracers are folded into the
+    column axis (one rezone call).  An unbracketed target edge is refused
+    (``equinox.error_if``).  No guards on the geometry: callers own them."""
+    import equinox as eqx
+    from legoesm.core.fv3_mapz import map1_q2
+
+    im, nlev, ntr = q.shape
+    cdt = q.dtype
+    qc = jnp.moveaxis(q, -1, 1).reshape(im * ntr, nlev)
     zero = jnp.zeros((im * ntr, 1), cdt)
     pe1c = jnp.concatenate([zero, jnp.repeat(pe1, ntr, axis=0)], axis=1)
     pe2c = jnp.concatenate([zero, jnp.repeat(pe2, ntr, axis=0)], axis=1)
     dp2c = jnp.concatenate([zero, pe2c[:, 2:] - pe2c[:, 1:-1]], axis=1)
     q2, ok = map1_q2(pe1c, jnp.concatenate([zero, qc], axis=1), pe2c, dp2c,
                      nlev, nlev, 0, kord, 0.0, return_ok=True)
-    q2 = eqx.error_if(q2, ~ok, "vertical_remap_sigma_fv3: unbracketed "
-                      "target edge in the FV3 rezone; refusing")
-    q2 = q2[:, 1:].reshape(im, ntr, nlev).astype(dtype)
-    return jnp.moveaxis(q2, 1, -1).reshape(*lead, nlev, ntr)
+    q2 = eqx.error_if(q2, ~ok, f"{who}: unbracketed target edge in the FV3 "
+                      "rezone; refusing")
+    return jnp.moveaxis(q2[:, 1:].reshape(im, ntr, nlev), 1, -1)
+
+
+def remap_tracers_fv3_pressure(q, pe1, pe2, *, kord: int = 9):
+    """FV3 Lagrangian-to-Eulerian tracer remap in PRESSURE for columns whose
+    Lagrangian interfaces ``pe1`` and Eulerian target interfaces ``pe2``
+    (``(..., nlev+1)``, top -> bottom, [Pa]) span the same column: the
+    top and bottom interfaces must be EQUAL (``fv_mapz`` remaps a column
+    onto the same total mass).  ``q``: ``(..., nlev, ntr)`` mixing ratios.
+
+    Same kernel and settings as :func:`vertical_remap_sigma_fv3` (FV3
+    ``map1_q2``, ``kord`` 9 = the duo deck's ``kord_tr``, ``q_min=0``, no
+    ``fillz``); conserves ``sum_k q dp`` per column to round-off.  ``q``,
+    ``pe1``, ``pe2`` must share one dtype (float32 or float64); the remap
+    runs and returns in it (no promotion, no output cast).
+    Refuses (``equinox.error_if``, never clips): non-finite interfaces or
+    tracers (in or out), unequal column ends, non-positive source or
+    target layers, an unbracketed target edge.  Used by the cube (FV3 duo) prescribed-wind
+    transport rows.
+
+    Dtype contract: float64 inputs need JAX x64 (refused otherwise when
+    the function sees them).  Under an ENCLOSING ``jax.jit`` with x64 off
+    the caller's float64 arguments are narrowed before this function runs,
+    which it cannot detect: such callers must validate on the host.
+    """
+    import equinox as eqx
+    if not jax.config.jax_enable_x64 and any(
+            np.dtype(a.dtype if hasattr(a, "dtype")
+                     else np.asarray(a).dtype) == np.float64
+            for a in (q, pe1, pe2)):
+        # JAX would narrow float64 (host or device) to float32 before the
+        # guards
+        raise ValueError("remap_tracers_fv3_pressure: float64 inputs need "
+                         "JAX x64 (they would be narrowed before the "
+                         "equal-column-ends check)")
+    q = jnp.asarray(q)
+    pe1 = jnp.asarray(pe1)
+    pe2 = jnp.asarray(pe2)
+    *lead, nlev, ntr = q.shape
+    if pe1.shape != (*lead, nlev + 1) or pe2.shape != (*lead, nlev + 1):
+        raise ValueError(f"remap_tracers_fv3_pressure: pe1 {pe1.shape} / pe2 "
+                         f"{pe2.shape} != {(*lead, nlev + 1)}")
+    for _nm, _a in (("q", q), ("pe1", pe1), ("pe2", pe2)):
+        if _a.dtype not in (jnp.float32, jnp.float64):
+            # float16/bfloat16 would round a remapped column budget away on
+            # the output cast
+            raise ValueError(f"remap_tracers_fv3_pressure: {_nm} must be "
+                             f"float32 or float64, got {_a.dtype}")
+    if not (q.dtype == pe1.dtype == pe2.dtype):
+        # ONE dtype in and out: no promotion and no output cast, so no
+        # column budget can be lost to a narrowing cast
+        raise ValueError(f"remap_tracers_fv3_pressure: q/pe1/pe2 must share "
+                         f"one dtype, got {q.dtype}/{pe1.dtype}/{pe2.dtype}")
+    cdt = q.dtype
+    im = math.prod(lead)
+    p1 = pe1.reshape(im, nlev + 1)
+    p2 = pe2.reshape(im, nlev + 1)
+    nonfinite = (jnp.any(~jnp.isfinite(p1)) | jnp.any(~jnp.isfinite(p2))
+                 | jnp.any(~jnp.isfinite(jnp.diff(p1, axis=-1)))
+                 | jnp.any(~jnp.isfinite(jnp.diff(p2, axis=-1))))
+    ends = jnp.any(p1[:, 0] != p2[:, 0]) | jnp.any(p1[:, -1] != p2[:, -1])
+    p1 = eqx.error_if(p1, nonfinite, "remap_tracers_fv3_pressure: non-finite "
+                      "interface or layer thickness; refusing")
+    p1 = eqx.error_if(p1, ~nonfinite & ends, "remap_tracers_fv3_pressure: "
+                      "source and target columns do not span the same "
+                      "pressure range; refusing")
+    p1 = eqx.error_if(p1, ~nonfinite & jnp.any(~(jnp.diff(p1, axis=-1) > 0)),
+                      "remap_tracers_fv3_pressure: non-positive Lagrangian "
+                      "layer; refusing")
+    p1 = eqx.error_if(p1, ~nonfinite & jnp.any(~(jnp.diff(p2, axis=-1) > 0)),
+                      "remap_tracers_fv3_pressure: non-positive target "
+                      "layer; refusing")
+    qin = q.reshape(im, nlev, ntr).astype(cdt)
+    qin = eqx.error_if(qin, jnp.any(~jnp.isfinite(qin)),
+                       "remap_tracers_fv3_pressure: non-finite tracer input; "
+                       "refusing")
+    q2 = _fv3_tracer_rezone_columns(qin, p1, p2, kord,
+                                    "remap_tracers_fv3_pressure")
+    q2 = eqx.error_if(q2, jnp.any(~jnp.isfinite(q2)),
+                      "remap_tracers_fv3_pressure: non-finite tracer output; "
+                      "refusing")
+    return q2.reshape(*lead, nlev, ntr)
 
 
 def vertical_advection_theta(
@@ -1753,6 +1848,45 @@ def make_cam6_l32_levels(p_ref: float = CAM6_L32_P0) -> HybridSigmaPressureCoord
     A_half = jnp.asarray(CAM6_L32_HYAI, dtype=jnp.float64)
     B_half = jnp.asarray(CAM6_L32_HYBI, dtype=jnp.float64)
     return create_hybrid_coordinate(len(CAM6_L32_HYAI) - 1, A_half, B_half, p_ref)
+
+
+#: DCMIP 2012 transport-test vertical grid (Ullrich et al. 2012, DCMIP Test
+#: Case Document v1.7, Appendix F.3; tests 1-1 / 1-2): uniformly spaced
+#: geometric height to ``z_top`` = 12 km in an isothermal (T0 = 300 K)
+#: atmosphere, ``eta = exp(-z / H)`` with ``H = Rd T0 / g`` (DCMIP's Rd =
+#: 287.0, the shared ``constants.g``), ``p0`` = 1e5 Pa.
+DCMIP2012_TRANSPORT_P0 = 1.0e5
+DCMIP2012_TRANSPORT_ZTOP = 12000.0
+DCMIP2012_TRANSPORT_T0 = 300.0
+DCMIP2012_TRANSPORT_RD = 287.0
+
+
+def dcmip2012_transport_eta_table(km: int = 30):
+    """``(ak [Pa], bk, ptop [Pa])`` float64 interface table of the DCMIP
+    2012 transport grid (Appendix F.3), top -> surface, for an FV3-style
+    ``pe = ak + bk * ps`` with a FIXED lid.
+
+    At ``ps = p0`` the interfaces are exactly ``p0 * eta_k``,
+    ``eta_k = exp(-z_k / H)``, ``z_k = z_top (1 - k / km)`` -- the same
+    levels as the sigma rows' ``create_dcmip_sigma`` (computed here in
+    float64).  Away from ``p0`` the lid stays at ``ptop = p0 eta_0`` and
+    the interior is terrain-following:
+    ``bk = (eta - eta_0) / (1 - eta_0)``, ``ak = ptop (1 - bk)``.
+    """
+    from legoesm import constants as _c
+    km = int(km)
+    if km < 1:
+        raise ValueError(f"km must be >= 1, got {km}")
+    H = DCMIP2012_TRANSPORT_RD * DCMIP2012_TRANSPORT_T0 / float(_c.g)
+    z = DCMIP2012_TRANSPORT_ZTOP * (1.0 - np.arange(km + 1, dtype=np.float64)
+                                    / km)
+    eta = np.exp(-z / H)
+    ptop = DCMIP2012_TRANSPORT_P0 * eta[0]
+    bk = (eta - eta[0]) / (1.0 - eta[0])
+    bk[0], bk[-1] = 0.0, 1.0
+    ak = ptop * (1.0 - bk)
+    ak[-1] = 0.0
+    return ak, bk, float(ptop)
 
 
 def assert_hybrid_valid_for_surface_pressure(
