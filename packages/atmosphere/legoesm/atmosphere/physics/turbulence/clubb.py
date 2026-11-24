@@ -6711,6 +6711,7 @@ def clubb_step(
     clubb_mf: bool = False,
     mf_pblh: jax.Array | None = None,
     mf_lts: jax.Array | None = None,
+    mf_tke: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6949,9 +6950,10 @@ def clubb_step(
             mf_lts = jax.vmap(_mf_lts_col)(T, q_liq, p_full, p_half[:, -1])
         mf_in = dict(
             zm=gr.zm, dzt=dzt, thl=thlm, qt=rtm, thv=thv_ds_zt, u=um, v=vm,
-            # CAM's tke_zm = 0.5 (up2 + vp2 + wp2) of the moments the call
-            # starts from (clubb.F90:2836, the previous call's end state)
-            tke=0.5 * (moments.up2 + moments.vp2 + moments.wp2),
+            # CAM's tke_zm = 0.5 (up2 + vp2 + wp2), held over the sub-cycle
+            # (pbuf read :1524 before the loop, written :2836 after it)
+            tke=(0.5 * (moments.up2 + moments.vp2 + moments.wp2) if mf_tke is None
+                 else mf_tke),
             p_zm=p_zm, iex_zm=iex_zm, ths=T_sfc * iex_zm[:, 0],
             wthl_sfc=wpthlp_sfc * jnp.ones((ncol,), T.dtype),
             wqt_sfc=wprtp_sfc * jnp.ones((ncol,), T.dtype),
@@ -7312,13 +7314,16 @@ def clubb_turbulence_prognostic(
         from legoesm.atmosphere.physics.turbulence.clubb_mf import mf_lts as _mf_lts_col
         _mf_lts_host = jax.vmap(_mf_lts_col)(
             T, jnp.zeros_like(T) if q_c is None else q_c, p_full, p_half[:, -1])
+    # and its TKE input, CAM's tke_pbuf: the moments before the sub-cycle
+    _mf_tke_host = (0.5 * (moments.up2 + moments.vp2 + moments.wp2)
+                    if clubb_mf else None)
 
     if n_sub == 1:
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
             radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
-            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
+            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host, mf_tke=_mf_tke_host,
             omega_cam_layer_density=omega_cam_layer_density, **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         sfc_energy_in = diags["sfc_energy_in"]
@@ -7354,7 +7359,7 @@ def clubb_turbulence_prognostic(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
                 radht_zt=radht_zt, omega=omega, routec_inversion=routec_inversion,
-            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host,
+            clubb_mf=clubb_mf, mf_pblh=mf_pblh, mf_lts=_mf_lts_host, mf_tke=_mf_tke_host,
                 omega_cam_layer_density=omega_cam_layer_density, **_top_kw,
                 **({"q_c": ql_c} if _liq_on else {}))
             ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c
