@@ -572,6 +572,20 @@ def test_config_validation():
     validate_tracer_transport_mpas_config(_cfg())
 
 
+@pytest.mark.parametrize("nlev", [2, NLEV])
+def test_sigma_dot_must_be_on_interfaces(mesh, coefs, nlev):
+    """A (nCells, nlev) sigma_dot is refused; at nlev = 2 it would otherwise
+    broadcast silently (nlev - 1 = 1)."""
+    sg = create_sigma_coordinate(nlev)
+    q = jnp.ones((mesh.nCells, nlev, 1))
+    st = air_mass_state(TracerState(tracers=Field(data=q, name="tracers", dims=("cell", "level", "tracer")),
+                                    time=Field(data=jnp.asarray(0.0), name="time", dims=())), P_S, sg)
+    psi = 2.0e7 * jax.random.normal(jax.random.PRNGKey(0), (mesh.nVertices,))
+    u = edge_normal_velocity_from_streamfunction(psi[:, None] * jnp.ones(nlev), mesh)
+    with pytest.raises(ValueError, match="nlev\\+1 interfaces"):
+        mpas_rk3_fct_step(st, DT, mesh, sg, _const_wind(u, jnp.zeros((mesh.nCells, nlev))), _cfg(), coefs)
+
+
 def test_centred2_tendency_refuses_mpas_fct(mesh, sigma):
     from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import tracer_tendencies_mpas
     st = _state(_blocky(mesh), sigma)

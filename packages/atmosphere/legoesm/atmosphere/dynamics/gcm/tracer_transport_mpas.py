@@ -490,7 +490,8 @@ def fct_flux_factor(anti, a, q1, q2, room_in, p_in, room_out, p_out, mesh, width
 
 
 def _mpas_mass_fluxes(q, dp, u_edge, sigma_dot, mesh, sigma_coord, coefs, config):
-    """Fluxes of one MPAS RK3 stage from the stage state ``(q, dp)``.
+    """Fluxes of one MPAS RK3 stage from the stage state ``(q, dp)``;
+    ``sigma_dot`` on the nlev+1 interfaces, (nCells, nlev+1).
 
     Returns ``(fm, a, f_ho, vm, vt)``: edge air-mass flux ``fm = u dp_e``
     (``dp_e`` the two-cell mean, as MPAS ``ru``) and its smooth magnitude
@@ -502,6 +503,9 @@ def _mpas_mass_fluxes(q, dp, u_edge, sigma_dot, mesh, sigma_coord, coefs, config
     tracer-mass tendency ``vt = dp V(q) + q vm`` with ``V`` the shared
     sigma vertical advection (so a constant ``q`` stays constant)."""
     from legoesm.core.operators_voronoi import mpas_edge_reconstruction
+    if sigma_dot.shape != dp.shape[:-1] + (dp.shape[-1] + 1,):
+        raise ValueError("sigma_dot must be on the nlev+1 interfaces, shape "
+                         f"{dp.shape[:-1] + (dp.shape[-1] + 1,)}; got {sigma_dot.shape}")
     c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
     fm = (u_edge * 0.5 * (dp[c1] + dp[c2]))[..., None]
     if config.fct_upwind_width_ms == 0:
