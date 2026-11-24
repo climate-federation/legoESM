@@ -2847,17 +2847,19 @@ def plane_conservative_tracer_stage(
             height_coord.theta_ref + eval_state.theta_prime.data,
             rho_0 + eval_state.rho_prime.data,
         )
-        q_pad, rho_pad, u_pad, v_pad = pad(
-            q_flat, rho_e_flux, eval_state.u.data, eval_state.v.data)
+        rho_pad, u_pad, v_pad = pad(
+            rho_e_flux, eval_state.u.data, eval_state.v.data)
         fx_pad = dt_eff * interp_cell_to_xface_vlast(rho_pad, grid) * u_pad
         fy_pad = dt_eff * interp_cell_to_yface_vlast(rho_pad, grid) * v_pad
         # The slow horizontal flux already reached rho via the slow tendency.
         drho_vert = out.rho_prime.data - state_slow.rho_prime.data
     else:
         out, (flux_x, flux_y) = acoustic_out
-        q_pad, fx_pad, fy_pad = pad(q_flat, flux_x, flux_y)
+        fx_pad, fy_pad = pad(flux_x, flux_y)
         drho_vert = (out.rho_prime.data - state_slow.rho_prime.data
                      + oh.divergence_vlast_halo(fx_pad, fy_pad, grid, h))
+    # The packed exchange needs equal-shape slabs: tracers go separately.
+    q_pad, = pad(q_flat)
     # Upward mass through interface j (0 = top) = column gain above it.
     g_inner = jnp.cumsum(drho_vert * dz, axis=-1)[..., :-1]
     pad_w = ((0, 0),) * (g_inner.ndim - 1) + ((1, 1),)
