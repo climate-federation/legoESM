@@ -186,6 +186,14 @@ def build_latlon_config(args):
     if args.ice_skin_prognostic is not None:
         argv.append("--ice-skin-prognostic" if args.ice_skin_prognostic
                     else "--no-ice-skin-prognostic")
+    # Pressure-surface A_h T diffusion: run_amip's flag, forwarded only when
+    # on (off leaves the argv unchanged).  Recorded by the driver manifest.
+    _ah_p = getattr(args, "latlon_ah_pressure_surfaces", False)
+    if not isinstance(_ah_p, bool):
+        raise ValueError(
+            f"latlon_ah_pressure_surfaces must be a bool, got {_ah_p!r}")
+    if _ah_p:
+        argv.append("--latlon-ah-pressure-surfaces")
     parsed = ra.build_arg_parser().parse_args(argv)
     # Land surface model.  This lane builds its ExperimentConfig from a FIXED
     # argv that passes no land flags and no --topography, so until now it
@@ -675,6 +683,12 @@ def build_parser():
     # default sub-cycles (N=6 -> ~hourly at dt~600s, ~15 min at the T106
     # CFL dt~155s) — never every step.  Moot for the NN-replacement variants.
     p.add_argument("--rad-update-steps", type=int, default=6)
+    p.add_argument("--latlon-ah-pressure-surfaces",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   dest="latlon_ah_pressure_surfaces",
+                   help="lat-lon PE: A_h T diffusion partially corrected to "
+                        "pressure surfaces (CAM3 eq. 3.80); default off "
+                        "(run_amip's flag)")
     p.add_argument("--ice-skin-prognostic",
                    action=argparse.BooleanOptionalAction, default=None,
                    help="Prognostic sea-ice skin (#2106); unset = auto (on "

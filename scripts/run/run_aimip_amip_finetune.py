@@ -52,6 +52,34 @@ def _load_yaml(p):
         return yaml.safe_load(fh) or {}
 
 
+def _build_spec_cfg(cfg: dict, first_year: int):
+    """The fine-tune's spectral config from the merged suite cfg."""
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+    from legoesm.training.campaign_driver import pressure_surface_flags
+    from legoesm.training.losses import LossConfig
+    from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
+    return NeuralGCMSpectralConfig(
+        n_max=int(cfg["n_max"]), n_levels=int(cfg["nlev"]), dt=float(cfg["dt"]),
+        pe_config=SpectralPEConfig(
+            hyperdiff_coeff=2.5e15, hyperdiff_order=2, time_integrator="ssp_rk3",
+            spectral_filter_strength=0.01, spectral_filter_order=8,
+            # Forwarded so a suite's dry-mass anchor is not silently
+            # ignored on the prescribed-SST lane; default False keeps
+            # every existing AMIP run byte-identical.
+            fix_mass=bool(cfg.get("fix_mass", False)),
+            anchor_mass_to_initial=bool(
+                cfg.get("anchor_mass_to_initial", False)),
+            # Same suite key as run_aimip (default off): a checkpoint trained
+            # with the pressure-surface T damping keeps it here.
+            T_damping_pressure_surfaces=pressure_surface_flags(
+                cfg, "spectral", where="AIMIP suite (AMIP fine-tune)")[
+                    "spectral_t_damping_pressure_surfaces"],
+        ),
+        n_epochs=1, n_train_days=1, start_year=first_year,
+        loss_config=LossConfig(),
+    )
+
+
 def _merged_cfg(suite_path: Path, variant: str = "classical") -> dict:
     suite = _load_yaml(suite_path)
     base = _load_yaml(Path(suite["base"]))
@@ -166,24 +194,7 @@ def main():
         # PhysicsState all read cfg["aimip_convection"].
         cfg["aimip_convection"] = args.convection_scheme
         logger.info(f"convection override: {cfg['aimip_convection']}")
-    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
-    from legoesm.training.losses import LossConfig
-    from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
-    spec_cfg = NeuralGCMSpectralConfig(
-        n_max=int(cfg["n_max"]), n_levels=int(cfg["nlev"]), dt=float(cfg["dt"]),
-        pe_config=SpectralPEConfig(
-            hyperdiff_coeff=2.5e15, hyperdiff_order=2, time_integrator="ssp_rk3",
-            spectral_filter_strength=0.01, spectral_filter_order=8,
-            # Forwarded so a suite's dry-mass anchor is not silently
-            # ignored on the prescribed-SST lane; default False keeps
-            # every existing AMIP run byte-identical.
-            fix_mass=bool(cfg.get("fix_mass", False)),
-            anchor_mass_to_initial=bool(
-                cfg.get("anchor_mass_to_initial", False)),
-        ),
-        n_epochs=1, n_train_days=1, start_year=args.first_year,
-        loss_config=LossConfig(),
-    )
+    spec_cfg = _build_spec_cfg(cfg, args.first_year)
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top)
     sigma_full = jnp.asarray(sigma.sigma_full)

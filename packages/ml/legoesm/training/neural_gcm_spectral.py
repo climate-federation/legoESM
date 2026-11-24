@@ -50,6 +50,8 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     apply_sponge_filter,
     apply_spectral_filter_to_state,
     apply_filter_to_tracers,
+    check_T_damping_pressure_surfaces,
+    correct_T_damping_pressure_surfaces,
     anchor_lnps_to_mass,
     global_dry_mass,
 )
@@ -1159,6 +1161,27 @@ def _add_phys_tendencies(a, b):
     )
 
 
+def _make_state_filter(pe_config, grid, sigma_coord, spectral_filter):
+    """Post-step exponential spectral filter on vor/div/T for the functional
+    rollouts.  With ``pe_config.T_damping_pressure_surfaces`` the T part gets
+    the same pressure-surface correction the model class applies to its
+    filter (``correct_T_damping_pressure_surfaces``, on the pre-filter state,
+    truncated to the de-aliased band); off, it is exactly
+    ``apply_spectral_filter_to_state`` (bit-identical to before)."""
+    if not pe_config.T_damping_pressure_surfaces or spectral_filter is None:
+        return lambda s: apply_spectral_filter_to_state(s, spectral_filter)
+    from legoesm.grids.gaussian import dealiasing_mask
+    mask = (dealiasing_mask(grid, pe_config.dealiasing_fraction)
+            if pe_config.dealiasing_fraction > 0.0 else None)
+
+    def _filter(s):
+        return correct_T_damping_pressure_surfaces(
+            grid, sigma_coord, s,
+            apply_spectral_filter_to_state(s, spectral_filter),
+            spectral_filter, mask)
+    return _filter
+
+
 def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name):
     """Build the per-step ``(state, tendency_fn) -> new_state`` integrator for the
     differentiable spectral training rollouts.
@@ -1189,6 +1212,7 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
         check_advective_cfl, refuse_semi_implicit_hybrid)
     check_advective_cfl(int(grid.n_max), dt, pe_config)
     refuse_semi_implicit_hybrid(pe_config, sigma_coord)
+    check_T_damping_pressure_surfaces(pe_config, sigma_coord)
 
     if not pe_config.semi_implicit:
         def _integrate_explicit(state, tendency_fn):
@@ -1429,6 +1453,8 @@ def spectral_rollout(
         pe_config, grid, sigma_coord, dt, integrator_name,
     )
     ms = grid.ms  # for sponge filter
+    _filter_state = _make_state_filter(
+        pe_config, grid, sigma_coord, spectral_filter)
 
     # Precompute the tracer filter (mirrors the precomputation done by
     # the model class for ordinary stepping).  ``None`` when neither
@@ -1594,9 +1620,7 @@ def spectral_rollout(
 
             # Exponential spectral filter on highest wavenumbers
             if spectral_filter is not None:
-                new_state = apply_spectral_filter_to_state(
-                    new_state, spectral_filter,
-                )
+                new_state = _filter_state(new_state)
 
             # Combined spectral + implicit hyperdiff applied to grid-space
             # tracers via one SH round-trip per tracer per step (no-op when
@@ -1840,9 +1864,7 @@ def spectral_rollout(
         if sponge_factor is not None:
             new_state = apply_sponge_filter(new_state, sponge_factor, ms)
         if spectral_filter is not None:
-            new_state = apply_spectral_filter_to_state(
-                new_state, spectral_filter,
-            )
+            new_state = _filter_state(new_state)
         if tracer_filter is not None and new_state.tracers is not None:
             new_state = new_state._replace(
                 tracers=apply_filter_to_tracers(
@@ -2130,6 +2152,8 @@ def spectral_amip_rollout(
         pe_config, grid, sigma_coord, dt, integrator_name,
     )
     ms = grid.ms  # for sponge filter
+    _filter_state = _make_state_filter(
+        pe_config, grid, sigma_coord, spectral_filter)
     tracer_filter = _compute_tracer_filter(grid, pe_config, spectral_filter, dt)
 
     # Dry-mass anchor target for THIS rollout, captured from its own initial
@@ -2196,7 +2220,7 @@ def spectral_amip_rollout(
         if sponge_factor is not None:
             new_state = apply_sponge_filter(new_state, sponge_factor, ms)
         if spectral_filter is not None:
-            new_state = apply_spectral_filter_to_state(new_state, spectral_filter)
+            new_state = _filter_state(new_state)
         if tracer_filter is not None and new_state.tracers is not None:
             new_state = new_state._replace(
                 tracers=apply_filter_to_tracers(

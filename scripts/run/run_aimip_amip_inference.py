@@ -77,6 +77,7 @@ def _merged_cfg(suite_path: Path, variant: str = "classical") -> dict:
 
 def _build_spec_cfg(cfg: dict):
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+    from legoesm.training.campaign_driver import pressure_surface_flags
     from legoesm.training.losses import LossConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
 
@@ -100,6 +101,11 @@ def _build_spec_cfg(cfg: dict):
             vertical_advection_scheme=str(
                 cfg.get("vertical_advection_scheme", "sb_centered")),
             frictional_heating=bool(cfg.get("frictional_heating", True)),
+            # Same suite key as run_aimip (default off): a checkpoint trained
+            # with the pressure-surface T damping keeps it here.
+            T_damping_pressure_surfaces=pressure_surface_flags(
+                cfg, "spectral", where="AIMIP suite (AMIP inference)")[
+                    "spectral_t_damping_pressure_surfaces"],
         ),
         n_epochs=1, lr=float(cfg.get("aimip_lr", 3.0e-4)),
         weight_decay=float(cfg.get("aimip_weight_decay", 1.0e-5)),

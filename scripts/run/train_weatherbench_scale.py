@@ -400,6 +400,10 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
         fp["adjoint_steps"] = int(cfg.adjoint_steps)
     if getattr(cfg, "probe_scenes", None) is not None:
         fp["probe_scenes"] = int(cfg.probe_scenes)
+    for _k in ("latlon_ah_pressure_surfaces",
+               "spectral_t_damping_pressure_surfaces"):
+        if yml.get(_k) is True:
+            fp[_k] = True
     return fp
 
 

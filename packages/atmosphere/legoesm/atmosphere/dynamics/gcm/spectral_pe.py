@@ -1575,6 +1575,60 @@ def T_pressure_surface_correction_hat(grid, sigma_coord, T, p_s, apply_L):
     return sh_analysis_3d(grid, corr)
 
 
+def correct_T_damping_pressure_surfaces(grid, sigma_coord, pre, post, factor,
+                                        dealias_mask=None):
+    """``post`` plus the pressure-surface correction of a post-step
+    multiplicative T damping ``factor(n)`` (``L = factor - 1``; see
+    ``SpectralPEConfig.T_damping_pressure_surfaces``), evaluated on the
+    pre-damping state ``pre`` and, when ``dealias_mask`` is given, truncated
+    to that band.  Shared by ``SpectralPrimitiveEquationModel`` and the
+    functional training rollouts (``neural_gcm_spectral``); callers apply it
+    only when the option is on."""
+    T = sh_synthesis_3d(grid, pre.T_hat.data)
+    p_s = jnp.exp(sh_synthesis(grid, pre.lnps_hat.data))
+    corr = T_pressure_surface_correction_hat(
+        grid, sigma_coord, T, p_s,
+        lambda c: (factor[:, None] - 1.0) * c)
+    if dealias_mask is not None:
+        corr = corr * dealias_mask[:, None]
+    return post._replace(
+        T_hat=post.T_hat.replace(data=post.T_hat.data + corr))
+
+
+def check_T_damping_pressure_surfaces(pe_config, sigma_coord):
+    """Refuse an inert or ill-posed ``T_damping_pressure_surfaces`` for the
+    functional rollouts (same refusals as the dycore factory / the model
+    constructor: non-bool; no T hyperdiffusion to correct; fewer than 3
+    levels).  Also refused with ``implicit_hyperdiff``: the functional
+    rollouts apply no implicit hyperdiffusion to the state (only the model
+    class does), so there would be no hyperdiffusion to correct."""
+    flag = pe_config.T_damping_pressure_surfaces
+    if not isinstance(flag, bool):
+        raise ValueError(
+            f"T_damping_pressure_surfaces must be a bool, got {flag!r}")
+    if not flag:
+        return
+    if pe_config.implicit_hyperdiff:
+        raise ValueError(
+            "spectral_t_damping_pressure_surfaces with implicit_hyperdiff: the "
+            "tendency then carries no explicit T hyperdiffusion and the "
+            "functional training rollouts run no implicit one on the state, so "
+            "there is no hyperdiffusion to correct.")
+    # the coefficient spectral_pe_tendencies actually uses
+    _hd = pe_config.hyperdiff_coeff
+    if pe_config.semi_implicit and pe_config.si_hyperdiff_boost != 1.0:
+        _hd = _hd * pe_config.si_hyperdiff_boost
+    if not (pe_config.hyperdiff_coeff > 0 and _hd > 0):
+        raise ValueError(
+            "spectral_t_damping_pressure_surfaces: this run has no T "
+            "hyperdiffusion to correct (hyperdiff_coeff <= 0, or zeroed by "
+            "si_hyperdiff_boost); it would be inert.")
+    if sigma_coord.n_levels < 3:
+        raise ValueError(
+            "T_damping_pressure_surfaces needs nlev >= 3 (three-level "
+            f"vertical quadratic), got nlev={sigma_coord.n_levels}")
+
+
 def apply_filter_to_tracers(tracers, multiplicative_filter, grid):
     """Apply a per-SH-mode multiplicative filter to grid-space tracers.
 
@@ -2018,15 +2072,9 @@ class SpectralPrimitiveEquationModel:
         is off."""
         if not self.config.T_damping_pressure_surfaces:
             return post
-        T = sh_synthesis_3d(self.grid, pre.T_hat.data)
-        p_s = jnp.exp(sh_synthesis(self.grid, pre.lnps_hat.data))
-        corr = T_pressure_surface_correction_hat(
-            self.grid, self.sigma_coord, T, p_s,
-            lambda c: (factor[:, None] - 1.0) * c)
-        if self._dealias_state is not None:
-            corr = corr * self._dealias_state[:, None]
-        return post._replace(
-            T_hat=post.T_hat.replace(data=post.T_hat.data + corr))
+        return correct_T_damping_pressure_surfaces(
+            self.grid, self.sigma_coord, pre, post, factor,
+            self._dealias_state)
 
     def _apply_spectral_filter(self, state):
         """Post-step spectral filter on vor/div/T, with the optional

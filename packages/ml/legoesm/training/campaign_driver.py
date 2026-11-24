@@ -49,6 +49,35 @@ def parse_bool_flag(value) -> bool:
     return bool(value)
 
 
+# Pressure-surface T-damping options (DycoreConfig fields of the same names,
+# user decision 2026-11-24): one opt-in per core, default OFF, refused on the
+# other core.  Deck/suite keys carry the DycoreConfig / run_amip names.
+PRESSURE_SURFACE_FLAGS = {
+    "latlon": "latlon_ah_pressure_surfaces",
+    "spectral": "spectral_t_damping_pressure_surfaces",
+}
+
+
+def pressure_surface_flags(cfg: dict, core: str, *, where: str) -> dict:
+    """``{flag: bool}`` for both pressure-surface T-damping keys of a deck.
+
+    Absent = False.  A present value must be a real bool (a quoted "false" or
+    a null is refused, as ``DycoreConfig`` validation does), and True on the
+    core that does not honour it is refused: it would be silently inert.
+    """
+    out = {}
+    for _core, flag in PRESSURE_SURFACE_FLAGS.items():
+        val = cfg.get(flag, False)
+        if not isinstance(val, bool):
+            raise ValueError(f"{where}: {flag} must be a bool, got {val!r}")
+        if val and core != _core:
+            raise ValueError(
+                f"{where}: {flag} is wired into the {_core} core only; this run "
+                f"builds the {core!r} core, where it would be silently inert.")
+        out[flag] = val
+    return out
+
+
 def validate_training_core(core: str) -> str:
     """Dispatch-hardened training-core selection.
 

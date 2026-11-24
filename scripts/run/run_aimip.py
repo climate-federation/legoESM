@@ -265,6 +265,19 @@ def _build_spectral_config(cfg: dict[str, Any]):
             "the lat-lon C-grid lane, or set aimip_grid: gaussian."
         )
 
+    # Pressure-surface T damping (DycoreConfig / run_amip key names, default
+    # off). This driver builds the spectral core only, so the lat-lon key is
+    # refused; sfno_full runs no spectral PE dycore, so the spectral key would
+    # be inert there and is refused too.
+    from legoesm.training.campaign_driver import pressure_surface_flags
+    _t_damp_p = pressure_surface_flags(cfg, "spectral", where="AIMIP suite")[
+        "spectral_t_damping_pressure_surfaces"]
+    if _t_damp_p and _variant == "sfno_full":
+        raise SystemExit(
+            "spectral_t_damping_pressure_surfaces is set but variant sfno_full "
+            "replaces the spectral PE dycore with the SFNO (no T damping to "
+            "correct); it would be silently inert. Remove the key for sfno_full.")
+
     return NeuralGCMSpectralConfig(
         n_max=int(cfg["n_max"]),
         # Config key drift (nlev vs n_levels, CLAUDE.md naming debt): a merge
@@ -300,6 +313,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
             vertical_advection_scheme=str(
                 cfg.get("vertical_advection_scheme", "sb_centered")),
             frictional_heating=bool(cfg.get("frictional_heating", True)),
+            T_damping_pressure_surfaces=_t_damp_p,
         ),
         sfno_embed_dim=sfno_embed,
         sfno_n_blocks=sfno_n_blocks,
@@ -1296,6 +1310,10 @@ def main():
                 "eval_metrics_train_period": eval_metrics_train,
                 "checkpoint": str(ckpt_path),
                 "eval_weights": eval_weights,
+                # dycore option record (default off): the AIMIP spectral core
+                "spectral_t_damping_pressure_surfaces": bool(
+                    _build_spectral_config(cfg).pe_config
+                    .T_damping_pressure_surfaces),
                 **(
                     {"checkpoint_ema": str(ema_ckpt_path)}
                     if ema_ckpt_path is not None else {}
