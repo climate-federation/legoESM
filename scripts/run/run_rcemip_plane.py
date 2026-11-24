@@ -85,6 +85,7 @@ from legoesm.grids.vertical import (
     create_height_coordinate_from_z_half,
     create_stretched_height_coordinate,
 )
+from legoesm.parallel.staggered_init import staggered_first_call
 
 
 # JAX x64 toggle happens at IMPORT TIME (before argparse). Two paths:
@@ -1024,7 +1025,12 @@ def _build_radiation_config(
     clouds: bool = True,
     insolation: str = "rcemip",
     t_sfc: float = 300.0,
+    column_chunk_size: int = 0,
 ) -> RadiationConfig | None:
+    if column_chunk_size > 0 and scheme != "rrtmgp":
+        raise ValueError(
+            f"--radiation-column-chunk {column_chunk_size} only applies to "
+            f"--radiation rrtmgp (got {scheme!r}); drop the flag.")
     if scheme == "none":
         return None
     if scheme not in ("gray", "rrtmgp"):
@@ -1052,7 +1058,8 @@ def _build_radiation_config(
     # RAD-1-ice): ice r_eff stays 30 µm; SAM uses T-dependent 6–250 µm.
     if scheme == "rrtmgp":
         from legoesm.atmosphere.physics.clouds.config import CloudConfig
-        rrtmgp_kwargs = {"include_clouds": clouds}
+        rrtmgp_kwargs = {"include_clouds": clouds,
+                         "column_chunk_size": column_chunk_size}
         if s0 is not None:
             rrtmgp_kwargs["S_0"] = s0
         # RAD-4: SAM RCEMIP trace-gas concentrations. gSAM (RCEMIP1/prm,
@@ -1811,6 +1818,12 @@ def parse_args(argv=None):
                         "RRTMGP). Gated mode (interval>1) applies cached "
                         "radiation tendency as forward Euler increments "
                         "between recomputes — standard SAM/WRF/CM1 practice.")
+    p.add_argument("--radiation-column-chunk", type=int, default=0,
+                   help="RRTMGP column-chunk block size (0 = off). >0 maps the "
+                        "rrtmgp solve over fixed-size column blocks, bounding "
+                        "its XLA scratch memory and compile time. Numerically "
+                        "exact (columns are independent); must divide the "
+                        "rank's column count.")
     p.add_argument("--radiation", choices=["gray", "rrtmgp", "none"],
                    default="rrtmgp",
                    help="Radiation scheme. DEFAULT rrtmgp = RRTM (the faithful "
@@ -2174,6 +2187,7 @@ def main():
     radiation_config = _build_radiation_config(
         args.radiation, update_interval_steps=args.radiation_interval,
         clouds=args.clouds, insolation=args.insolation, t_sfc=args.T_sfc,
+        column_chunk_size=args.radiation_column_chunk,
     )
     if args.land:
         radiation_config = _with_land_radiation_surface(
@@ -2433,14 +2447,18 @@ def main():
                     )
                 land_sfc_flux_jit = jax.jit(_land_sfc_flux_wrapper)
 
+    def _step_once(st):
+        return model.step(st, dt=args.dt, physics_fn=physics_fn)
+
     for i in range(_start_step, args.steps):
         if args.land:
             if land_rad_refresh_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
             ):
-                cached_rad_tend, cached_land_rad_sfc = land_rad_refresh_jit(
-                    state, land_T_sfc,
-                )
+                cached_rad_tend, cached_land_rad_sfc = (
+                    staggered_first_call(land_rad_refresh_jit, state, land_T_sfc)
+                    if cached_rad_tend is None
+                    else land_rad_refresh_jit(state, land_T_sfc))
             if cached_rad_tend is not None:
                 state = apply_radiation_forward_euler(
                     state, cached_rad_tend, args.dt,
@@ -2463,17 +2481,26 @@ def main():
                 args.land_albedo,
                 land_emissivity,
             )
-            state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+            # First step compiles the step: block, then return the freed compile
+            # heap to the OS (the only trim when radiation runs inside the step).
+            state = (staggered_first_call(_step_once, state) if i == _start_step
+                     else _step_once(state))
         else:
             if rad_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
             ):
-                cached_rad_tend = rad_jit(state)
+                # First refresh: return the compile's freed heap to the OS.
+                cached_rad_tend = (staggered_first_call(rad_jit, state)
+                                   if cached_rad_tend is None
+                                   else rad_jit(state))
             if cached_rad_tend is not None:
                 state = apply_radiation_forward_euler(
                     state, cached_rad_tend, args.dt,
                 )
-            state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+            # First step compiles the step: block, then return the freed compile
+            # heap to the OS (the only trim when radiation runs inside the step).
+            state = (staggered_first_call(_step_once, state) if i == _start_step
+                     else _step_once(state))
         # POSITIVITY GUARD (CRM-dycore campaign, codex-reviewed): keep the water
         # tracers >=0 in the STATE after each step, matching run_rce_mpi_long.
         # The advective-form tracer advection under strong div(u) — e.g. a

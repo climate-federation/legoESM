@@ -17,7 +17,9 @@ The case's cell size (dx, dy, dz) is kept; the bench sets the cell COUNTS:
   ``(ny * n_y / N) x (nx * n_x)`` and so changes with N; part of the weak
   "efficiency" is that shape change, not communication.
 
-N = 1 runs the serial spectral core (no layout); N > 1 runs the y-slab layout
+N = 1 runs the serial spectral core (no layout) for slab/pencil, and a 1-rank
+planes layout for ``--decomp planes`` (and ``auto``, the default), so the
+1-rank reference runs the same FFT layout as N > 1; N > 1 runs the chosen layout
 (global ny must divide by N). Each rank builds its own slab of the initial
 state; the theta noise is drawn per GLOBAL row, so the IC does not depend on N.
 
@@ -45,15 +47,46 @@ from bench_plane_crm_dd_scaling import (  # noqa: E402
 )
 
 
+# Voted 2026-11-22, revised after the same-code rerun at e55ef4b (a/a/a):
+# planes only when every rank shares one node, else pencil. Measured weak
+# fp32: planes wins at 32 and 64 ranks on 1 node; pencil wins on 2+ nodes from
+# 64 ranks (64 on 2 x 32: 35% vs 30%; 256 on 4 x 64: 17% vs 6%) - the planes
+# all-to-all over every rank does not scale across nodes.
+def choose_decomp(decomp: str, n_nodes: int) -> str:
+    """Resolve ``--decomp auto`` to ``planes`` (one node) or ``pencil``."""
+    if decomp != "auto":
+        return decomp
+    return "planes" if n_nodes == 1 else "pencil"
+
+
+def count_nodes(comm) -> int:
+    """Number of shared-memory nodes the communicator spans (MPI
+    ``COMM_TYPE_SHARED`` split: one local root per node)."""
+    from mpi4py import MPI
+    local = comm.Split_type(MPI.COMM_TYPE_SHARED)
+    roots = comm.allreduce(1 if local.Get_rank() == 0 else 0)
+    local.Free()
+    return roots
+
+
+def builds_layout(decomp: str, n: int) -> bool:
+    """Whether the bench runs a distributed layout: always for planes (so the
+    1-rank reference uses the planes FFT layout), else only for N > 1."""
+    return decomp == "planes" or n > 1
+
+
 def bench_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--mode", choices=["strong", "weak"], default="strong")
     p.add_argument("--precision", choices=["float32", "float64"],
                    default="float64")
     p.add_argument("--case", default="cbl_nieuwstadt")
-    p.add_argument("--decomp", choices=["slab", "pencil"], default="slab",
-                   help="slab = y-slabs over all ranks; pencil = most-square "
-                        "y x x rank mesh")
+    p.add_argument("--decomp", choices=["auto", "slab", "pencil", "planes"],
+                   default="auto",
+                   help="auto = planes when all ranks share one node, else pencil; "
+                        "slab = y-slabs over all ranks; pencil = most-square "
+                        "y x x rank mesh; planes = the pencil mesh with the "
+                        "planes FFT mode (one all-to-all per transform)")
     p.add_argument("--nx", type=int, required=True)
     p.add_argument("--ny", type=int, required=True)
     p.add_argument("--nz", type=int, required=True)
@@ -149,14 +182,17 @@ def main(argv=None):
     rank, n = comm.Get_rank(), comm.Get_size()
     n_y, n_x = most_square_factors(n)
     ny_g, nx_g = global_grid_shape(bargs.mode, bargs.ny, bargs.nx, n_y, n_x)
-    p_y, p_x = (n_y, n_x) if bargs.decomp == "pencil" else (n, 1)
+    n_nodes = count_nodes(comm)
+    decomp = choose_decomp(bargs.decomp, n_nodes)
+    p_y, p_x = (n_y, n_x) if decomp in ("pencil", "planes") else (n, 1)
     if ny_g % p_y or nx_g % p_x:
         raise SystemExit(f"global {ny_g}x{nx_g} not divisible by mesh {p_y}x{p_x}")
     ny_l, nx_l = ny_g // p_y, nx_g // p_x
     grid = scaled_grid(case.grid, nx_g, ny_g, bargs.nz)
     cfg = les.cbl_les_config(grid, args, sgs)
-    layout = (sl.make_spectral_les_pencil_layout(comm, p_y, p_x, ny_g, nx_g)
-              if n > 1 else None)
+    layout = (sl.make_spectral_les_pencil_layout(
+        comm, p_y, p_x, ny_g, nx_g, planes=decomp == "planes")
+              if builds_layout(decomp, n) else None)
     g = sl.make_grid(cfg, dtype=dtype, layout=layout)
     ry, rx = divmod(rank, p_x)
     st = local_cbl_state(sl, g, args, ry * ny_l, ny_l, u_geo, dtype,
@@ -200,7 +236,7 @@ def main(argv=None):
             "model": "spectral_les", "case": case.name, "sgs": sgs,
             "mode": bargs.mode, "precision": bargs.precision, "n_ranks": n,
             "ny_global": ny_g, "nx_global": nx_g, "nz": bargs.nz,
-            "ny_local": ny_l, "nx_local": nx_l, "decomp": bargs.decomp,
+            "ny_local": ny_l, "nx_local": nx_l, "decomp": decomp, "n_nodes": n_nodes,
             "mesh": [p_y, p_x], "dx": g.dx, "dy": g.dy, "dz": g.dz, "dt": dt0,
             "time_steps": bargs.time_steps, "windows": bargs.windows,
             "compile_plus_first_step_s": t_compile,
