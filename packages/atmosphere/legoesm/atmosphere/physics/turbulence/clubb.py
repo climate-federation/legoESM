@@ -8,7 +8,7 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 7594)
+Table of contents (sections, in order; flag reference table at line 7599)
 -----------------------------------------------------------------------------
   1. [line  372] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
   2. [line  493] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
