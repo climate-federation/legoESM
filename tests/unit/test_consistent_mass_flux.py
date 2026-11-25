@@ -689,11 +689,17 @@ def test_hybrid_guards_check_the_stored_dp_itself(hc, monkeypatch):
         air_mass_state(st, _ps(m.lonCell, m.latCell), hc)
 
 
-def test_latlon_one_row_grid_gets_both_pole_faces(sc):
-    """n_lat=1: no interior v-faces, but the two pole faces (zero flux) must still exist."""
+@pytest.mark.parametrize("coord", ["sc", "hc"])
+@pytest.mark.parametrize("refine", [0, None])
+def test_latlon_one_row_grid_gets_both_pole_faces(coord, refine, request):
+    """n_lat=1: no interior v-faces, but the two pole faces (zero flux) must
+    still exist, on sigma and Kent hybrid levels, with and without the
+    default continuity correction."""
     from legoesm.grids.latlon import create_latlon_grid
     g = create_latlon_grid(1, 36)
-    mf = cmf.consistent_mass_flux_latlon(g, sc, dcmip13_wind_geo, _ps(g.lon2d, g.lat2d), refine=0)
+    kw = {} if refine is None else {"refine": refine}
+    mf = cmf.consistent_mass_flux_latlon(g, request.getfixturevalue(coord),
+                                         dcmip13_wind_geo, _ps(g.lon2d, g.lat2d), **kw)
     fv = mf.flux_h[1]
     assert fv.shape[0] == 2
     assert np.all(np.asarray(fv) == 0.0)

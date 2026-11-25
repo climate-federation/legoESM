@@ -677,10 +677,17 @@ def test_default_hydro_duo_row_still_cam6_l32():
     from legoesm.grids.vertical import CAM6_L32_HYAI, CAM6_L32_HYBI
     from legoesm import constants
     from scripts.matrix._cube_duo_adapters import build_duo_hydro
-    h = build_duo_hydro(12, perturbed=False)
+    h = build_duo_hydro(36, perturbed=False)
     assert h.km == 32 and h.model.config.eta == "cam6_l32"
     np.testing.assert_allclose(h.model.ak, np.asarray(CAM6_L32_HYAI)
                                * constants.p_ref, rtol=1e-12, atol=1e-9)
     np.testing.assert_allclose(h.model.bk, np.asarray(CAM6_L32_HYBI),
                                rtol=0, atol=1e-15)
     assert np.asarray(h.state["state"]["delp"]).shape[-1] == 32
+
+
+def test_hydro_duo_refuses_unvalidated_resolution():
+    """The 1920 s deck step is validated at C36 only."""
+    from scripts.matrix._cube_duo_adapters import build_duo_hydro
+    with pytest.raises(ValueError, match="validated at C36 only"):
+        build_duo_hydro(12, perturbed=False)

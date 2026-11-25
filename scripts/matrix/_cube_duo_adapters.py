@@ -676,6 +676,12 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     else:
         bundle = rotated_jw_bundle(model, perturbed=perturbed,
                                    alpha=rotated_alpha)
+    if n != 36:
+        # The deck step (1920 s, n_split 8) is validated on the full cube
+        # matrix at C36 only; refuse other resolutions rather than run an
+        # unvalidated Courant number (vote: codex A, author A).
+        raise ValueError(f"build_duo_hydro: deck dt {DUO_HYDRO_DT_ATMOS:.0f} s "
+                         f"is validated at C36 only, got C{n}")
     dt = DUO_HYDRO_DT_ATMOS
 
     hs_fn = None
