@@ -5554,20 +5554,21 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     field_specs_2d = [(f"q{i+1}", f"Tracer q{i+1}", "viridis")
                       for i in range(min(n_tracers, 4))]
 
+    vertical_scheme = (
+        "fv3_duo Lagrangian (implicit omega) + map1_q2"
+        if duo is not None else
+        "upwind (legacy cube model)"
+        if tc.grid_type == "cubed_sphere" else
+        model.config.vertical_scheme
+        if tc.grid_type == "icosahedral" else cfg["vertical"])
+    duo_rows = ({"duo": duo.note,
+                 "accepted_steps": int(round(float(state_final[1]) / dt)),
+                 "elapsed_days": float(state_final[1]) / 86400.0}
+                if duo is not None else {})
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "levels": nlev, "period_days": period, "dt": dt,
-        "vertical_scheme": (
-            "fv3_duo Lagrangian (implicit omega) + map1_q2"
-            if duo is not None else
-            "upwind (legacy cube model)"
-            if tc.grid_type == "cubed_sphere" else
-            model.config.vertical_scheme
-            if tc.grid_type == "icosahedral" else cfg["vertical"]),
-        **({"duo": duo.note,
-            "accepted_steps": int(round(float(state_final[1]) / dt)),
-            "elapsed_days": float(state_final[1]) / 86400.0}
-           if duo is not None else {}),
+        "vertical_scheme": vertical_scheme, **duo_rows,
         "status": status, "notes": notes,
         "wall_time": f"{wall:.1f}s"},
         diag=diag)  # iter-99: surface BLOWUP info if any
