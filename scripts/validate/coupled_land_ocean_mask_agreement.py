@@ -1,6 +1,6 @@
 """Does the atmosphere's land fraction agree with the 3-D ocean's wet cells?
 
-Builds two coupled drivers (build-only, no step): one whose atmosphere land
+Builds and sets up two coupled drivers (no step): one whose atmosphere land
 fraction comes from the land-mask file (the owned-surface recipe) and one whose
 3-D ocean wet mask comes from WOA.  Both must sit on the same lat-lon grid.
 
@@ -43,8 +43,10 @@ def main(argv=None):
     a = p.parse_args(argv)
     from scripts.run import run_coupled
     land = run_coupled.main(shlex.split(a.land_argv), build_only=True)
+    land.setup()
     f_land = np.asarray(land._atm._f_land, dtype=float)
     ocean = run_coupled.main(shlex.split(a.ocean_argv), build_only=True)
+    ocean.setup()
     wet = np.asarray(ocean._ocean_land_mask, dtype=float)
     f_land = f_land.reshape(wet.shape)
     r = classify(f_land, wet)
