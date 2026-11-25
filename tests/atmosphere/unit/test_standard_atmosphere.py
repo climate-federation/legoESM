@@ -434,6 +434,8 @@ class TestDriverStandardICMPAS:
         eq = T[np.abs(lat) < 15.0, -1].mean()
         pole = T[np.abs(lat) > 70.0, -1].mean()
         assert eq > pole + 10.0
+        assert eq > 290.0                  # latCell in radians (a degree mixup gives ~283 K)
+        assert np.all(T[:, -1] > T[:, 0])  # index -1 is the lowest level
         assert T.min() < 230.0
         cwv = column_water_vapor(drv.tracers["q_v"], drv.state.p_s.data,
                                  drv.sigma.dsigma)
@@ -441,7 +443,11 @@ class TestDriverStandardICMPAS:
         assert float(jnp.max(jnp.abs(drv.state.u.data))) == 0.0
 
     def test_refused_over_topography(self, drv):
-        drv.state = drv.state._replace(
-            phis=drv.state.phis.replace(data=jnp.ones_like(drv.state.phis.data)))
-        with pytest.raises(NotImplementedError, match="flat topography"):
-            drv._apply_standard_atmosphere_ic()
+        flat = drv.state
+        drv.state = flat._replace(
+            phis=flat.phis.replace(data=jnp.ones_like(flat.phis.data)))
+        try:
+            with pytest.raises(NotImplementedError, match="flat topography"):
+                drv._apply_standard_atmosphere_ic()
+        finally:
+            drv.state = flat
