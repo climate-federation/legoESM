@@ -2,9 +2,9 @@
 
 With the default barotropic eta damping on, the sea level change of a step must
 equal minus dt times the column divergence of the tracer mass fluxes in every
-column, and a passive tracer of one must stay one.  Before the damping was
-booked as a transport the two differed by up to 1.7 cm per step in a wind
-driven box and the tracer of one drifted by 1e-3 within a few days.
+column, and a uniform salinity with no surface salt flux must stay uniform.
+Before the damping was booked as a transport the two differed by centimetres
+per step in a wind driven box and the uniform tracer drifted.
 """
 import numpy as np
 
@@ -49,7 +49,7 @@ def test_damping_booked_in_tracer_transports():
     zmid = np.cumsum(dz) - dz / 2
     T0 = (4.0 + 22.0 * np.exp(-zmid / 200.0))[None, None, :] * mask3
     st = st._replace(T=st.T.replace(data=jnp.asarray(T0)),
-                     passive=jnp.asarray(mask3, float)[..., None])
+                     S=st.S.replace(data=jnp.asarray(35.0 * mask3)))
     cfg = LatLonCGridOceanConfig.from_flat(store_mass_flux=True, physics=OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="kpp"), lateral_mixing=LateralMixingConfig(scheme="none")))
     assert cfg.barotropic.barotropic_diffusion_alpha > 0.0          # the damping under test is on
@@ -63,6 +63,6 @@ def test_damping_booked_in_tracer_transports():
         div = np.asarray(divergence_cgrid(new.mass_flux_u.data, new.mass_flux_v.data, grid).sum(-1))
         worst = max(worst, float(np.abs((np.asarray(new.eta.data - st.eta.data) + DT * div) * mask2).max()))
         st = new
-    one = np.asarray(st.passive[..., 0])
+    salt = np.asarray(st.S.data)
     assert worst < 1e-12, worst
-    assert np.abs(np.where(mask3, one - 1.0, 0.0)).max() < 1e-11
+    assert np.abs(np.where(mask3, salt - 35.0, 0.0)).max() < 35.0e-11
