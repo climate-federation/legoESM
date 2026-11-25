@@ -1078,6 +1078,15 @@ class CoupledESMDriver:
                     "yet (the wet mask is the atmosphere's land fraction, cell by "
                     "cell); refusing")
             layout = getattr(self._atm, "_voronoi_layout", None)
+            from legoesm.grids.geography import geography_has_land
+            if layout is not None and geography_has_land(geo):
+                # VOTED a/a/a: the dry->wet flux routing is built from the
+                # rank-local wet mask (routes within a rank, raises on an
+                # all-dry rank); refused on every rank until it is global
+                raise ValueError(
+                    f"geography {geo} has land, and a partitioned (multi-rank) "
+                    "MPAS ocean routes dry-cell fluxes only within each rank; "
+                    "run it on one process (or an all-ocean geography)")
             depth = geography_ocean_depth(
                 self._atm._grid_global if layout is not None else mesh, geo,
                 H_min=BathymetryConfig().H_min, H_max=cfg.ocean_H_max_m)

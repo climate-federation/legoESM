@@ -109,13 +109,13 @@ def open_geography(path: str):
 
 
 def geography_has_land(path: str) -> bool:
-    """Any land in the file (elevation > 0, land_fraction > 0 or a barrier):
-    the same answer on every MPI rank, unlike a rank-local land fraction."""
+    """Any land in the file: a barrier, else ``land_fraction > 0`` when the
+    file carries one (it overrides the elevation), else ``elevation > 0``.
+    The same answer on every MPI rank, unlike a rank-local land fraction."""
     ds = open_geography(path)
     try:
-        return bool(np.any(ds["elevation"].values > 0.0)
-                    or ("land_fraction" in ds and np.any(ds["land_fraction"].values > 0.0))
-                    or "barrier_lat" in ds)
+        lf = ds["land_fraction"] if "land_fraction" in ds else ds["elevation"]
+        return bool("barrier_lat" in ds or np.any(lf.values > 0.0))
     finally:
         ds.close()
 

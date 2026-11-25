@@ -256,6 +256,9 @@ def test_geography_has_land(tmp_path):
     assert not geo.geography_has_land(_gen(tmp_path, "aquaplanet"))
     assert geo.geography_has_land(_gen(tmp_path, "ridge", barrier_lon=0.0))
     assert geo.geography_has_land(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0)))
+    ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))
+    ds["land_fraction"] = ds["elevation"] * 0.0     # explicit: all ocean
+    assert not geo.geography_has_land(_write(ds, tmp_path, "zero_lf.nc"))
 
 
 def test_coupled_refuses_atm_owned_geography_land_without_a_land_model(tmp_path):
@@ -442,6 +445,27 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
     assert np.all(H[wet < 0.5] == 0.0)
     assert isinstance(d._ocean_z_coord, OceanPartialCellCoordinate)
     assert d._ocean_model.z_coord is d._ocean_z_coord   # model rebuilt on it
+
+
+def test_partitioned_mpas_ocean_refuses_a_geography_with_land(tmp_path, monkeypatch):
+    """Dry->wet flux routing is rank-local; a multi-rank MPAS ocean (the
+    atmosphere's Voronoi MPI layout) under a geography with land is refused."""
+    from types import SimpleNamespace
+
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    orig = CoupledESMDriver._init_ocean
+
+    def partitioned(self):
+        self._atm._voronoi_layout = SimpleNamespace()
+        return orig(self)
+
+    monkeypatch.setattr(CoupledESMDriver, "_init_ocean", partitioned)
+    cc = CoupledConfig(f_land_mode="analytical", land_mode="none", ocean_mode="dynamic")
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))),
+                         cc, output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="partitioned"):
+        d.setup()
 
 
 def test_coupled_latlon_dynamic_ocean_refuses_a_geography(tmp_path):
