@@ -2740,6 +2740,8 @@ class ModelDriver:
         self.diagnostics = None
         self._phis_data = None
         self._f_land = None
+        # (self, f_land) -> f_land, applied once where setup finalises f_land
+        self._land_fraction_hook = None
         # Voronoi MPI: does the GLOBAL mesh hold any land (None = not known,
         # use this rank's own cells).  Every rank holds the global product,
         # so the answer is rank-uniform with no collective.
@@ -4036,6 +4038,11 @@ class ModelDriver:
                 f"  Land fraction source: {_lf_src} "
                 f"(mean={float(jnp.mean(self._f_land)):.3f})")
 
+        _hook = self._land_fraction_hook
+        if _hook is not None and self._f_land is not None:
+            # set by a coupled driver whose ocean dictates part of the
+            # land/sea partition (CoupledESMDriver._owned_land_fraction_hook)
+            self._f_land = _hook(self, self._f_land)
         if self._f_land is not None:
             # every land-fraction source above, once: roundoff below 1 left a
             # 1e-14 water fraction the slab divided by (SST to 4.7e9 K).  The

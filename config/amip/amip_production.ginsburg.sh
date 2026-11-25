@@ -216,10 +216,10 @@ if [[ -n "${AMIP_SSO}" ]]; then
   CMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
 fi
 
-# The SLAB CMIP deck only (config/cmip/cmip_ocean_slab.yaml, atmosphere-owned
-# land): the atmosphere land model's paths, verbatim from AMIP_PATH_FLAGS.  Not
-# in CMIP_PATH_FLAGS: the 3-D ocean deck keeps the coupler's land, and a land
-# mask would change its atmosphere land fraction.
+# The CMIP decks with an atmosphere-owned surface (cmip_ocean_slab.yaml and
+# cmip_ocean_3D.yaml): the atmosphere land model's paths, verbatim from
+# AMIP_PATH_FLAGS.  Kept out of CMIP_PATH_FLAGS so a deck without an
+# atmosphere land model does not pick up a land mask.
 CMIP_LAND_PATH_FLAGS=(
   --surfdata "${AMIP_SURFDATA}"
   --clm-surfdata-path "${CLM_SURFDATA}"
