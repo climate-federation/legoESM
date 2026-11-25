@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 # "No surface-T override" sentinel for ``surface_T_sfc_override``.  Formerly
@@ -318,6 +319,18 @@ class PhysicsState(NamedTuple):
     # znt, hfx, qfx, pblh), seeded at WRF's cold start; None for every other
     # scheme.  Appended LAST with a default.
     sfclay: jnp.ndarray = None
+    # FIVE fine layers (legoesm.atmosphere.physics.five): the fine state, the
+    # fine physics carry and the column selection, as one dict pytree.  None
+    # unless FIVE is switched on (existing pytrees unchanged).
+    five_carry: object = None
+    # CAM7 CLUBB-MF plume cloud, (ncol, nlev) top-down: moist-plume area
+    # fraction [-] and its in-cloud condensate [kg/kg] (atmos_phys clubb.F90
+    # mf_cloudfrac_zt / mf_qc_zt, sub-cycle mean), written by prognostic CLUBB
+    # with clubb_mf and read one step LAGGED by the cam6_clubb cloud lane as
+    # CAM7's deep-cloud hookup (clubb3_run).  Zeros = no plume cloud (MF off,
+    # cold start).  Appended LAST.
+    mf_cloudfrac: jnp.ndarray = None
+    mf_qc: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -491,7 +504,7 @@ def init_physics_state(
     # overwrites it each step and radiation reads it when cloud_scheme="clubb".
     cloud_fraction = jnp.zeros((ncol, nlev), dtype=dtype)
 
-    return PhysicsState(
+    return _strong_types(PhysicsState(
         tke=tke,
         conv_prog_profile=conv_prog_profile,
         conv_stoch_state=conv_stoch_state,
@@ -517,6 +530,8 @@ def init_physics_state(
         conv_icwmr=jnp.zeros((ncol, nlev), dtype=dtype),
         pblh=jnp.zeros((ncol,), dtype=dtype),
         relvar=jnp.full((ncol, nlev), _RELVAR_INIT, dtype=dtype),
+        mf_cloudfrac=jnp.zeros((ncol, nlev), dtype=dtype),
+        mf_qc=jnp.zeros((ncol, nlev), dtype=dtype),
         clubb_wp2_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         clubb_kh_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         cloud_fraction_old=jnp.zeros((ncol, nlev), dtype=dtype),
@@ -527,7 +542,16 @@ def init_physics_state(
         zc_q_v_prev=_zc_seed(physics_config, (ncol, nlev), dtype),
         zc_p_s_prev=_zc_seed(physics_config, (ncol,), dtype),
         sfclay=_init_sfclay(ncol, physics_config, dtype),
-    )
+    ))
+
+
+def _strong_types(phys_state):
+    """Drop the weak type of every seeded leaf: a weak seed changes the jitted
+    step's argument signature after step 1 (physics returns the field strongly
+    typed) and forces a second full compile. Values are unchanged."""
+    return jax.tree_util.tree_map(
+        lambda x: jnp.asarray(x, dtype=x.dtype) if getattr(x, "weak_type", False) else x,
+        phys_state)
 
 
 def _zc_seed(physics_config, shape, dtype):
@@ -659,6 +683,9 @@ def update_physics_state(phys_state, updates):
         zc_q_v_prev=updates.get("zc_q_v_prev", phys_state.zc_q_v_prev),
         zc_p_s_prev=updates.get("zc_p_s_prev", phys_state.zc_p_s_prev),
         sfclay=updates.get("sfclay", phys_state.sfclay),
+        five_carry=updates.get("five_carry", phys_state.five_carry),
+        mf_cloudfrac=updates.get("mf_cloudfrac", phys_state.mf_cloudfrac),
+        mf_qc=updates.get("mf_qc", phys_state.mf_qc),
     )
 
 

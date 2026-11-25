@@ -1,0 +1,9 @@
+# Production deck + CAM6's host omega handed to prognostic CLUBB, non-default arm.
+#
+# CAM6 gives CLUBB the dycore's large-scale pressure velocity
+# (clubb_intr.F90:1654-1656, 1677-1679, 1778, cam_cesm2_1_rel_60), so its
+# fluxes, variances and wp2/wp3 feel the subsidence; production runs CLUBB with
+# wm = 0.  Ported from Isma Di Carlo's ENSO fork (opt-in).  Everything else is
+# amip_production.yaml.
+include: amip_production.yaml
+clubb_host_omega: true

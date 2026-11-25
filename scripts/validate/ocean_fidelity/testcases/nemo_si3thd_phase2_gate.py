@@ -316,13 +316,30 @@ def forcing_inputs(values) -> dict:
     return {**{name: values[name] for name in ZDF_INPUT_NAMES}, "sst": values["sst"]}
 
 
+def _lane_forcing(exact):
+    """Construct the lane's pre-SST 13-field forcing boundary explicitly."""
+    import jax.numpy as jnp
+    from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
+
+    require(
+        "sss" in exact and exact["sss"] is not None,
+        "missing sea-surface salinity (sss)",
+    )
+    return SI3SurfaceForcing(
+        **{
+            name: jnp.asarray(exact[name], dtype=jnp.float64)
+            for name in ZDF_INPUT_NAMES
+        }
+    )
+
+
 def _reconstructed_forcing(exchange, entry, post_zdf, exact):
     """Reviewed pre-fix bridge, retained only for the registered owner arm."""
 
     qns_entry = exchange["qns_ice"] - exchange["dqns_ice"] * (
         post_zdf["t_su"] - entry.T_surface
     )
-    return _forcing(exact)._replace(qns_ice=qns_entry)
+    return _lane_forcing(exact)._replace(qns_ice=qns_entry)
 
 
 def _score(rows, name, oracle, lego, *, plant=False, exact=False):
@@ -1087,7 +1104,7 @@ def _si3_column_step_arrays_ablation(
     S_layers = (
         sal_out.sz_i
         if (_nemo_source_round and _nemo_salprof_factoring)
-        else bl.option2_salinity_profile(
+        else bl._si3_502_option2_salinity_profile(
             S_bulk,
             forcing.sss,
             _nemo_source_round=_nemo_source_round,
@@ -1198,7 +1215,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         step_entry_jax = jax.tree.map(
             lambda x: jnp.asarray(x, dtype=jnp.float64), step_entry
         )
-        step_forcing = _forcing(step_input)
+        step_forcing = _lane_forcing(step_input)
         trace = si3_lane_column_step_arrays(
             step_entry_jax,
             step_forcing,

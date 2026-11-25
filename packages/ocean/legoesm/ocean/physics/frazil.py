@@ -25,7 +25,8 @@ The nonlinear liquidus is solved with 16 fixed-point iterations (also on
 remelting). Supported seawater regime: initial Si <= S <= 50 PSU, 0 <= Si <= 4,
 sea pressure 0..1e8 Pa, supercooling <= 1.34 K, cp/Lf <= 0.02 K^-1.
 Within this regime the iteration is contractive; tests require equilibrium
-within 1e-10 K in float64 and 1e-4 K in float32. Warm layers with insufficient
+within 1e-10 K in float64 and 1e-4 K in float32 outside the RULE 5 switch
+band (below). Warm layers with insufficient
 incoming ice remain above freezing. A half-mass numerical freeze cap prevents
 division by zero outside this regime; equilibrium is not promised there.
 
@@ -49,6 +50,18 @@ The pressure bound catches negative, nonfinite, and >1e8 Pa values, not units:
 6000 dbar mistakenly supplied as 6000 Pa passes. Units cannot be certified
 without independent depth/density information; callers must supply Pa.
 No driver or sea-ice coupling is performed by this module.
+
+RULE 5: the formation bound x >= 0 and the remelt bound 0 <= melt <= rising
+ice are smooth by default (``supercooling_switch_width_K`` = 0.01 K, applied
+as w*cp/Lf in ice-fraction units); 0 restores the hard clip bitwise. The 0.5
+half-mass cap and the rise-carry roundoff guard stay hard. KNOWN DIFFERENCE
+(fixture frazil_rule5_main_*.npz, vs the hard clip): water within about 5 mK
+of freezing forms (above it) or keeps rising (below it) up to 0.2 kg m-2 of
+ice per column and shifts T by up to 4.5 mK, so "ice present => T <= Tf" holds
+only to about 5 mK (where the hard clip's derivative is 0 the smooth one is
+not, by design) and a remelted cell can keep up to about 5 mK of
+supercooling (the formation check covers formation only); mass and salt budgets stay exact and no ice melts beyond
+what rises.
 """
 
 import math
@@ -59,6 +72,7 @@ import jax.numpy as jnp
 from jax.experimental import checkify
 
 from legoesm import constants
+from legoesm.core.smooth import smooth_max_c1, validate_smoothing_width
 from legoesm.ocean.eos import (VALID_FREEZE_SCHEMES, freezing_point,
                                potential_temperature, in_situ_temperature)
 
@@ -88,6 +102,7 @@ __param_spec__ = {
             "rho_sw_kg_m3": "Reference density convention, not a closure tuning parameter.",
             "c_p_sw_j_kg_k": "Specific heat convention shared with receiving sea ice.",
             "L_f_j_kg": "Latent enthalpy convention shared with receiving sea ice.",
+            "supercooling_switch_width_K": "RULE 5 smoothing width of the freeze/melt switches; numerics, not a closure.",
         },
     },
 }
@@ -114,6 +129,9 @@ class FrazilConfig(NamedTuple):
     rho_sw_kg_m3: float = constants.rho_ocean
     c_p_sw_j_kg_k: float = constants.c_sw
     L_f_j_kg: float = constants.L_f
+    # RULE 5 width [K] of the formation (x >= 0) and remelt (0 <= melt <= rising
+    # ice) switches, applied in ice-fraction units w * cp / Lf; 0 = hard clip.
+    supercooling_switch_width_K: float = 0.01
 
 
 class FrazilResult(NamedTuple):
@@ -146,6 +164,7 @@ def apply_frazil(T_C, S_psu, dz_m, active_mask, p_pa, config):
         value = getattr(config, name)
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive")
+    validate_smoothing_width("supercooling_switch_width_K", config.supercooling_switch_width_K)
     if not math.isfinite(config.ice_salinity_psu) or not 0 <= config.ice_salinity_psu <= 4:
         raise ValueError("ice_salinity_psu must be finite and in [0, 4]")
 
@@ -196,8 +215,27 @@ def _apply_frazil_in_situ(T, S, dz, active, p, config):
     si = config.ice_salinity_psu
     latent_over_cp = jnp.asarray(latent / cp, dtype=dtype)
     mass = rho * jnp.where(active, dz, jnp.ones_like(dz))
+    w = config.supercooling_switch_width_K * cp / latent  # ice-fraction units
 
-    def equilibrium_fraction(t, s, pressure, lower, upper):
+    def form(x):
+        # x >= 0 smooth (RULE 5); the 0.5 half-mass cap is a numerical guard
+        # outside the supported regime and stays hard (votes FZ1, FZ2)
+        if w == 0:
+            return jnp.clip(x, 0, 0.5)
+        return jnp.minimum(smooth_max_c1(x, 0.0, w), 0.5)
+
+    def remelt(cap):
+        # melt fraction y = -x in [0, cap]: a difference of 1-Lipschitz ramps
+        # stays in [0, cap] and is exactly 0 when no ice rises (cap = 0)
+        # (vote FZ3'); the composed smooth min/max would not be
+        def clip(x):
+            if w == 0:
+                return jnp.clip(x, -cap, 0)
+            y = -x
+            return smooth_max_c1(y - cap, 0.0, w) - smooth_max_c1(y, 0.0, w)
+        return clip
+
+    def equilibrium_fraction(t, s, pressure, bound):
         # x = m/M. Solving T'(x)=Tf(S'(x),p) by fixed-point substitution
         # preserves derivatives, unlike differentiating bisection comparisons.
         def step(_, x):
@@ -205,11 +243,11 @@ def _apply_frazil_in_situ(T, S, dz, active, p, config):
             tf = (freezing_point(salinity, pressure, scheme=config.freezing_scheme)
                   - constants.T_freeze).astype(dtype)
             updated = (tf - t) / (latent_over_cp + tf)
-            return jnp.clip(updated, lower, upper)
+            return bound(updated)
 
         return jax.lax.fori_loop(0, _EQUILIBRIUM_ITERATIONS, step, jnp.zeros_like(t))
 
-    formed_fraction = equilibrium_fraction(T, S, p, 0, 0.5)
+    formed_fraction = equilibrium_fraction(T, S, p, form)
     formed_fraction = jnp.where(active, formed_fraction, 0)
     formed = mass * formed_fraction
     liquid_mass = mass - formed
@@ -226,12 +264,13 @@ def _apply_frazil_in_situ(T, S, dz, active, p, config):
 
     def rise(carry, cell):
         t, s, pressure, m, new_ice, wet, old_dz = cell
-        x = equilibrium_fraction(t, s, pressure, -carry / m, 0)
+        x = equilibrium_fraction(t, s, pressure, remelt(carry / m))
         x = jnp.where(wet, x, 0)
         melted = -x * m
         t_new = (t + x * latent_over_cp) / (1 - x)
         s_new = (s - x * si) / (1 - x)
         dz_new = jnp.where(wet, (m + melted) / rho, old_dz)
+        # roundoff guard: melted <= carry by construction (vote FZ4)
         return jnp.maximum(carry - melted, 0) + new_ice, (t_new, s_new, dz_new)
 
     def front(a):

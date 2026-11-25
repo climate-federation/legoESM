@@ -2,13 +2,18 @@
 # from realistic WOA18 initial conditions.
 #
 #   source config/amip/amip_production.ginsburg.sh
-#   run_coupled.py "${CMIP_PATH_FLAGS[@]}" --config config/cmip/cmip_ocean_3D.yaml
+#   run_coupled.py "${CMIP_PATH_FLAGS[@]}" "${CMIP_LAND_PATH_FLAGS[@]}" \
+#       --config config/cmip/cmip_ocean_3D.yaml
 #
-# The dynamic-ocean twin of config/cmip/cmip_ocean_slab.yaml: it inherits the
-# SAME tuned atmosphere + air-sea physics from cmip_tuned_physics.yaml; only the
-# ocean differs (a stepped 3D primitive-equation ocean from WOA18 T/S, vs a
-# thermodynamic slab).  Reproduces the run that solved the 3D-ocean cold-collapse
-# and reaches a stable, realistic spin-up.
+# The dynamic-ocean twin of config/cmip/cmip_ocean_slab.yaml (user 2026-11-25:
+# same recipe): it INCLUDES the slab deck, so the atmosphere, its own land model
+# and open-water exchange (atmosphere-owned surface on the column lane), the
+# timestep and cadence are the slab deck's rows; only the ocean differs.  NEW
+# 3-D BASELINE: not comparable with runs of the earlier 3-D deck (coupler land
+# tile, Sundqvist/SBM atmosphere, ocean-derived land fraction).
+#
+# Land/sea partition: the atmosphere's land-mask file; cells the 3-D ocean holds
+# dry are land for the atmosphere too (user decision 2026-11-25, option 1).
 #
 # The cold-collapse fix = WOA surface T/S Newtonian restoring (the tau below): a
 # free 3D ocean from realistic WOA T/S cold-collapses when the dry cold-start
@@ -18,57 +23,15 @@
 #
 # Precedence: an explicit CLI flag > this file > the included base > parser default.
 
-include: cmip_tuned_physics.yaml
-
-# --- run orchestration (identical to the slab twin) ---
-preset: slab_richards
-grid_type: latlon
-energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
-resolution: 24
-nlev: 20
-# hybrid B(eta)=eta**2: holds all of ETOPO (exponent 3 carries negative layer
-# mass below ~658 hPa, i.e. over Tibet, once real terrain is on; F36, vote
-# 2026-10-10).
-transition_exponent: 2
-dt: 300.0
-ic: standard
-days: 240
-diag_days: 10                  # atm<->ocean coupling cadence (<=10 d for stability)
+include: cmip_ocean_slab.yaml
 
 # --- ocean: prognostic 3D from WOA18 IC + surface restoring (the stabilizer) ---
 ocean: dynamic
 ocean_ic: woa                  # WOA18 T/S initial condition (data/woa18/)
 ocean_nlev: 20
 ocean_dt: 300.0                # ocean sub-step [s]
-# TUNED restoring timescales (the cold-collapse fix): SST drift -92 -> +25 K/yr,
-# R_TOA -54 -> -10 W/m2.  Units: days; sensible range ~1-365 d.  Haney (1971)
-# Newtonian surface T/S relaxation — a driver-level coupled spin-up
-# flux-correction (CoupledConfig.ocean_restore_*), NOT a physics-scheme closure,
-# so it lives here in config rather than the physics __param_spec__ system
-# (which is deliberately scheme-only; see tests/test_param_specs.py scope).
 ocean_restore_sst_tau_days: 5.0
 ocean_restore_sss_tau_days: 30.0
-
-# --- CMIP6 historical forcing SCHEMES (F40): the same selectors as
-# config/amip/amip_production.yaml.  File PATHS are machine-specific and come
-# from the launcher (CMIP_PATH_FLAGS in config/amip/amip_production.ginsburg.sh:
-# ozone/solar/GHG/aerosol/CCN/volcanic files, plus terrain + subgrid orography,
-# F36).  Without the forcing file paths this deck refuses to start (no idealized
-# forcing under a "historical" label).  Volcanic aerosol is on when the launcher
-# passes its file; its LW toggle follows the launcher's AMIP_VOLCANIC_LW policy.
-ozone_forcing: external
-solar_source: spectral_file
-solar_tsi_var: TSI
-solar_spectral_var: SSI_frac
-solar_spectral_band_order: rrtmg_sw
-ghg_forcing: external
-aerosol_forcing: external
-diurnal_cycle: true            # coupler takes segment-MEAN surface radiation (F35)
-orbital_insolation: true
-rrtmgp_overhead_layer: true
-
-# --- CMOR output (historical-1850 forcing) ---
-experiment: historical
-start_year: 1850
-cmip_output: true
-cmip_resolution_deg: 5.0
+# The atmosphere builds its own surface boundary under atm_owns_surface, which
+# refuses the coupler's tile-blended surface radiation.
+couple_surface_radiation: false

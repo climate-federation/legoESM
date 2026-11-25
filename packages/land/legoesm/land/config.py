@@ -194,6 +194,13 @@ class MultiLayerLandConfig(NamedTuple):
     # snow-buried leaf + stem area; snow-free albedo unchanged).  Two-leaf canopy
     # only.  Off = the unmasked snow blend.
     canopy_snow_masking: bool = False
+    # Intercepted canopy snow, CLM5.0 snowveg_flag ON_RAD (``land/canopy/
+    # interception.py`` CanopySnowConfig): a prognostic ``W_canopy_snow`` store
+    # that intercepts snowfall, sheds and unloads it to the ground snow,
+    # sublimates through the wet-leaf flux and whitens the masked canopy
+    # (fcansno).  ``None`` (default) = off (bare branches).  Needs
+    # ``canopy_snow_masking`` and the bulk snowpack; validated in the step.
+    canopy_snow: Any | None = None
     # Snowpack model: "bulk" (one SWE reservoir, energy-limited melt at the soil
     # skin) or "layered" (``legoesm.land.snow_column``: an equal-mass multi-layer
     # pack solved implicitly together with the soil column, with phase change,

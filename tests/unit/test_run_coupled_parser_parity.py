@@ -138,6 +138,24 @@ def test_main_only_amip_dests_are_computed_not_guessed():
                             "config", "ocean", "preset", "zm_tau", "clubb_c8"}
 
 
+def test_zm_detrain_widths_reach_the_coupled_zm_config():
+    """CLI -> ExperimentConfig -> ZhangMcFarlaneConfig overrides; refused as
+    run_amip-only before they counted as read by the shared builder."""
+    from legoesm.driver.physics_pipeline import _zm_overrides
+    from scripts.run import run_coupled
+    drv = run_coupled.main(
+        ["--grid", "latlon", "--convection", "zhang_mcfarlane",
+         "--turbulence", "clubb", "--cld-macmic-num-steps", "3",
+         "--zm-detrain-phase-width-K", "0.2",
+         "--zm-detrain-number-width-kgkg-s", "2e-12"], build_only=True)
+    cfg = drv.atm_config
+    assert (cfg.zm_detrain_phase_width_K,
+            cfg.zm_detrain_number_width_kgkg_s) == (0.2, 2e-12)
+    ov = _zm_overrides(cfg)
+    assert (ov["detrain_phase_width_K"],
+            ov["detrain_number_width_kgkg_s"]) == (0.2, 2e-12)
+
+
 @pytest.mark.parametrize("argv", [
     ["--truncation", "21"], ["--land-model", "slab"],
     ["--restart-from", "ckpt.npz"], ["--profile", "3"],

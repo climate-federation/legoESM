@@ -180,6 +180,116 @@ def _bench_voronoi(level: int, n_warmup: int, n_iters: int, use_mpi: bool):
     }
 
 
+def sched_has_neighbors(layout) -> bool:
+    """Whether a Voronoi layout's batched schedule exchanges anything (an
+    empty schedule makes the exchange an identity and the timing vacuous)."""
+    sched = layout.batched_comm
+    return bool(sched is not None and sched.neighbor_ranks)
+
+
+def _bench_voronoi_state(level: int, nlev: int, n_tracers: int,
+                         n_warmup: int, n_iters: int):
+    """Time the PRODUCTION MPAS state exchange: one batched halo exchange of
+    the edge winds (n_local_edges, nlev) plus T (n_local_cells, nlev), p_s
+    (n_local_cells,) and ``n_tracers`` (n_local_cells, nlev) tracers, float64,
+    compiled, each call synchronised before the next (as a dynamics stage
+    consumes its exchange).  The same ``batched_halo_exchange`` call
+    ``make_voronoi_mpi_step`` issues per stage, on the same layout builder.
+
+    Also returns a sha256 per rank of the exchanged arrays: the exchange only
+    copies values, so two transports (host-staged vs GPU-direct) must give
+    identical digests from the same seeds.
+    """
+    import hashlib
+
+    import numpy as np
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.parallel.halo_exchange_voronoi import (
+        batched_halo_exchange,
+        build_batched_halo_schedule,
+    )
+    from legoesm.parallel.voronoi_mpi import initialize_voronoi_mpi
+    from mpi4py import MPI
+
+    comm = MPI.COMM_WORLD
+    rank, n_procs = comm.Get_rank(), comm.Get_size()
+    if n_procs < 2:
+        raise SystemExit("--payload state needs >= 2 MPI ranks")
+    mesh = create_voronoi_mesh(level)
+    # The driver's own partition path (initialize_voronoi_mpi with its
+    # defaults), so the halo sizes are the production run's.
+    _, _, layout = initialize_voronoi_mpi(mesh)
+    part = layout.partition
+    if not sched_has_neighbors(layout):
+        raise SystemExit(f"rank {rank}: layout has no halo neighbours; "
+                         "nothing would be exchanged")
+    sched = layout.batched_comm
+    if sched is None:
+        sched = build_batched_halo_schedule(part.cell_comm, part.edge_comm)
+    keys = jax.random.split(jax.random.PRNGKey(rank), 3 + n_tracers)
+    f64 = jnp.float64
+    u = jax.random.normal(keys[0], (part.n_local_edges, nlev), dtype=f64)
+    cells = ((jax.random.normal(keys[1], (part.n_local_cells, nlev), dtype=f64),
+              jax.random.normal(keys[2], (part.n_local_cells,), dtype=f64))
+             + tuple(jax.random.normal(keys[3 + i], (part.n_local_cells, nlev),
+                                       dtype=f64) for i in range(n_tracers)))
+    exchange = jax.jit(lambda u_, c_: batched_halo_exchange((u_,), c_, sched, rank))
+
+    out = jax.block_until_ready(exchange(u, cells))
+    # The exchange must overwrite each rank's halo with its neighbours'
+    # (different) random values; an identity exchange leaves every leaf equal.
+    _in = jax.tree_util.tree_leaves(((u,), cells))
+    _out = jax.tree_util.tree_leaves(out)
+    halo_changed = (len(_in) == len(_out) and any(
+        not np.array_equal(np.asarray(o), np.asarray(i)) for o, i in zip(_out, _in)))
+    digest = hashlib.sha256()
+    for a in jax.tree_util.tree_leaves(out):
+        digest.update(np.ascontiguousarray(np.asarray(a)).tobytes())
+    for _ in range(n_warmup):
+        jax.block_until_ready(exchange(u, cells))
+    comm.Barrier()
+    times = []
+    for _ in range(n_iters):
+        t0 = time.perf_counter()
+        jax.block_until_ready(exchange(u, cells))
+        times.append(time.perf_counter() - t0)
+    comm.Barrier()
+    per_rank_ms = comm.allgather(1e3 * float(np.median(times)))
+    digests = comm.allgather(digest.hexdigest())
+    halo_changed_all = comm.allgather(bool(halo_changed))
+    n_bytes = 8 * (part.n_local_edges * nlev
+                   + part.n_local_cells * (nlev * (1 + n_tracers) + 1))
+    try:
+        import mpi4jax
+        cuda_built = bool(mpi4jax.has_cuda_support())
+    except Exception:  # noqa: BLE001 -- reported, never fatal for a timing
+        cuda_built = None
+    return {
+        "grid": "voronoi",
+        "payload": "state",
+        "level": level,
+        "nlev": nlev,
+        "n_tracers": n_tracers,
+        "n_cells": int(mesh.nCells),
+        "n_ranks": n_procs,
+        "n_warmup": n_warmup,
+        "n_iters": n_iters,
+        "backend": jax.default_backend(),
+        "MPI4JAX_USE_CUDA_MPI": os.environ.get("MPI4JAX_USE_CUDA_MPI"),
+        "mpi4jax_cuda_built": cuda_built,
+        "mpi_library": MPI.Get_library_version().splitlines()[0],
+        "local_state_bytes_rank0": n_bytes,
+        "per_rank_digest": digests,
+        "per_rank_halo_changed": halo_changed_all,
+        "exchanges": {
+            "state": {
+                "time_per_exchange_ms": max(per_rank_ms),
+                "per_rank_median_ms": per_rank_ms,
+            },
+        },
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Halo exchange micro-benchmark")
     parser.add_argument("--grid", choices=["cubed-sphere", "voronoi"],
@@ -192,6 +302,15 @@ def main():
                         help="Halo width (1 or 2)")
     parser.add_argument("--level", type=int, default=4,
                         help="Voronoi subdivision level")
+    parser.add_argument("--payload", choices=["cell", "state"], default="cell",
+                        help="voronoi only: 'cell' = one 2-D cell field through "
+                             "the per-entity exchange; 'state' = the production "
+                             "batched MPAS state exchange (winds, T, p_s, "
+                             "tracers), compiled and synchronised")
+    parser.add_argument("--n-tracers", type=int, default=None,
+                        help="voronoi --payload state: number of 3-D tracers "
+                             "carried with T (required: name it for the deck "
+                             "being modelled)")
     parser.add_argument("--n-warmup", type=int, default=3)
     parser.add_argument("--n-iters", type=int, default=50)
     parser.add_argument("--output", type=str, default=None,
@@ -211,6 +330,12 @@ def main():
         results = _bench_cubed_sphere(
             args.n, args.nlev, args.halo,
             args.n_warmup, args.n_iters, use_mpi,
+        )
+    elif args.grid == "voronoi" and args.payload == "state":
+        if args.n_tracers is None:
+            parser.error("--payload state needs --n-tracers")
+        results = _bench_voronoi_state(
+            args.level, args.nlev, args.n_tracers, args.n_warmup, args.n_iters,
         )
     elif args.grid == "voronoi":
         results = _bench_voronoi(

@@ -117,8 +117,9 @@ def _split_oracle(sw_down, cos_z):
     out = [_O_PAR_FRAC * sw_dir, _O_PAR_FRAC * sw_diff,
            _O_NIR_FRAC * sw_dir, _O_NIR_FRAC * sw_diff,
            _O_UV_FRAC * sw_down]
-    if not is_day:
-        out = [0.0] * 5
+    if not is_day:   # low sun: all of sw_down handed on as diffuse (#2650)
+        out = [0.0, _O_PAR_FRAC * sw_down, 0.0, _O_NIR_FRAC * sw_down,
+               _O_UV_FRAC * sw_down]
     return tuple(out)
 
 
@@ -260,7 +261,7 @@ def _arr(x):
     (500.0, 0.60),   # partly cloudy, k_t=0.612 -> Erbs mid quartic branch
     (120.0, 0.50),   # overcast, k_t=0.176 -> Erbs LOW linear branch
     (40.0, 0.30),    # very low k_t=0.098 -> Erbs low linear branch
-    (300.0, 0.005),  # sun below horizon -> night guard (all zero)
+    (300.0, 0.005),  # below the 0.01 cosine cutoff -> all diffuse
 ])
 def test_split_sw_matches_erbs_weiss_norman_oracle(sw_down, cos_z):
     """split_sw_components PAR/NIR/UV direct+diffuse match the independent Erbs

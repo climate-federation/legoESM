@@ -537,12 +537,14 @@ def _amip_main_only_dests(parser):
     import re
     from legoesm.driver.config import (
         CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS,
+        ZM_WIDTH_FIELDS,
     )
     pat = r"(?:args|pre)\.(\w+)|getattr\((?:args|pre),\s*\"(\w+)\""
     read = {m[0] or m[1] for m in re.findall(
         pat, inspect.getsource(_run_amip().build_config_from_args)
         + Path(__file__).read_text())}
-    read |= set(ZM_SCALAR_FIELDS) | set(ZM_TRIGGER_FIELDS) | set(CLUBB_SCALAR_FIELDS)
+    read |= (set(ZM_SCALAR_FIELDS) | set(ZM_TRIGGER_FIELDS) | set(ZM_WIDTH_FIELDS)
+             | set(CLUBB_SCALAR_FIELDS))
     amip = {a.dest for a in _run_amip().build_arg_parser()._actions}
     return sorted((amip - read) - {"help"})
 
@@ -551,6 +553,10 @@ def _amip_main_only_dests(parser):
 # select that tile and never reached the atmosphere config before P5a.
 _LAND_TILE_ONLY = ("transient_land_cover", "land_cover_surfdata",
                    "snow_albedo_feedback")
+# ...except under --atm-owns-surface, where the atmosphere's own land model
+# owns land (the coupler never steps its land tile), so its snow albedo follows
+# the deck as in the AMIP decks.
+_ATM_OWNED_LAND_KEEPS = ("snow_albedo_feedback",)
 
 # Grid -> hydrostatic-dycore discretization when the deck names none.  lat-lon
 # uses the Arakawa C-grid so the atm co-locates with the C-grid 3-D ocean
@@ -589,7 +595,8 @@ def _coupled_atm_config(args):
                          "set; pass one.")
     from legoesm.driver.config import ExperimentConfig
     return cfg._replace(
-        **{f: getattr(ExperimentConfig(), f) for f in _LAND_TILE_ONLY},
+        **{f: getattr(ExperimentConfig(), f) for f in _LAND_TILE_ONLY
+           if not (args.atm_owns_surface and f in _ATM_OWNED_LAND_KEEPS)},
         # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
         morrison_warm_rain_scheme=(
             args.morrison_warm_rain_scheme
@@ -1279,8 +1286,12 @@ def main(argv=None, *, build_only=False):
             overrides["woa_s_path"] = args.woa_s_path
             # Co-derive the atmosphere land fraction from the SAME ocean mask
             # and enable a land tile over the continents (f_land>0 with
-            # land_mode='none' would try to run an unused land model).
-            overrides["f_land_mode"] = "from_ocean"
+            # land_mode='none' would try to run an unused land model).  Under
+            # --atm-owns-surface the partition is the atmosphere's land mask
+            # with the ocean's dry cells as land (the driver's land-fraction
+            # hook), read by the coupler as f_land_mode='analytical'.
+            if not args.atm_owns_surface:
+                overrides["f_land_mode"] = "from_ocean"
             # Select the land surface model (coupler dispatches on the config
             # type: MultiLayerLandConfig -> Richards column tile, else slab).
             # woa defaults to slab when --land-scheme is unset.

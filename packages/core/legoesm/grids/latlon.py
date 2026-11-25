@@ -95,6 +95,11 @@ class LatLonGrid(NamedTuple):
     # scalar-leaf precedent).  NOTE: this does add one pytree leaf;
     # no repo code pins the LatLonGrid leaf count (checked 2026-07-03).
     omega: float = constants.Omega
+    # Rotation-axis tilt [rad] for the DCMIP 2008 / Williamson-1992 rotated
+    # tests: the planetary vorticity is ``rotated_coriolis`` (``2 omega S``,
+    # S = -cos(lon) cos(lat) sin(alpha) + sin(lat) cos(alpha)).  Appended with
+    # a default; ``0.0`` keeps every existing path bit-identical.
+    coriolis_alpha: float = 0.0
 
     # ------------------------------------------------------------------
     # GridProtocol properties
@@ -172,6 +177,7 @@ def create_latlon_grid(
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
     dtype=None,
+    coriolis_alpha: float = 0.0,
 ) -> LatLonGrid:
     """Create a latitude-longitude grid.
 
@@ -185,6 +191,9 @@ def create_latlon_grid(
         Sphere radius [m].
     omega : float
         Rotation rate [rad/s].
+    coriolis_alpha : float
+        Rotation-axis tilt [rad] (DCMIP 2008 rotated tests).  Default ``0.0``.
+        Serial lane only: the band-decomposed MPI/SPMD steps refuse it.
 
     Returns
     -------
@@ -204,10 +213,19 @@ def create_latlon_grid(
     )
     lon = jnp.linspace(0.0, 2.0 * jnp.pi - dlon, n_lon)
 
-    return build_uniform_latlon_grid_from_axes(
+    grid = build_uniform_latlon_grid_from_axes(
         lat=lat, lon=lon, dlat=dlat, dlon=dlon,
         radius=radius, omega=omega, dtype=dtype,
     )
+    if coriolis_alpha != 0.0:
+        # Rotated planet (DCMIP 2008 rotated tests): cell-centre f here; the
+        # vertex planetary vorticity is rebuilt by ``latlon_vertex_coriolis``.
+        from legoesm.core.williamson_sw_analytic import rotated_coriolis
+        f_rot = rotated_coriolis(grid.lon2d, grid.lat2d, omega=float(omega),
+                                 alpha=float(coriolis_alpha), xp=jnp)
+        grid = grid._replace(f=f_rot.astype(grid.f.dtype),
+                             coriolis_alpha=float(coriolis_alpha))
+    return grid
 
 
 def compute_v_face_coords(

@@ -28,6 +28,16 @@ assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
+SI3_RECEIPTS = tuple(sorted(
+    (Path(__file__).parents[3] / "docs/ice/fidelity").glob("si3_r*_receipt.md")
+))
+
+
+def test_strict_extent_refuses_implicit_anchors():
+    citation = next(iter(gate.CITATION_MAP))
+    with pytest.raises(ValueError, match="requires explicit anchors"):
+        gate._merge_resolution_repin(citation, "1-2", strict_extent=True)
+
 
 def test_bare_line_spans_bind_to_the_last_named_file():
     text = ("`stprk3_stg.F90:324` then, in `stp2d.F90` order, `:128` and "
@@ -52,6 +62,12 @@ def test_line_numbers_expands_commas_and_ranges():
     assert gate.line_numbers("139,145") == [139, 145]
     assert gate.line_numbers("103-105") == [103, 104, 105]
     assert gate.line_numbers("1,3-5") == [1, 3, 4, 5]
+
+
+def test_c_source_citations_are_scanned():
+    assert gate.extract("`packages/core/legoesm/core/_scalar_libm.c:4-38`") == [
+        "packages/core/legoesm/core/_scalar_libm.c:4-38"
+    ]
 
 
 @pytest.mark.parametrize("spec", ["309-300", ""])
@@ -191,12 +207,166 @@ def test_no_citation_map_key_is_written_twice():
     import collections
 
     source = Path(gate.__file__).read_text()
+    tree = ast.parse(source)
+    hidden_updates = []
+    for function in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if (
+                isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "CITATION_MAP"
+                and node.func.attr == "update"
+            ):
+                hidden_updates.append(function.name)
+    assert hidden_updates == [], f"citation-map updates hidden in helpers: {hidden_updates}"
+
     assignment = next(
-        node.value for node in ast.parse(source).body
+        node.value for node in tree.body
         if isinstance(node, ast.Assign)
         and getattr(node.targets[0], "id", "") == "CITATION_MAP")
     written = [ast.literal_eval(key) for key in assignment.keys]
+    for node in tree.body:
+        if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
+        func = call.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "CITATION_MAP"
+            and func.attr == "update"
+        ):
+            continue
+        assert len(call.args) == 1 and isinstance(call.args[0], ast.Dict)
+        written.extend(ast.literal_eval(key) for key in call.args[0].keys)
     repeated = sorted(
         key for key, count in collections.Counter(written).items() if count > 1)
     assert repeated == [], f"shadowed citation-map keys: {repeated}"
     assert len(written) == len(gate.CITATION_MAP)
+
+
+@pytest.mark.parametrize("receipt", SI3_RECEIPTS, ids=lambda path: path.stem)
+def test_every_si3_receipt_has_a_full_live_citation_map(receipt: Path) -> None:
+    """Default CI audits every SI3 receipt from its first line, not a selected subset."""
+    citations = gate.extract(receipt.read_text())
+    assert citations, f"{receipt.name} rendered no citations"
+    assert [citation for citation in citations if citation not in gate.CITATION_MAP] == []
+    failures = [
+        gate.check(citation, gate.CITATION_MAP[citation])
+        for citation in citations
+        if gate.check(citation, gate.CITATION_MAP[citation])["status"] != "OK"
+    ]
+    assert failures == []
+
+
+def test_default_si3_receipt_discovery_is_complete() -> None:
+    registered = {
+        Path(name).name for name in gate.FILES
+        if name.startswith("docs/ice/fidelity/si3_r") and name.endswith("_receipt.md")
+    }
+    assert registered == {path.name for path in SI3_RECEIPTS}
+def test_orca2_round341_receipt_passes_citation_gate_and_plant_fires():
+    """The round-341 receipt must pass the citation gate and fail on a plant."""
+    if not gate.FILES["stp2d.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round341_rescore_walk_receipt.md"
+    )
+    heading = "# ORCA2 round 341 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    planted = gate.run(
+        receipt,
+        heading,
+        plant="ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:177",
+    )
+    assert planted["status"] == "FAIL"
+    assert any(
+        row["citation"]
+        == "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:177"
+        for row in planted["failures"]
+    )
+
+
+def test_orca2_round343_receipt_passes_citation_gate_and_plant_fires():
+    """The round-343 receipt must pass the citation gate and fail on a plant."""
+    if not gate.FILES["stp2d.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round343_speed_benchmark_receipt.md"
+    )
+    heading = "# ORCA2 round 343 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    planted = gate.run(
+        receipt,
+        heading,
+        plant="packages/core/legoesm/core/precision.py:117-125",
+    )
+    assert planted["status"] == "FAIL"
+    assert any(
+        row["citation"] == "packages/core/legoesm/core/precision.py:117-125"
+        for row in planted["failures"]
+    )
+
+
+def test_orca2_round344_receipt_passes_citation_gate_and_plant_fires():
+    """The round-344 receipt must pass the citation gate and fail on a plant."""
+    if not gate.FILES["stp2d.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round344_fast_literal_receipt.md"
+    )
+    heading = "# ORCA2 round 344 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    citation = (
+        "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round343_speed_benchmark.py:1186-1233"
+    )
+    planted = gate.run(receipt, heading, plant=citation)
+    assert planted["status"] == "FAIL"
+    assert any(row["citation"] == citation for row in planted["failures"])
+
+
+def test_orca2_round348_receipt_passes_citation_gate_and_plant_fires():
+    """The round-348 receipt must pass the citation gate and fail on a plant."""
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round348_speed_long_runs_receipt.md"
+    )
+    heading = "# ORCA2 round 348 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    citation = "packages/core/legoesm/core/_scalar_libm.c:4-38"
+    planted = gate.run(receipt, heading, plant=citation)
+    assert planted["status"] == "FAIL"
+    assert any(row["citation"] == citation for row in planted["failures"])

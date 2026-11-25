@@ -54,3 +54,9 @@ class RadiationOutput(NamedTuple):
     # same solve, when ``solve_columns(clear_sky=True)``; else None.
     lw_flux_up_toa_clr: jax.Array | None = None
     sw_flux_up_toa_clr: jax.Array | None = None
+    # (ncol,) net radiation absorbed ABOVE the model top [W/m^2]: the RRTMGP
+    # overhead layer's net SW / LW convergence, whose heating is discarded
+    # (CAM-RRTMG behaviour).  Exact zeros with the overhead layer off; None
+    # for backends that do not compute it.  The energy budget's explicit sink.
+    sw_absorbed_above_top: jax.Array | None = None
+    lw_absorbed_above_top: jax.Array | None = None

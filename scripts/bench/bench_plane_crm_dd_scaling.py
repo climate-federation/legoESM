@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import resource
 import os
 import socket
 import statistics
@@ -55,13 +56,19 @@ RCEMIP1_DECK_ARGV = (
     "--smag-cs", "0.19", "--semi-implicit", "--microphysics", "morrison",
     "--nlev", "64", "--T-sfc", "300.0", "--insolation", "rcemip",
     "--radiation", "rrtmgp", "--clouds", "--radiation-interval", "150",
+    "--radiation-column-chunk", "128",
 )
+
+
+# Ranks per node admitted at a time to the first radiation compile+call
+# (vote 2026-11-16: 8): all 128 at once exceed the node's memory.
+RAD_FIRST_CALL_RANKS_PER_ROUND = 8
 
 
 def bench_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--mode", choices=["strong", "weak"], default="strong")
-    p.add_argument("--precision", choices=["float32", "float64"],
+    p.add_argument("--precision", choices=["float32", "float64", "mixed"],
                    default="float64")
     p.add_argument("--warmup-steps", type=int, default=3)
     p.add_argument("--time-steps", type=int, default=10,
@@ -82,7 +89,20 @@ def bench_parser() -> argparse.ArgumentParser:
                         "process).")
     p.add_argument("--output", type=str, default=None,
                    help="Append one JSON line (rank 0).")
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="After the timed windows, ranks 0 and n/2 record a "
+                        "jax.profiler trace of 2 steps under this directory.")
+    p.add_argument("--ablate-fix-mass", action="store_true",
+                   help="Attribution only: run with the dry-mass fixer off.")
     return p
+
+
+def _rank_stats(rank_window_s, time_steps):
+    """Per-rank ms/step (median over windows): min/median/max and slowest rank."""
+    per_rank = [1e3 * statistics.median(w[r] for w in rank_window_s) / time_steps
+                for r in range(len(rank_window_s[0]))]
+    return {"min": min(per_rank), "median": statistics.median(per_rank),
+            "max": max(per_rank), "slowest_rank": per_rank.index(max(per_rank))}
 
 
 def most_square_factors(n: int) -> tuple[int, int]:
@@ -210,12 +230,15 @@ def main(argv=None):
         make_flat_plane_terrain_metric,
     )
     from legoesm.grids.plane import create_plane_grid
+    from legoesm.parallel.staggered_init import (
+        release_freed_heap, staggered_first_call,
+    )
     from legoesm.parallel.plane_mpi import (
         make_plane_pencil_grid, make_plane_pencil_layout,
     )
 
-    jax.config.update("jax_enable_x64", bargs.precision == "float64")
-    dtype = jnp.float32 if bargs.precision == "float32" else jnp.float64
+    jax.config.update("jax_enable_x64", bargs.precision != "float32")
+    dtype = jnp.float64 if bargs.precision == "float64" else jnp.float32
     rargs = rcp.parse_args([*RCEMIP1_DECK_ARGV, *runner_argv,
                             "--precision", bargs.precision])
     if rargs.hyperdiff is None:  # same resolution as the driver's main()
@@ -235,6 +258,8 @@ def main(argv=None):
     ny_g, nx_g = global_grid_shape(bargs.mode, rargs.ny, rargs.nx,
                                    n_ranks_y, n_ranks_x)
     cfg = rcp.build_dycore_config(rargs)
+    if bargs.ablate_fix_mass:
+        cfg = cfg._replace(fix_mass=False)
     halo = horizontal_advection_halo_width(cfg)
     layout = make_plane_pencil_layout(
         rank=rank, n_ranks=n_ranks, n_ranks_y=n_ranks_y, n_ranks_x=n_ranks_x,
@@ -272,15 +297,27 @@ def main(argv=None):
         return state
 
     t_compile = _timed(one_step, 1, sync)
+    # Return the dycore compile heap so the later radiation compile fits
+    # (128 ranks/node otherwise sit at ~230 GB of freed-but-held heap).
+    heap_trimmed = release_freed_heap()
     _timed(one_step, max(bargs.warmup_steps - 1, 0), sync)
     finite_ok = all(bool(jnp.all(jnp.isfinite(f.data))) for f in
                     (state.u, state.v, state.w, state.theta_prime,
                      state.rho_prime, state.tracers))
-    window_s = []
+    window_s, rank_window_s = [], []
     for _ in range(bargs.windows):
         comm.Barrier()
         dt_local = _timed(one_step, bargs.time_steps, sync)
         window_s.append(comm.allreduce(dt_local, op=MPI.MAX))
+        rank_window_s.append(comm.allgather(dt_local))
+    comm.Barrier()
+    if bargs.profile_dir and rank in (0, n_ranks // 2):
+        jax.profiler.start_trace(f"{bargs.profile_dir}/rank{rank:04d}",
+                                 create_perfetto_trace=True)
+        _timed(one_step, 2, sync)
+        jax.profiler.stop_trace()
+    elif bargs.profile_dir:
+        _timed(one_step, 2, sync)
     comm.Barrier()
     finite_ok = finite_ok and all(
         bool(jnp.all(jnp.isfinite(f.data))) for f in
@@ -300,7 +337,8 @@ def main(argv=None):
         rad_cfg = rcp._build_radiation_config(
             rargs.radiation, update_interval_steps=rargs.radiation_interval,
             clouds=rargs.clouds, insolation=rargs.insolation,
-            t_sfc=rargs.T_sfc)
+            t_sfc=rargs.T_sfc,
+            column_chunk_size=rargs.radiation_column_chunk)
         mp_cfg = rcp._build_microphysics_config(
             rargs.microphysics, rargs.homogeneous_ice_nucleation,
             hard_saturation_adjustment=rargs.hard_saturation_adjustment,
@@ -310,14 +348,19 @@ def main(argv=None):
         non_rad_fn, rad_fn = rcp.split_rad_from_other_physics(
             grid, hc, tm, radiation_config=rad_cfg,
             microphysics_config=mp_cfg, dt=rargs.dt, T_sfc=rargs.T_sfc,
-            p_sfc=rcp.P_SFC_RCEMIP, surface_flux=not rargs.no_surface_flux)
+            p_sfc=rcp.P_SFC_RCEMIP, surface_flux=not rargs.no_surface_flux,
+            mixed_precision=(bargs.precision == "mixed"))
         physics = {}
         for name, fn in (("non_rad", non_rad_fn), ("rad", rad_fn)):
             if fn is None:
                 physics[f"{name}_ms"] = 0.0
                 continue
             jf = jax.jit(lambda s, f=fn: f(s, grid, hc, tm))
-            sync(jf(state))
+            if name == "rad":
+                staggered_first_call(jf, state, comm=comm,
+                                     ranks_per_round=RAD_FIRST_CALL_RANKS_PER_ROUND)
+            else:
+                sync(jf(state))
             comm.Barrier()
             t = _timed(lambda: jf(state), bargs.physics_calls, sync)
             physics[f"{name}_ms"] = 1e3 * comm.allreduce(
@@ -341,6 +384,9 @@ def main(argv=None):
             physics["amortised_ms_per_step"] = calls[0] * (
                 physics["non_rad_ms"] + physics["rad_ms"])
 
+    # Peak resident memory per rank (Linux ru_maxrss is KiB), max over ranks.
+    peak_rss_mib = comm.allreduce(
+        resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, op=MPI.MAX)
     if rank == 0:
         per_step = [w / bargs.time_steps for w in window_s]
         rec = {
@@ -361,7 +407,9 @@ def main(argv=None):
             "ms_per_step_min": 1e3 * min(per_step),
             "ms_per_step_median": 1e3 * statistics.median(per_step),
             "finite": finite_all, "max_abs_dtheta_prime": max_dtheta,
-            "physics": physics,
+            "physics": physics, "peak_rss_mib_max_rank": peak_rss_mib,
+            "heap_trimmed_after_first_step": heap_trimmed,
+            "rank_ms_per_step": _rank_stats(rank_window_s, bargs.time_steps),
             "dycore_config": {k: (v if isinstance(v, (int, float, str, bool,
                                                       type(None))) else str(v))
                               for k, v in cfg._asdict().items()},

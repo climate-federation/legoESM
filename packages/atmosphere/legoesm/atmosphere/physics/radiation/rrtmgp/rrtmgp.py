@@ -613,6 +613,11 @@ class RRTMGP:
       clear_sky: bool = False,
       o3_top_vmr: jnp.ndarray | None = None,
       cloud_rho_ice: float | None = None,
+      cloud_path_snow: jnp.ndarray | None = None,
+      cloud_d_eff_snow: jnp.ndarray | None = None,
+      snow_optics=None,
+      cloud_snow_weight: jnp.ndarray | None = None,
+      aerosol_volcanic_moments_sw: jnp.ndarray | None = None,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -674,6 +679,12 @@ class RRTMGP:
           byte-identical.
       solar_spectral_fraction : jnp.ndarray | None
           Per-g-point solar source weights (ngpt_sw,).
+      aerosol_volcanic_moments_sw : jnp.ndarray | None
+          Shortwave aerosol with its OWN per-band optics (CMIP6 volcanic
+          sulfate), ``(ncol, nlev, 3, n_bnd_sw)`` per-layer moments
+          ``(tau, tau*ssa, tau*ssa*g)``, bands in ascending wavenumber (the
+          SW gas-optics band order).  Mixed with the grey
+          ``aerosol_optical_depth`` as a second component.  ``None`` = absent.
       ghg_vmr_override : dict | None
           Runtime GHG VMR overrides (e.g. ``{"co2": 4.15e-4}``).
       mcica_cloud_fraction : jnp.ndarray | None
@@ -695,6 +706,18 @@ class RRTMGP:
           ``rhoi`` for the ice PSD and the optics size ``deffi =
           effi*rhoi/rhows*2`` (micro_mg2_0.F90:2795).  ``None`` => CAM's
           ``rhoi`` = 500, the value the cloud optics convert from.
+      cloud_path_snow, cloud_d_eff_snow, snow_optics :
+          CAM6 snow in the radiation (radiation.F90:928-1067): snow water
+          path (ncol, nlev) [kg/m^2] on the same footing as the cloud paths
+          (in cloud, with its fraction weight, under McICA), snow effective
+          diameter (ncol, nlev) [micron] (0 = no snow optics) and the
+          Mitchell table (``mitchell_ice_optics.MitchellIceOptics``).  All
+          three or none; they need cloud paths, and are refused with
+          ``cloud_fraction`` scaling or separate LW paths.
+      cloud_snow_weight :
+          (ncol, nlev) fraction weight already in ``cloud_path_snow`` (CAM6
+          cldfsnow/cldfprime), so the LW absorption cap is taken in cloud
+          before it, as CAM does.  ``None`` => 1.
 
       Returns
       -------
@@ -741,6 +764,9 @@ class RRTMGP:
       if aerosol_absorption_optical_depth_lw is not None:
           aerosol_absorption_optical_depth_lw = jnp.asarray(
               aerosol_absorption_optical_depth_lw).astype(_table_dtype)
+      if aerosol_volcanic_moments_sw is not None:
+          aerosol_volcanic_moments_sw = jnp.asarray(
+              aerosol_volcanic_moments_sw).astype(_table_dtype)
       if cloud_path_liq is not None:
           cloud_path_liq = jnp.asarray(cloud_path_liq).astype(_table_dtype)
       if cloud_path_ice is not None:
@@ -767,6 +793,28 @@ class RRTMGP:
       if mcica_cloud_fraction is not None:
           mcica_cloud_fraction = jnp.asarray(
               mcica_cloud_fraction).astype(_table_dtype)
+      _snow_parts = (cloud_path_snow, cloud_d_eff_snow, snow_optics)
+      if any(x is not None for x in _snow_parts):
+          if any(x is None for x in _snow_parts):
+              raise ValueError(
+                  "snow in the radiation needs cloud_path_snow, "
+                  "cloud_d_eff_snow and snow_optics together")
+          if cloud_path_liq is None and cloud_path_ice is None:
+              raise ValueError("cloud_path_snow needs the cloud paths too")
+          if (cloud_fraction is not None or cloud_path_liq_lw is not None
+                  or cloud_path_ice_lw is not None
+                  or sw_optical_field_only or lw_optical_field_only):
+              raise ValueError(
+                  "cloud_path_snow is wired for in-cloud (McICA) or plain "
+                  "grid-mean paths only, not cloud_fraction scaling, "
+                  "separate LW paths or the optical-field outputs")
+          from legoesm.atmosphere.physics.radiation.rrtmgp.optics import (
+              mitchell_ice_optics as _mio)
+          cloud_path_snow = jnp.asarray(cloud_path_snow).astype(_table_dtype)
+          cloud_d_eff_snow = jnp.asarray(cloud_d_eff_snow).astype(_table_dtype)
+          snow_optics = _mio.cast_table(snow_optics, _table_dtype)
+          cloud_snow_weight = (jnp.ones_like(cloud_path_snow) if cloud_snow_weight is None
+                               else jnp.asarray(cloud_snow_weight).astype(_table_dtype))
       if ghg_vmr_override is not None:
           # Cast every numeric override (array, Python float/int, list)
           # to the working dtype; only floating leaves are retyped so
@@ -820,12 +868,20 @@ class RRTMGP:
                         else jnp.asarray(o3_top_vmr).astype(
                             _table_dtype).reshape(ncol, 1))
           cloud_path_liq, cloud_path_ice = _zero(cloud_path_liq), _zero(cloud_path_ice)
+          cloud_path_snow = _zero(cloud_path_snow)
+          if cloud_d_eff_snow is not None:
+              cloud_d_eff_snow = _top(cloud_d_eff_snow, cloud_d_eff_snow[:, :1])
+              cloud_snow_weight = _top(cloud_snow_weight, cloud_snow_weight[:, :1])
           cloud_path_liq_lw = _zero(cloud_path_liq_lw)
           cloud_path_ice_lw = _zero(cloud_path_ice_lw)
           cloud_fraction = _zero(cloud_fraction)
           aerosol_optical_depth = _zero(aerosol_optical_depth)
           aerosol_absorption_optical_depth_lw = _zero(
               aerosol_absorption_optical_depth_lw)
+          if aerosol_volcanic_moments_sw is not None:
+              aerosol_volcanic_moments_sw = jnp.concatenate(
+                  [jnp.zeros_like(aerosol_volcanic_moments_sw[:, :1]),
+                   aerosol_volcanic_moments_sw], axis=1)
           if cloud_r_eff_liq is not None:
               cloud_r_eff_liq = _top(cloud_r_eff_liq, cloud_r_eff_liq[:, :1])
           if cloud_r_eff_ice is not None:
@@ -997,6 +1053,15 @@ class RRTMGP:
       else:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
           cpl_lw_3d = cpi_lw_3d = None
+      # CAM6 snow: same halo + post-clip as the cloud paths (a halo diameter
+      # extrapolated below 0 is clipped to 0 = no snow optics there).
+      cloud_snow = None
+      if has_clouds and cloud_path_snow is not None:
+          cloud_snow = (
+              jnp.clip(_add_halos(cloud_path_snow[:, None, ::-1]), 0.0, None),
+              jnp.clip(_add_halos(cloud_d_eff_snow[:, None, ::-1]), 0.0, None),
+              snow_optics,
+              jnp.clip(_add_halos(cloud_snow_weight[:, None, ::-1]), 0.0, 1.0))
 
       # McICA (CAM6 mcica_subcol_gen): each g-point sees its own
       # maximum-random cloud subcolumn.  The paths passed in are IN-CLOUD;
@@ -1033,12 +1098,17 @@ class RRTMGP:
                   mask = jnp.concatenate(
                       [jnp.zeros_like(mask[:, :, :1]), mask], axis=2)
 
+              # snow: its cap weight is sampled with the path (a smooth
+              # mask m gives m w min(p a, 50) = min(m w p a, 50 m w))
+              _sampled = ((_cpl, _cpi) if cloud_snow is None
+                          else (_cpl, _cpi, cloud_path_snow, cloud_snow_weight))
+
               def paths(igpt):
                   m = mask[igpt]
                   return tuple(
                       jnp.clip(_add_halos(
                           apply_mask(m, x)[:, None, ::-1]), 0.0, None)
-                      for x in (_cpl, _cpi))
+                      for x in _sampled)
               return paths
 
           lw_path_fn = _mcica_paths(optics_lib.n_gpt_lw)
@@ -1060,6 +1130,25 @@ class RRTMGP:
       # Resolved once here and shared by the MC-optics short-circuit and the
       # full SW solve so the per-band selection is defined in exactly one place.
       aer_ssa, aer_g = _resolve_aerosol_sw_optics(config, optics_lib)
+
+      # Per-band aerosol component (volcanic): (ncol, nlev, 3, n_bnd) ->
+      # (3, n_bnd, ncol, 1, nlev+2), the same halo / bottom-first layout as
+      # the grey aerosol OD; the moments are linear in OD, so the linear halo
+      # extrapolation + clip is the treatment the grey OD gets.
+      if aerosol_volcanic_moments_sw is not None:
+          n_bnd = int(optics_lib.gas_optics_sw.n_bnd)
+          if aerosol_volcanic_moments_sw.shape[-2:] != (3, n_bnd):
+              raise ValueError(
+                  "aerosol_volcanic_moments_sw trailing shape "
+                  f"{aerosol_volcanic_moments_sw.shape[-2:]}, expected (3, "
+                  f"{n_bnd}) for this SW gas-optics table.")
+          _nc, _nl = aerosol_volcanic_moments_sw.shape[:2]
+          _vm = jnp.moveaxis(aerosol_volcanic_moments_sw, (2, 3), (0, 1))
+          _vm = _add_halos(_vm[..., ::-1].reshape(3 * n_bnd * _nc, 1, _nl))
+          volc_moments_3d = jnp.clip(
+              _vm.reshape(3, n_bnd, _nc, 1, _nl + 2), 0.0, None)
+      else:
+          volc_moments_3d = None
 
       # Optional aerosol optical depth (longwave, pure absorber)
       if aerosol_absorption_optical_depth_lw is not None:
@@ -1101,6 +1190,7 @@ class RRTMGP:
               aerosol_optical_depth=aerosol_od_3d,
               aerosol_single_scattering_albedo=aer_ssa,
               aerosol_asymmetry_factor=aer_g,
+              aerosol_volcanic_moments=volc_moments_3d,
           )
           # Strip the singleton Y axis + vertical halos, flip back to the
           # legoESM TOA-first convention -> (n_gpt, ncol, nlev).
@@ -1170,6 +1260,7 @@ class RRTMGP:
           vmr_fields,
           sfc_T_2d,
           level_temperature=T_lev_3d,
+          **({} if cloud_snow is None else {'cloud_snow': cloud_snow}),
           cloud_r_eff_liq=crl_3d,
           cloud_path_liq=cpl_lw_3d,
           cloud_r_eff_ice=cri_3d,
@@ -1200,12 +1291,14 @@ class RRTMGP:
           aerosol_optical_depth=aerosol_od_3d,
           aerosol_single_scattering_albedo=aer_ssa,
           aerosol_asymmetry_factor=aer_g,
+          aerosol_volcanic_moments=volc_moments_3d,
           solar_fraction_by_gpt=solar_weights,
           use_scan=config.use_scan,
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
           cloud_path_fn=sw_path_fn,
           clear_sky=clear_sky,
+          **({} if cloud_snow is None else {'cloud_snow': cloud_snow}),
       )
 
       # --- 6. Compute heating rates using exact layer thickness ---
@@ -1225,6 +1318,16 @@ class RRTMGP:
 
       lw_hr = lw_hr_3d[:, 0, hw:-hw][:, ::-1]
       sw_hr = sw_hr_3d[:, 0, hw:-hw][:, ::-1]
+
+      if overhead:
+          # Net radiation absorbed in the overhead layer (face 0 = lid, face 1 =
+          # model top, TOA-first after the flip): its heating is discarded
+          # below, so the energy budget books this as an explicit sink.
+          sw_above = (sw_down[:, 0] - sw_up[:, 0]) - (sw_down[:, 1] - sw_up[:, 1])
+          lw_above = (lw_down[:, 0] - lw_up[:, 0]) - (lw_down[:, 1] - lw_up[:, 1])
+      else:
+          sw_above = jnp.zeros_like(sw_down[:, 0])
+          lw_above = jnp.zeros_like(lw_down[:, 0])
 
       if overhead:
           # Drop the overhead layer's heating and the model-top face: face 0
@@ -1249,6 +1352,8 @@ class RRTMGP:
                               if clear_sky else None),
           sw_flux_up_toa_clr=(sw_fluxes['flux_up_clr'][:, 0, -1]
                               if clear_sky else None),
+          sw_absorbed_above_top=sw_above,
+          lw_absorbed_above_top=lw_above,
       )
 
   def solve_columns_chunked(

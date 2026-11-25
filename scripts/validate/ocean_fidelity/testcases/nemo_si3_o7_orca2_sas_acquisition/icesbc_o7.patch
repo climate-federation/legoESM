@@ -1,0 +1,20 @@
+--- icesbc.F90
++++ icesbc.F90
+@@ -28,0 +29,4 @@
++! O7_OBSERVER_BEGIN
++   USE o7_si3_writer, ONLY : o7_tau_after, o7_flx_entry, o7_flx_exit
++
++! O7_OBSERVER_END
+@@ -108,0 +113,3 @@
++! O7_OBSERVER_BEGIN
++      CALL o7_tau_after( utau_ice, vtau_ice )
++! O7_OBSERVER_END
+@@ -323,0 +331,4 @@
++! O7_OBSERVER_BEGIN
++      CALL o7_flx_entry( u_ice, v_ice, ssu_m, ssv_m, utau, vtau, smask0, at_i, at_i_b, vt_i, &
++         & qsr_oce, qns_oce, qemp_oce, frq_m, e3t_m, sst_m, t_bo, rn_amax_2d )
++! O7_OBSERVER_END
+@@ -436,0 +448,3 @@
++! O7_OBSERVER_BEGIN
++      CALL o7_flx_exit( qsb_ice_bot, fhld, qlead, frq_m )
++! O7_OBSERVER_END

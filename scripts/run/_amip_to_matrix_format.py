@@ -56,9 +56,11 @@ _VARNAME_REMAP = {
     "lw_up_toa": "lw_up_toa",
     "sw_net_sfc": "sw_net_sfc",
     "lw_net_sfc": "lw_net_sfc",
-    "energy_residual": "energy_residual",
+    "energy_toa_minus_dE_dt": "energy_toa_minus_dE_dt",
     "moisture_residual": "moisture_residual",
 }
+# Old timeseries.npz files wrote TOA-minus-dE/dt as ``energy_residual``.
+_LEGACY_KEYS = {"energy_toa_minus_dE_dt": "energy_residual"}
 
 
 # iter-42 codex MEDIUM: status whitelist.  ``run_amip.py`` writes
@@ -247,9 +249,15 @@ def main(out_dir: Path) -> int:
     for src_key, dst_key in _VARNAME_REMAP.items():
         if src_key == "days":
             continue
-        if src_key not in data.files:
+        read_key = src_key
+        if (src_key not in data.files
+                and _LEGACY_KEYS.get(src_key) in data.files):
+            read_key = _LEGACY_KEYS[src_key]
+            print(f"  [_amip_to_matrix_format] note: {npz_path} uses the "
+                  f"legacy key '{read_key}' for '{src_key}'", file=sys.stderr)
+        if read_key not in data.files:
             continue
-        arr = data[src_key]
+        arr = data[read_key]
         if not _is_real_array(arr):
             continue
         arr_np = np.asarray(arr)

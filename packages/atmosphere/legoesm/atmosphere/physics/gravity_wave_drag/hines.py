@@ -214,10 +214,10 @@ def hines_gwd(
     """
     ncol, nlev = u.shape
     dtype = u.dtype
-    # a host may hand fp64 hybrid pressures to fp32 columns; the scans below
-    # need one dtype in their carries
-    p_full, p_half, z_half, rho, lat = (
-        jnp.asarray(a, dtype) for a in (p_full, p_half, z_half, rho, lat))
+    # a host may hand fp64 hybrid pressures (or fp64 T / v, the column lane)
+    # to fp32 columns; the scans below need one dtype in their carries
+    v, T, p_full, p_half, z_half, rho, lat = (
+        jnp.asarray(a, dtype) for a in (v, T, p_full, p_half, z_half, rho, lat))
     sharp = config.smooth_sharpness
     hard = isinstance(sharp, (int, float)) and sharp == math.inf
     rd, rg = constants.R_d, constants.g

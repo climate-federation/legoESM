@@ -1,0 +1,14 @@
+--- sbcssm.f90
++++ sbcssm.f90
+@@ -35,1 +35,2 @@
+-   USE iom            ! IOM library
++   USE iom            ! IOM library
++   USE c_ladder_writer, ONLY : c_record_ssm
+@@ -82,1 +83,2 @@
+-      !
++      !
++      CALL c_record_ssm(1,kt,Kbb,Kmm,l_ssm_mean,l_useCT,ln_apr_dyn)
+@@ -209,1 +211,2 @@
+-      !
++      !
++      CALL c_record_ssm(2,kt,Kbb,Kmm,l_ssm_mean,l_useCT,ln_apr_dyn)

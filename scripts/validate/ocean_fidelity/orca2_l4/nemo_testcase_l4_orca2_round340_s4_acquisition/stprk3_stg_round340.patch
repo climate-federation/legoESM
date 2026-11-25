@@ -1,0 +1,25 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -29,6 +29,7 @@
+    !!    stp_RK3_stg  : NEMO 3rd order Runge-Kutta stage with qco or linssh
+    !!----------------------------------------------------------------------
+    USE step_oce       ! time stepping used modules
++   USE round340_state_writer, ONLY: r340_state_frame
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+    USE bdydyn         ! ocean open boundary conditions (define bdy_dyn)
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
+@@ -71,4 +72,5 @@
++   PUBLIC   r340_stage_probe
+    !!----------------------------------------------------------------------
+    !! NEMO/OCE 5.0, NEMO Consortium (2024)
+    !! Software governed by the CeCILL license (see ./LICENSE)
+    !!----------------------------------------------------------------------
+@@ -584,0 +587 @@
++      CALL r340_state_frame( kstp, kstg, Kaa, ts(:,:,:,:,Kaa), uu(:,:,:,Kaa), vv(:,:,:,Kaa), ssh(:,:,Kaa) )
+@@ -591,0 +595,6 @@
++   SUBROUTINE r340_stage_probe(kt,klev,pts,pu,pv,pssh)
++      INTEGER,INTENT(in)::kt,klev
++      REAL(wp),INTENT(in)::pts(:,:,:,:),pu(:,:,:),pv(:,:,:),pssh(:,:)
++      CALL r340_state_frame(kt,1,klev,pts,pu,pv,pssh)
++   END SUBROUTINE r340_stage_probe
++

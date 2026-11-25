@@ -1,0 +1,9 @@
+# Production deck + CAM7 CLUBB-MF on prognostic CLUBB, non-default arm.
+#
+# A stochastic plume ensemble (Suselj et al. 2019; CAM atmos_phys0_34_002
+# clubb_mf.F90) whose mass-flux convergence of thl and qt is CLUBB's explicit
+# forcing, reduced setting (fixed L0 = 200 m, CAM's KISS draws; user
+# 2026-11-23).  Aimed at the weak shallow-cumulus fluxes of CAM6 CLUBB.
+# Everything else is amip_production.yaml.
+include: amip_production.yaml
+clubb_mf: true

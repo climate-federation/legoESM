@@ -144,6 +144,7 @@ def test_unfloored_qco_ratio_is_available_only_to_stage_boundary(card_and_model)
     eta = -500.0 * jnp.asarray(card.recipe.land_mask)
     ratio = nemo_qco_r3t_ratio(
         card.recipe.z_coord, eta, 500.0 * card.recipe.land_mask,
+        linear_free_surface=False,
         evaluation="nemo_reciprocal")
     assert np.all(np.asarray(ratio)[np.asarray(card.recipe.land_mask, bool)] == -1.0)
 

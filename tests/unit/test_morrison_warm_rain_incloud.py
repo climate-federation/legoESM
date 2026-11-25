@@ -135,8 +135,13 @@ def _run(mcfg, cf, qc, qr, qi, rho, dt=1.0e-3, N_c=None, jit=False):
     # q_v supersaturated (q_sat ~ 1.1e-2 at 285 K, 800 hPa): no cloud
     # evaporation sink, so at dt = 1e-3 s the q_c donor clamp cannot bind and
     # the published terms ARE the kernel rates.
+    # interfaces hydrostatic with the 200 m layers (the MG2 ice sedimentation
+    # takes its layer masses from them, as MG2 does from pdel)
+    from legoesm import constants
+    pdel = np.asarray(rho) * constants.g * 200.0
+    p_half = 8.0e4 + np.concatenate([np.zeros((shape[0], 1)), np.cumsum(pdel, axis=1)], axis=1)
     args = (jnp.full(shape, 285.0), jnp.full(shape, 1.5e-2), hyd,
-            jnp.full(shape, 8.0e4), jnp.full((shape[0], shape[1] + 1), 8.0e4),
+            jnp.full(shape, 8.0e4), jnp.asarray(p_half),
             jnp.asarray(rho), jnp.full(shape, 200.0), dt)
     kw = {} if cf is None else {"cloud_fraction": jnp.asarray(cf)}
     fn = morrison_microphysics

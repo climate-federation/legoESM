@@ -862,6 +862,63 @@ def shortwave_penetration_sweeney_tendency(
     return _absorbed_tendency_from_faces(I_face, sw_visible, wet, dz_live, rho_0, c_sw)
 
 
+# --- Ohlmann (2003, J. Climate 16, 1337-1351, doi:10.1175/1520-0442(2003)16<1337:ORHICM>2.0.CO;2) ---
+# Chlorophyll-dependent double exponential for the transmission normalised to the NET shortwave just beneath the
+# surface (his Eq. 2a and Eq. 5): Tr(z) = A1 exp(-B1 z) + A2 exp(-B2 z), valid below 2 m. A1 + A2 < 1; the remainder
+# is absorbed above about 2 m and goes to the top cell. Table 1a of the paper (chl in mg m-3, B in m-1), read first
+# hand from the PDF (6 November 2026). The paper tabulates 0.01 to 3.0 mg m-3 only; MOM6 MOM_opacity.F90
+# (init_ohlmann_table, commit 0e9a561) and CESM-POP add rows at 0.001, 0.005 and 4 to 10 mg m-3 "provided by
+# C. Ohlmann", which are not in the paper and are not used here. Within 0.01 to 3.0 the MOM6 rows equal Table 1a.
+# Parameters between rows: linear interpolation in chl, as the paper recommends ("simple linear interpolation
+# between successive tabled quantities"); chl is clamped to 0.01 to 3.0. The paper's functional fits (Eqs. 6a to
+# 6d) are for Table 1b, carry round-off (their own note), and print A2 with +0.010 where Fig. 3 has -0.016, so the
+# table is used.
+OHLMANN_CHL = (0.01, 0.02, 0.03, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.60,
+               0.70, 0.80, 0.90, 1.00, 1.50, 2.00, 2.50, 3.00)
+OHLMANN_A1 = (0.4488, 0.4563, 0.4622, 0.4715, 0.4877, 0.4993, 0.5084, 0.5159, 0.5223, 0.5278,
+              0.5326, 0.5369, 0.5408, 0.5474, 0.5529, 0.5576, 0.5615, 0.5649, 0.5757, 0.5802, 0.5808, 0.5788)
+OHLMANN_A2 = (0.2940, 0.2894, 0.2858, 0.2800, 0.2703, 0.2628, 0.2571, 0.2523, 0.2481, 0.2444,
+              0.2411, 0.2382, 0.2356, 0.2309, 0.2269, 0.2235, 0.2206, 0.2181, 0.2106, 0.2089, 0.2113, 0.2167)
+OHLMANN_B1 = (0.0319, 0.0355, 0.0384, 0.0434, 0.0532, 0.0612, 0.0681, 0.0743, 0.0800, 0.0853,
+              0.0902, 0.0949, 0.0993, 0.1077, 0.1154, 0.1227, 0.1294, 0.1359, 0.1640, 0.1876, 0.2082, 0.2264)
+OHLMANN_B2 = (0.3306, 0.3433, 0.3537, 0.3705, 0.4031, 0.4262, 0.4456, 0.4621, 0.4763, 0.4889,
+              0.4999, 0.5100, 0.5191, 0.5347, 0.5477, 0.5588, 0.5682, 0.5764, 0.6042, 0.6206, 0.6324, 0.6425)
+
+
+def ohlmann_parameters(chl):
+    """(A1, A2, B1, B2) of Ohlmann (2003) Table 1a at ``chl`` [mg m-3], linear in chl between rows, clamped."""
+    chl = jnp.asarray(chl)
+    c = jnp.clip(chl, OHLMANN_CHL[0], OHLMANN_CHL[-1])
+    xp = jnp.asarray(OHLMANN_CHL, dtype=c.dtype)
+    return tuple(jnp.interp(c, xp, jnp.asarray(t, dtype=c.dtype))
+                 for t in (OHLMANN_A1, OHLMANN_A2, OHLMANN_B1, OHLMANN_B2))
+
+
+def shortwave_penetration_ohlmann_tendency(
+    sw_net: jnp.ndarray,
+    chl: jnp.ndarray,
+    dz_live: jnp.ndarray,
+    wet_cell: jnp.ndarray,
+    rho_0: float = _RHO_0_DEFAULT,
+    c_sw: float = _C_SW_DEFAULT,
+) -> jnp.ndarray:
+    """Ohlmann (2003) penetration of the NET surface shortwave ``sw_net`` (...,) [W/m2] for surface ``chl`` (...,).
+
+    The flux fraction at the surface face is 1; at every deeper interface it is A1 exp(-B1 z) + A2 exp(-B2 z), so
+    the top cell takes 1 - Tr(z1), which holds the near-surface remainder 1 - A1 - A2 (Ohlmann's scheme is not
+    valid above 2 m; MOM6 likewise puts that part in the first layer). The light reaching the seabed is deposited
+    in the deepest wet cell, as the other kernels do. The column total equals ``sw_net``.
+    """
+    dz_live = jnp.asarray(dz_live)
+    wet = jnp.asarray(wet_cell, dtype=dz_live.dtype)
+    sw_net = jnp.asarray(sw_net, dtype=dz_live.dtype)
+    A1, A2, B1, B2 = (p[..., jnp.newaxis] for p in ohlmann_parameters(jnp.asarray(chl, dtype=dz_live.dtype)))
+    depth = jnp.cumsum(dz_live, axis=-1)                                       # (..., nlev), > 0
+    Tr = A1 * jnp.exp(-B1 * depth) + A2 * jnp.exp(-B2 * depth)
+    I_face = jnp.concatenate([jnp.ones_like(dz_live[..., :1]), Tr], axis=-1)    # (..., nlev+1)
+    return _absorbed_tendency_from_faces(I_face, sw_net, wet, dz_live, rho_0, c_sw)
+
+
 def apply_shortwave_penetration(
     config: ShortwavePenetrationConfig,
     sw_down: jnp.ndarray,

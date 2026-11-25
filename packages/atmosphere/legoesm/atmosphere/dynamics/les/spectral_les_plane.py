@@ -230,6 +230,9 @@ class SpectralLESLayout(NamedTuple):
     n_ranks_x: int = 1
     comm_row: Any = None
     comm_col: Any = None
+    planes: bool = False  # FFT mode: one all-to-all to whole horizontal planes
+    #                      of a z-chunk per transform (spectra (ny, nkx,
+    #                      ceil(nz/P)), z zero-padded)
 
     @property
     def n_ranks_y(self) -> int:
@@ -245,11 +248,13 @@ class SpectralLESLayout(NamedTuple):
 
 
 def make_spectral_les_pencil_layout(comm, n_ranks_y: int, n_ranks_x: int,
-                                    ny_global: int, nx: int) -> SpectralLESLayout:
+                                    ny_global: int, nx: int,
+                                    planes: bool = False) -> SpectralLESLayout:
     """Collective: build a ``n_ranks_y x n_ranks_x`` pencil layout on ``comm``.
 
     ``n_ranks_x == 1`` returns the plain y-slab layout (no sub-communicators),
-    so slab runs keep the pre-pencil code path exactly."""
+    so slab runs keep the pre-pencil code path exactly. ``planes=True``
+    keeps the physical slab/pencil blocks but selects the planes FFT mode."""
     size, rank = comm.Get_size(), comm.Get_rank()
     if n_ranks_y < 1 or n_ranks_x < 1 or n_ranks_y * n_ranks_x != size:
         raise ValueError(
@@ -259,13 +264,13 @@ def make_spectral_les_pencil_layout(comm, n_ranks_y: int, n_ranks_x: int,
             f"global {ny_global}x{nx} not divisible by mesh {n_ranks_y}x{n_ranks_x}")
     if n_ranks_x == 1:
         return SpectralLESLayout(rank=rank, n_ranks=size, ny_global=ny_global,
-                                 nx=nx, comm=comm)
+                                 nx=nx, comm=comm, planes=planes)
     ry, rx = divmod(rank, n_ranks_x)
     comm_row = comm.Split(color=ry, key=rx)
     comm_col = comm.Split(color=rx, key=ry)
     return SpectralLESLayout(rank=rank, n_ranks=size, ny_global=ny_global,
                              nx=nx, comm=comm, n_ranks_x=n_ranks_x,
-                             comm_row=comm_row, comm_col=comm_col)
+                             comm_row=comm_row, comm_col=comm_col, planes=planes)
 
 
 class SpectralLESGrid(NamedTuple):
@@ -396,11 +401,13 @@ def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64,
         # no energy (zeros), so the sliced wavenumbers there are harmless.
         # Pencil: the kx chunk is owned per COLUMN index ry of Py (the slab
         # transform runs on comm_col); for the slab n_ranks_y/ry == n_ranks/rank.
+        # Planes mode: every rank holds the full spectrum (lo, hi = 0, nkx).
         from legoesm.parallel.distributed_fft import (
-            kx_local_size, local_kx_slice)
+            kx_local_size, layout_is_planes, layout_kx_slice)
         nkx = nx // 2 + 1
-        nkx_pad = layout.n_ranks_y * kx_local_size(nx, layout.n_ranks_y)
-        lo, hi = local_kx_slice(nx, layout.n_ranks_y, layout.ry)
+        nkx_pad = (nkx if layout_is_planes(layout)
+                   else layout.n_ranks_y * kx_local_size(nx, layout.n_ranks_y))
+        lo, hi = layout_kx_slice(layout, nx)
 
         def _slice(arr):
             return jnp.pad(arr, ((0, 0), (0, nkx_pad - nkx)))[:, lo:hi]
@@ -462,6 +469,22 @@ def ddy(f, g: SpectralLESGrid):
     return _ifft(fh, g, f.shape[-1])
 
 
+def grad_h(f, g: SpectralLESGrid):
+    """``(∂f/∂x, ∂f/∂y)`` — equal to ``(ddx(f), ddy(f))``, from ONE forward FFT."""
+    fh = _fft(f, g)
+    return (_ifft(fh * (1j * g.kx[..., None]), g, f.shape[-1]),
+            _ifft(fh * (1j * g.ky[..., None]), g, f.shape[-1]))
+
+
+def div_h(fx, fy, g: SpectralLESGrid):
+    """Horizontal divergence ``∂fx/∂x + ∂fy/∂y`` (spectral, exact) — equal to
+    ``ddx(fx) + ddy(fy)`` up to round-off, summed in spectral space so it costs
+    ONE inverse FFT instead of two."""
+    fh = (_fft(fx, g) * (1j * g.kx[..., None])
+          + _fft(fy, g) * (1j * g.ky[..., None]))
+    return _ifft(fh, g, fx.shape[-1])
+
+
 def _apply_filter(f, g: SpectralLESGrid):
     """Smooth horizontal high-wavenumber low-pass (per z-level). Multiplies the
     rfft2 spectrum by the precomputed σ(k) mask; uniform in z ⇒ divergence-free
@@ -483,6 +506,26 @@ def _dealias(f, g: SpectralLESGrid):
 # the rfft2 FULL axis is y (axis 0), the REDUCED axis is x (axis 1). Both       #
 # Nyquist modes are dropped (unrepresentable derivative; the oracle does too).  #
 # --------------------------------------------------------------------------- #
+def _via_planes(op, f, L):
+    """Planes FFT mode: one all-to-all to whole horizontal planes of this
+    rank's z-chunk, the SERIAL horizontal operator ``op`` on them, one
+    all-to-all back (the plane size may change, e.g. the 3/2 pad)."""
+    from legoesm.parallel.distributed_fft import (
+        blocks_from_planes, planes_from_blocks)
+    gy, gx = f.shape[0] * L.n_ranks_y, f.shape[1] * L.n_ranks_x
+    if (gy, gx) not in ((L.ny_global, L.nx),
+                        (3 * L.ny_global // 2, 3 * L.nx // 2)):
+        raise ValueError(f"block {f.shape[:2]} x mesh is neither the coarse nor "
+                         f"the 3/2 fine global grid")
+    p = planes_from_blocks(f, n_ranks_y=L.n_ranks_y, n_ranks_x=L.n_ranks_x,
+                           comm=L.comm)
+    # The serial operators take (ny, nx, nz); the planes are level-major.
+    q = jnp.moveaxis(op(jnp.moveaxis(p, 0, 2)), 2, 0)
+    return blocks_from_planes(q, n_ranks_y=L.n_ranks_y,
+                              n_ranks_x=L.n_ranks_x, comm=L.comm,
+                              nz_out=f.shape[-1])
+
+
 def _pad_to_fine(f_yxz, g: SpectralLESGrid | None = None):
     """Coarse ``(ny,nx,nz)`` → fine ``(3ny/2, 3nx/2, nz)`` physical (zero-pad).
 
@@ -491,8 +534,11 @@ def _pad_to_fine(f_yxz, g: SpectralLESGrid | None = None):
     ``parallel/distributed_fft.distributed_pad_to_fine``."""
     if g is not None and g.layout is not None:
         from legoesm.parallel.distributed_fft import (
-            distributed_pad_to_fine, layout_is_pencil, pencil_pad_to_fine)
+            distributed_pad_to_fine, layout_is_pencil, layout_is_planes,
+            pencil_pad_to_fine)
         L = g.layout
+        if layout_is_planes(L):
+            return _via_planes(lambda p: _pad_to_fine(p), f_yxz, L)
         if layout_is_pencil(L):
             return pencil_pad_to_fine(
                 f_yxz, ny_global=L.ny_global, nx=L.nx, n_ranks_y=L.n_ranks_y,
@@ -513,9 +559,13 @@ def _truncate_from_fine(f_fine, ny, nx, g: SpectralLESGrid | None = None):
     """Fine ``(3ny/2,3nx/2,nz)`` → coarse ``(ny,nx,nz)`` physical (+9/4 scaling)."""
     if g is not None and g.layout is not None:
         from legoesm.parallel.distributed_fft import (
-            distributed_truncate_from_fine, layout_is_pencil,
+            distributed_truncate_from_fine, layout_is_pencil, layout_is_planes,
             pencil_truncate_from_fine)
         L = g.layout
+        if layout_is_planes(L):
+            # GLOBAL coarse size: callers may pass this rank's block shape.
+            return _via_planes(
+                lambda p: _truncate_from_fine(p, L.ny_global, L.nx), f_fine, L)
         if layout_is_pencil(L):
             return pencil_truncate_from_fine(
                 f_fine, ny_global=L.ny_global, nx=L.nx, n_ranks_y=L.n_ranks_y,
@@ -559,13 +609,29 @@ def ddz_f2c(ff, dz):
 # --------------------------------------------------------------------------- #
 # Strain rate + Smagorinsky eddy viscosity                                     #
 # --------------------------------------------------------------------------- #
-def _velocity_gradients(u, v, w, g: SpectralLESGrid):
+def horizontal_velocity_gradients(u, v, w, g: SpectralLESGrid):
+    """The six horizontal velocity derivatives on their NATIVE points (``u, v``
+    at centres, ``w`` at faces), one forward FFT per component. :func:`rhs`
+    computes them once per call and hands them to :func:`advection`,
+    :func:`eddy_viscosity` and :func:`sgs_and_wall` (identical values to each
+    of those computing its own; ``hg=None`` there does exactly that)."""
+    dudx, dudy = grad_h(u, g)
+    dvdx, dvdy = grad_h(v, g)
+    dwdx_f, dwdy_f = grad_h(w, g)
+    return dict(dudx=dudx, dudy=dudy, dvdx=dvdx, dvdy=dvdy,
+                dwdx_f=dwdx_f, dwdy_f=dwdy_f)
+
+
+def _velocity_gradients(u, v, w, g: SpectralLESGrid, hg=None):
     """All nine resolved velocity gradients ``a_cd = ∂u_c/∂x_d`` at CENTRES
     (c=component u,v,w; d=direction x,y,z). Shared by :func:`_strain` and
-    :func:`_vreman_nu_t`."""
+    :func:`_vreman_nu_t`. ``hg`` = :func:`horizontal_velocity_gradients` of the
+    same ``(u, v, w)`` (computed here when None)."""
     dz = g.dz
-    dudx, dvdx, dwdx = ddx(u, g), ddx(v, g), ddx(w, g)   # dwdx at faces
-    dudy, dvdy, dwdy = ddy(u, g), ddy(v, g), ddy(w, g)
+    if hg is None:
+        hg = horizontal_velocity_gradients(u, v, w, g)
+    dudx, dvdx, dwdx = hg["dudx"], hg["dvdx"], hg["dwdx_f"]   # dwdx at faces
+    dudy, dvdy, dwdy = hg["dudy"], hg["dvdy"], hg["dwdy_f"]
     dwdz_c = ddz_f2c(w, dz)                               # ∂w/∂z at centres
     # ∂u/∂z, ∂v/∂z at faces → centre.
     dudz_f = jnp.pad(ddz_c2f(u, dz), ((0, 0), (0, 0), (1, 1)), mode="edge")
@@ -576,9 +642,9 @@ def _velocity_gradients(u, v, w, g: SpectralLESGrid):
         a31=f2c(dwdx), a32=f2c(dwdy), a33=dwdz_c)
 
 
-def _strain(u, v, w, g: SpectralLESGrid):
+def _strain(u, v, w, g: SpectralLESGrid, hg=None):
     """Full resolved strain ``S_ij`` and ``|S|=√(2 S_ij S_ij)`` at CENTRES."""
-    a = _velocity_gradients(u, v, w, g)
+    a = _velocity_gradients(u, v, w, g, hg)
     dudx, dudy, dudz_c = a["a11"], a["a12"], a["a13"]
     dvdx, dvdy, dvdz_c = a["a21"], a["a22"], a["a23"]
     dwdx_c, dwdy_c, dwdz_c = a["a31"], a["a32"], a["a33"]
@@ -592,12 +658,12 @@ def _strain(u, v, w, g: SpectralLESGrid):
     return (S11, S22, S33, S12, S13, S23), Smag
 
 
-def _vreman_nu_t(u, v, w, g: SpectralLESGrid):
+def _vreman_nu_t(u, v, w, g: SpectralLESGrid, hg=None):
     """Vreman (2004) eddy viscosity at CENTRES — computes the nine resolved
     gradients on the spectral grid and defers the algebra to the shared
     :func:`legoesm.atmosphere.physics.turbulence.vreman.vreman_nu_t` (the SAME
     implementation the compressible CRM uses)."""
-    a = _velocity_gradients(u, v, w, g)
+    a = _velocity_gradients(u, v, w, g, hg)
     return _vreman_core(
         a["a11"], a["a12"], a["a13"], a["a21"], a["a22"], a["a23"],
         a["a31"], a["a32"], a["a33"],
@@ -605,7 +671,7 @@ def _vreman_nu_t(u, v, w, g: SpectralLESGrid):
         bbeta_guard_width=g.cfg.vreman_bbeta_guard_width)
 
 
-def eddy_viscosity(u, v, w, g: SpectralLESGrid):
+def eddy_viscosity(u, v, w, g: SpectralLESGrid, hg=None):
     """Wall-damped constant-coefficient Smagorinsky ``ν_t=(C_s l)²|S|`` at centres.
 
     ``l = min(C_s Δ, κ z)`` (Mason 1989) with ``Δ=(Δx Δy Δz)^⅓``. This is a
@@ -616,7 +682,7 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
     (``smagorinsky_dynamic``) replaces the constant ``C_s`` + κz cap with the
     per-(x,y,z) ``C_s²`` from :func:`lasd_core.lasd_cs2` (β IS the near-wall
     scale correction, so no Mason cap)."""
-    S_tuple, Smag = _strain(u, v, w, g)
+    S_tuple, Smag = _strain(u, v, w, g, hg)
     delta = (g.dx * g.dy * g.dz) ** (1.0 / 3.0)
     if g.cfg.smagorinsky_dynamic:
         nz = u.shape[-1]
@@ -626,7 +692,7 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
                        layout=g.layout)
         return cs2 * (delta ** 2) * Smag + g.cfg.nu_floor   # ν_t = C_s²·Δ²·|S|
     if g.cfg.sgs_model == "vreman":
-        return _vreman_nu_t(u, v, w, g)
+        return _vreman_nu_t(u, v, w, g, hg)
     if g.cfg.sgs_model != "smagorinsky":
         raise ValueError(
             f"unknown sgs_model {g.cfg.sgs_model!r}; "
@@ -640,7 +706,7 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
     return (l_m ** 2) * Smag + g.cfg.nu_floor               # (ny,nx,nz)
 
 
-def sgs_buoyancy_factor(theta, tracers, u, v, w, g: SpectralLESGrid):
+def sgs_buoyancy_factor(theta, tracers, u, v, w, g: SpectralLESGrid, hg=None):
     """Lilly (1962) stable-stratification suppression factor for the SGS eddy
     viscosity, at CENTRES: ``f = √(max(0, 1 − Ri/Pr_t))`` with ``Ri = N²/|S|²``.
 
@@ -653,11 +719,11 @@ def sgs_buoyancy_factor(theta, tracers, u, v, w, g: SpectralLESGrid):
     :func:`~legoesm.atmosphere.physics._shared.lilly_buoyancy_factor` /
     ``brunt_vaisala_n_squared_from_gradient`` (no re-derived Ri form).
 
-    ponytail: recomputes ``_strain`` (also done in :func:`eddy_viscosity`) rather
-    than threading ``Smag`` out — only runs when ``sgs_buoyancy`` is on; make
-    ``eddy_viscosity`` return ``Smag`` if this doubling ever shows up in a profile.
+    ponytail: recomputes the strain algebra (also done in :func:`eddy_viscosity`)
+    from the shared gradients ``hg`` rather than threading ``Smag`` out — only
+    runs when ``sgs_buoyancy`` is on.
     """
-    (S11, S22, S33, S12, S13, S23), _Smag = _strain(u, v, w, g)
+    (S11, S22, S33, S12, S13, S23), _Smag = _strain(u, v, w, g, hg)
     theta_v = virtual_theta(theta, tracers) if tracers is not None else theta
     theta_v = jnp.clip(theta_v, 1.0, None)                  # keep g/θ_v finite
     # ∂θ_v/∂z at centres: 2nd-order central interior + one-sided edges (uniform
@@ -680,7 +746,7 @@ def sgs_buoyancy_factor(theta, tracers, u, v, w, g: SpectralLESGrid):
 # --------------------------------------------------------------------------- #
 # Rotational-form advection (de-aliased)                                        #
 # --------------------------------------------------------------------------- #
-def advection(u, v, w, g: SpectralLESGrid):
+def advection(u, v, w, g: SpectralLESGrid, hg=None):
     """Rotational (vorticity) form ``C = ω × u`` — the energy-conserving form the
     oracle uses (the Bernoulli ½|u|² term is absorbed by the pressure). Returns
     ``(Cu, Cv, Cw)`` as MINUS the advective tendency (i.e. the RHS contribution
@@ -688,11 +754,13 @@ def advection(u, v, w, g: SpectralLESGrid):
     dz = g.dz
     ny, nx = u.shape[0], u.shape[1]
     # Vorticity from spectral/staggered derivatives on the COARSE grid.
-    dudy, dvdx = ddy(u, g), ddx(v, g)
+    if hg is None:
+        hg = horizontal_velocity_gradients(u, v, w, g)
+    dudy, dvdx = hg["dudy"], hg["dvdx"]
     omega_z = dvdx - dudy                                   # centres
     dudz_f = jnp.pad(ddz_c2f(u, dz), ((0, 0), (0, 0), (1, 1)), mode="edge")
     dvdz_f = jnp.pad(ddz_c2f(v, dz), ((0, 0), (0, 0), (1, 1)), mode="edge")
-    dwdx_f, dwdy_f = ddx(w, g), ddy(w, g)                   # faces
+    dwdx_f, dwdy_f = hg["dwdx_f"], hg["dwdy_f"]             # faces
     omega_x_f = dvdz_f - dwdy_f                             # faces
     omega_y_f = dwdx_f - dudz_f                             # faces
 
@@ -784,7 +852,8 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
 # --------------------------------------------------------------------------- #
 # SGS stress divergence + MOST wall model                                      #
 # --------------------------------------------------------------------------- #
-def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None):
+def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None,
+                 hg=None):
     """SGS force ``∂_j(2 ν_t S_ij)`` with the surface vertical momentum flux
     replaced by the Monin–Obukhov (neutral) wall stress.
 
@@ -792,13 +861,15 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None):
     velocity ``u_*`` (diagnostic)."""
     dz = g.dz
     kappa = constants.kappa_von_karman
-    (S11, S22, S33, S12, S13, S23), _ = _strain(u, v, w, g)
+    if hg is None:
+        hg = horizontal_velocity_gradients(u, v, w, g)
+    (S11, S22, S33, S12, S13, S23), _ = _strain(u, v, w, g, hg)
     tau11, tau22, tau33 = 2 * nu_t * S11, 2 * nu_t * S22, 2 * nu_t * S33
     tau12 = 2 * nu_t * S12
     _tau13, _tau23 = 2 * nu_t * S13, 2 * nu_t * S23           # centres
     # Horizontal divergence of the stress (spectral, exact).
-    Fu = ddx(tau11, g) + ddy(tau12, g)
-    Fv = ddx(tau12, g) + ddy(tau22, g)
+    Fu = div_h(tau11, tau12, g)
+    Fv = div_h(tau12, tau22, g)
     # Vertical SGS momentum flux on FACES: τ_i3 = 2 ν_t S_i3, interpolated to
     # faces; the SURFACE face value is the MOST wall stress (not the interior
     # closure), the rigid-lid top is no-stress.
@@ -807,8 +878,8 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None):
     dvdz_f = ddz_c2f(v, dz)
     # FULL vertical SGS stress τ_i3 = 2 ν_t S_i3 = ν_t(∂u_i/∂z + ∂w/∂x_i) on the
     # interior faces (codex faithfulness: the ∂w/∂x, ∂w/∂y terms were missing).
-    dwdx_i = ddx(w, g)[..., 1:-1]                           # faces → interior (nz-1)
-    dwdy_i = ddy(w, g)[..., 1:-1]
+    dwdx_i = hg["dwdx_f"][..., 1:-1]                        # faces → interior (nz-1)
+    dwdy_i = hg["dwdy_f"][..., 1:-1]
     tau13_f = nu_t_f * (dudz_f + dwdx_i)                    # interior faces (nz-1)
     tau23_f = nu_t_f * (dvdz_f + dwdy_i)
     # MOST neutral wall stress at the first centre level z_c[0], Moeng (1984)
@@ -841,7 +912,7 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None):
     Fv = Fv + ddz_f2c(tau23_full, dz)
     # Vertical SGS force on interior FACES: ∂_x τ13 + ∂_y τ23 + ∂_z τ33.
     #   τ13_f, τ23_f live on interior faces (nz-1); τ33 at centres (nz).
-    Fw_int = (ddx(tau13_f, g) + ddy(tau23_f, g)
+    Fw_int = (div_h(tau13_f, tau23_f, g)
               + ddz_c2f(tau33, dz))                        # (ny, nx, nz-1)
     Fw = jnp.pad(Fw_int, ((0, 0), (0, 0), (1, 1)))         # 0 at the walls → nz+1
     return Fu, Fv, Fw, u_star
@@ -859,7 +930,7 @@ def scalar_rhs(theta, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
     (de-aliased by 3/2 padding), the vertical ``w ∂θ/∂z`` product formed at faces
     then averaged. θ at centres, w at faces."""
     dz = g.dz
-    dthdx, dthdy = ddx(theta, g), ddy(theta, g)            # centres
+    dthdx, dthdy = grad_h(theta, g)                        # centres
     dthdz_f = jnp.pad(ddz_c2f(theta, dz), ((0, 0), (0, 0), (1, 1)))  # faces, 0 walls
     if g.cfg.dealias:
         # Pass g so the 3/2 pad/truncate use the DISTRIBUTED global-y transform
@@ -872,7 +943,7 @@ def scalar_rhs(theta, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
         adv = u * dthdx + v * dthdy + f2c(w * dthdz_f)
     # Horizontal SGS scalar flux divergence (spectral).
     Kh = nu_t / g.cfg.pr_sgs
-    Hsgs = ddx(Kh * dthdx, g) + ddy(Kh * dthdy, g)
+    Hsgs = div_h(Kh * dthdx, Kh * dthdy, g)
     # Vertical SGS flux on interior faces + surface flux BC + no-flux lid.
     Kh_f = c2f(Kh)
     flux_int = Kh_f * ddz_c2f(theta, dz)                   # (ny,nx,nz-1), J=K∂θ/∂z
@@ -1044,9 +1115,9 @@ def scalar_rhs_monotone(phi, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux,
                 "van_leer": _vanleer_flux_div}[scheme]
     adv = (flux_div(phi, u, v, w, g)
            - phi * _vanleer_fv_velocity_divergence(u, v, w, g))
-    dthdx, dthdy = ddx(phi, g), ddy(phi, g)
+    dthdx, dthdy = grad_h(phi, g)
     Kh = nu_t / g.cfg.pr_sgs
-    Hsgs = ddx(Kh * dthdx, g) + ddy(Kh * dthdy, g)
+    Hsgs = div_h(Kh * dthdx, Kh * dthdy, g)
     Kh_f = c2f(Kh)
     flux_int = Kh_f * ddz_c2f(phi, dz)
     z = jnp.zeros_like(phi[..., :1])
@@ -1109,18 +1180,22 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     div_h = uh + vh + wzh                                   # (nyk, nxr, nz) complex
     rhs = div_h / dt
     k2_2d = g.k2
-    pencil = g.layout is not None and getattr(g.layout, "n_ranks_x", 1) > 1
-    if pencil:
-        # Pencil spectral data are z-split: gather whole z for the vertical solve
-        # (ky chunk rx of Px, zero-padded rows -> k2=0 -> gauge-pinned, rhs 0 ->
-        # phi 0), trimmed to nz BEFORE building the matrix, re-padded after.
+    from legoesm.parallel.distributed_fft import (
+        layout_is_pencil, layout_is_planes, layout_zsplit)
+    zsplit = g.layout is not None and (layout_is_pencil(g.layout)
+                                       or layout_is_planes(g.layout))
+    if zsplit:
+        # Pencil / planes spectral data are z-split (over the row communicator /
+        # all ranks): gather whole z for the vertical solve (ky chunk r of n,
+        # zero-padded rows -> k2=0 -> gauge-pinned, rhs 0 -> phi 0), trimmed to
+        # nz BEFORE building the matrix, re-padded after.
         from legoesm.parallel.distributed_fft import (
             chunk_slice, pencil_spec_to_zwhole)
         L = g.layout
-        rhs = pencil_spec_to_zwhole(rhs, nz_out=nz, n_ranks_x=L.n_ranks_x,
-                                    comm_row=L.comm_row)
-        lo, hi = chunk_slice(L.ny_global, L.n_ranks_x, L.rx)
-        k2_2d = jnp.pad(g.k2, ((0, L.n_ranks_x * (hi - lo) - L.ny_global),
+        zn, zr, zcomm = layout_zsplit(L)
+        rhs = pencil_spec_to_zwhole(rhs, nz_out=nz, n_ranks_x=zn, comm_row=zcomm)
+        lo, hi = chunk_slice(L.ny_global, zn, zr)
+        k2_2d = jnp.pad(g.k2, ((0, zn * (hi - lo) - L.ny_global),
                                (0, 0)))[lo:hi]
         nyk = hi - lo
     # Tridiagonal in z (centres), Neumann walls: φ[-1]=φ[0], φ[nz]=φ[nz-1].
@@ -1146,14 +1221,16 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     rhs = rhs.at[..., 0].set(jnp.where(sing, 0.0 + 0.0j, rhs[..., 0]))
     del s0
     phi_h = thomas_solve(a, b, c, rhs)
-    if pencil:
+    if zsplit:
         from legoesm.parallel.distributed_fft import pencil_zwhole_to_spec
         phi_h = pencil_zwhole_to_spec(phi_h, ny_global=L.ny_global,
-                                      n_ranks_x=L.n_ranks_x, comm_row=L.comm_row)
+                                      n_ranks_x=zn, comm_row=zcomm)
     # u = u* - dt ∇φ.  Horizontal grad spectral; vertical grad to faces.
+    # Horizontal gradient straight from phi_h (not irfft -> rfft of phi): same
+    # values to round-off, one forward FFT fewer.
     phi = _ifft(phi_h, g, nz)
-    u_new = u_s - dt * ddx(phi, g)
-    v_new = v_s - dt * ddy(phi, g)
+    u_new = u_s - dt * _ifft(phi_h * (1j * g.kx[..., None]), g, nz)
+    v_new = v_s - dt * _ifft(phi_h * (1j * g.ky[..., None]), g, nz)
     dphidz_f = jnp.pad(ddz_c2f(phi, dz), ((0, 0), (0, 0), (1, 1)))    # 0 at walls
     w_new = w_s - dt * dphidz_f
     w_new = w_new.at[..., 0].set(0.0).at[..., -1].set(0.0)
@@ -1180,7 +1257,7 @@ def _w_hyperdiffusion(w, g: SpectralLESGrid):
     return _horizontal_hyperdiff(w, g.cfg.w_hyperdiff_coeff, g)
 
 
-def _divergence_damping(u, v, w, g: SpectralLESGrid):
+def _divergence_damping(u, v, w, g: SpectralLESGrid, hg=None):
     """Momentum divergence damping tendency ``α·∇(∇·u)`` (OPT-IN). ``∇·u`` is
     formed at centres (spectral horizontal + face→centre vertical); its gradient
     is added back to u, v (centres) and w (faces). α>0 damps divergence
@@ -1189,9 +1266,11 @@ def _divergence_damping(u, v, w, g: SpectralLESGrid):
     operative momentum lever here."""
     a = g.cfg.div_damping_coeff
     dz = g.dz
-    div_c = ddx(u, g) + ddy(v, g) + ddz_f2c(w, dz)        # (ny,nx,nz) at centres
-    dRu = a * ddx(div_c, g)
-    dRv = a * ddy(div_c, g)
+    if hg is None:
+        hg = horizontal_velocity_gradients(u, v, w, g)
+    div_c = hg["dudx"] + hg["dvdy"] + ddz_f2c(w, dz)      # (ny,nx,nz) at centres
+    ddiv_dx, ddiv_dy = grad_h(div_c, g)
+    dRu, dRv = a * ddiv_dx, a * ddiv_dy
     dRw = a * jnp.pad(ddz_c2f(div_c, dz), ((0, 0), (0, 0), (1, 1)))  # faces, 0 walls
     return dRu, dRv, dRw
 
@@ -1212,8 +1291,11 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     is active, the surface heat flux AND a stability-corrected drag are derived
     from the coupled stable MOST surface layer (:func:`most_surface_flux`) — the
     GABLS1-faithful prescribed-cooling boundary condition."""
-    Cu, Cv, Cw = advection(u, v, w, g)
-    nu_t = eddy_viscosity(u, v, w, g)
+    # The six horizontal velocity derivatives, once for this (u, v, w): shared
+    # by advection, the eddy viscosity, the buoyancy factor and the SGS force.
+    hg = horizontal_velocity_gradients(u, v, w, g)
+    Cu, Cv, Cw = advection(u, v, w, g, hg)
+    nu_t = eddy_viscosity(u, v, w, g, hg)
     if g.cfg.sgs_buoyancy and theta is not None:
         # Suppress the strain-based ν_t across stable stratification (Lilly 1962);
         # the SAME factor damps momentum (sgs_and_wall) and scalar (K_h=ν_t/Pr)
@@ -1223,7 +1305,7 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         # keeps the background floor UNsuppressed — a molecular-like minimum that
         # must survive f→0, else the inviscid inversion grows the 2Δ KH/gravity-
         # wave mode nu_floor exists to damp. No-op when nu_floor=0 (the default).
-        f_buoy = sgs_buoyancy_factor(theta, tracers, u, v, w, g)
+        f_buoy = sgs_buoyancy_factor(theta, tracers, u, v, w, g, hg)
         nu_t = f_buoy * nu_t + (1.0 - f_buoy) * g.cfg.nu_floor
     cd_surf, sfc_flux = None, sfc_theta_flux
     if t_sfc is not None and theta is not None:
@@ -1233,7 +1315,8 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         _us, _ths, sfc_flux, cd_surf = most_surface_flux(
             spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0,
             zeta_cap_width=g.cfg.most_zeta_cap_width)
-    Fu, Fv, Fw, u_star = sgs_and_wall(u, v, w, nu_t, g, u_geo, cd_surf=cd_surf)
+    Fu, Fv, Fw, u_star = sgs_and_wall(u, v, w, nu_t, g, u_geo, cd_surf=cd_surf,
+                                      hg=hg)
     ug, vg = u_geo
     Ru = Cu + Fu + f_cor * (v - vg) + force[0]
     Rv = Cv + Fv - f_cor * (u - ug) + force[1]
@@ -1244,7 +1327,7 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     if g.cfg.w_hyperdiff_coeff > 0.0:
         Rw = Rw + _w_hyperdiffusion(w, g)
     if g.cfg.div_damping_coeff > 0.0:
-        dRu, dRv, dRw = _divergence_damping(u, v, w, g)
+        dRu, dRv, dRw = _divergence_damping(u, v, w, g, hg)
         Ru = Ru + dRu; Rv = Rv + dRv; Rw = Rw + dRw
     scalar_fn = scalar_rhs_monotone if g.cfg.monotone_scalars else scalar_rhs
     Rtheta = None

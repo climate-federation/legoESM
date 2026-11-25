@@ -123,25 +123,26 @@ def pnorm_smooth_min(a: jax.Array, b: jax.Array, p: float, eps: float) -> jax.Ar
 
 
 @jax.custom_jvp
-def _div(x, y):
+def stable_div(x, y):
+    """``x / y`` whose derivative is formed as ``(dx - (x/y) dy) / y``, never ``y**-2``."""
     return x / y
 
 
-@_div.defjvp
-def _div_jvp(primals, tangents):
-    # d(x/y) = (dx - (x/y) dy) / y through _div again, so forward-mode AD never
+@stable_div.defjvp
+def _stable_div_jvp(primals, tangents):
+    # d(x/y) = (dx - (x/y) dy) / y through stable_div again, so forward-mode AD never
     # forms y^-2 (it underflows to 0 for tiny y in fp32: 0*inf = NaN).  Measured
     # in fp32 at y ~ 1e-20: first and second derivatives (fwd-fwd, fwd-rev,
     # rev-rev) finite; third-order reverse is NaN (transposition divides plainly).
     x, y = primals
     dx, dy = tangents
-    out = _div(x, y)
-    return out, _div(dx - out * dy, y)
+    out = stable_div(x, y)
+    return out, stable_div(dx - out * dy, y)
 
 
 def _pnorm_ratio(lo, hi, eps):
     ok = hi > eps
-    return ok, jnp.where(ok, _div(lo, jnp.where(ok, hi, jnp.ones_like(hi))), jnp.zeros_like(lo))
+    return ok, jnp.where(ok, stable_div(lo, jnp.where(ok, hi, jnp.ones_like(hi))), jnp.zeros_like(lo))
 
 
 @functools.partial(jax.custom_jvp, nondiff_argnums=(2, 3))
@@ -264,6 +265,43 @@ def zero_at_or_below(x: jax.Array, floor: float, width: float) -> jax.Array:
     return x * smoothstep_quintic((x - floor) / width)
 
 
+def ramp_above_ln(x: jax.Array, floor: float, log_width: float) -> jax.Array:
+    """Weight of the test ``x > floor`` for a positive ``floor`` (RULE 5), as a
+    C2 ramp in ``ln x``: exactly 0 at and below ``floor``, exactly 1 from
+    ``floor * exp(log_width)``.  ``log_width = 0`` is the hard ``x > floor``."""
+    if log_width == 0:
+        return (jnp.asarray(x) > floor).astype(jnp.result_type(x, float))
+    lx = jnp.log(jnp.maximum(x, floor))
+    return smoothstep_quintic((lx - math.log(floor)) / log_width)
+
+
+def floor_ln(x: jax.Array, floor: float, log_width: float) -> jax.Array:
+    """``max(floor, x)`` for a positive ``floor`` (RULE 5): C1 smooth max in
+    ``ln`` space, exact outside ``|ln(x/floor)| >= log_width/2``.
+    ``log_width = 0`` is ``jnp.maximum``; C1 needs ``log_width <= 2 ln 2``
+    (the clamp at ``floor/2`` must sit outside the smoothing band)."""
+    if log_width == 0:
+        return jnp.maximum(floor, x)
+    if log_width > 2.0 * math.log(2.0):
+        raise ValueError(f"floor_ln needs log_width <= 2 ln 2, got {log_width}")
+    return jnp.exp(smooth_max_c1(math.log(floor),
+                                 jnp.log(jnp.maximum(x, 0.5 * floor)), log_width))
+
+
+def cap_ln(x: jax.Array, cap: float, log_width: float) -> jax.Array:
+    """``min(x, cap)`` for a positive ``cap`` and ``x >= 0`` (RULE 5): C1 smooth
+    min in ``ln`` space, exact outside ``|ln(x/cap)| >= log_width/2``.
+    ``log_width = 0`` is ``jnp.minimum``; C1 needs ``log_width <= 2 ln 2``
+    (the switch at ``cap/2`` must sit outside the smoothing band)."""
+    if log_width == 0:
+        return jnp.minimum(x, cap)
+    if log_width > 2.0 * math.log(2.0):
+        raise ValueError(f"cap_ln needs log_width <= 2 ln 2, got {log_width}")
+    lo = 0.5 * cap
+    soft = jnp.exp(smooth_min_c1(jnp.log(jnp.maximum(x, lo)), math.log(cap), log_width))
+    return jnp.where(x > lo, soft, x)
+
+
 def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
     if width == 0:
@@ -326,6 +364,60 @@ def sqrt_c1(x: jax.Array, width: float) -> jax.Array:
     bridge = math.sqrt(width) * t * t * (2.5 - 1.5 * t)
     above = x >= width
     return jnp.where(above, jnp.sqrt(jnp.where(above, x, width)), bridge)
+
+
+def _unit_ramp(x: jax.Array, wabs: jax.Array) -> jax.Array:
+    """``clip(x / wabs, 0, 1)`` for ``x > 0`` and 0 for ``x <= 0`` (also when
+    ``wabs = 0``), with the division taken only inside ``0 < x < wabs`` (double
+    where) and through :func:`stable_div`, so no ``1/wabs**2`` reaches the gradient."""
+    inside = (x > 0) & (x < wabs)
+    t = stable_div(x, jnp.where(inside, wabs, 1.0))      # derivative (dx - t dw)/w: no w**-2 in float32
+    return jnp.where(inside, t, jnp.where((x > 0) & (x >= wabs), 1.0, 0.0))
+
+
+def step_rel(x: jax.Array, scale: jax.Array, width: float) -> jax.Array:
+    """C1 step ``x > 0`` (RULE 5), one-sided: exactly 0 for ``x <= 0`` (ties go
+    to the hard form's side), a ramp over ``0 < x < width*scale``, exactly 1
+    above.  ``scale >= 0`` is the magnitude ``x`` is measured against (traced is
+    fine); ``width`` is dimensionless and static, ``width = 0`` is the hard
+    ``x > 0``."""
+    if width == 0:
+        return (x > 0).astype(jnp.result_type(x, float))
+    return smoothstep_cubic(_unit_ramp(x, width * scale))
+
+
+def positive_part_rel(x: jax.Array, scale: jax.Array, width: float) -> jax.Array:
+    """C1 ``max(x, 0)`` (RULE 5): exactly 0 for ``x <= 0``, exactly ``x`` from
+    ``width*scale`` on, ``x t (2 - t)`` with ``t = x/(width*scale)`` between
+    (:func:`positive_part_c1` with its band set relative to ``scale``); never
+    above ``max(x, 0)``.  ``width = 0`` is ``jnp.maximum(x, 0)``."""
+    if width == 0:
+        return jnp.maximum(x, 0.0)
+    t = _unit_ramp(x, width * scale)
+    return jnp.where(t >= 1.0, x, x * t * (2.0 - t))
+
+
+def max_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
+    """C1 ``max(a, b)`` (RULE 5) with the band ``|a - b| < width*(|a| + |b|)/2``
+    relative to the operands (dimensionless static ``width``): exact outside it,
+    ``b + u**2 / (2 w)`` inside (``u = a - b + w/2``, ``w = width*(|a| + |b|)``;
+    value and slope match at both joins).  No division outside the band, so the
+    gradient is finite at zero operands.  ``width = 0`` is ``jnp.maximum``."""
+    if width == 0:
+        return jnp.maximum(a, b)
+    a, b = jnp.broadcast_arrays(jnp.asarray(a), jnp.asarray(b))
+    d = a - b
+    wabs = width * (jnp.abs(a) + jnp.abs(b))
+    u = d + 0.5 * wabs
+    t = _unit_ramp(u, wabs)
+    return jnp.where(t >= 1.0, a, b + 0.5 * u * t)          # exact a above, exact b below the band
+
+
+def min_rel(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
+    """C1 ``min(a, b)``, relative band as :func:`max_rel`; ``width = 0`` is ``jnp.minimum``."""
+    if width == 0:
+        return jnp.minimum(a, b)
+    return -max_rel(-a, -b, width)
 
 
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:

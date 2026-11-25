@@ -1,0 +1,26 @@
+--- zdftke.F90
++++ zdftke.F90
+@@ -58,6 +58,8 @@
+    USE lib_mpp        ! MPP library
+    USE prtctl         ! Print control
+    USE sbcwave        ! Surface boundary waves
++   USE round332_writer, ONLY : r332_tke_begin, r332_tke_row
++                     ! round-332 WRITE-only mixing-length discriminator
+    USE tke_round331_writer, ONLY : r331_tke_inputs, r331_after_bc, &
+       & r331_after_matrix, r331_after_solve
+                      ! round-331 WRITE-only TKE localisation recorder
+@@ -185,3 +187,5 @@
+       CALL r326_write( kt, nn_mxlice, ln_mxl0 )   ! round 326: SI3 fields tke_avn reads
++      CALL r332_tke_begin(kt,Kbb,Kmm)
++                     ! round-336 kt=2 context for the reviewed row recorder
+       CALL tke_avn( Kbb, Kmm,        p_avm, p_avt, z_pdlr )   ! now avt, avm, dissl
+       !
+@@ -707,6 +711,8 @@
+             !
+          END SELECT
+          !
++         CALL r332_tke_row(Kbb,Kmm,jj,zmxlm(ntsi:ntei,1:jpkm1), &
++            & zmxld(ntsi:ntei,1:jpkm1),p_pdlr(ntsi:ntei,jj,2:jpkm1))
+          !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+          !                     !  Vertical eddy viscosity and diffusivity  (avm and avt)
+          !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<

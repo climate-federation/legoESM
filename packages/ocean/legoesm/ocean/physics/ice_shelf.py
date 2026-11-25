@@ -221,6 +221,38 @@ def isf_prescribed_melt_tendencies(
     ``ρ0·c_sw·Σ dT_k·h_k = pqoce + pqhc`` and
     ``ρ0·Σ dS_k·h_k = −fwf·⟨S⟩_w`` (locked by tests).
 
+    Oracle (``tests/ocean/unit/test_ice_shelf_nemo_oracle.py``, compiled
+    NEMO 5.0.1 eORCA1 build): the TBL deposition pattern and the volume
+    source match to 1e-12.  KNOWN DIFFERENCES:
+
+    * NEMO 5.0.1's 3-D ``eos_fzp`` (the call ``isf_par`` makes) writes
+      ``P(zs)·zs − 5.87701e-2·S`` — the ``S`` factor binds only the last
+      coefficient (operator precedence; fixed in 5.0.2).  Its TBL freezing
+      point is ~0.14 K colder than the TEOS-10 form used here, so the
+      temperature tendency differs by ~0.16 % per case (pinned).  Matching
+      5.0.1 would need the slipped formula; not done.
+    * Salinity: NEMO sets no salt tendency and adds the melt volume as a
+      divergence source over the TBL cells (``isf_hdiv_mlt``); here the TBL
+      cells get a virtual-salt dilution and the volume goes to a 2-D
+      ``eta`` source (see ``apply_isf_prescribed_melt_step``).  Not
+      compared against NEMO (no salt oracle in this test).
+    * Geometry: NEMO fixes ``ktop`` (on the static ``gdepw_0``) and the
+      band thickness ``zmax − zmin`` at initialisation, then bounds it each
+      step by the live water depth and top-cell thickness; here ``ktop``,
+      the ``zmax`` clamp and the band thickness are all recomputed from the
+      live thicknesses.  Identical at rest (the oracle columns have no
+      free-surface stretch); can differ by one level when the stretch moves
+      an interface across ``zmin``.
+    * A column whose ``min(zmax, depth)`` is not below the snapped ``zmin``
+      gets no melt, as NEMO's ``mskisf_par`` (eORCA1 Depoorter: 8 columns,
+      2.6 % of the annual melt).  NEMO decides this once on the static
+      grid; here it follows the live thicknesses, like ``ktop``.  On
+      regridded grids the loader rescales the monthly melt to the full
+      source total before this mask drops any column.
+    * The ``fwf > 0`` gate drops refreezing, which NEMO would apply; the
+      eORCA1 forcing ``sornfisf`` has no negative values, so it never binds
+      there.
+
     TBL construction (EXACT NEMO isftbl semantics — isfpar.F90 +
     isftbl.F90, codex r3 #3):
 
@@ -296,7 +328,8 @@ def isf_prescribed_melt_tendencies(
     at_bot = idx == kbot_idx
     w = dz * full + frac[..., jnp.newaxis] * dz * at_bot   # Σw = htbl
 
-    has_melt = (fwf > 0.0) & (col_depth > 0.0)
+    # isf_par_init mskisf_par: no melt where the band below the snapped top is empty.
+    has_melt = (fwf > 0.0) & (col_depth > 0.0) & (zmax_c - zmin_snap > 0.0)
     htbl_safe = jnp.where(htbl > 0.0, htbl, 1.0)
     w_norm = jnp.where(has_melt[..., jnp.newaxis], w / htbl_safe[..., jnp.newaxis], 0.0)
 
@@ -345,6 +378,20 @@ def three_equation_melt(
     substituting the freezing-point relation + the salt equation
     into the heat equation.  Assumes the ice has zero salinity and
     neglects the (small) sensible-heat ice-conduction term.
+
+    Oracle (``tests/ocean/unit/test_ice_shelf_nemo_oracle.py``): with
+    NEMO's constants passed through ``config``, melt, heat flux and
+    interface temperature match compiled NEMO 5.0.1 ``isfcav_mlt`` '3eq'
+    rebuilt without conduction to 1e-12.  KNOWN DIFFERENCE vs the stock
+    build (conduction ``ρ_i c_i κ (T_b − T_s)/draft``, κ = 1.54e-6 m²/s,
+    T_s = −20 °C): heat flux differs by at most 0.43 W/m² on the fixture
+    grid; relative to the flux that is ≤0.12 % for T ≥ 0 °C but up to 32 %
+    near freezing (T = −1.9 °C, 100 m draft) where the melt itself is tiny.
+    Pinned per case.  The oracle passes NEMO's depth coefficient
+    (−7.53e-8·g·ρ0 = −7.577e-4 °C per metre of draft) as ``freeze_c`` with
+    ``p_ice_dbar`` = draft in metres, as NEMO does; the default
+    ``freeze_c`` (−7.61e-4 °C/dbar, Jenkins 1991, applied to
+    ``ice_base_pressure_dbar`` = draft) is 0.4 % larger, ~3 mK at 1000 m.
 
     Parameters
     ----------

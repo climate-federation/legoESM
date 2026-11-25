@@ -658,8 +658,13 @@ _CERTIFIED_CARD_DIGESTS = {
     # field (default "four_cell"); with that field dropped from the repr they
     # reproduce the previous pins 3f8ec523690fbe51 / a1fd1ae1b93dab73 exactly.
     # GYRE-zco is red on main too and is left as main has it.
-    "LOCK_EXCHANGE-zco": "8f0f10523a1d4641",
-    "OVERFLOW-zps": "be68a39f58cc44ee",
+    # Re-pinned for the five appended fields (store_tracer_budget from the
+    # tracer-budget port; momentum_face_mask, coriolis_time_scheme,
+    # coriolis_baroclinic_operator, open_boundary_smooth_width from the Pacific
+    # zoom port; all default off); with those five dropped from the repr the
+    # digests reproduce 8f0f10523a1d4641 / be68a39f58cc44ee exactly.
+    "LOCK_EXCHANGE-zco": "0eb2610fb3b1e024",
+    "OVERFLOW-zps": "0c58d034b5258a46",
 }
 
 

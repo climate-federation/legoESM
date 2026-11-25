@@ -36,7 +36,7 @@ References
 from __future__ import annotations
 
 from functools import partial
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -81,6 +81,8 @@ from legoesm.grids.vertical import (
     compute_geopotential_hybrid,
     vertical_advection,
     vertical_advection_hybrid,
+    vertical_advection_hybrid_sb,
+    vertical_advection_hybrid_van_leer,
     compute_pressure_velocity,
     compute_mass_flux_from_cumsum,
     compute_sigma_dot_from_cumsum,
@@ -178,6 +180,11 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # undershoots left negative water; the borrow moves the deficit between
     # levels (frozen-MSE-neutral for vapour AND condensate).  False = no floor.
     conservative_tracer_clamp: bool = True
+    # Positivity: pay a column's net-negative condensate from the same
+    # column's vapour with its latent heat before the borrow
+    # (``apply_water_positivity(condensate_from_vapour=...)``).  False = the
+    # legacy form, which creates water when the globe cannot repay a deficit.
+    positivity_condensate_from_vapour: bool = True
     # #1354/#1515: hard-floor path only (conservative_tracer_clamp=False): the
     # floor removes the per-species latent heat of the clipped water (vapour
     # cools, ice warms, liquid unchanged) so frozen MSE is conserved.  No-op
@@ -262,6 +269,17 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # pre-core body, unchanged; the driver fills it from
     # ``DycoreConfig.vertical_form``.  Appended at the tuple END.
     vertical_form: str = "legacy"
+    # ASKED(user), 2026-11-15: smooth hybrid tracer reconstruction.
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    # Hybrid only; sigma retains its existing upwind tracer operator.
+    tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
+    # APPENDED LAST.  Tracers advance through the RK step as layer mass Q = dp*q (q = Q/dp
+    # after the step): each stage's mass-form tendency then sums exactly, so
+    # sum(q dp) is conserved across the stages.  False = the legacy
+    # mixing-ratio update, which creates or destroys tracer mass at second
+    # order in dt (KNOWN DIFFERENCE; gaps in test_latlon_mass_weighted_rk).
+    tracer_mass_weighted_rk: bool = True
 
 
 # CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
@@ -445,14 +463,21 @@ def cgrid_to_hydrostatic(
 
 def latlon_tracer_tendencies(tracers, u, v, u_c, v_c, dp_u, dp_v, div_dp, dp,
                               vert_vel, p_s, grid, sigma_coord, config, _hybrid):
-    """Tracer tendencies (mass-weighted flux form); ``vert_vel`` is the hybrid
-    mass flux or the sigma-dot."""
+    """Tracer tendencies with selectable conservative hybrid transport.
+
+    ``vert_vel`` is the hybrid interface mass flux (positive downward) or
+    the sigma-dot.
+    """
+
+    if config.tracer_vertical_scheme not in ("sb", "van_leer"):
+        raise ValueError(f"unknown tracer vertical scheme {config.tracer_vertical_scheme!r}")
 
     # --- 12. Tracer transport (mass-weighted flux form) ---
     # Uses the same mass fluxes (dp_u*u, dp_v*v) as the continuity
     # equation for discrete consistency.  The mixing-ratio tendency is:
-    #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp - vert_advection
-    # This conserves ∫ q·dp·dA (tracer mass) to machine precision.
+    #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp + vertical_tendency
+    # With PPM horizontal transport, the hybrid flux form closes the
+    # instantaneous product rule for ∫ q·dp·dA (tracer mass) to round-off.
     #
     # All tracers share the same u, v, dp, div_dp.  Stack along a trailing
     # tracer axis and fold it into the level axis so the operator's
@@ -504,23 +529,22 @@ def latlon_tracer_tendencies(tracers, u, v, u_c, v_c, dp_u, dp_v, div_dp, dp,
                 u_c[..., None] * dq_dx_stack + v_c[..., None] * dq_dy_stack
             )
 
-        # Vertical advection batched across all tracers — both
-        # ``vertical_advection_hybrid`` and ``vertical_advection``
-        # operate on ``axis=-1`` for the vertical, so move the tracer
-        # axis to leading where the velocity-independent shared work
-        # (``F_full`` / ``p_full`` for hybrid, ``F`` for sigma) is
-        # computed *once* and the upwind ``jnp.diff(field, axis=-1)``
-        # broadcasts across the (n_tracers,) axis.  Replaces a Python
-        # for-loop that called the operator ``n_tracers`` times.
-        # Same leading-axis batching as the (u, v) vertical advection
-        # in CD-grid CE/PE (Loop 142).
+        # Both vertical operators use axis=-1 and broadcast their shared
+        # mass fluxes across the leading tracer axis.
         tracers_lead = jnp.moveaxis(
             tracer_stack, -1, 0,
         )  # (n_tracers, n_lat, n_lon, nlev)
         if _hybrid:
-            vert_q_lead = vertical_advection_hybrid(
-                tracers_lead, vert_vel, p_s, sigma_coord,
-            )
+            if config.tracer_vertical_scheme == "sb":
+                vert_q_lead = vertical_advection_hybrid_sb(
+                    tracers_lead, vert_vel, p_s, sigma_coord,
+                )
+            else:  # Membership checked above, including empty tracer states.
+                vert_q_lead = vertical_advection_hybrid_van_leer(
+                    tracers_lead, vert_vel, p_s, sigma_coord,
+                    flux_smoothing_width=config.tracer_van_leer_flux_width,
+                    smoothing_width=config.tracer_van_leer_width,
+                )
         else:
             vert_q_lead = vertical_advection(
                 tracers_lead, vert_vel, sigma_coord,
@@ -1352,6 +1376,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             # tolerate) would crash on the unfiltered transport.
             # Codex review of Stage 3-E BLOCK #1 + #2 caught this.
             if polar_mask is not None:
+                dps_raw = dps
                 dT = fourier_filter_3d(dT, grid, polar_mask)
                 dps = fourier_filter(dps, grid, polar_mask)
 
@@ -1385,9 +1410,24 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 # applies directly.  Without this loop, the lifted
                 # equatorial-CFL dt would race the (un-filtered)
                 # polar tracer advection past its CFL.
+                # Filtered as layer-MASS tendencies, dp*dq + q*dB*dps, and
+                # rebuilt with the filtered dps: the filter keeps each row's
+                # zonal sum, so the tracer mass sum(q dp) is conserved;
+                # filtering dq and dps separately keeps neither weighted sum.
                 if dq:
+                    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+                        dp_t = dp_from_hybrid(sigma_coord, s.p_s)
+                        dB = sigma_coord.dB
+                    else:
+                        dB = sigma_coord.dsigma
+                        dp_t = s.p_s[..., jnp.newaxis] * dB
                     dq = {
-                        name: fourier_filter_3d(dq_field, grid, polar_mask)
+                        name: (fourier_filter_3d(
+                            dp_t * dq_field
+                            + s.tracers[name] * dB * dps_raw[..., jnp.newaxis],
+                            grid, polar_mask)
+                            - s.tracers[name] * dB * dps[..., jnp.newaxis]
+                        ) / dp_t
                         for name, dq_field in dq.items()
                     }
 
@@ -1397,9 +1437,41 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 tracers=dq,
             )
 
-        state_new = dispatch_integrator(
-            state_c, tendency_fn, dt, self.config.time_integrator,
-        )
+        if self.config.tracer_mass_weighted_rk and state_c.tracers:
+            if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+                dB_m = sigma_coord.dB
+
+                def _dp(p_s):
+                    return dp_from_hybrid(sigma_coord, p_s)
+            else:
+                dB_m = sigma_coord.dsigma
+
+                def _dp(p_s):
+                    return p_s[..., jnp.newaxis] * dB_m
+            q_tendency_fn = tendency_fn
+
+            def tendency_fn(sQ):
+                dp_s = _dp(sQ.p_s)
+                s_q = sQ._replace(tracers={k: Q / dp_s
+                                           for k, Q in sQ.tracers.items()})
+                d = q_tendency_fn(s_q)
+                return d._replace(tracers={
+                    k: dp_s * dq_k
+                    + s_q.tracers[k] * dB_m * d.p_s[..., jnp.newaxis]
+                    for k, dq_k in d.tracers.items()})
+
+            dp0 = _dp(state_c.p_s)
+            out_Q = dispatch_integrator(
+                state_c._replace(tracers={k: dp0 * q for k, q
+                                          in state_c.tracers.items()}),
+                tendency_fn, dt, self.config.time_integrator)
+            dp1 = _dp(out_Q.p_s)
+            state_new = out_Q._replace(tracers={k: Q / dp1 for k, Q
+                                                in out_Q.tracers.items()})
+        else:
+            state_new = dispatch_integrator(
+                state_c, tendency_fn, dt, self.config.time_integrator,
+            )
 
         # Enforce v = 0 at poles via the rank-aware helper (matches the
         # tendency-side rewrite above).  Serial config has
@@ -1732,7 +1804,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 state.tracers, state.T, _dp,
                 conservative=self.config.conservative_tracer_clamp,
                 energy_consistent=self.config.energy_consistent_moisture_clip,
-                area=grid.area)
+                area=grid.area,
+                condensate_from_vapour=self.config.positivity_condensate_from_vapour)
             state = state._replace(tracers=_tr_out, T=_T_out)
 
         # #1675: the mass fixer's accumulate-dtype correction promotes ``p_s``
@@ -1882,3 +1955,15 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         """
         return self.step(state, dt, physics_fn=physics_fn,
                          phys_state=phys_state)
+
+
+__param_spec__ = {
+    "CGridLatLonPrimitiveEquationConfig": {
+        "scheme_key": "latlon_pe",
+        "params": {},
+        "excluded": {
+            "tracer_van_leer_width": "tunable_tier 0: numerics smoothing width",
+            "tracer_van_leer_flux_width": "tunable_tier 0: numerics smoothing width",
+        },
+    },
+}
