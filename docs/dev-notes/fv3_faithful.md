@@ -46,8 +46,9 @@ halo (multi-tile compare) vs FV3 — the crux. Assets /tmp/fv3_poc{,_a2b,_dsw3}/
   (T_k = dPhi/(Rd dlnp)); over terrain a2b_ord4 interpolates gz and p^kappa to corners separately, so the
   corner pairs leave the hydrostatic curve (C36 2-0-0: static bottom error 1.66e-4 m/s2; analytic corners
   0.03-0.08e-4). The C36 rest_state_topo 1-d max wind (13.5 m/s) is dominated by FV3's per-acoustic-substep
-  vtdm4 del-6 diffusion of delp/pt (`fv_tp_2d(delp, ..., nord=nord_v, damp_c=damp_v)`, sw_core.F90:886):
-  its coefficient carries no dt factor, and it smooths ps over the unfiltered mountain (max ~246 Pa after one
+  vtdm4 del-6 damping (`damp_v`, which acts on delp, pt and vorticity together; the measured wind
+  sensitivity below is to that combined operator, e.g. `fv_tp_2d(delp, ..., nord=nord_v, damp_c=damp_v)`,
+  sw_core.F90:886): its coefficient carries no dt factor, its delp part smooths ps over the unfiltered mountain (max ~246 Pa after one
   full 8-substep step, the same at dt=0.25/1/4 s probes), and the generic CFL clamp
   (1920 -> 200 s at fixed n_split=8) runs ~9.6x more substeps per day than the deck. C36 1-d max |V|:
   dt=200 damp_v=0.12 13.5; dt=1920 damp_v=0.12 7.4 (probe; the matrix row at 1920 s gives 7.25); damp_v=0 at dt=1920 2.1 / at dt=200 2.2 m/s. damp_v also
