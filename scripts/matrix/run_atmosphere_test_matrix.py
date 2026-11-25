@@ -5020,7 +5020,11 @@ def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
     notes.append("final tracer mass in the top+surface layers / M0 " + ", ".join(
         f"q{i + 1} {e:.2e}" for i, e in enumerate(edge / np.where(m0 != 0, m0, np.nan))))
 
-    # terrain crossing from the saved q1 snapshots
+    # terrain crossing from the saved q1 snapshots.  Deliberately measured in
+    # the PRESCRIBED analytic geometry (analytic mountain zs and analytic-p_s
+    # level heights) on every grid and both coordinates; the weights are the
+    # model's own layer masses, which on spectral come from the band-projected
+    # p_s (vote: codex A, author A -- keeps the existing sigma-path diagnostic)
     if tc.vertical_coord == "hybrid":
         z = np.asarray(dcmip13_full_level_height(lon, lat, sigma_coord), np.float64)
     else:

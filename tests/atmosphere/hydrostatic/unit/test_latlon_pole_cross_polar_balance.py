@@ -6,10 +6,11 @@ rows the C-grid must not treat the zero-length polar v-face (wall v = 0) as a
 VALUE: the pole-row v used for Coriolis (v -> u-face) and KE (v -> cell) is
 extrapolated in latitude from the two nearest real faces, and the pole vertex
 vorticity is the Stokes circulation per unit polar-cap area, not the free-slip
-wall zero.  Each of those was a spurious O(f v) force on the pole
-row only (rotated_steady: 44 m/s after 2 d vs 27.9 analytic).  The initial
-momentum tendency on the pole rows must therefore be no larger than in the
-interior (pre-fix it was ~10x larger).
+wall zero.  Each of those was a spurious force on the pole row only (the
+averaging errors through planetary and relative vorticity, the cap error
+through relative vorticity; rotated_steady: 44 m/s after 2 d vs 27.9
+analytic).  The initial momentum tendency on the pole rows must therefore be
+comparable to the interior (asserted ratio < 1.5; pre-fix it was ~10x).
 """
 from __future__ import annotations
 
