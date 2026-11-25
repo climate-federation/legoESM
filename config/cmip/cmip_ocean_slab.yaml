@@ -243,6 +243,7 @@ morrison_warm_rain_incloud: true   # CAM6 MG2 in-cloud warm rain and two-moment
                                    # snow, production's (user decision
                                    # 2026-09-30 / 2026-10-19); the column lane
                                    # carries the snow number N_s
+energy_consistent_moisture_clip: true  # production's (vote 2026-11-25, 2-1)
 snow_age_activation_K: 5000.0
 surface_bulk_scheme: large_yeager_cesm  # CAM6/CESM shr_flux_atmOcn (LY04)
 # (surface_gustiness_zi: 300 removed, user 2026-10-19: inert on this scheme --
