@@ -317,7 +317,8 @@ DUO_HYDRO_ETA = "cam6_l32"
 #: damping (vtdm4 del-6 on delp/pt/vorticity, divergence damping) is tuned
 #: per acoustic substep, so the clamp (C36: 1920 -> 200 s at fixed n_split)
 #: applied it ~9.6x more often per day and drove the rest_state_topo
-#: spurious wind (C36 1 d: 13.5 m/s clamped vs 7.4 at the deck step).
+#: spurious wind (C36 --quick matrix row, 1 d: 13.47 m/s clamped vs 7.25
+#: at the deck step).
 DUO_HYDRO_DT_ATMOS = 1920.0
 
 
