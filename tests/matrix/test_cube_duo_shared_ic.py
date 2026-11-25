@@ -224,3 +224,19 @@ def test_cube_branch_forwards_case_and_ic_kwargs(matrix_mod, monkeypatch,
     assert seen["n"] == 8
     for k, v in expect.items():
         assert seen.get(k) == v, (k, seen)
+
+
+def test_matrix_cube_held_suarez_is_plain_hs94(monkeypatch):
+    """The matrix cube HS row applies Held & Suarez (1994) like every other
+    grid (strat=False), not FV3 solo's modified-stratosphere default."""
+    import legoesm.core.fv3_native_physics_coupling as cpl
+    seen = []
+
+    def _spy(state, press, *a, strat=True, **k):
+        seen.append(strat)
+        return state
+    monkeypatch.setattr(cpl, "apply_held_suarez_step_sixface_jax", _spy)
+    duo = A.build_duo_hydro(36, held_suarez=True)
+    duo.step(duo.state, duo.dt)
+    assert seen == [False], seen
+    assert "Held-Suarez 1994" in duo.note

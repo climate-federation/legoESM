@@ -695,10 +695,15 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
         amat6, lat6, wv6 = stack_held_suarez_metrics(grid.ctx_np)
         ng = grid.ng
 
+        # strat=False: plain Held & Suarez (1994), as on every other grid.
+        # FV3 solo's default (do_strat_HS_forcing, hswf.F90) adds a modified
+        # stratosphere above 100 hPa (T_eq rising 2.25 K/km x cos(lat), 10-40 d
+        # relaxation) that drives a ~25 m/s westerly jet at the top level and
+        # made the matrix row non-comparable (30 d max|V| 25.7 vs 15.3 m/s).
         def _hs(state, press, dt_):
             return apply_held_suarez_step_sixface_jax(
                 state, press, tab, amat6, lat6, wv6, dt=dt_, n=n, ng=ng,
-                km=km, strat=True)
+                km=km, strat=False)
         hs_jit = jax.jit(_hs, static_argnums=(2,))
 
         def hs_fn(b, dt_):
@@ -751,7 +756,7 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
                 f"alpha={rotated_alpha:.4f}, perturbed={perturbed}), "
                 f"rotated-planet Coriolis"))
     if held_suarez:
-        note += " + certified FV3 HS (strat=T) after each step"
+        note += " + Held-Suarez 1994 forcing (FV3 hswf, strat=F) after each step"
     return SimpleNamespace(
         model=model, grid=grid, state=bundle, dt=dt, step=step, ps=ps,
         temperature=temperature, winds=winds, lon_deg=lon_deg,
