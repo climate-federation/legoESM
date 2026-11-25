@@ -73,6 +73,9 @@ mpas_sponge_del2_top_layers: 2       # index-based sponge: 2 layers on L32 span
                                      # branches) -- 2 layers is the closest
                                      # offered setting (user 2026-09-21)
 mpas_sponge_del2_top_factor: 8.0
+tracer_vertical_scheme: van_leer
+tracer_van_leer_width: 1.0e-10  # VOTED W4: mixing-ratio increments [kg/kg]
+tracer_van_leer_flux_width: 1.0e-6  # VOTED W4: mass flux [Pa/s]
 mpas_vert_advection_scheme: sb       # conservative Simmons-Burridge flux form
                                      # of the hybrid theta transport (van Leer
                                      # is sigma-only on this lane).  The
@@ -252,11 +255,17 @@ cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
                                      # reference: bias within sampling noise,
                                      # per-column scatter ~1.8x the 8-subcolumn one.
 cloud_n_subcolumns: 8                # read only by max_random; inert under mcica
-rrtmgp_gpoint_batch_size: 0          # CPU: one g-point at a time (code default 16 is
-                                     # for GPU). Measured 2026-10-06, res6 16 ranks x 8
-                                     # cores: radiation step 13.8 s at 16, 7.9 s at 0
-                                     # (~139 s per simulated day); fluxes differ only by
-                                     # summation order (<= 6.1e-4 W/m2).
+rrtmgp_gpoint_batch_size: 16         # GPU: 16 g-points per vmap block (production
+                                     # runs on GPU; user decision 2026-11-18).
+                                     # Measured on A100, MPAS res6, 1 simulated day, 0 vs
+                                     # 16 only: 0.161 -> 0.132 s/step on 1 GPU, 0.112 ->
+                                     # 0.092 on 4 (2026-11-13, before the full gas
+                                     # tables); 16/32/64/128 within 3% (2026-11-16).
+                                     # COSTS CPU runs: 2026-10-06, res6 16 ranks x 8
+                                     # cores, radiation step 13.8 s at 16 vs 7.9 s at 0
+                                     # (~139 s per simulated day) -- a CPU run passes
+                                     # --rrtmgp-gpoint-batch-size 0.  Fluxes differ
+                                     # only by summation order (<= 6.1e-4 W/m2).
 rrtmgp_use_scan: true                # scan the RRTMGP column recurrence (code default:
                                      # unrolled on CPU, scan on GPU, so GPU is unchanged).
                                      # Measured 2026-10-29, this deck, MPAS res6 CPU: step
@@ -461,6 +470,14 @@ land_canopy_most_n_iters: 10
 # Canopy Newton solve columns per batch: 64 -> 0 = one batch per GPU (user
 # 2026-11-07; AMIP 4 A100 step 0.242 -> 0.138 s, answers equal to rounding).
 land_canopy_solve_group: 0
+# Two-leaf canopy fixes from I. Di Carlo's legoESM-enso fork (user 2026-11-20:
+# fixed value is the default): semi-implicit ground heat flux (CLM5 eqs.
+# 2.5.123-2.5.124, 2.6.15; explicit flux heated the 2.9 mm top soil layer
+# 17-43 K in one step under sparse dry canopy) and unconverged columns keep
+# their last admissible iterate (CLM5 2.5.3.2; the cold-state fallback gave
+# 1,100-1,430 W/m2 sensible heat and was held).  NEW BASELINE.
+land_canopy_implicit_ground_flux: true
+land_canopy_fallback_from_last_iterate: true
 mpas_land_beta_soil: true
 # Surface drag over land from the land model's own roughness / canopy drag, not
 # the ocean bulk law (user 2026-10-03: "a major default"; Dec 2001 45-70N land:
@@ -470,6 +487,10 @@ mpas_land_stress_from_land: true
 # not on the land-blended T_sfc/q_sfc (#1320; CESM computes atm-ocn fluxes on
 # ocean points only).  User 2026-10-19.
 ocean_flux_on_ocean_surface: true
+# Partly ice-covered sea cells: turbulent exchange on the ice skin and on the
+# open water separately, the ice skin charged its own sensible/latent heat
+# (#2573, user 2026-11-19).  Radiation is not split.
+sea_ice_flux_split: true
 mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
                                 # albedo rebuilt every land step, as the
                                 # offline calibration runs the tables (user
@@ -492,6 +513,7 @@ land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101_v3.npz
 mpas_qv_smooth_del2_m2s: 0.0
 mpas_qv_smooth_del4_m4s: 3.6421e14
 mpas_conservative_tracer_clamp: true
+positivity_condensate_from_vapour: true  # pay net-negative column condensate from the column's vapour (ENSO-fork port, 2026-11-20)
 
 # ---- forcing / IC / output (unchanged) ------------------------------------------
 diurnal_cycle: true

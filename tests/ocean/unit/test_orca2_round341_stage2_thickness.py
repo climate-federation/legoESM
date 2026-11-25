@@ -1,6 +1,6 @@
 """Round 341 production-call-site, Stage-1/Stage-3/legacy bit-identity, and
 eager==jit controls for Stage-2 ``_nemo_ws_stage_transport`` stored ``e3t(Kmm)``
-thickness (``ocean_model_latlon_cgrid.py:2293-2295`` and ``:9570-9572``).
+thickness (``ocean_model_latlon_cgrid.py:2293-2295`` and ``:9616-9618``).
 """
 from __future__ import annotations
 
@@ -167,7 +167,7 @@ def _run_production_step_spies() -> dict[str, object]:
 
 def test_stage2_transport_uses_stored_h_s2_kmm_and_fails_on_revert() -> None:
     """Exercise ``_nemo_ws_stage_transport`` and the production ``_step_impl``
-    Stage-2 call site (``ocean_model_latlon_cgrid.py:2293-2295`` and ``:9570-9572``).
+    Stage-2 call site (``ocean_model_latlon_cgrid.py:2293-2295`` and ``:9616-9618``).
     Reverting either ``stored_h_stage`` in ``_nemo_ws_stage_transport`` or
     ``_h_s2_kmm`` / ``stored_h_stage`` at the Stage-2 call site in ``_step_impl``
     makes this test fail.
@@ -271,8 +271,8 @@ def test_stage2_transport_uses_stored_h_s2_kmm_and_fails_on_revert() -> None:
 
 
 def test_stage1_stage3_and_legacy_caller_stay_bit_identical() -> None:
-    """Prove that Stage 1 (``:9341``, ``stage_index=0``), Stage 3 (``:9641``,
-    ``stage_index=2``), and the legacy caller (``:10145``, across
+    """Prove that Stage 1 (``:9387``, ``stage_index=0``), Stage 3 (``:9687``,
+    ``stage_index=2``), and the legacy caller (``:10191``, across
     ``stage_index=0, 1, 2``) remain bit-identical before vs after the Stage-2
     fix, and that ``stored_h_stage=True`` is refused for ``stage_index != 1``.
     """

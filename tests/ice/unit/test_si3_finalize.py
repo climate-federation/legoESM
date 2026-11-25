@@ -19,7 +19,12 @@ from legoesm.ice.si3_finalize import (
     si3_o15_step,
     si3_o16_step,
 )
-from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig, SI3State
+from legoesm.ice.si3_orca2_state import (
+    SI3ORCA2StateConfig,
+    SI3State,
+    fortran_sum_categories,
+    si3_lbc_lnk_orca2,
+)
 from legoesm.ice.si3_surface import SI3SurfaceConfig
 
 
@@ -341,7 +346,9 @@ def test_o16_tau_gradient_matches_central_difference() -> None:
             taum=jnp.ones((2, 2)), utau_oce=z[1:-1, 1:-1], vtau_oce=z[1:-1, 1:-1],
             tmask_k1=jnp.ones(shape),
         )
-        return jnp.sum(si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=True).utau)
+        return jnp.sum(si3_ice_update_tau(
+            inputs, config=cfg, ln_drgice_imp=True, nn_fsbc=cfg.nn_fsbc, kt=1
+        ).utau)
 
     x = jnp.asarray(1.0, dtype=jnp.float64)
     grad = float(jax.grad(objective)(x))
@@ -364,7 +371,9 @@ def test_o16_tau_gradient_is_finite_at_zero_relative_velocity() -> None:
             taum=jnp.ones((2, 2)), utau_oce=z[1:-1, 1:-1], vtau_oce=z[1:-1, 1:-1],
             tmask_k1=jnp.ones(shape),
         )
-        return jnp.sum(si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=True).utau)
+        return jnp.sum(si3_ice_update_tau(
+            inputs, config=cfg, ln_drgice_imp=True, nn_fsbc=cfg.nn_fsbc, kt=1
+        ).utau)
 
     zero = jnp.asarray(0.0, dtype=jnp.float64)
     assert float(objective(zero)) == 0.0
@@ -470,6 +479,126 @@ def test_step_sea_ice_returns_the_o15_corrected_state() -> None:
     np.testing.assert_array_equal(np.asarray(new_state.szv_i)[owned], np.asarray(corrected.szv_i)[owned])
 
 
+def test_step_sea_ice_runs_complete_icethd_tail_after_ice_cor() -> None:
+    cfg = _config(nn_hls=1)
+    shape, owned_shape = (6, 6), (4, 4)
+    owned = (slice(1, -1), slice(1, -1))
+    state0 = SI3State.zeros(*shape, cfg)
+    a = jnp.full((*shape, 1), -1.0, dtype=jnp.float64)
+    a = a.at[owned].set(0.25)
+    a = a.at[2:4, 2:4, :].set(0.0)
+    v = jnp.zeros((*shape, 1), dtype=jnp.float64).at[owned].set(0.125)
+    v = v.at[2:4, 2:4, :].set(0.0)
+    oa = jnp.full((*shape, 1), -999.0, dtype=jnp.float64)
+    oa_values = jnp.arange(16.0, dtype=jnp.float64).reshape(*owned_shape, 1) + 10.0
+    oa = oa.at[owned].set(oa_values)
+    state0 = state0._replace(
+        a_i=a,
+        v_i=v,
+        oa_i=oa,
+        szv_i=jnp.zeros((*shape, 1, 1), dtype=jnp.float64),
+        u_ice=jnp.arange(36.0, dtype=jnp.float64).reshape(shape) + 1.0,
+        v_ice=jnp.arange(36.0, dtype=jnp.float64).reshape(shape) + 101.0,
+        equivalent=state0.equivalent._replace(h_i=jnp.where(a > 0.0, v / a, 0.0), a_i=a),
+        aggregated=state0.aggregated._replace(at_i=a[..., 0], vt_i=v[..., 0]),
+    )
+    refreshed_names = (
+        "a_i", "v_i", "v_s", "sv_i", "oa_i", "t_su",
+        "a_ip", "v_ip", "v_il", "e_i", "e_s", "szv_i",
+    )
+    poisoned = {}
+    for index, name in enumerate(refreshed_names):
+        field = getattr(state0, name)
+        poisoned[name] = jnp.full_like(field, -1000.0 - index).at[owned].set(field[owned])
+    state0 = state0._replace(**poisoned)
+    z = jnp.zeros(shape, dtype=jnp.float64)
+    stress = SI3StressInputs(
+        uu_kbb=z,
+        vv_kbb=z,
+        umask_k1=jnp.ones(shape),
+        vmask_k1=jnp.ones(shape),
+        u_ice=z,
+        v_ice=z,
+        u_oce=z,
+        v_oce=z,
+        drag_io=jnp.ones(shape) * 0.005,
+        at_i=a[..., 0],
+        utau=z,
+        vtau=z,
+        tmod_io=z,
+        taum=jnp.ones(owned_shape),
+        utau_oce=jnp.zeros(owned_shape),
+        vtau_oce=jnp.zeros(owned_shape),
+    )
+    update = _forcing(owned_shape, (*owned_shape, 1))._replace(
+        tmask=jnp.ones(shape),
+        snwice_mass=jnp.zeros(shape),
+        snwice_mass_b=jnp.zeros(shape),
+    )
+    fluxes = _fluxes(shape)
+    forcing = SI3FinalizeForcing(
+        fluxes=fluxes,
+        update=update,
+        stress=stress,
+        sss_m=jnp.full(shape, 34.0),
+        sst_m=jnp.full(shape, -1.8),
+        rn_amax_2d=jnp.full(shape, 0.95),
+        rn_himin=0.1,
+        surface_config=_surface_config(nn_hls=1),
+        ln_drgice_imp=False,
+    )
+    new_state, response = sea_ice_module.step_sea_ice(
+        state0,
+        forcing,
+        jnp.zeros(owned_shape),
+        jnp.zeros(owned_shape),
+        jnp.zeros(owned_shape),
+        build_si3_orca2_o2_config(cfg),
+        0.0,
+        cfg.rDt_ice,
+    )
+    ice_cor = si3_o15_step(
+        state0,
+        fluxes,
+        sss_m=forcing.sss_m,
+        sst_m=forcing.sst_m,
+        rn_amax_2d=forcing.rn_amax_2d,
+        rn_himin=forcing.rn_himin,
+        config=cfg,
+    ).state
+    corrected = response.correction.state
+    expected_age = ice_cor.oa_i.at[owned].set(
+        ice_cor.oa_i[owned] + ice_cor.a_i[owned] * cfg.rDt_ice
+    )
+    for name in refreshed_names:
+        source = expected_age if name == "oa_i" else getattr(ice_cor, name)
+        expected = si3_lbc_lnk_orca2(
+            source, "T", 1.0, nn_hls=cfg.nn_hls, ldfull=True
+        )
+        np.testing.assert_array_equal(np.asarray(getattr(corrected, name)), np.asarray(expected))
+        np.testing.assert_array_equal(np.asarray(getattr(new_state, name)), np.asarray(expected))
+        assert not np.array_equal(np.asarray(expected), np.asarray(source)), name
+
+    expected_at_i = fortran_sum_categories(corrected.a_i, axis=-1)
+    np.testing.assert_array_equal(np.asarray(corrected.aggregated.at_i), np.asarray(expected_at_i))
+    np.testing.assert_array_equal(np.asarray(new_state.aggregated.at_i), np.asarray(expected_at_i))
+
+    expected_u = ice_cor.u_ice.at[2, 2].set(0.0).at[2, 3].set(0.0)
+    expected_v = ice_cor.v_ice.at[2, 2].set(0.0).at[3, 2].set(0.0)
+    expected_u = si3_lbc_lnk_orca2(
+        expected_u, "U", -1.0, nn_hls=cfg.nn_hls, ldfull=True
+    )
+    expected_v = si3_lbc_lnk_orca2(
+        expected_v, "V", -1.0, nn_hls=cfg.nn_hls, ldfull=True
+    )
+    np.testing.assert_array_equal(np.asarray(corrected.u_ice), np.asarray(expected_u))
+    np.testing.assert_array_equal(np.asarray(corrected.v_ice), np.asarray(expected_v))
+    np.testing.assert_array_equal(np.asarray(new_state.u_ice), np.asarray(expected_u))
+    np.testing.assert_array_equal(np.asarray(new_state.v_ice), np.asarray(expected_v))
+    assert expected_u[2, 2] == expected_u[2, 3] == 0.0
+    assert expected_v[2, 2] == expected_v[3, 2] == 0.0
+
+
 @pytest.mark.parametrize("ln_drgice_imp", [False, True])
 @pytest.mark.parametrize("field", ["tmod_io", "utau"])
 def test_o16_tau_gradient_is_finite_at_zero_relative_velocity_both_arms(field, ln_drgice_imp) -> None:
@@ -486,7 +615,10 @@ def test_o16_tau_gradient_is_finite_at_zero_relative_velocity_both_arms(field, l
             utau_oce=z[1:-1, 1:-1], vtau_oce=z[1:-1, 1:-1],
             tmask_k1=jnp.ones(shape),  # main requires the level-1 mask on the implicit arm
         )
-        out = si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=ln_drgice_imp)
+        out = si3_ice_update_tau(
+            inputs, config=cfg, ln_drgice_imp=ln_drgice_imp,
+            nn_fsbc=cfg.nn_fsbc, kt=1,
+        )
         return jnp.sum(getattr(out, field))
 
     x = jnp.asarray(0.0, dtype=jnp.float64)

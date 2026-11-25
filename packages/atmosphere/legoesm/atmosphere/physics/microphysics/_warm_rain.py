@@ -728,11 +728,15 @@ def saturation_adjustment_gsam(T, q_v, q_c, p_full, *, excess_sharpness,
     ok = sat & (niter <= _GSAM_SATADJ_MAXITER - 1)
     if hard_excess and math.isinf(qc_floor_sharpness):
         q_c_new = jnp.where(ok, p_weight * jnp.maximum(0.0, tabs1 - tabs) / fac, 0.0)
-        T_adj = tabs1 if p_min_width_pa == 0.0 else tabs + p_weight * (tabs1 - tabs)
-        return jnp.where(ok, T_adj, tabs), q_t - q_c_new, q_c_new
-    dT = jnp.where(ok, p_weight, 0.0) * smooth_relu(tabs1 - tabs, qc_floor_sharpness)
-    q_c_new = dT / fac
-    return tabs + dT, q_t - q_c_new, q_c_new
+    else:
+        dT = jnp.where(ok, p_weight, 0.0) * smooth_relu(tabs1 - tabs, qc_floor_sharpness)
+        q_c_new = dT / fac
+    # Water and heat move as ONE amount (condensation > 0), applied with
+    # opposite signs to q_v and q_c and as L_v/c_pd * amount to T. Forming
+    # q_v = (q_v + q_c) - q_c_new instead rounds at the vapour scale and, in
+    # fp32, creates water (measured +2.0e-8 summed per call on RCEMIP1 64^3).
+    condensation = q_c_new - q_c
+    return T + fac * condensation, q_v - condensation, q_c + condensation
 
 
 def effective_Nc(N_c, Nc_0, *, predict_Nc=True, nc_specified_field=False):
@@ -923,6 +927,22 @@ KK2000_CAM6_QC_MAX = 5.0e-3     # in-cloud cap [kg/kg] (shared with morrison.py)
 _KK2000_CAM6_RELVAR_MIN = 1.0e-3   # relvar clip (clubb_intr.F90:2425)
 _KK2000_CAM6_RELVAR_MAX = 10.0     # relvarmax, non-CLUBB deep scheme (:2418)
 
+# --- Liquid cloud water FSD (Boutle et al. 2014, QJRMS 140, 583-594) ---
+# FSD = (a - b C) Phi(x, C) for C < 1, c Phi(x, C) for C = 1,
+# Phi(x, C) = (x C)^(1/3) ((d x C)^e + 1)^f, x the grid box size [km], C the
+# cloud fraction; as restated in Crnivec and Mayer (2021, GMD 14, 3663, eq. 8).
+_BOUTLE14_FSD_A = 0.45
+_BOUTLE14_FSD_B = 0.25
+_BOUTLE14_FSD_OVERCAST = 0.11
+_BOUTLE14_PHI_D = 0.06
+_BOUTLE14_PHI_E = 1.5
+_BOUTLE14_PHI_F = -0.17
+_M_PER_KM = 1.0e3
+_BOUTLE14_XC_MIN_KM = 1.0e-6   # x C below this is cloud free (keeps dFSD/dC finite)
+# Plausibility check of the cell size x [km] read from areaCell (a unit-sphere
+# mesh gives about 1e-5 km); a units guard, not physics.
+BOUTLE14_X_KM_RANGE = (0.01, 1000.0)
+
 # --- CAM6 MG2 in-cloud warm-rain inputs (micro_mg2_0.F90, CESM2.1) ---
 # lcldm = max(liqcldf, mincld) (:878), micro_mg_utils.F90:123 mincld = 1e-4;
 # qcic = min(qc/lcldm, 5e-3), ncic = max(nc/lcldm, 0), both 0 where qc < qsmall
@@ -1045,6 +1065,66 @@ def mg2_var_coef(relvar, a, dtype):
                  _KK2000_CAM6_RELVAR_MIN, _KK2000_CAM6_RELVAR_MAX)
     return jnp.exp(jax.scipy.special.gammaln(r + a)
                    - jax.scipy.special.gammaln(r)) / r ** a
+
+
+def boutle2014_fsd(cloud_fraction, cell_area_m2, overcast_ramp_width=0.0):
+    """Fractional standard deviation of liquid cloud water, Boutle et al.
+    (2014): ``(0.45 - 0.25 C) Phi`` for ``C < 1`` and ``0.11 Phi`` at
+    ``C = 1``, ``Phi = (x C)^(1/3) ((0.06 x C)^1.5 + 1)^(-0.17)``,
+    ``x = sqrt(cell_area_m2)`` in km; 0 where ``x C <= _BOUTLE14_XC_MIN_KM``.
+
+    KNOWN DIFFERENCE (RULE 5): the published jump at ``C = 1`` (0.20 ->
+    0.11) switches on traced state, so ``overcast_ramp_width`` = w > 0 blends
+    the two coefficients with a smoothstep over ``C`` in ``[1 - w, 1]``
+    (continuous value and C-derivative); ``w = 0`` is the published hard jump.
+    Outside that band and at ``C = 1`` the value is the published one; inside
+    it the coefficient lies between the ``C < 1`` line and 0.11.  Below ``_BOUTLE14_XC_MIN_KM`` the
+    cell is treated as cloud free, which keeps the C-derivative (order
+    C^(-2/3)) finite; there FSD is below 0.0045, so the relvar is clipped to
+    relvarmax by MG2 anyway for any factor below 70 (forward unchanged).
+    """
+    c = jnp.clip(cloud_fraction, 0.0, 1.0)
+    # the cell size in the state's working precision: a mesh may store its
+    # areas in float32 (orchestrator, 5 November 2026)
+    x_km = jnp.sqrt(jnp.asarray(cell_area_m2, dtype=c.dtype)) / _M_PER_KM
+    xc_raw = x_km * c
+    cloudy = xc_raw > _BOUTLE14_XC_MIN_KM
+    xc = jnp.where(cloudy, xc_raw, 1.0)
+    phi = xc ** (1.0 / 3.0) * ((_BOUTLE14_PHI_D * xc) ** _BOUTLE14_PHI_E + 1.0) ** _BOUTLE14_PHI_F
+    lin = _BOUTLE14_FSD_A - _BOUTLE14_FSD_B * c
+    if overcast_ramp_width == 0.0:
+        coef = jnp.where(c >= 1.0, _BOUTLE14_FSD_OVERCAST, lin)
+    else:
+        t = jnp.clip((c - (1.0 - overcast_ramp_width)) / overcast_ramp_width, 0.0, 1.0)
+        coef = lin + t * t * (3.0 - 2.0 * t) * (_BOUTLE14_FSD_OVERCAST - lin)
+    return jnp.where(cloudy, coef * phi, 0.0)
+
+
+def check_boutle2014_cell_size(cell_area_m2):
+    """Raise if ``sqrt(cell_area_m2)`` [km] leaves ``BOUTLE14_X_KM_RANGE``
+    (concrete NumPy areas only; a unit-sphere mesh gives about 1e-5 km)."""
+    x = cell_area_m2 ** 0.5 / _M_PER_KM
+    lo, hi = BOUTLE14_X_KM_RANGE
+    if not ((x >= lo).all() and (x <= hi).all()):
+        raise ValueError(
+            f"relvar_scheme='boutle2014': cell sizes {x.min():.3g} to {x.max():.3g} km "
+            f"lie outside {BOUTLE14_X_KM_RANGE} km; is areaCell in m^2?")
+
+
+def boutle2014_relvar(cloud_fraction, cell_area_m2, fsd_factor, overcast_ramp_width=0.0):
+    """MG2 relvar ``1/(fsd_factor * FSD)^2`` from :func:`boutle2014_fsd`
+    (gamma distribution of the same variance), with ``fsd_factor * FSD``
+    floored at ``relvarmax^(-1/2)``: the result is at most ``relvarmax``,
+    which MG2's clip (:func:`mg2_var_coef`, [0.001, relvarmax]) gives anyway,
+    so the forward value after the clip is unchanged, while the reverse pass
+    never multiplies the clip's zero cotangent by an overflowing derivative.
+    Cloud-free cells (FSD 0) get ``relvarmax``, CAM6's relvar default there
+    (clubb_intr.F90:2421).  ``fsd_factor`` must be positive (refused at build).
+    """
+    f = fsd_factor * boutle2014_fsd(cloud_fraction, cell_area_m2, overcast_ramp_width)
+    floor = _KK2000_CAM6_RELVAR_MAX ** -0.5
+    above = f > floor
+    return jnp.where(above, 1.0 / jnp.maximum(f, floor) ** 2, _KK2000_CAM6_RELVAR_MAX)
 
 
 def rule5_sharpness(width):
@@ -1186,18 +1266,63 @@ def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_m
     ``widths``: the size reset's RULE 5 widths, see
     :func:`mg2_droplet_fall_coefficients` (none = MG2's hard clip).
     """
-    g = constants.g
-    pdel = p_half[:, 1:] - p_half[:, :-1]
     fc, fnc = mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho,
                                             presence_top=presence_top, **widths)
-    c0 = q_c
     n0 = mg2_presence(q_c, presence_top) * jnp.maximum(N_c_kg, 0.0)
+    dqc, dn, dqv, sfc, nstep_req = mg2_cloud_fallout(q_c, n0, fc, fnc, lcldm, p_half, dt,
+                                                     n_substeps_max)
+    return dqc, dn, dqv, -constants.L_v * dqv / constants.c_pd, sfc, nstep_req  # latent-ok: MG2 oracle constant
+
+
+def mg2_ice_sedimentation(q_i, N_i_kg, icldm, rho, p_half, dt, n_substeps_max, config, dcs, *,
+                          presence_top, slope_log_width):
+    """CAM6 MG2 cloud-ice sedimentation (micro_mg2_0.F90:2063-2064, :2088-2089,
+    :2119-2147, :2206-2214, :2232-2316) of the POST-process grid state.
+
+    ``q_i`` [kg/kg] and ``N_i_kg`` [1/kg] are ``state + tendency*dt``; ``icldm``
+    the ice cloud fraction (>= mincld).  The fall speeds come from the
+    in-cloud state ``q_i/icldm``, ``max(N_i_kg, 0)/icldm`` on MG2's ice slope
+    (:func:`mg2_ice_slope`, ``slope_log_width`` as everywhere in this mode)
+    by :func:`mg2_ice_fall_speeds`, switched on by :func:`mg2_presence` as
+    the droplets' are; ``fi = g rho vtrmi``, ``fni = g rho vni``; the
+    transported number is 0 where the grid ice is below qsmall (:2213).
+    Fallout, sub-steps and the sublimation of ice falling into a smaller
+    cloud fraction as :func:`mg2_cloud_fallout`, the latent cooling with
+    ``L_s``.  Returns ``(dq_i, dN_i_kg, dq_v, dT, sfc_flux, nstep_required)``
+    as :func:`mg2_cloud_sedimentation`."""
+    g = constants.g
+    q_ic = q_i / icldm
+    _, lami = mg2_ice_slope(q_ic, jnp.maximum(N_i_kg, 0.0) / icldm, config.rho_cloud_ice, dcs,
+                            log_width=slope_log_width)
+    vt, vn = mg2_ice_fall_speeds(lami, rho, config)
+    on = mg2_presence(q_ic, presence_top)
+    n0 = mg2_presence(q_i, presence_top) * jnp.maximum(N_i_kg, 0.0)
+    f, fn = on * g * rho * vt, on * g * rho * vn
+    dqi, dn, dqv, sfc, nstep_req = mg2_cloud_fallout(
+        q_i, n0, f, fn, icldm, p_half, dt, n_substeps_max)
+    return dqi, dn, dqv, -constants.L_s * dqv / constants.c_pd, sfc, nstep_req  # latent-ok: MG2 oracle constant (xxls)
+
+
+def mg2_cloud_fallout(c0, n0, f, fn, cldm, p_half, dt, n_substeps_max):
+    """MG2 sub-stepped fallout of a cloud species, droplets or ice
+    (micro_mg2_0.F90:2232-2316 ice, :2319-2377 droplets): mass ``c0``
+    [kg/kg] and number ``n0`` [1/kg], grid means; ``f``, ``fn`` the mass- and
+    number-weighted ``g rho V`` [Pa/s], fixed over sub-steps; ``cldm`` the
+    species' cloud fraction.  ``nstep = 1 + floor(max_k max(f, fn)/pdel *
+    dt)`` per column, clipped to ``n_substeps_max``; flux ``F = f c``; level
+    k gains ``d F(k-1)`` with ``d = min(cldm(k)/cldm(k-1), 1)``; the inflow
+    share ``(1-d) F(k-1)`` falling into clear air becomes vapour.  Returns
+    ``(dq, dn, dq_v, sfc_flux, nstep_required)`` [kg/kg/s, 1/(kg s),
+    kg/kg/s, kg/(m^2 s), int]."""
+    g = constants.g
+    q_c, fc, fnc, lcldm = c0, f, fn, cldm
+    pdel = p_half[:, 1:] - p_half[:, :-1]
     courant = jnp.max(jnp.maximum(fc, fnc) / pdel, axis=1) * dt
     nstep_req = 1 + jnp.floor(courant).astype(jnp.int32)
     nsub = jnp.clip(nstep_req, 1, n_substeps_max)[:, None]
     inv = 1.0 / nsub.astype(q_c.dtype)
     ratio = jnp.minimum(lcldm[:, 1:] / lcldm[:, :-1], 1.0)
-    d = jnp.concatenate([jnp.zeros_like(ratio[:, :1]), ratio], axis=1)
+    d = jnp.concatenate([jnp.zeros_like(lcldm[:, :1]), ratio], axis=1)   # also for one level
 
     def _shift(x):  # value of the level above; nothing enters the top
         return jnp.concatenate([jnp.zeros_like(x[:, :1]), x[:, :-1]], axis=1)
@@ -1205,7 +1330,12 @@ def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_m
     def body(i, carry):
         c, n, dqc, dn, dqv, sfc = carry
         on = (i < nsub).astype(q_c.dtype)
-        F, Fn = fc * c, fnc * n
+        # Donor bound: a sub-step never exports more than the level holds.
+        # MG2 never needs it (its nstep is uncapped, so fc dt/nstep <= pdel);
+        # it binds only where n_substeps_max clips nstep, and is bitwise
+        # inert otherwise (vote 2026-11-20: author, GLM).
+        F = jnp.minimum(fc * c, jnp.maximum(c, 0.0) * pdel / (dt * inv))
+        Fn = jnp.minimum(fnc * n, jnp.maximum(n, 0.0) * pdel / (dt * inv))
         tend_c = (F - d * _shift(F)) / pdel
         tend_n = (Fn - d * _shift(Fn)) / pdel
         evap = (1.0 - d) * _shift(F) / pdel
@@ -1216,7 +1346,7 @@ def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_m
     z = jnp.zeros_like(q_c)
     _, _, dqc, dn, dqv, sfc = jax.lax.fori_loop(
         0, int(n_substeps_max), body, (c0, n0, z, z, z, jnp.zeros_like(q_c[:, 0])))
-    return dqc, dn, dqv, -constants.L_v * dqv / constants.c_pd, sfc, nstep_req  # latent-ok: MG2 oracle constant
+    return dqc, dn, dqv, sfc, nstep_req
 
 
 
@@ -1438,16 +1568,25 @@ def mg2_inprecip_rain(q_r, N_r, rho, precip_frac, lamr_min, lamr_max):
     small = q_ric < MG2_QSMALL
     q_ric = jnp.where(small, 0.0, q_ric)
     N_ric = jnp.where(small, 0.0, jnp.maximum(N_r / precip_frac, 0.0))
-    active = q_ric > MG2_QSMALL
+    N_ric, lamr = mg2_rain_size_dist(q_ric, N_ric, rho, lamr_min, lamr_max)
+    return q_ric, N_ric, lamr, N_ric * lamr
+
+
+def mg2_rain_size_dist(q_r, N_r, rho, lamr_min, lamr_max):
+    """``size_dist_param_basic(mg_rain_props, q_r, N_r, lamr)``
+    (micro_mg_utils.F90:481-516) for rain mass ``q_r`` [kg/kg] and per-VOLUME
+    number ``N_r``: where ``q_r > qsmall``, ``lamr = (pi rho_w N_r/(rho
+    q_r))^(1/3)`` and, outside ``[lamr_min, lamr_max]``, the bound with the
+    number re-adjusted to match; ``lamr = 0`` and the number unchanged
+    elsewhere.  Returns ``(N_r, lamr)``."""
+    active = q_r > MG2_QSMALL
     cr = jnp.pi * constants.rho_water
-    den = jnp.where(active, rho * q_ric, 1.0)
-    lam_raw = safe_pow(_div_tangent_safe(cr * N_ric, den), 1.0 / 3.0)
+    den = jnp.where(active, rho * q_r, 1.0)
+    lam_raw = safe_pow(_div_tangent_safe(cr * N_r, den), 1.0 / 3.0)
     lam = jnp.clip(lam_raw, lamr_min, lamr_max)
     N_adj = jnp.where((lam_raw < lamr_min) | (lam_raw > lamr_max),
-                      lam ** 3 * den / cr, N_ric)
-    N_ric = jnp.where(active, N_adj, N_ric)
-    lamr = jnp.where(active, lam, 0.0)
-    return q_ric, N_ric, lamr, N_ric * lamr
+                      lam ** 3 * den / cr, N_r)
+    return jnp.where(active, N_adj, N_r), jnp.where(active, lam, 0.0)
 
 
 def self_collection_rain_mg2(q_ric, N_ric, rho, precip_frac):
@@ -1491,8 +1630,9 @@ def rain_evaporation_mg2(q_v, q_sat, T, p, rho, q_ric, lamr, n0r, lcldm,
     qclr = (q_v - dum * q_sat) / one_m_dum
     lam = jnp.where(active, lamr, 1.0)
     dv, mu, sc = _air_transport_props(T, p, rho)
-    arn = config.fall_a_r * safe_pow(
-        config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    # MG2 arn = ar*rhof with rhof = (rhosu/rho)^0.54, no density floor
+    # (micro_mg2_0.F90:895-897)
+    arn = config.fall_a_r * safe_pow(config.rho_su / rho, _FALL_RHO_EXPONENT)
     dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)  # latent-ok: MG2 oracle constant (calc_ab, xxlv)
     ab = 1.0 + dqsdt * constants.L_v / constants.c_pd  # latent-ok: MG2 oracle constant (calc_ab, xxlv)
     eps = _mg2_vent_eps(n0r, lam, arn, config.fall_b_r, config.rain_vent_f1,
@@ -1528,6 +1668,7 @@ def _mg2_vent_eps(n0_vol, lam, a_fall, b_fall, f1, f2, rho, dv, mu, sc):
 # f1s=0.86, f2s=0.28, eii=0.5. ---
 MG2_QSIC_MAX = 0.01            # in-precip snow cap [kg/kg] (micro_mg2_0.F90:1363, :2766)
 MG2_SNOWMELT_OFFSET_K = 2.0    # snowmelt = tmelt + 2 K: all snow melts above it (:329)
+MG2_RAINFRZE_OFFSET_K = 40.0   # rainfrze = tmelt - 40 K: all rain freezes below it (:331)
 _MG2_SNOW_VT_CAP = 1.2         # ums, uns <= 1.2*rhof [m/s] (:1407-1408, :2189-2190)
 _MG2_STOKES_DIV = 9.0          # accrete_cloud_water_snow Stokes number dc0^2 uns rhow lams/(9 mu) (:1133)
 _MG2_ECI_KNEE = 0.4            # eci = St^2/(St+0.4)^2, Thompson et al. 2004 (:1134)
@@ -1608,7 +1749,7 @@ def mg2_inprecip_snow(q_s, N_s, precip_frac, config, psd_sharpness=None):
 def mg2_snow_rhof_asn(rho, config):
     """MG2 ``rhof = (rhosu/rho)^0.54`` and ``asn = as*rhof``
     (micro_mg2_0.F90:940-944)."""
-    rhof = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    rhof = safe_pow(config.rho_su / rho, _FALL_RHO_EXPONENT)   # no floor, as MG2 (:895)
     return rhof, config.fall_a_s * rhof
 
 
@@ -1840,6 +1981,20 @@ def mg2_instant_snow_melt(T, q_s, N_s, width_K, cap_sharpness=MG2_CAP_SHARPNESS)
     excess = T - (constants.T_freeze + MG2_SNOWMELT_OFFSET_K)
     frac = mg2_phase_change_fraction(excess, q_s, width_K, cap_sharpness)
     return frac * jnp.maximum(q_s, 0.0), frac * N_s
+
+
+def mg2_instant_rain_freeze(T, q_r, N_r, width_K, cap_sharpness=MG2_CAP_SHARPNESS):
+    """MG2 instantaneous rain freezing below ``rainfrze = T_freeze - 40 K``
+    (micro_mg2_0.F90:1182-1212 before the processes, :2571-2610 after
+    sedimentation): MG2 freezes the fraction ``min(1, (rainfrze - T) c_p/(L_f
+    q_r))`` of the rain where ``T < rainfrze`` and ``q_r > 0`` (heat-limited so
+    the freezing cannot warm the air above rainfrze).  The switch-on and the
+    rounded min are those of :func:`mg2_instant_snow_melt`
+    (:func:`mg2_phase_change_fraction`).  Returns the frozen ``(mass, number)
+    = (f q_r, f N_r)`` in the units of ``q_r``, ``N_r``."""
+    deficit = (constants.T_freeze - MG2_RAINFRZE_OFFSET_K) - T
+    frac = mg2_phase_change_fraction(deficit, q_r, width_K, cap_sharpness)
+    return frac * jnp.maximum(q_r, 0.0), frac * N_r
 
 # --- Seifert & Beheng (2001) warm-rain UNIVERSAL FUNCTIONS ---
 # Faithful transcription of the gSAM M2005 IRAIN=1 path
@@ -2403,6 +2558,52 @@ def mg2_ice_slope(q_i, N_i, rho_ice, dcs, log_width=0.0):
                                 _MG2_MIN_MEAN_MASS_ICE, log_width=log_width)
 
 
+# --- CAM6 MG2 cloud-ice fall speeds (micro_mg2_0.F90:900-901, :2119-2147;
+# micro_mg_utils.F90:130-142) ---
+_MG2_ICE_FALL_RHO_EXP = 0.35   # ain, ajn = (ai, aj) (rhosu/rho)^0.35 (:900-901)
+_MG2_ICE_VT_CAP = 1.2          # vtrmi, fni <= 1.2 rhof [m/s] (:2121-2128, :2136-2145)
+_MG2_AC = 3.0e7                # ac, droplet fall-speed prefactor in aj (micro_mg_utils.F90:131)
+_MG2_ICE_RADIUS_PER_SLOPE = 1.5  # irad = 1.5/lami (:2132)
+_MG2_ICE_BLEND_R_LO_UM = 18.0  # small-ice blend starts at 18 um (:2133)
+_MG2_ICE_BLEND_WIDTH_UM = 2.0  # and ends at 20 um (:2133)
+
+
+def mg2_ice_fall_speeds(lami, rho, config):
+    """MG2 cloud-ice mass- and number-weighted fall speeds ``(vtrmi, vni)``
+    (micro_mg2_0.F90:2119-2147, ``vni = fni/(g rho)``)::
+
+        vtrmi = min(ain Gamma(4+bi)/(6 lami^bi), 1.2 rhof)
+        vni   = min(ain Gamma(1+bi)/lami^bi,     1.2 rhof)
+
+    blended, with ``ifrac = min(1, max(0, (1.5e6/lami - 18)/2))``, toward the
+    same laws with ``ajn, bj`` (small ice as bulk-density spheres) as
+    ``ifrac vtrmi + (1 - ifrac) min(ajn ..., 1.2 rhof)``, where
+    ``ain = ai (rhosu/rho)^0.35``, ``ajn = aj (rhosu/rho)^0.35``,
+    ``aj = ac (rhoi/rhows)^(bc/3) rhows/rhow``, ``bj = bc`` and
+    ``rhof = (rhosu/rho)^0.54``, none floored (:895, :900-901).  0 where
+    ``lami = 0`` (no ice, :2145-2146).  The blend and the caps are CAM's
+    continuous piecewise-linear ``min``/``max``, ported exactly like the MG2
+    snow and rain fall-speed caps."""
+    rhof = safe_pow(config.rho_su / rho, _FALL_RHO_EXPONENT)
+    dum = safe_pow(config.rho_su / rho, _MG2_ICE_FALL_RHO_EXP)
+    bi, bj = config.fall_b_i, _MG2_DROP_FALL_BC
+    aj = (_MG2_AC * (config.rho_cloud_ice / constants.rho_ice) ** (bj / 3.0)
+          * constants.rho_ice / constants.rho_water)
+    on = lami > 0.0
+    lam = jnp.where(on, lami, 1.0)
+    cap = _MG2_ICE_VT_CAP * rhof
+    lam_bi, lam_bj = safe_pow(lam, bi), safe_pow(lam, bj)
+    vt_i = jnp.minimum(config.fall_a_i * dum * math.gamma(4.0 + bi) / (6.0 * lam_bi), cap)
+    vn_i = jnp.minimum(config.fall_a_i * dum * math.gamma(1.0 + bi) / lam_bi, cap)
+    vt_j = jnp.minimum(aj * dum * math.gamma(4.0 + bj) / (6.0 * lam_bj), cap)
+    vn_j = jnp.minimum(aj * dum * math.gamma(1.0 + bj) / lam_bj, cap)
+    irad_um = _MG2_ICE_RADIUS_PER_SLOPE / lam * 1.0e6
+    ifrac = jnp.clip((irad_um - _MG2_ICE_BLEND_R_LO_UM) / _MG2_ICE_BLEND_WIDTH_UM, 0.0, 1.0)
+    vt = ifrac * vt_i + (1.0 - ifrac) * vt_j
+    vn = ifrac * vn_i + (1.0 - ifrac) * vn_j
+    return jnp.where(on, vt, 0.0), jnp.where(on, vn, 0.0)
+
+
 def mg2_deposition_limiter(q_v, T, qvi, q_c, qcrat, vap_dep, mnuccd, nnuccd, dt,
                            width, *, presence_top):
     """MG2 cloud-ice deposition limits (micro_mg2_0.F90:1591-1621), grid rates
@@ -2509,7 +2710,7 @@ def bigg_cold_step(T, config):
                               / RAMP_WIDTH_PER_SHARPNESS)
 
 
-def mg2_frozen_rain_ice_fraction(lamr, dcs, ramp_frac):
+def mg2_frozen_rain_ice_fraction(lamr, dcs, ramp_frac, ice_at_dcs=False):
     """Share of MG2's frozen rain that becomes cloud ice, the rest snow.
 
     CAM6 MG2 (micro_mg2_0.F90:1648-1656) sends ALL of it to cloud ice where
@@ -2522,9 +2723,24 @@ def mg2_frozen_rain_ice_fraction(lamr, dcs, ramp_frac):
     per-column share difference is 0.75-1.0 (a 499 um drop: all ice in CAM,
     almost none here; test_morrison_mg2_frozen_rain_split.py).  Active only
     with do_graupel=False; the production deck has do_graupel=True.
+
+    ``ice_at_dcs`` (static) selects the test of MG2's post-sedimentation rain
+    freezing, which sends the frozen rain to snow where ``lamr < 1/Dcs`` and to
+    cloud ice otherwise (micro_mg2_0.F90:2596-2602): a mean drop of exactly
+    Dcs goes to ice there, where the Bigg freezing above (``1/lamr < Dcs``,
+    :1651) sends it to snow.  That matters because MG2's rain slope bound puts
+    every large drop exactly at 1/lamr = 500 um, CAM6's Dcs.  The smooth form
+    is then 1 up to ``1/lamr = Dcs`` and 0 from ``(1 + ramp_frac) Dcs``, so it
+    matches MG2 on every drop up to Dcs, the slope bound included; the hard
+    limit is MG2's ``lamr >= 1/Dcs``.
     """
     has = lamr > MG2_QSMALL
     d = 1.0 / jnp.where(has, lamr, 1.0)
+    if ice_at_dcs:
+        if ramp_frac <= 0.0:
+            return jnp.where(has & (lamr >= 1.0 / dcs), 1.0, 0.0)
+        return jnp.where(has, smoothstep_quintic(((1.0 + ramp_frac) * dcs - d)
+                                                 / (ramp_frac * dcs)), 0.0)
     if ramp_frac <= 0.0:
         return jnp.where(has & (d < dcs), 1.0, 0.0)
     return jnp.where(has, smoothstep_quintic((dcs - d) / (ramp_frac * dcs)), 0.0)

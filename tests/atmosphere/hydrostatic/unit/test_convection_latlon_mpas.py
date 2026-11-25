@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.atmosphere.forcing.idealized.held_suarez import (
@@ -265,6 +266,22 @@ class TestConvectionMPAS:
         )
         assert bool(jnp.all(jnp.isfinite(tend.du_dt.data)))
         assert bool(jnp.all(jnp.isfinite(tend.dp_s_dt.data)))
+
+    def test_convective_precip_exported_as_prc(
+        self, scheme_config, mpas_mesh, mpas_state, sigma_coord,
+    ):
+        """The bridge publishes its precip again as ``precip_conv_sfc``
+        (CMOR prc), because the combined sum fuses it into ``precip``."""
+        scheme_name, cfg = scheme_config
+        physics_fn = make_convection_physics(cfg, model_type="mpas", dt=300.0)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
+        if tend.precip is None:
+            assert tend.precip_conv_sfc is None
+        else:
+            np.testing.assert_array_equal(
+                np.asarray(tend.precip_conv_sfc.data),
+                np.asarray(tend.precip.data))
 
     def test_kf_wrf_variant_mpas_needs_reconstructed_winds(
         self, mpas_mesh, mpas_state, sigma_coord,

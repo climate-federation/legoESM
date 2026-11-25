@@ -364,6 +364,9 @@ def test_orca2_card_states_the_config_tail_selectors():
         "vmix_eos_use_config_rho0": False,
     }
     assert {name: getattr(config, name) for name in expected_tail} == expected_tail
+    assert config.physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh is True
+    assert config.physics.shortwave_penetration.scheme == "nemo_qsr_rgb"
+    assert config.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch is True
 
 
 # --------------------------------------------------------------------------
@@ -513,6 +516,7 @@ def test_the_nemo_testcase_cards_still_require_the_carried_pair():
 
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_gyre_zco_card,
+        build_gyre_zco_lane_certified_card,
         validate_nemo_testcase_card,
     )
 
@@ -665,3 +669,21 @@ def test_gyre_routing_choices_do_not_leak_to_orca2_tanks_or_vortex():
         cfg = card.recipe.model_config
         assert cfg.physics is None
         assert cfg.nemo_qsr_stage3_kmm_source_association is None
+
+
+def test_orca2_card_pins_zdf_ddm_hard_switches():
+    from pathlib import Path
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_zps_card,
+    )
+
+    deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+
+    ddm = build_orca2_zps_card(deck).recipe.model_config.physics.vertical_mixing.ddm
+    widths = ("regime_width", "n2_gate_width", "k_max_width", "avm_max_width")
+    assert ddm.enabled and ddm.form == "nemo_literal"
+    assert {name: getattr(ddm, name) for name in widths} == dict.fromkeys(widths, 0.0)

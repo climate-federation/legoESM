@@ -409,7 +409,7 @@ def test_aerosol_climatology_averages_the_years_on_the_noleap_clock(
         return np.full(np.shape(lat_grid), 1e-3 * (c.start_year - 2000)
                        + (0.5 if band == "vis" else 0.0))
     monkeypatch.setattr(ext, "get_aerosol_at_time", _aod)
-    monkeypatch.setattr(ext, "get_aerosol_sw_volcanic_at_time",
+    monkeypatch.setattr(ext, "get_aerosol_sw_volcanic_optics_at_time",
                         lambda c, day, lat_grid=None: None)
     monkeypatch.setattr(ext, "get_aerosol_lw_at_time",
                         lambda c, day, lat_grid=None: None)

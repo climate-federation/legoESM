@@ -243,3 +243,29 @@ def test_mcica_model_layer_mask_is_identical_with_overhead_on_or_off(
         cf_pad = jnp.concatenate([jnp.zeros((NCOL, 1)), jnp.asarray(cf0)], 1)
         m_pad = np.asarray(orig(cf_pad, m0.shape[0], shift=jnp.asarray(s0), width=0.0))
         assert not np.array_equal(m_pad[:, :, 1:], m0)
+
+
+def test_absorbed_above_top_is_the_discarded_convergence(solvers):
+    """The exported sink equals, per column and per band, (lid net - surface
+    net) minus the applied model-layer heating -- the energy that entered the
+    reported TOA but never the column -- and is exactly zero with the layer
+    off.  Shown failing if the export reads the wrong faces."""
+    from legoesm.atmosphere.physics.radiation.rrtmgp import constants as C
+    off, on = solvers
+    inp = _inputs()
+    r0 = off.solve_columns(**inp)
+    r1 = on.solve_columns(**inp, o3_top_vmr=jnp.full((NCOL,), 3e-6))
+    dp = np.asarray(inp["p_half"][:, 1:] - inp["p_half"][:, :-1])
+
+    def gap(up, dn, hr):
+        net = np.asarray(dn - up)
+        return net[:, 0] - net[:, -1] - (np.asarray(hr) * dp).sum(1) * C.CP_D / C.G
+    g_sw = gap(r1.sw_flux_up, r1.sw_flux_down, r1.sw_heating_rate)
+    g_lw = gap(r1.lw_flux_up, r1.lw_flux_down, r1.lw_heating_rate)
+    np.testing.assert_allclose(np.asarray(r1.sw_absorbed_above_top), g_sw,
+                               rtol=1e-10, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(r1.lw_absorbed_above_top), g_lw,
+                               rtol=1e-10, atol=1e-9)
+    assert np.all(np.asarray(r1.sw_absorbed_above_top) > 0.0)
+    np.testing.assert_array_equal(np.asarray(r0.sw_absorbed_above_top), 0.0)
+    np.testing.assert_array_equal(np.asarray(r0.lw_absorbed_above_top), 0.0)

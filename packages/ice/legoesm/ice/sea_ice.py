@@ -883,6 +883,7 @@ from legoesm.ice.si3_o17 import (  # noqa: E402
     SI3O17LiveForcing,
     SI3O17StepState,
     SI3O17Trace,
+    si3_icethd_tail,
     si3_o17_step,
 )
 
@@ -942,6 +943,14 @@ def _si3_orca2_o2_step_with_trace(
             _plant_skip_rebin=forcing.plant_skip_rebin,
             _plant_strip_transfer_barriers=forcing.plant_strip_transfer_barriers,
         )
+        correction = correction._replace(
+            state=si3_icethd_tail(
+                correction.state,
+                rDt_ice=config.si3_orca2.rDt_ice,
+                nn_hls=config.si3_orca2.nn_hls,
+                ldfull=True,
+            )
+        )
         h = int(config.si3_orca2.nn_hls)
         owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
         update_fluxes = correction.fluxes.__class__(
@@ -960,6 +969,8 @@ def _si3_orca2_o2_step_with_trace(
             forcing.stress._replace(at_i=final.state.aggregated.at_i),
             config=config.si3_orca2,
             ln_drgice_imp=forcing.ln_drgice_imp,
+            nn_fsbc=config.si3_orca2.nn_fsbc,
+            kt=1,  # SI3FinalizeForcing is the frozen nn_fsbc=1 SAS boundary.
         )
         return final.state, SI3FinalizeResponse(
             correction=correction,

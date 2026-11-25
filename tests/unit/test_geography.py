@@ -189,6 +189,7 @@ def test_grassland_where_the_file_has_no_land_map(tmp_path):
     (lambda d: d.__setitem__("land_fraction", d["elevation"] * 0 + 50.0), r"not %"),
     (lambda d: d["elevation"].attrs.update(units="km"), "units"),
     (lambda d: d["elevation"].values.__setitem__((3, 4), np.nan), "finite"),
+    (lambda d: d.__setitem__("PCT_SAND", d["elevation"] * 0 + 40.0), "PCT_NAT_PFT"),
 ])
 def test_open_geography_refuses(tmp_path, edit, msg):
     ds = mg.idealized("aquaplanet")
@@ -249,6 +250,26 @@ def test_coupled_refuses_geography_with_its_own_land_tile(tmp_path, monkeypatch,
     d = CoupledESMDriver(cfg, CoupledConfig(f_land_mode="analytical", **cc_kw),
                          output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match="coupler's own land tile"):
+        d.setup()
+
+
+def test_geography_has_land(tmp_path):
+    assert not geo.geography_has_land(_gen(tmp_path, "aquaplanet"))
+    assert geo.geography_has_land(_gen(tmp_path, "ridge", barrier_lon=0.0))
+    assert geo.geography_has_land(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0)))
+    ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))
+    ds["land_fraction"] = ds["elevation"] * 0.0     # explicit: all ocean
+    assert not geo.geography_has_land(_write(ds, tmp_path, "zero_lf.nc"))
+
+
+def test_coupled_refuses_atm_owned_geography_land_without_a_land_model(tmp_path):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    cfg = _mpas_cfg(_gen(tmp_path, "ridge", barrier_lon=0.0))
+    d = CoupledESMDriver(cfg, CoupledConfig(f_land_mode="analytical", land_mode="none",
+                                            atm_owns_surface=True),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="runs no land model"):
         d.setup()
 
 
@@ -316,6 +337,114 @@ def test_ocean_depth_is_the_binned_sea_depth_clipped(mesh, tmp_path):
                   == np.where(f == 1.0, 10.0, 4000.0))
 
 
+def _basin_of(nb, wet, seed):
+    seen = np.zeros(wet.size, dtype=bool)
+    seen[seed] = True
+    front = [seed]
+    while front:
+        c = np.asarray(front)
+        n = nb[:, c].ravel()
+        n = np.unique(n[n >= 0])
+        n = n[wet[n] & ~seen[n]]
+        seen[n] = True
+        front = list(n)
+    return seen
+
+
+@pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_two_wiggly_pole_to_pole_barriers_split_the_ocean(mesh, grid_kind, seed):
+    """No wet-to-wet face path crosses a closed barrier: two random wiggly
+    pole-to-pole barriers (vertices 2.5 deg apart, so arcs cut cell corners
+    between densified points) leave the two sides in different basins."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.topography import neighbour_table
+    g = create_latlon_grid(45, 90) if grid_kind == "latlon" else mesh
+    rng = np.random.default_rng(seed)
+    lat = np.linspace(-90.0, 90.0, 73)
+    lines = []
+    for c in (0.0, 180.0):
+        lon = c + np.cumsum(rng.normal(0.0, 1.5, lat.size))
+        lon[0], lon[-1] = lon[1], lon[-2]   # a pole has no longitude of its own
+        lines.append((lat, lon))
+    owners = geo.barrier_owners(g, lines)
+    if grid_kind == "mpas":
+        assert geo.barrier_gaps(g, owners) == 0
+    # on the 4-neighbour lat-lon grid an arc through a cell corner gives a
+    # diagonal owner step, which barrier_gaps refuses (conservatively: a
+    # corner-connected wall still blocks face fluxes); the split must hold
+    wet = ~geo.closed_barrier_cells(g, owners, 1)
+    nb = neighbour_table(g)[0]
+    clat = np.asarray(g.grid_lat).ravel()
+    clon = np.mod(np.asarray(g.grid_lon).ravel(), 2.0 * np.pi)
+    def wet_cell(lon_deg):
+        d = np.where(wet, np.abs(clat) + np.abs(clon - np.deg2rad(lon_deg)), np.inf)
+        return int(np.argmin(d))
+    east = _basin_of(nb, wet, wet_cell(90.0))
+    assert not east[wet_cell(270.0)]
+
+
+def test_land_tile_stamps_the_geography_file(tmp_path):
+    """The soil-hydraulics stamp (land IC conversion) hashes the geography
+    FILE; the in-memory land map it builds has no path to hash."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import build_multilayer_land_tile
+    from legoesm.land.restart import HYDRAULICS_SOURCE_CLM_MAP, soil_hydraulics_stamp
+    p = _gen(tmp_path, "aquaplanet")
+    # simple_seb: the two-leaf canopy needs the harmonized surfdata, which a
+    # geography does not carry in this PR
+    tile = build_multilayer_land_tile(
+        ExperimentConfig(geography=p, land_surface_scheme="simple_seb"),
+        np.zeros(2), np.zeros(2), None)
+    assert tile["surfdata_file"] == p
+    st = soil_hydraulics_stamp(tile["cfg"].hydraulics.retention_curve,
+                               HYDRAULICS_SOURCE_CLM_MAP, tile["surfdata_file"])
+    assert st["parameter_file"] == "aquaplanet.nc"
+
+
+def test_ocean_depth_skips_below_sea_level_land(mesh, tmp_path):
+    """A land point below sea level (land_fraction 1) does not deepen the
+    ocean: same depth as with that point at elevation 0."""
+    ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))
+    el = ds["elevation"].values
+    rng = np.random.default_rng(0)
+    pts = rng.choice(np.flatnonzero(el.ravel() < 0.0), 2000, replace=False)
+    lf = (el > 0.0).astype(float)
+    lf.ravel()[pts] = 1.0
+    dep = ds.copy(deep=True)
+    dep["elevation"].values.ravel()[pts] = -9000.0
+    dep["land_fraction"] = (("lat", "lon"), lf)
+    flat = ds.copy(deep=True)
+    flat["elevation"].values.ravel()[pts] = 0.0
+    kw = dict(H_min=10.0, H_max=1e5)
+    d_dep = geo.geography_ocean_depth(mesh, _write(dep, tmp_path, "dep.nc"), **kw)
+    d_flat = geo.geography_ocean_depth(mesh, _write(flat, tmp_path, "flat.nc"), **kw)
+    assert np.array_equal(d_dep, d_flat)
+    del dep["land_fraction"]     # control: without the mask the points do deepen it
+    assert np.any(geo.geography_ocean_depth(mesh, _write(dep, tmp_path, "d2.nc"), **kw)
+                  > d_flat)
+
+
+def test_ocean_depth_refuses_land_fraction_off_the_elevation_grid(mesh, tmp_path):
+    ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))
+    ds["land_fraction"] = (("lat_lf", "lon_lf"), np.zeros((4, 8)))
+    ds = ds.assign_coords(lat_lf=np.linspace(-67.5, 67.5, 4), lon_lf=np.arange(8) * 45.0)
+    with pytest.raises(ValueError, match="on the elevation grid"):
+        geo.geography_ocean_depth(mesh, _write(ds, tmp_path, "g.nc"), H_min=10.0, H_max=5500.0)
+
+
+@pytest.mark.parametrize("axes", ["lon180", "lat_desc"])
+def test_ocean_depth_refuses_axes_the_terrain_would_reorder(mesh, tmp_path, axes):
+    ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))
+    if axes == "lon180":
+        ds = ds.assign_coords(lon=(ds["lon"] + 180.0) % 360.0 - 180.0).sortby("lon")
+    else:
+        ds = ds.isel(lat=slice(None, None, -1))
+    with pytest.raises(ValueError, match="ocean depth needs ascending"):
+        geo.geography_ocean_depth(mesh, _write(ds, tmp_path, "g.nc"),
+                                  H_min=10.0, H_max=5500.0)
+
+
 def test_snap_partial_cells_is_the_omip_inline_recipe():
     """The shared snap is the inline OMIP code it replaced, bitwise."""
     import jax.numpy as jnp
@@ -359,6 +488,30 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
     assert np.all(H[wet < 0.5] == 0.0)
     assert isinstance(d._ocean_z_coord, OceanPartialCellCoordinate)
     assert d._ocean_model.z_coord is d._ocean_z_coord   # model rebuilt on it
+
+
+@pytest.mark.parametrize("shape,kw", [("box", dict(box=(-30.0, 30.0, 60.0, 150.0))),
+                                      ("aquaplanet", {})])
+def test_partitioned_mpas_ocean_refuses_a_geography(tmp_path, monkeypatch, shape, kw):
+    """Dry->wet flux routing and the wet-cell checks are rank-local; a
+    multi-rank MPAS ocean (the atmosphere's Voronoi MPI layout) under any
+    geography is refused."""
+    from types import SimpleNamespace
+
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    orig = CoupledESMDriver._init_ocean
+
+    def partitioned(self):
+        self._atm._voronoi_layout = SimpleNamespace()
+        return orig(self)
+
+    monkeypatch.setattr(CoupledESMDriver, "_init_ocean", partitioned)
+    cc = CoupledConfig(f_land_mode="analytical", land_mode="none", ocean_mode="dynamic")
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, shape, **kw)),
+                         cc, output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="partitioned"):
+        d.setup()
 
 
 def test_coupled_latlon_dynamic_ocean_refuses_a_geography(tmp_path):
@@ -529,3 +682,55 @@ def test_coupled_mpas_ocean_refuses_an_unwired_start(tmp_path):
         ocean_ic="woa"), output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match="must be 'rest' or 'qobs'"):
         d.setup()
+
+
+# sha256[:16] of the float64 terrain from cf/main acd8798d83 (before this PR),
+# same fixture, so the no-geography production path and legacy mode stay
+# bitwise to the pre-geography loader (measured cross-worktree, then pinned)
+_MAIN_TERRAIN_SHA = {
+    ("mpas3", "phis"): "406f5c36c722acd9", ("mpas3", "fland"): "b8aea3c7274f5c12",
+    ("latlon", "phis"): "15b40b1c9560a04d", ("latlon", "fland"): "28472ccd0cbd7f13",
+}
+
+
+@pytest.fixture
+def x64():
+    import jax
+    orig = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", orig)
+
+
+def test_terrain_is_bitwise_the_pre_geography_loader(x64, tmp_path):
+    import hashlib
+
+    import xarray as xr
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    mesh = create_voronoi_mesh(3)   # built under x64, as the pinned run was
+    rng = np.random.default_rng(0)
+    lat_e, lon_e = np.arange(89.5, -90.0, -1.0), np.arange(-179.5, 180.0, 1.0)
+    z = rng.normal(0.0, 2000.0, (lat_e.size, lon_e.size))
+    lat_m, lon_m = np.arange(-89.0, 90.0, 2.0), np.arange(1.0, 360.0, 2.0)
+    f = (rng.uniform(0.0, 1.0, (lat_m.size, lon_m.size))
+         * (rng.uniform(size=(lat_m.size, lon_m.size)) > 0.5))
+    ep = _write(xr.Dataset({"z": (("latitude", "longitude"), z, {"units": "m"})},
+                           coords={"latitude": lat_e, "longitude": lon_e}), tmp_path, "e.nc")
+    mp = _write(xr.Dataset({"sftlf": (("lat", "lon"), f)},
+                           coords={"lat": lat_m, "lon": lon_m}), tmp_path, "m.nc")
+    g = xr.Dataset({"elevation": (("lat", "lon"), z, {"units": "m"}),
+                    "land_fraction": (("lat_lf", "lon_lf"), f)},
+                   coords={"lat": lat_e, "lon": lon_e, "lat_lf": lat_m, "lon_lf": lon_m})
+    g.attrs["legoesm_geography_version"] = 1
+    gp = _write(g, tmp_path, "g.nc")
+    cfg = TopographyConfig(source="file", path=ep, elev_var="z", lat_var="latitude",
+                           lon_var="longitude", smoothing_passes=4,
+                           land_mask_path=mp, land_mask_var="sftlf")
+    def sha(x):
+        return hashlib.sha256(np.ascontiguousarray(x, dtype=np.float64).tobytes()).hexdigest()[:16]
+    for name, grid in (("mpas3", mesh), ("latlon", create_latlon_grid(45, 90))):
+        for out in (load_real_topography(grid, config=cfg),
+                    geo.geography_terrain(grid, gp, "legacy", smoothing_passes=4)):
+            assert (sha(out[0]), sha(out[1])) == (_MAIN_TERRAIN_SHA[(name, "phis")],
+                                                  _MAIN_TERRAIN_SHA[(name, "fland")])

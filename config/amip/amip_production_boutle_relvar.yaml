@@ -1,0 +1,12 @@
+# Production deck + MG2 relvar from Boutle et al. (2014), non-default arm.
+#
+# MG2's subgrid cloud-water variance (relvar) from the Boutle et al. (2014,
+# QJRMS 140, 583-594) liquid FSD in CLUBB's cloud fraction and the cell size,
+# in place of CLUBB's own rcm**2/qclvar.  Ported from Isma Di Carlo's ENSO
+# fork (opt-in).  Everything else is amip_production.yaml.
+include: amip_production.yaml
+morrison_relvar_scheme: boutle2014
+morrison_boutle_fsd_factor: 1.0           # NAMED, equals the code default
+morrison_boutle_overcast_ramp_width: 0.01 # NAMED, equals the code default:
+                            # RULE 5 width of the smooth blend of Boutle's FSD
+                            # coefficient jump at full cover (0 = published jump)

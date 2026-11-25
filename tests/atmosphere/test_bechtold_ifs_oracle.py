@@ -245,8 +245,10 @@ def test_wrapper_tunable_defaults_are_sucumf():
     tun = _tunables(BechtoldConfig(use_ifs_ascent=True, dx_m=_DX))
     # main #2253 (user 2026-10-28): the run's default no-supply shallow mode
     # is "zero", a recorded departure; the default smooth switches (RULE 5,
-    # #2281) another; everything else is sucumf's.
-    assert tun == IfsTunables()._replace(shallow_nosupply="zero", hard_switches=False)
+    # #2281) another; the corrected cloud-top humidity fixer (#2594, owner
+    # 2026-11-24) a third; everything else is sucumf's.
+    assert tun == IfsTunables()._replace(shallow_nosupply="zero", hard_switches=False,
+                                         openifs_cloud_top_fixer=False)
 
 
 def _wrapper_out(fix, cfg, g="L32"):
@@ -448,18 +450,25 @@ def test_wrapper_surface_rain_is_cumastrn_surface_flux(fix, g, monkeypatch):
             assert np.max(np.abs(got - want)) / scale <= _TOL
 
 
-def test_wrapper_publishes_the_surface_snow_flux(fix):
+def test_wrapper_publishes_the_surface_snow_flux(fix, monkeypatch):
     """F29: the frozen surface precipitation is CUMASTRN's surface snow flux,
-    within the column's surface precipitation."""
+    within its surface rain + snow flux (exact; the column sum of the rain
+    source equals that flux to round-off, checked by
+    test_wrapper_surface_rain_is_cumastrn_surface_flux)."""
+    from legoesm.atmosphere.physics.convection import _ifs_faithful as F
     from legoesm.atmosphere.physics.convection.config import BechtoldConfig
 
+    cap, orig = {}, F.cumastrn
+    def spy(*a, **k):
+        cap["o"] = orig(*a, **k)
+        return cap["o"]
+    monkeypatch.setattr(F, "cumastrn", spy)
     out, _ = _wrapper_out(fix, BechtoldConfig(use_ifs_ascent=True, dx_m=_DX))
     snow = np.asarray(out.precip_frozen_sfc)
-    dp = np.diff(fix["L32_p_half"], axis=1)
-    total = np.sum(np.asarray(out.dq_r_conv_dt) * dp, axis=1) / _thermo(fix, "L").RG
-    assert snow.shape == total.shape and np.all(snow >= 0.0)
-    assert np.any(snow > 0.0)
-    assert np.all(snow <= total)
+    rain = np.asarray(cap["o"].pmflxr)[:, -1]
+    np.testing.assert_array_equal(snow, np.asarray(cap["o"].pmflxs)[:, -1])
+    # snow <= rain + snow  <=>  rain >= 0
+    assert np.all(snow >= 0.0) and np.all(rain >= 0.0) and np.any(snow > 0.0)
 
 
 def test_clamped_square_roots_pass_nan_through(fix, monkeypatch):
@@ -618,12 +627,17 @@ def test_nosupply_gradient_through_the_supply_ramp(fix):
 # against the oracle (arm L0), the no-supply closure held at the source
 # ("first_guess") so only the switches differ: (dT_dt, dq_v_dt, M_u, surface
 # precipitation) per fixture column, measured (x64, CPU) by switch_gaps().
+# Re-measured for #2281 part 3 (downdraught, CUFLXN and post-fixer switches
+# smoothed): L32 column 12 heating gap 0.070 -> 0.97, drying 0.013 -> 0.18 -- its whole
+# precipitation flux (1.3e-9 kg m-2 s-1) lies inside the flux window
+# (0.01 x 2.27e-7), so the smooth positive part suppresses it; KNOWN
+# DIFFERENCE, kept (vote 2 Q6, 2026-11-19).  Other changes <= 6.6e-6.
 _SWITCH_GAP = {
     "L32": (
-        [1.155408049270849e-13, 3.1927949260996204e-13, 0.0011130719528878582, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.6723091836596204e-16, 4.198668525995863e-05, 0.0, 0.07037075107906984, 4.049624669431736e-12, 1.7179434496712484e-12, 3.1143115208075958e-12],
-        [1.7172552867238978e-14, 1.163127531864268e-13, 0.0010985278742337056, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.3674537767162897e-13, 4.689802829971999e-05, 0.0, 0.013070933253375527, 4.1134943022347197e-13, 5.056799592526267e-14, 1.101205278761102e-13],
-        [1.4365594076618328e-14, 1.340269644731608e-13, 0.0011884180672240485, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.470103297401741e-15, 5.127344626210799e-05, 0.0, 0.0, 4.239592100981241e-13, 4.719359133175054e-14, 6.594308439320736e-14],
-        [3.975688633527109e-15, 1.3571569211051792e-13, 0.0010549443125622503, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.344751639650026e-14, 5.1273446260288524e-05, 0.0, 1.6870632593248073e-25, 4.206675081458067e-13, 3.8886484681088704e-14, 0.0],
+        [1.155408049270849e-13, 3.1927949260996204e-13, 0.0011130719528878582, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.4927806518186066e-06, 4.19866852170346e-05, 0.0, 0.9734300882432095, 4.049624669431736e-12, 1.7179434496712484e-12, 3.1143115208075958e-12],
+        [1.7172552867238978e-14, 1.163127531864268e-13, 0.0010985278742337056, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.911942492452407e-06, 4.689802829971999e-05, 0.0, 0.18080538279776642, 4.1134943022347197e-13, 5.056799592526267e-14, 1.101205278761102e-13],
+        [1.4365594076618328e-14, 1.340269644731608e-13, 0.0011884180672240485, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.470103297401741e-15, 5.127344626193498e-05, 0.0, 0.0, 4.239592100981241e-13, 4.719359133175054e-14, 6.594308439320736e-14],
+        [3.975688633527109e-15, 1.3605024188564655e-13, 0.0010549443125622503, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 6.621867336070376e-06, 5.127344625960713e-05, 0.0, 0.0, 4.2082974011963847e-13, 3.8886484681088704e-14, 0.0],
     ),
     "L137": (
         [1.661612930475599e-11, 0.0, 0.0, 0.0, 0.0],
@@ -635,7 +649,7 @@ _SWITCH_GAP = {
         [1.722849855972394e-13, 0.012694584019058777, 8.875598874530435e-13],
         [4.41178551951255e-14, 0.014005735274384364, 1.990163333564079e-13],
         [1.2783764286336544e-13, 0.015307609436948059, 2.0573300977747443e-13],
-        [9.120569143950305e-16, 0.015307609436951737, 1.541579152082197e-13],
+        [9.120569143950305e-16, 0.015307609436952462, 1.5953942788457935e-13],
     ),
 }
 
@@ -699,8 +713,9 @@ def _probe(name):
 # window and the test variable is that perturbation.  mode "inject" (sites no
 # input perturbation reached: floors and caps real columns rarely hit; vote
 # 2026-11-14): the column (optionally perturbed by ``direction``/``value``)
-# with only this site's switched operand moved to mid-window at s = 1 (offset
-# under stop_gradient; s spans the window in units of 1) and each ``partners``
+# with only this site's switched operand replaced by mid-window + (s - 1) w
+# (value and derivative a function of s only; vote 3 2026-11-19), s = 1, and
+# each ``partners``
 # site held mid-window, so the switch reaches the output.
 _SITE_POINTS = {
     ('* (1.0 - sm.lt(kget(pvervel, njkt5), ZOMEGA_RES, _W_OMEGA)))', 'lt'):
@@ -801,6 +816,54 @@ _SITE_POINTS = {
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
     ('zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)', 'min'):
         ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    # part 3 (CUDDRAFN, CUFLXN, post-fixers): injection for every site (vote
+    # 2026-11-19, 3 of 3)
+    ('bp = sm.pos(b, w)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('return bp - sm.pos(b - a, w)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('ddq = sm.lt(kget(zmfdq, idtop), ZDDTOP_Q * kget(zmfdq, ikd), _W_DDQF)', 'lt'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('en = -sm.pos(-en, _W_DDEN)     # bounded: en <= 0 (entrainment only)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
+    ('en = sm.max(en, ZDD_MIX_MIN * mfd1, _W_DDEN)', 'max'):
+        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
+    ('frz = sm.le(tk, rtt, _W_TFRZ)', 'le'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('melt = sm.on(sk, 0.0, _W_PFLX)', 'on'):
+        ('STRESS', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('pmfdde_rate + sm.pos(-zer, _W_RATE), pmfdde_rate)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
+    ('pr = sm.pos(r1, _W_PFLX)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('ps = sm.pos(s1, _W_PFLX)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('return r2, s2, t_new - (r1 + s1), dpmel * sm.on(r1 + s1, 0.0, _W_PFLX, strict=False)', 'on'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('sn1 = jnp.where(dsn, sm.pos(sn1, _W_PFLX), 0.0)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('sn2 = jnp.where(dsn, sm.pos(sn2, _W_PFLX), 0.0)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('t_new = sm.pos(r1 + s1, _W_PFLX)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zbuoyz = -sm.pos(-zbuoyz, _W_DDBUO)   # bounded: <= 0', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zdrfl = -sm.pos(zrfl - zrfln, _W_PFLX)    # bounded: <= 0 (evaporation only)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zdrfl1 = rcpecons * sm.pos(qsk - qk, _W_QDEF) * zrcucov * spow(arg, ZEVAP_EXP) * dp', 'pos'):
+        ('STRESS', 0, 'inject', None, 0.0, 0.01, ()),
+    ('zneed = sm.pos(-(pqen + zmfa) / zdzt, _W_LUDE)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zrfln = sm.pos(zrnew, _W_PFLX)', 'pos'):
+        ('L32', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zrmin = zrfl - zrcucov * sm.pos(zrhebc * qsk - qk, _W_QDEF) * zcons2 * dp', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('zrnew = sm.max(zrnew, zrmin, _W_PFLX)', 'max'):
+        ('STRESS', 0, 'inject', None, 0.0, 0.0001, ()),
+    ('zsnmlt = zfac * sm.pos(zten - rtt, _W_TFRZ)', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.0001, ()),
+    ('ztwetb = tk - sm.pos(qsk - qk, _W_QDEF) * (ZTW1 + ZTW2 * (pk - ZTW3) - ZTW4 * (tk - ZTW5))', 'pos'):
+        ('L32', 10, 'inject', None, 0.0, 0.01, ()),
 }
 
 
@@ -938,6 +1001,24 @@ _SITE_SYNTHETIC = {
     ('zrnew = sm.pos(zrnew, _W_COND)', 'pos'):
         ('0.0', '_W_COND',
          'successor (review round 1: caps bounded from below, fraction <= 1) of a site whose full-scheme injection point failed the per-site test (check_grads through the whole scheme disagrees with autodiff to 1e-3 relative)', 'cuascent'),
+    ('melt = melt * sm.on(zten, rtt, _W_TFRZ)', 'on'):
+        ('th.RTT', '_W_TFRZ',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried)'),
+    ('sq = (idbas >= K - 1) * sm.gt(-kget(pmfd, idbas), 0.5 * kget(mu, idbas), _W_SQ)', 'gt'):
+        ('_S_SQ', '_W_SQ',
+         'no fixture column: injecting only this site mid-window changes no scheme output when it alone is made exact (all 13 convecting columns tried) (bound traced: representative value)'),
+    ('RCUCOV * (1.0 + (sm.max(zrhm, ZRHM_MIN, _W_RHM) - ZRHM_MIN) / ZRHM_SCALE),', 'max'):
+        ('ZRHM_MIN', '_W_RHM',
+         'full-scheme injection point found, but it reaches the scheme output only at round-off level (|d loss/ds| <= 4e-12, finite difference 0; vote 3 2026-11-19)'),
+    ('pmfude_rate = jnp.where(cud, pmfude_rate + sm.pos(-zer, _W_RATE), pmfude_rate)', 'pos'):
+        ('0.0', '_W_RATE',
+         'full-scheme injection point found, but its derivative (|d loss/ds| ~ 1e-6..1e-8 on a loss ~ 200) is resolved by finite differences only to 1.1-1.4e-3 at h = 1e-2 (round-off, error ~ 1/h), above the 1e-3 tolerance (vote 3 2026-11-19)'),
+    ('zalfaw = sm.sel(sm.lt(kget(pten, jk), rtt, _W_TFRZ), 0.0, foealfcu(th, kget(pten, jk), sm))', 'lt'):
+        ('th.RTT', '_W_TFRZ',
+         'full-scheme injection point found, but it reaches the scheme output only at round-off level (|d loss/ds| <= 4e-12, finite difference 0; vote 3 2026-11-19)'),
+    ('en = sm.max(en, -ZDD_DET_MAX * kget(pmfu, jk) - (mfd1 - zdmfde), _W_DDEN)', 'max'):
+        ('0.0', '_W_DDEN',
+         'full-scheme injection point found, but its derivative (|d loss/ds| ~ 2e-6..2e-7 on a loss ~ 200) is resolved by finite differences only to >= 9e-4..1.5e-3 at h = 1e-2..3e-2 (round-off, error ~ 1/h), not robustly inside the 1e-3 tolerance (vote 3 2026-11-19) (bound traced: representative value)'),
 }
 
 
@@ -1092,6 +1173,15 @@ def test_smooth_mixing_fraction_keeps_the_parcel_blend_convex():
     ("zlnew = Z_CLDMAX - sm.pos(Z_CLDMAX - zlnew, _W_COND)", "pos"),
     ("zrnew = lr - sm.pos(lr - zrnew, _W_COND)   # <= lr", "pos"),
     ("return jnp.minimum(1.0, x) if sm.hard else 1.0 - sm.pos(1.0 - x, _W_ONE)", "pos"),
+    # part 3: melt cap, detrained-precipitation caps, flux positivity fixer,
+    # evaporation bound, downdraught entrainment bound, cloud-top fixer
+    ("bp = sm.pos(b, w)", "pos"),   # _cap_min: melt, detrained precip, cloud-top fixer
+    ("return bp - sm.pos(b - a, w)", "pos"),
+    ("t_new = sm.pos(r1 + s1, _W_PFLX)", "pos"),
+    ("pr = sm.pos(r1, _W_PFLX)", "pos"),
+    ("zrfln = sm.pos(zrnew, _W_PFLX)", "pos"),
+    ("zdrfl = -sm.pos(zrfl - zrfln, _W_PFLX)    # bounded: <= 0 (evaporation only)", "pos"),
+    ("en = -sm.pos(-en, _W_DDEN)     # bounded: en <= 0 (entrainment only)", "pos"),
 ])
 def test_host_water_closes_with_a_bounded_cap_active(fix, site):
     """RULE 0 with the smooth caps inside their windows: every level's capped
@@ -1109,6 +1199,158 @@ def test_host_water_closes_with_a_bounded_cap_active(fix, site):
            + col(out.dq_r_detr_dt) + col(out.dq_s_detr_dt))
     assert np.max(np.abs(dry)) > 0.0
     assert np.max(np.abs(res)) / np.max(np.abs(dry)) <= _TOL
+
+
+def _ref_nonneg(r1, s1, dpmel):
+    """cuflxn.F90:427-438 / :489-500, the three branches: (rain, snow, amount
+    added to the total, melt)."""
+    if r1 + s1 < 0.0:
+        return 0.0, 0.0, -(r1 + s1), 0.0
+    if r1 < 0.0:
+        return 0.0, s1 + r1, 0.0, dpmel
+    if s1 < 0.0:
+        return r1 + s1, 0.0, 0.0, dpmel
+    return r1, s1, 0.0, dpmel
+
+
+def test_precip_positivity_fixer_conserves_and_has_the_openifs_limit():
+    """RULE 0 x RULE 5 for CUFLXN's negative-flux fixer: the smooth form's
+    rain + snow is the input total plus the returned deficit (which the caller
+    adds to the level's precipitation source, as OpenIFS) to round-off, both
+    are >= 0, and with the exact switches it is OpenIFS's three branches."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+
+    w = M._W_PFLX
+    pts = [(a * w, b * w) for a in (-3.0, -1.0, -0.4, 0.0, 0.3, 0.7, 2.0, 50.0)
+           for b in (-3.0, -0.6, 0.0, 0.2, 0.9, 5.0)]
+    for r1, s1 in pts:
+        for hard in (True, False):
+            r2, s2, deficit, mel = (float(x) for x in M._nonneg_precip(
+                IfsSmooth(hard), jnp.asarray(r1), jnp.asarray(s1), 0.25 * w))
+            # deficit >= 0 at the hard limit; the C1 positive part sits up
+            # to 4w/27 below T inside its window
+            assert r2 >= 0.0 and s2 >= 0.0 and deficit >= (0.0 if hard else -4.0 * w / 27.0)
+            assert abs(r2 + s2 - (r1 + s1) - deficit) <= 1e-12 * w
+            if hard:
+                np.testing.assert_allclose((r2, s2, deficit, mel), _ref_nonneg(r1, s1, 0.25 * w),
+                                           rtol=1e-12, atol=1e-12 * w)
+    # outside every window the smooth form is the exact one
+    np.testing.assert_allclose(
+        [float(x) for x in M._nonneg_precip(IfsSmooth(False), jnp.asarray(50.0 * w),
+                                            jnp.asarray(5.0 * w), 0.25 * w)],
+        _ref_nonneg(50.0 * w, 5.0 * w, 0.25 * w), rtol=1e-12)
+
+
+def test_precip_positivity_fixer_gradient_at_default():
+    """check_grads through the fixer inside its windows; the derivative
+    differs from the exact switch's."""
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+
+    w = M._W_PFLX
+
+    def f(r1, s1, hard=False):   # in units of w
+        r2, s2, d, mel = M._nonneg_precip(IfsSmooth(hard), r1 * w, s1 * w, 0.25 * w)
+        return (r2 + 2.0 * s2 + 3.0 * d + 5.0 * mel) / w
+
+    for r1, s1 in ((0.4, 0.2), (0.5, -0.2), (-0.1, 0.6)):
+        x = (jnp.asarray(r1), jnp.asarray(s1))
+        check_grads(f, x, order=1, modes=("rev",), eps=1e-5, atol=1e-6, rtol=1e-6)
+        g = np.asarray(jax.grad(f, argnums=(0, 1))(*x))
+        gh = np.asarray(jax.grad(lambda a, b: f(a, b, True), argnums=(0, 1))(*x))
+        assert np.all(np.isfinite(g)) and np.max(np.abs(g - gh)) > 1e-3 * np.max(np.abs(gh))
+
+
+def test_cap_min_is_zero_with_nothing_to_cap():
+    """_cap_min (smooth bounded min used by the melt cap, the detrained-
+    precipitation caps and the cloud-top fixer): exactly 0 where a = 0 or
+    b <= 0, across b's window (the former form b - pos(b - a) gave up to
+    4w/27 there: snow melted below freezing); 0 <= f <= max(b, 0),
+    f <= a + 4w/27; the hard limit is max(min(a, b), 0)."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+
+    w = M._W_PFLX
+    sm = IfsSmooth(False)
+    a = jnp.linspace(0.0, 3.0, 61)[:, None] * w
+    b = jnp.linspace(-1.0, 3.0, 81)[None, :] * w
+    f = np.asarray(M._cap_min(sm, a, b, w))
+    np.testing.assert_array_equal(f[0], 0.0)                 # a = 0
+    np.testing.assert_array_equal(f[:, np.asarray(b[0]) <= 0.0], 0.0)
+    assert np.all(f >= 0.0) and np.all(f <= np.maximum(np.asarray(b), 0.0))
+    assert np.all(f <= np.asarray(a) + 4.0 * w / 27.0 * (1.0 + 1e-12))
+    # hard limit: pos(b) - pos(b - a) = b - (b - a) rounds (codex round 2)
+    np.testing.assert_allclose(np.asarray(M._cap_min(IfsSmooth(True), a, b, w)),
+                               np.maximum(np.minimum(np.asarray(a), np.asarray(b)), 0.0),
+                               rtol=1e-12, atol=1e-12 * w)
+
+
+def test_cap_min_gradient_at_default():
+    """check_grads through _cap_min inside both windows; the derivative
+    differs from the exact min's."""
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+
+    w = M._W_PFLX
+
+    def f(a, b, hard=False):   # in units of w
+        return M._cap_min(IfsSmooth(hard), a * w, b * w, w) / w
+
+    for a, b in ((2.0, 0.5), (0.4, 0.9), (1.2, 1.5)):
+        x = (jnp.asarray(a), jnp.asarray(b))
+        check_grads(f, x, order=1, modes=("rev",), eps=1e-5, atol=1e-6, rtol=1e-6)
+        g = np.asarray(jax.grad(f, argnums=(0, 1))(*x))
+        gh = np.asarray(jax.grad(lambda p, q: f(p, q, True), argnums=(0, 1))(*x))
+        assert np.all(np.isfinite(g)) and np.max(np.abs(g - gh)) > 1e-3 * np.max(np.abs(gh))
+
+
+def test_smooth_melt_cap_is_zero_below_freezing_full_scheme(fix, monkeypatch):
+    """Full scheme (L32, smooth default) with the snow flux the melt cap sees
+    moved into its window (b = w/2, injected: no fixture column puts it there
+    below freezing): every melt call below freezing (zsnmlt = 0) melts
+    nothing, and some do sit below freezing."""
+    import linecache
+    import sys
+    from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    orig, rec = M._cap_min, []
+
+    def spy(sm, a, b, w):
+        fr = sys._getframe(1)
+        if linecache.getline(fr.f_code.co_filename, fr.f_lineno).strip().startswith("dpmel ="):
+            b = jnp.full_like(b, 0.5 * w)
+            f = orig(sm, a, b, w)
+            jax.debug.callback(lambda a, f: rec.append((np.asarray(a), np.asarray(f))), a, f)
+            return f
+        return orig(sm, a, b, w)
+
+    monkeypatch.setattr(M, "_cap_min", spy)
+    th, x = _thermo(fix, "L"), _inputs(fix, "L32", jnp.float64)
+    cumastrn(th, float(fix["dt"]), qsat=satur_qsat(th, x["T"], x["p_full"]),
+             tun=IfsTunables(hard_switches=False), **x)
+    jax.effects_barrier()
+    a = np.concatenate([np.ravel(r[0]) for r in rec])
+    f = np.concatenate([np.ravel(r[1]) for r in rec])
+    assert np.sum(a == 0.0) > 0
+    np.testing.assert_array_equal(f[a == 0.0], 0.0)
+
+
+def test_smooth_melt_is_zero_below_freezing(fix):
+    """The smooth melt cap must not melt snow at T < RTT, where OpenIFS's
+    melting factor ZFAC changes sign (T < RTT - 1/ZMELT_DT): surface snow of
+    the fixture's frozen-precipitation columns is the oracle's."""
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    th, x = _thermo(fix, "L"), _inputs(fix, "L32", jnp.float64)
+    out = cumastrn(th, float(fix["dt"]), qsat=satur_qsat(th, x["T"], x["p_full"]),
+                   tun=IfsTunables(hard_switches=False), **x)
+    ref = np.asarray(fix["L_L32_PMFLXS"])[:, -1]
+    assert np.any(ref > 0.0)
+    np.testing.assert_allclose(np.asarray(out.pmflxs)[:, -1], ref, rtol=1e-3, atol=1e-12)
 
 
 def test_ascent_cap_helpers_gradient_at_default():
@@ -1200,9 +1442,9 @@ def mse_residuals(fix, g):
 # enthalpy-correction numerator (cudtdqn.F90:290-299).  The exact port
 # reproduces it (first assertion).
 _MSE_SMOOTH_GAP = {
-    "L32": [-5.431957106338814e-10, -9.727429972627988e-10, -0.027704053871804746, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.794919768371983e-11, -0.011967617924881324, 0.0, 2.3062560541853294e-11, -1.8975043758473475e-10, -6.591278634004993e-10, 1.7271485619062517e-10],
+    "L32": [-5.43309397471603e-10, -9.727429972627988e-10, -0.027704053871804746, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0902657382748657e-10, -0.011967617050174795, 0.0, -1.305190177128008e-10, -3.7278269360285776e-10, -6.591278634004993e-10, 1.7271485619062517e-10],
     "L137": [1.2356137814306667e-11, 0.0, 0.0, 0.0, 0.0],
-    "STRESS": [1.0560086138866609e-09, 3.4830013889908003, 1.8132695345229877e-10],
+    "STRESS": [1.0560086138866609e-09, 3.4830013889212523, 3.725020292222325e-10],
 }
 
 
@@ -1249,3 +1491,117 @@ def test_switch_scales_probe_covers_every_class(fix):
     assert (M._W_MF, _ifs_smooth.IfsSmooth.max) == before
     assert set(scales) == set(probe._classes().values())
     assert all(np.isfinite(s) and s > 0.0 and n > 0 for s, n in scales.values())
+
+
+# --- #2594: cloud-top negative-humidity fixer (cumastrn.F90:1159-1180).  It
+# fires on no fixture column at the fixture step; STRESS column 0 at ten
+# times the step makes it fire in both switch modes (measured 2026-11-25:
+# the only firing case of step factors 1/3/10 x four upper-humidity
+# reductions x the 24 fixture columns).
+_FIRE_G, _FIRE_COL, _FIRE_DT = "STRESS", 0, 10.0
+_CUM_JIT = jax.jit(cumastrn, static_argnums=(0, 1), static_argnames=("tun",))
+
+
+def _fire_run(fix, hard, openifs, q_scale=1.0):
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    th = _thermo(fix, "L")
+    x = {k: v[_FIRE_COL:_FIRE_COL + 1] for k, v in _inputs(fix, _FIRE_G).items()}
+    x["q"] = x["q"] * q_scale
+    return _CUM_JIT(th, _FIRE_DT * float(fix["dt"]), qsat=satur_qsat(th, x["T"], x["p_full"]),
+                    tun=IfsTunables(hard_switches=hard, openifs_cloud_top_fixer=openifs), **x)
+
+
+def _cloudsc_water(fix, out):
+    """Column water as CLOUDSC receives it [kg m-2 s-1]: vapour tendency +
+    detrained liquid and ice (PLUDELI1/2, its species sources) + detrained
+    rain/snow + surface rain/snow; and the column drying (the scale)."""
+    dp = np.diff(fix[f"{_FIRE_G}_p_half"][_FIRE_COL:_FIRE_COL + 1], axis=1)
+    dq = np.asarray(out.ptenq) - fix[f"{_FIRE_G}_dq_other"][_FIRE_COL:_FIRE_COL + 1]
+    col = np.sum(dq * dp, axis=1) / _thermo(fix, "L").RG
+    li = np.asarray(out.pludeli)[:, 0] + np.asarray(out.pludeli)[:, 1]
+    res = (col + np.sum(li + np.asarray(out.psnde).sum(axis=1), axis=1)
+           + np.asarray(out.pmflxr)[:, -1] + np.asarray(out.pmflxs)[:, -1])
+    return float(res[0]), float(col[0])
+
+
+@pytest.mark.parametrize("hard", [True, False])
+def test_cloud_top_fixer_takes_the_deficit_from_the_condensate(fix, hard):
+    """#2594 (owner decision 2026-11-24): the default fixer REMOVES the
+    humidity deficit from the detrained condensate (OpenIFS adds it), keeps
+    PLUDELI1 + PLUDELI2 = PLUDE >= 0, and leaves more vapour than OpenIFS at
+    the fired levels."""
+    cor, ref = _fire_run(fix, hard, False), _fire_run(fix, hard, True)
+    pc, pr = np.asarray(cor.plude)[0], np.asarray(ref.plude)[0]
+    fired = pc != pr
+    assert np.any(fired)
+    assert np.all(pc[fired] < pr[fired]) and np.all(pc >= 0.0)
+    li = np.asarray(cor.pludeli)[0, 0] + np.asarray(cor.pludeli)[0, 1]
+    np.testing.assert_allclose(li, pc, rtol=1e-12, atol=1e-12 * np.max(pr))
+    lir = np.asarray(ref.pludeli)[0, 0] + np.asarray(ref.pludeli)[0, 1]
+    assert np.max(np.abs(lir - pr)) > 1e-3 * np.max(np.abs(pr - pc))
+    assert np.all(np.asarray(cor.ptenq)[0][fired] > np.asarray(ref.ptenq)[0][fired])
+
+
+@pytest.mark.parametrize("hard", [True, False])
+def test_cloud_top_fixer_water_closes_only_when_corrected(fix, hard):
+    """RULE 0, #2594: with the fixer firing, the water CLOUDSC receives
+    (vapour + PLUDELI liquid/ice + detrained and surface precipitation)
+    closes over the column to the oracle tolerance (fp64) in the default;
+    OpenIFS's form, which rescales PLUDELI by the updated PLUDE, does not."""
+    res_c, dry_c = _cloudsc_water(fix, _fire_run(fix, hard, False))
+    res_r, dry_r = _cloudsc_water(fix, _fire_run(fix, hard, True))
+    print("hard", hard, "water residual default / OpenIFS [kg m-2 s-1]", res_c, res_r)
+    assert abs(res_c) / abs(dry_c) <= _TOL
+    assert abs(res_r) / abs(dry_r) > 1.0e3 * _TOL
+
+
+@pytest.mark.parametrize("hard", [True, False])
+def test_cloud_top_fixer_energy_difference_is_the_openifs_mismatch(fix, hard):
+    """RULE 0, #2594: the column frozen-MSE residual of OpenIFS's fixer
+    exceeds the default's by exactly Lv x its PLUDELI-PLUDE mismatch (the
+    default's mismatch is 0), so the corrected fixer adds nothing to the
+    column energy budget.  (This column's absolute residual is #2571's.)"""
+    th = _thermo(fix, "L")
+    sl = slice(_FIRE_COL, _FIRE_COL + 1)
+    sub = {f"{_FIRE_G}_{k}": fix[f"{_FIRE_G}_{k}"][sl] for k in ("p_half", "dT_other", "dq_other")}
+    r, mism = {}, {}
+    for openifs in (False, True):
+        o = _fire_run(fix, hard, openifs)
+        r[openifs] = _mse_residual({**fix, **sub}, _FIRE_G, o.ptent, o.ptenq,
+                                   np.asarray(o.pmflxs)[:, -1], np.asarray(o.pludeli)[:, 1].sum(1),
+                                   np.asarray(o.psnde)[:, 1].sum(1), o.pvdiscu)[0]
+        mism[openifs] = float(np.sum(np.asarray(o.pludeli)[0, 0] + np.asarray(o.pludeli)[0, 1]
+                                     - np.asarray(o.plude)[0]))
+    print("hard", hard, "MSE residual default / OpenIFS [W m-2]", r[False], r[True])
+    # The fixer moves only PLUDE (vapour sink, Lv x -dPLUDE via the humidity
+    # tendency) and PLUDELI (heating RLVTT dLI1 + RLSTT dLI2, minus Lf dLI2
+    # in the budget; RLSTT - RLMLT = RLVTT), so the residual changes by
+    # RLVTT x d(LI1 + LI2 - PLUDE): the mismatch difference of the two forms.
+    assert th.RLSTT - th.RLMLT == pytest.approx(th.RLVTT, rel=1e-15)
+    assert mism[True] != 0.0
+    assert abs(mism[False]) <= 1e-12 * abs(mism[True])
+    np.testing.assert_allclose(r[True] - r[False], th.RLVTT * (mism[True] - mism[False]),
+                               rtol=1e-6)
+
+
+def test_cloud_top_fixer_gradient_at_default(fix):
+    """RULE 5 (d): reverse-mode derivative through the smooth corrected fixer
+    on the firing column agrees with finite differences (check_grads)."""
+    from jax.test_util import check_grads
+
+    def f(s):
+        o = _fire_run(fix, False, False, q_scale=s)
+        return jnp.sum(o.plude) + jnp.sum(o.ptenq)
+
+    one = jnp.asarray(1.0)
+    g = float(jax.grad(f)(one))
+    assert np.isfinite(g) and g != 0.0
+    check_grads(f, (one,), order=1, modes=("rev",), eps=1e-6, atol=1e-3 * abs(g), rtol=1e-3)
+
+
+def test_cloud_top_fixer_switch_is_validated():
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    with pytest.raises(ValueError, match="openifs_cloud_top_fixer"):
+        cumastrn(lego_thermo(), 1.0, *([None] * 22), tun=IfsTunables(openifs_cloud_top_fixer=1))

@@ -262,6 +262,12 @@ __param_spec__ = {
             "wrf_nodd_tder_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_ddinc_cap_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "wrf_dd_rh_low_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_fabe_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_ainc_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_ainc_rel_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_ainc_tol_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_dfda_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_dabe_width_jkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "cloud_depth_min": "trigger: fixed shallow/deep cloud-depth split (not sigmoid-tunable, fix via config)",
             "cloud_depth_sharpness": "numerics: sigmoid sharpness on the deep/shallow blend",
             "cloud_top_detrainment_fraction": "fixed KF-Eta cloud-top detrainment-level fraction (structural detrainment profile, not a tunable closure rate)",
@@ -342,6 +348,7 @@ __param_spec__ = {
         "excluded": {
             "cloud_mask_sharpness": "inert: belonged to the replaced T_moist >= T layer mask; the Isca qe_moist_convection port has no such mask and raises on a non-default value",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the smooth CAPE trigger",
+            "dry_parcel_gate_width": "numerics: RULE 5 smoothing width of the below-LCL-table dry-parcel gate; 0 = hard step",
         },
         "params": {
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Frierson (2007)", "shape": None},
@@ -403,6 +410,12 @@ class SBMConfig(NamedTuple):
     # The oracle's convecting layer is kLZB..surface; sbm_convection raises
     # if this is set to anything but its default.
     cloud_mask_sharpness: float = 5.0
+    # RULE 5 width of the dry-parcel gate in the LCL lookup value
+    # log(e / T**(1/kappa)) (dimensionless, natural-log units): a parcel whose
+    # value lies below the table (LCL T < 173 K, the oracle's FATAL) does not
+    # convect; above it the outputs ramp in with sigmoid((v - v_min)/width - 4).
+    # 0 = the hard step.  Numerics, excluded from __param_spec__.
+    dry_parcel_gate_width: float = 0.1
 
 
 class AhmedNeelinDCAConfig(NamedTuple):
@@ -793,6 +806,13 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # closure mass flux is scaled by a C1 ramp from 0 at capelmt to 1 at
     # capelmt + width (_zm_cam6 module docstring).  0 = CAM's hard switch.
     trigger_width_J_kg: float = 10.0
+    # Water positivity right after ZM's update in the macmic loop (MPAS lane,
+    # cld_macmic_num_steps >= 2), where CAM6 runs qneg3 inside physics_update
+    # after convect_deep_tend (physpkg.F90:1925).  CAM6 floors Q at 1e-12 and
+    # creates water; legoESM pays and borrows column by column instead
+    # (core.conservation.after_convection_positivity), a documented
+    # departure.  False (default) = no positivity stage after ZM.
+    positivity_after_zm: bool = False
 
 
 class KainFritschConfig(NamedTuple):
@@ -1044,6 +1064,12 @@ class KainFritschConfig(NamedTuple):
     wrf_nodd_tder_width_kgs: float = 1.0
     wrf_ddinc_cap_width: float = 0.02
     wrf_dd_rh_low_width_kgkg: float = 1.0e-6
+    wrf_closure_fabe_width: float = 0.01
+    wrf_closure_ainc_width: float = 5.0e-4
+    wrf_closure_ainc_rel_width: float = 1.0e-3
+    wrf_closure_ainc_tol_width: float = 1.0e-5
+    wrf_closure_dfda_width: float = 0.01
+    wrf_closure_dabe_width_jkg: float = 1.0
 
 
 class EmanuelConfig(NamedTuple):
@@ -1585,6 +1611,12 @@ class BechtoldConfig(NamedTuple):
     # quantity); True = OpenIFS's exact switches.  The level/flag structure is
     # hard either way (KNOWN DIFFERENCE in _ifs_cumastrn).
     ifs_hard_switches: bool = False
+    # Faithful chain only (#2594, owner decision 2026-11-24): cloud-top
+    # negative-humidity fixer.  False (default) = corrected: the deficit is
+    # taken out of the detrained condensate.  True = OpenIFS as written
+    # (cumastrn.F90:1171 adds it, driving q more negative).  KNOWN DIFFERENCE
+    # in _ifs_cumastrn.cumastrn_column.
+    ifs_openifs_cloud_top_fixer: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.

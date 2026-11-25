@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import math
-
 import argparse
 import importlib.util
 import json
@@ -15,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import netCDF4
 import numpy as np
-from legoesm.ice.dynamics import si3_cgrid_deformation
+from legoesm.ice.dynamics import si3_lane_cgrid_deformation
 from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     _step_ice_rheo_card_impl,
     build_ice_rheo_card,
@@ -129,8 +127,8 @@ def run_ridging_regime_scan(
             v_ice_v=following["v_ice"],
         )
         forcing = card.forcing_template._replace(concentration_t=current["a_i"][..., 0])
-        divergence, deformation = si3_cgrid_deformation(
-            dynamics, forcing, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
+        divergence, deformation = si3_lane_cgrid_deformation(
+            dynamics, forcing, card.metrics, card.dynamics_config
         )
         interior = (
             slice(gate._HALO_WIDTH, -gate._HALO_WIDTH),
@@ -275,8 +273,8 @@ def _active_ridging_projection(card, frame: dict[str, np.ndarray], next_frame, *
         u_ice_u=next_frame["u_ice"], v_ice_v=next_frame["v_ice"]
     )
     forcing = card.forcing_template._replace(concentration_t=frame["a_i"][..., 0])
-    divergence, deformation = si3_cgrid_deformation(
-        dynamics, forcing, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
+    divergence, deformation = si3_lane_cgrid_deformation(
+        dynamics, forcing, card.metrics, card.dynamics_config
     )
     area = jnp.asarray(frame["a_i"][..., 0])
     open_water = 1.0 - area

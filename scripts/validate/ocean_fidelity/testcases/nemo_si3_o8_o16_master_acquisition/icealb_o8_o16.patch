@@ -1,0 +1,11 @@
+--- icealb.F90
++++ icealb.F90
+@@ -23,0 +24,3 @@
++! O8O16_OBSERVER_BEGIN
++   USE o8_o16_master_writer, ONLY : o8o16_albedo_config
++! O8O16_OBSERVER_END
+@@ -211,0 +215,4 @@
++! O8O16_OBSERVER_BEGIN
++      CALL o8o16_albedo_config(rn_alb_sdry,rn_alb_smlt,rn_alb_idry,rn_alb_imlt, &
++         &                     rn_alb_dpnd,rn_alb_lpnd,rn_alb_hpiv)
++! O8O16_OBSERVER_END

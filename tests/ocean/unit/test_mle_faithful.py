@@ -310,7 +310,7 @@ def test_vertical_structure_full_curve_matches_nemo():
 
 def test_vertical_structure_5_21_coefficient_canary():
     # The 5/21 factor is the NEMO value; 1/3 (a plausible transcription) shifts
-    # mu measurably at mid-column (proves the pin canaries _R5_21).
+    # mu measurably at mid-column (proves the pin canaries R5_21).
     frac = np.array([0.25, 0.5, 0.75])
     got = np.asarray(mle_vertical_structure(jnp.asarray(frac)))
     zeta = 1.0 - 2.0 * frac

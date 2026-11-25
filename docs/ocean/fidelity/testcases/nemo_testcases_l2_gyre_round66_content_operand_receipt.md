@@ -25,8 +25,8 @@ Its implicit update is `e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*Krhs` at
 `GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:548-562`.
 legoESM reconstructs the WS thicknesses and split final content at
 `ocean_model_latlon_cgrid.py:1888-1938`; production supplies its stage sources
-at `ocean_model_latlon_cgrid.py:6341-6410` and consumes them at
-`ocean_model_latlon_cgrid.py:7884-7922`.
+at `ocean_model_latlon_cgrid.py:6360-6429` and consumes them at
+`ocean_model_latlon_cgrid.py:7903-7941`.
 
 ## Reciprocal substitution (maximum absolute content difference)
 
@@ -55,8 +55,8 @@ their divergence to Krhs at
 `GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90:287-305`.
 legoESM computes the shared GM/Redi tendency but sends it to `T_mid/S_mid`,
 which the later WS restart replaces
-(`ocean_model_latlon_cgrid.py:7146-7585`,
-`ocean_model_latlon_cgrid.py:7884-7922`).
+(`ocean_model_latlon_cgrid.py:7165-7604`,
+`ocean_model_latlon_cgrid.py:7903-7941`).
 
 | row | T max | S max |
 |---|---:|---:|

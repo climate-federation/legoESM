@@ -37,10 +37,13 @@ from legoesm.driver.config import (  # noqa: E402
     GridConfig,
     OutputConfig,
 )
-from legoesm.driver.model_driver import ModelDriver, _evap_sfc_slot  # noqa: E402
+from legoesm.driver.model_driver import (  # noqa: E402
+    ModelDriver,
+    _sfc_diag_slot,
+)
 
 RES, NLEV, DT = 3, 20, 300.0  # level 3 = 642 cells
-N_SLOTS = _evap_sfc_slot() + 1
+N_SLOTS = _sfc_diag_slot("rad_absorbed_above_top") + 1
 
 pytestmark = pytest.mark.skipif(
     MPI.COMM_WORLD.Get_size() < 2, reason="needs mpirun -n >= 2")
@@ -125,7 +128,7 @@ def _serial_and_mpi():
 
 
 KEYS = ("energy_toa_net", "sw_net_sfc", "lw_net_sfc", "hfss", "hfls",
-        "evspsbl")
+        "evspsbl", "energy_rad_above_top", "energy_snowfall_fusion")
 
 
 # Area weights are float32 (grid_area), and the serial mean sums them in a
@@ -159,7 +162,7 @@ def test_partitioned_tracker_matches_serial_including_dE_dt():
     want1 = ref._mpas_energy_sample(ref.state.p_s.data, 1.0)
     got1 = d._mpas_energy_sample(d.state.p_s.data, 1.0)
     assert abs(want1["energy_dE_dt"]) > 1.0, "control: dE/dt must be nonzero"
-    _assert_close(got1, want1, KEYS + ("energy_dE_dt", "energy_residual"))
+    _assert_close(got1, want1, KEYS + ("energy_dE_dt", "energy_toa_minus_dE_dt"))
 
 
 def test_stale_halo_edges_are_refreshed_before_the_ke_term():

@@ -216,6 +216,18 @@ if [[ -n "${AMIP_SSO}" ]]; then
   CMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
 fi
 
+# The CMIP decks with an atmosphere-owned surface (cmip_ocean_slab.yaml and
+# cmip_ocean_3D.yaml): the atmosphere land model's paths, verbatim from
+# AMIP_PATH_FLAGS.  Kept out of CMIP_PATH_FLAGS so a deck without an
+# atmosphere land model does not pick up a land mask.
+CMIP_LAND_PATH_FLAGS=(
+  --surfdata "${AMIP_SURFDATA}"
+  --clm-surfdata-path "${CLM_SURFDATA}"
+)
+if [[ -n "${AMIP_LAND_MASK}" ]]; then
+  CMIP_LAND_PATH_FLAGS+=( --land-mask-file "${AMIP_LAND_MASK}" )
+fi
+
 # Warn (don't fail) on a missing local input so a Stage-0 flat-topo smoke still works.
 for _f in "${ETOPO}" "${CLM_SURFDATA}" "${AMIP_SURFDATA}" ${AMIP_SSO:+"${AMIP_SSO}"} \
           ${AMIP_LAND_MASK:+"${AMIP_LAND_MASK}"}; do

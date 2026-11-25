@@ -70,14 +70,18 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
                          source_face_thickness: bool,
                          literal_bottom_loop: bool = False,
                          return_fraction_operands: bool = False,
-                         south_ff_copy: bool = False):
+                         south_ff_copy: bool = False,
+                         south_e3f0_fill=None,
+                         south_mask_zero: bool = False):
     """Replay compiled dynspg_ts.f90:1231-1280 with one mask choice."""
 
     import jax.numpy as jnp
 
     from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_een_south_e3f0,
         _nemo_south_copy_fill,
+        _nemo_south_zero_fill,
     )
     from legoesm.ocean.vertical import nemo_e3f_0vor_from_tmask
 
@@ -143,7 +147,15 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
     q_south = shift(q, 0, 1)
     if south_ff_copy:
         ff_south = _nemo_south_copy_fill(ff)
-        q_south = b(ff_south[..., None] / shift(e3f, 0, 1))
+        south_e3f = shift(e3f, 0, 1)
+        if south_e3f0_fill is not None:
+            e3f0_south = _nemo_een_south_e3f0(
+                e3f0, jnp.asarray(south_e3f0_fill, dtype=dtype))
+            fmask_south = (_nemo_south_zero_fill(fmask) if south_mask_zero
+                           else shift(fmask, 0, 1))
+            south_e3f = b(e3f0_south * b(
+                one + shift(r3f, 0, 1)[..., None] * fmask_south))
+        q_south = b(ff_south[..., None] / south_e3f)
 
     def triad(a, c, d):
         return b(b(a + c) + d)
@@ -197,7 +209,18 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
         "source_e3v": source_e3v,
         "current_e3u": current_e3u,
         "current_e3v": current_e3v,
-        "zpvo_u_nw": uq["nw"],
+        **{f"zpvo_u_{corner}": uq[corner]
+           for corner in ("nw", "ne", "sw", "se")},
+        **{f"neighbor_e3v_u_{corner}": un[corner][0]
+           for corner in ("nw", "ne", "sw", "se")},
+        **{f"neighbor_mask_u_{corner}": un[corner][1]
+           for corner in ("nw", "ne", "sw", "se")},
+        **{f"zpvo_v_{corner}": vq[corner]
+           for corner in ("nw", "ne", "sw", "se")},
+        **{f"neighbor_e3u_v_{corner}": vn[corner][0]
+           for corner in ("nw", "ne", "sw", "se")},
+        **{f"neighbor_mask_v_{corner}": vn[corner][1]
+           for corner in ("nw", "ne", "sw", "se")},
         "mbku": mbku,
         "mbkv": mbkv,
         **terms,

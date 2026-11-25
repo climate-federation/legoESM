@@ -41,7 +41,8 @@ as independent oracle literals and canaried against the module constants
 (module == literal == value), so no scheme coefficient is sourced from the SUT;
 S_0 is the shared ``legoesm.constants`` value.  DEPARTURES / numeric guards
 (documented, not the pure closed form; reproduced by the oracle so the pin
-stays exact): the cos Z > 0.01 and SZA > 89 deg night guards with the
+stays exact): the cos Z <= 0.01 low-sun branch of the split (all of sw_down
+handed on as diffuse), the SZA > 89 deg night guard with the
 kb = kk_Pb = 50 night sentinel, the fSun clip to [0, 1] and LAI > 0 zeroing,
 the max(., 0) floors on the scattered-sunlit and shaded down-fluxes, the
 max(kn CI, 1e-6) / max(kn + kb LAI, 1e-6) profile-integral guards, and the
@@ -210,7 +211,8 @@ def split_sw_components(
 
     Direct/diffuse split follows the Liu-Jordan (1960) clearness-index
     approach as adapted for instantaneous radiation (Erbs et al. 1982).
-    All arithmetic is differentiable; the night guard uses jnp.where.
+    All arithmetic is differentiable.  With cos Z <= 0.01 all of sw_down is
+    returned as diffuse, so the five components always sum to sw_down.
 
     Parameters
     ----------
@@ -225,8 +227,8 @@ def split_sw_components(
         Direct and diffuse PAR [W m-2], direct and diffuse NIR [W m-2],
         and total UV [W m-2].
     """
-    # Night guard: avoid division by zero and set all components to zero
-    is_day = cos_zenith > 0.01  # coeff-ok: night guard, cos(zenith) floor to avoid /0
+    # Low-sun guard: avoid division by zero (the light is routed diffuse below)
+    is_day = cos_zenith > 0.01  # coeff-ok: low-sun guard, cos(zenith) floor to avoid /0
 
     # Extra-terrestrial irradiance (top-of-atmosphere, W m-2)
     I0 = constants.S_0  # total solar irradiance
@@ -244,6 +246,10 @@ def split_sw_components(
     f_d = jnp.where(k_t <= _ERBS_KT_LOW, f_d_low,
           jnp.where(k_t <= _ERBS_KT_HIGH, f_d_mid, f_d_high))
     f_d = jnp.clip(f_d, 0.0, 1.0)
+    # Low sun (cos Z <= 0.01): the clearness index is undefined there, so the
+    # whole of sw_down is handed on as diffuse light rather than dropped -- the
+    # atmosphere has already deposited it at the surface (#2650).
+    f_d = jnp.where(is_day, f_d, 1.0)
 
     # Broadband direct and diffuse
     sw_diff = f_d * sw_down
@@ -255,14 +261,6 @@ def split_sw_components(
     NIR_dir  = _NIR_FRACTION * sw_dir
     NIR_diff = _NIR_FRACTION * sw_diff
     UV       = _UV_FRACTION * sw_down
-
-    # Apply night guard
-    zero = jnp.zeros_like(sw_down)
-    PAR_dir  = jnp.where(is_day, PAR_dir,  zero)
-    PAR_diff = jnp.where(is_day, PAR_diff, zero)
-    NIR_dir  = jnp.where(is_day, NIR_dir,  zero)
-    NIR_diff = jnp.where(is_day, NIR_diff, zero)
-    UV       = jnp.where(is_day, UV,       zero)
 
     return PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV
 
@@ -880,7 +878,7 @@ def clm5_exposed_area(LAI, SAI, htop, hbot, pft_index, f_snow, snow_depth):
 
 def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
                               hbot, pft_index, f_snow, snow_depth, cosz,
-                              f_diffuse):
+                              f_diffuse, fcansno=0.0):
     """Column albedo of one band with the canopy hiding the snow (CLM5).
 
     DELTA form: the snow-free column albedo is left exactly as supplied and only
@@ -897,19 +895,23 @@ def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
     snow already blended on (the unmasked model value).  No exposed plant area
     (none, or all of it buried) -> ``alb_snowy`` exactly; no snow ->
     ``alb_snowfree`` exactly.  ``band`` 0 =
-    visible, 1 = near-infrared.  Intercepted canopy snow is not represented
-    (fcansno = 0): a bare-branch bound."""
+    visible, 1 = near-infrared.  ``fcansno`` is the snow-covered canopy
+    fraction of CLM5's intercepted canopy snow (snowveg_flag ON_RAD,
+    SurfaceAlbedoMod.F90 1327-1331), applied to the snowy term only (the
+    snow-free reference has no canopy snow by construction); 0 = bare
+    branches."""
     xl_t, rhol_t, taul_t, rhos_t, taus_t = (jnp.asarray(t) for t in _clm5_pft_optics())
     ip = jnp.clip(jnp.round(pft_index).astype(jnp.int32), 0, _N_CLM_PFT - 1)
     elai, esai = clm5_exposed_area(LAI, SAI, htop, hbot, pft_index, f_snow,
                                    snow_depth)
 
-    def _ts(lai, sai, ground):
+    def _ts(lai, sai, ground, fcs=0.0):
         vai = lai + sai
         f_leaf = lai / jnp.maximum(vai, _CLM_MPE)
         albd, albi = clm5_two_stream_albedo(
             vai, f_leaf, rhol_t[ip, band], taul_t[ip, band], rhos_t[ip, band],
-            taus_t[ip, band], xl_t[ip], cosz, ground)
+            taus_t[ip, band], xl_t[ip], cosz, ground,
+            fcansno=fcs, omega_snow=_CLM_OMEGA_SNOW[band])
         return f_diffuse * albi + (1.0 - f_diffuse) * albd
 
     tlai = jnp.where(LAI < _CLM_VAI_CUT, 0.0, LAI)
@@ -918,7 +920,7 @@ def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
     # EXPOSED plant area (none at all, or all buried) returns alb_snowy
     # bit-exactly, the unmasked model value: CTSM puts elai + esai = 0 in its
     # non-vegetated albedo filter (SurfaceAlbedoMod 805-814).
-    masked = alb_snowfree + (_ts(elai, esai, alb_snowy)
+    masked = alb_snowfree + (_ts(elai, esai, alb_snowy, fcansno)
                              - _ts(tlai, tsai, alb_snowfree))
     return jnp.where(elai + esai > 0.0, masked, alb_snowy)
 

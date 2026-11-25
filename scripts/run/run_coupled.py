@@ -552,6 +552,8 @@ def _amip_main_only_dests(parser):
 # select that tile and never reached the atmosphere config before P5a.
 _LAND_TILE_ONLY = ("transient_land_cover", "land_cover_surfdata",
                    "snow_albedo_feedback")
+# ...except under --atm-owns-surface, where the atmosphere's own land model
+# owns land (the coupler never steps its land tile) and keeps all three.
 
 # Grid -> hydrostatic-dycore discretization when the deck names none.  lat-lon
 # uses the Arakawa C-grid so the atm co-locates with the C-grid 3-D ocean
@@ -1289,8 +1291,12 @@ def main(argv=None, *, build_only=False):
             overrides["woa_s_path"] = args.woa_s_path
             # Co-derive the atmosphere land fraction from the SAME ocean mask
             # and enable a land tile over the continents (f_land>0 with
-            # land_mode='none' would try to run an unused land model).
-            overrides["f_land_mode"] = "from_ocean"
+            # land_mode='none' would try to run an unused land model).  Under
+            # --atm-owns-surface the partition is the atmosphere's land mask
+            # with the ocean's dry cells as land (the driver's land-fraction
+            # hook), read by the coupler as f_land_mode='analytical'.
+            if not args.atm_owns_surface:
+                overrides["f_land_mode"] = "from_ocean"
             # Select the land surface model (coupler dispatches on the config
             # type: MultiLayerLandConfig -> Richards column tile, else slab).
             # woa defaults to slab when --land-scheme is unset.

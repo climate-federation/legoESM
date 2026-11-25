@@ -15,7 +15,7 @@
 #
 # Every run setting is an explicit variable recorded in the job log:
 #   RANKS       rank counts to run in this job (each <= nodes*128)
-#   MODELS      "crm les"          PRECISIONS "float32 float64"
+#   MODELS      "crm les"          PRECISIONS "float32 float64 mixed"
 #   MODES       "strong weak"      BOUNDS     1 = run the bound probes first
 #   Column physics is timed (separately) on CRM WEAK runs only: its cost per
 #   rank depends only on the tile, and strong-mode 1-rank tiles are 512^2.
@@ -24,7 +24,13 @@
 #               substepped horizontal acoustics refuses to run without it, and
 #               every production deck passes it). 1 rank runs the halo core
 #               too (bench --single-rank-path halo, the like-for-like baseline).
-#   LES_DECOMPS "slab pencil"  y-slabs and/or the most-square x-y pencil mesh
+#   LES_DECOMPS "auto"  any of auto / slab / pencil / planes (planes = pencil
+#               mesh with the one-all-to-all planes FFT, its 1-rank point runs
+#               the planes layout too; auto = planes when all ranks share one node,
+#               else pencil)
+#   PPN_MAX     ranks per node (default 128 = packed); a divisor of 128. N >
+#               PPN_MAX runs on N/PPN_MAX equally filled nodes (N must be a
+#               multiple), cores at stride 128/PPN_MAX
 #
 # 1 node : qsub -v RANKS="1 2 4 8 16 32 64 128" crm_les_ladder.pbs
 # 2 nodes: qsub -l select=2:ncpus=128:mpiprocs=128:mem=230GB -v RANKS=256 crm_les_ladder.pbs
@@ -34,11 +40,13 @@ set -uo pipefail
 : "${REPO:=${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/../../.." && pwd)}}"
 : "${RANKS:=1 2 4 8 16 32 64 128}"
 : "${MODELS:=crm les}"
-: "${PRECISIONS:=float32 float64}"
+: "${PRECISIONS:=float32 float64 mixed}"
 : "${MODES:=strong weak}"
 : "${BOUNDS:=1}"
 : "${CRM_EXTRA:=}"
-: "${LES_DECOMPS:=slab pencil}"
+: "${TIME_PHYSICS:=1}"  # 0 = weak runs time the dycore only (physics/rank is tile-only)
+: "${PPN_MAX:=128}"   # ranks per node cap (fp64/mixed 64x64x64 tiles need ~5.2 GB/rank)
+: "${LES_DECOMPS:=auto}"
 : "${STRONG_NX:=512}" "${WEAK_NX:=64}" "${CRM_NLEV:=64}" "${LES_NZ:=128}"
 : "${WARMUP:=3}" "${TIME_STEPS:=5}" "${WINDOWS:=3}"
 : "${OUT:=/glade/derecho/scratch/${USER}/crm_les_scaling/${PBS_JOBID:-local}}"
@@ -56,13 +64,17 @@ mkdir -p "$OUT"
 exec > >(tee -a "$OUT/job.log") 2>&1
 cd "$REPO" || exit 2
 
+case "$PPN_MAX" in ''|*[!0-9]*|0*) echo "PPN_MAX must be a positive decimal integer"; exit 2 ;; esac
+if [ "$PPN_MAX" -lt 1 ] || [ "$PPN_MAX" -gt 128 ] || [ $(( 128 % PPN_MAX )) -ne 0 ]; then
+    echo "PPN_MAX=$PPN_MAX must divide 128"; exit 2
+fi
 NODES=$(sort -u "${PBS_NODEFILE:-/dev/null}" 2>/dev/null | wc -l)
 [ "$NODES" -ge 1 ] || NODES=1
 CORES=128
 echo "[ladder] sha=$(git rev-parse HEAD) dirty=$(git status --porcelain --untracked-files=no | wc -l) nodes=$NODES"
 echo "[ladder] RANKS=[$RANKS] MODELS=[$MODELS] PRECISIONS=[$PRECISIONS] MODES=[$MODES]"
 echo "[ladder] LES_DECOMPS=$LES_DECOMPS STRONG_NX=$STRONG_NX WEAK_NX=$WEAK_NX CRM_NLEV=$CRM_NLEV LES_NZ=$LES_NZ"
-echo "[ladder] WARMUP=$WARMUP TIME_STEPS=$TIME_STEPS WINDOWS=$WINDOWS CRM_EXTRA=[$CRM_EXTRA]"
+echo "[ladder] TIME_PHYSICS=$TIME_PHYSICS PPN_MAX=$PPN_MAX WARMUP=$WARMUP TIME_STEPS=$TIME_STEPS WINDOWS=$WINDOWS CRM_EXTRA=[$CRM_EXTRA]"
 echo "[ladder] XLA_FLAGS=$XLA_FLAGS OUT=$OUT"
 
 # run N PPN CMD... : N ranks, PPN per node, each pinned to one core spread
@@ -103,7 +115,10 @@ if [ "$BOUNDS" = 1 ]; then
 fi
 
 for N in $RANKS; do
-    PPN=$(( N < CORES ? N : CORES ))
+    PPN=$(( N < PPN_MAX ? N : PPN_MAX ))
+    if [ $(( N % PPN )) -ne 0 ]; then
+        echo "--- SKIP n=$N: nodes must be equally filled (N multiple of PPN_MAX=$PPN_MAX)"; rc_all=1; continue
+    fi
     if [ $(( (N + PPN - 1) / PPN )) -gt "$NODES" ]; then
         echo "--- SKIP n=$N: needs more than $NODES node(s)"; rc_all=1; continue
     fi
@@ -111,6 +126,7 @@ for N in $RANKS; do
      for PREC in $PRECISIONS; do
       for MODE in $MODES; do
         if [ "$MODE" = strong ]; then NXY=$STRONG_NX; PHYS=""; else NXY=$WEAK_NX; PHYS=--time-physics; fi
+        [ "$TIME_PHYSICS" = 1 ] || PHYS=""
         COMMON=(--mode "$MODE" --precision "$PREC" --nx "$NXY" --ny "$NXY"
                 --warmup-steps "$WARMUP" --time-steps "$TIME_STEPS"
                 --windows "$WINDOWS")
@@ -121,6 +137,8 @@ for N in $RANKS; do
                 "${COMMON[@]}" --nlev "$CRM_NLEV" --semi-implicit $PHYS $CRM_EXTRA \
                 --output "$OUT/crm.jsonl" || { echo "FAILED crm $MODE $PREC n=$N"; rc_all=1; } ;;
           les)
+            # mixed precision is a CRM mode only
+            [ "$PREC" = mixed ] && continue
             for DEC in $LES_DECOMPS; do
             run "$N" "$PPN" scripts/bench/bench_spectral_les_dd_scaling.py \
                 "${COMMON[@]}" --nz "$LES_NZ" --decomp "$DEC" \

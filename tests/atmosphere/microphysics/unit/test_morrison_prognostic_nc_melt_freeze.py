@@ -261,6 +261,10 @@ def test_morrison_wires_the_post_sedimentation_state(monkeypatch):
     # near-ice-saturated vapour in the freezing cells (the warm fixture's humidity at
     # 228 K would deposit enough ice to warm them past -40 C)
     fx["col_q_v"] = np.where(np.asarray(cloudy & ~even), 1.0e-5, fx["col_q_v"])
+    # MG2 freezes rain below -40 C and adds its ice share AFTER this helper
+    # (micro_mg2_0.F90:2571-2610); off here so the outputs isolate the helper
+    monkeypatch.setattr(M, "mg2_instant_rain_freeze",
+                        lambda T_, q, n, *a, **k: (jnp.zeros_like(q), jnp.zeros_like(n)))
     monkeypatch.setattr(M, "mg2_instant_ice_melt_homog_freeze", ident)
     base = A._run(fx, T=T, hyd_kw=hyd)
     monkeypatch.setattr(M, "mg2_instant_ice_melt_homog_freeze", spy)

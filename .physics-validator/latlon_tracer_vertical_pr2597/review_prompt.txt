@@ -1,0 +1,745 @@
+Read-only adversarial review of actual T20 merge resolutions. Original conflict hunks and resolved patches pasted below. Your earlier vote A was applied: main spectral field before branch tracer tail; positional branch tail shifts inherently, all name-keyed values unchanged. Check all 4 hunks preserve BOTH intents and no out-of-scope behaviour/default change. State PASS or concrete defects. Auto-merge audit: main vertical.py changes only sigma error text; factory adds spectral sponge argument; no new hybrid callers/lanes; both validators retained; four YAMLs retain branch tracer selectors/widths and main IC/SSO/spectral updates. Do not propose adjacent improvements.
+diff --cc packages/coupler/legoesm/driver/config.py
+index 852769bf86,860a721b6f..0000000000
+--- a/packages/coupler/legoesm/driver/config.py
++++ b/packages/coupler/legoesm/driver/config.py
+@@@ -429,12 -429,10 +429,19 @@@ class DycoreConfig(NamedTuple)
+      # A/B; it carries #930 (lat-lon), #1029 (MPAS) and the lat-lon 50 K floor.
+      # validate_strict refuses any other form off those two lanes.
+      vertical_form: str = "legacy"
+++<<<<<<< HEAD
+ +    # ASKED(user), 2026-11-15: lat-lon HYBRID selector; MPAS always van Leer.
+ +    # None resolves per lane: hybrid lat-lon SB, hybrid MPAS van Leer;
+ +    # sigma retains its existing operator and refuses explicit selections.
+ +    tracer_vertical_scheme: Literal["sb", "van_leer"] | None = None
+ +    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+ +    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
+++=======
++     # Spectral lane, CAM-SE top Laplacian sponge (dyn_comp.F90 nu_top): del2
++     # viscosity [m2/s] x (4, 2, 1) on vor, div and T of the top three levels.
++     # 0.0 = off (bit-identical).  (appended after vertical_form: positional ABI)
++     spectral_sponge_nu_top_m2s: float = 0.0
+++>>>>>>> origin/main
+
+
+  class EvaluationConfig(NamedTuple):
+diff --cc scripts/run/run_amip.py
+index c77a99cd5d,95a45fe2ea..0000000000
+--- a/scripts/run/run_amip.py
++++ b/scripts/run/run_amip.py
+@@@ -3003,9 -3002,8 +3013,14 @@@ def build_config_from_args(args: argpar
+              else tuple(args.mpas_vert4_log_form_tracers or ())),
+          mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
+          mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
+++<<<<<<< HEAD
+ +        tracer_vertical_scheme=args.tracer_vertical_scheme,
+ +        tracer_van_leer_width=args.tracer_van_leer_width,
+ +        tracer_van_leer_flux_width=args.tracer_van_leer_flux_width,
+++=======
++         spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
++                                     if args.spectral_sponge_nu_top_m2s is not None else 0.0),
+++>>>>>>> origin/main
+          mpas_sponge_del2_top_layers=(args.mpas_sponge_del2_top_layers
+                                       if args.mpas_sponge_del2_top_layers is not None else 0),
+          mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor
+diff --cc tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py
+index b87e9cc844,051c2c19b0..0000000000
+--- a/tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py
++++ b/tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py
+@@@ -181,15 -181,15 +181,27 @@@ def test_unknown_tracer_name_raises_wit
+
+  def test_new_fields_are_appended_last():
+      """Positional ABI: the new fields sit at the end of both NamedTuples,
+++<<<<<<< HEAD
+ +    followed by the later-appended vertical form and tracer smoothing width."""
+ +    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
+ +    from legoesm.driver.config import DycoreConfig
+ +    assert MPASPrimitiveEquationConfig._fields[-5:] == (
+ +        "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form",
+ +        "tracer_van_leer_width", "tracer_van_leer_flux_width")
+ +    assert DycoreConfig._fields[-6:] == (
+ +        "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers", "vertical_form",
+ +        "tracer_vertical_scheme", "tracer_van_leer_width", "tracer_van_leer_flux_width")
+++=======
++     followed only by the later-appended ``vertical_form`` and
++     ``spectral_sponge_nu_top_m2s``."""
++     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
++     from legoesm.driver.config import DycoreConfig
++     assert MPASPrimitiveEquationConfig._fields[-3:] == (
++         "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form")
++     assert DycoreConfig._fields[-4:] == (
++         "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers", "vertical_form",
++         "spectral_sponge_nu_top_m2s")
+++>>>>>>> origin/main
+
+
+  def test_every_builder_forwarding_the_filter_forwards_the_form():
+diff --cc tests/unit/test_run_amip_cli.py
+index 2a53253614,26ad27fca7..0000000000
+--- a/tests/unit/test_run_amip_cli.py
++++ b/tests/unit/test_run_amip_cli.py
+@@@ -6399,52 -6421,61 +6422,113 @@@ def test_fp32_land64_micro64_deck_selec
+      assert args.microphysics != "none"
+
+
+++<<<<<<< HEAD
+ +@pytest.mark.parametrize("scheme,width,flux_width", [("sb", 1e-10, 1e-6), ("van_leer", 2e-10, 3e-6), ("van_leer", 0.0, 0.0), (None, 1e-10, 0.0)])
+ +def test_tracer_vertical_flags_round_trip(scheme, width, flux_width):
+ +    from legoesm.driver.config import experiment_config_to_dict, experiment_config_from_dict
+ +    parser = build_arg_parser()
+ +    args = _postprocess_args(parser.parse_args([
+ +        "--dataset", "analytical", "--grid-type", "latlon", "--discretization", "latlon_cgrid",
+ +        "--tracer-van-leer-width", str(width), "--tracer-van-leer-flux-width", str(flux_width),
+ +        *([] if scheme is None else ["--tracer-vertical-scheme", scheme])]), parser)
+ +    cfg = build_config_from_args(args)
+ +    assert cfg.dycore.tracer_vertical_scheme == scheme
+ +    assert cfg.dycore.tracer_van_leer_flux_width == flux_width
+ +    assert cfg.dycore.tracer_van_leer_width == width
+ +    restored = experiment_config_from_dict(experiment_config_to_dict(cfg))
+ +    assert restored.dycore.tracer_vertical_scheme == scheme
+ +    assert restored.dycore.tracer_van_leer_flux_width == flux_width
+ +    assert restored.dycore.tracer_van_leer_width == width
+ +    with pytest.raises(ValueError, match="tracer_vertical_scheme"):
+ +        cfg._replace(dycore=cfg.dycore._replace(tracer_vertical_scheme="typo")).validate_strict()
+ +    for name in ("tracer_van_leer_width", "tracer_van_leer_flux_width"):
+ +        for invalid in (-1.0, float("nan"), float("inf")):
+ +            with pytest.raises(ValueError, match=name):
+ +                cfg._replace(dycore=cfg.dycore._replace(**{name: invalid})).validate_strict()
+ +
+ +
+ +
+ +@pytest.mark.parametrize("deck,scheme", [("amip_production.yaml", "van_leer"),
+ +                                         ("amip_production_latlon48.yaml", "sb")])
+ +def test_production_decks_explicitly_select_tracer_smoothing(deck, scheme):
+ +    from legoesm.driver.run_config_yaml import load_yaml_config
+ +    parser = build_arg_parser()
+ +    rows = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser)
+ +    assert rows["tracer_vertical_scheme"] == scheme
+ +    assert rows["tracer_van_leer_width"] == 1e-10
+ +    assert rows["tracer_van_leer_flux_width"] == 1e-6
+ +    parser.set_defaults(**rows)
+ +    cfg = build_config_from_args(_postprocess_args(
+ +        parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+ +    assert cfg.dycore.tracer_vertical_scheme == scheme
+ +    assert cfg.dycore.tracer_van_leer_width == 1e-10
+ +    assert cfg.dycore.tracer_van_leer_flux_width == 1e-6
+ +
+ +
+ +@pytest.mark.parametrize("deck", ["amip_production.yaml", "amip_production_latlon48.yaml"])
+ +def test_production_tracer_borrow_resolved_on(deck):
+ +    from legoesm.driver.run_config_yaml import load_yaml_config
+ +    parser = build_arg_parser()
+ +    parser.set_defaults(**load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser))
+ +    cfg = build_config_from_args(_postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+ +    assert cfg.dycore.mpas_conservative_tracer_clamp is True
+++=======
++ @pytest.mark.parametrize("deck, sso", [
++     ("amip_production_fv3duo_c24.yaml", "data/amip/sso_stdh_fv3duo_c24_cut2dx.nc"),
++     ("amip_production_fv3duo_c48.yaml", "data/amip/sso_stdh_fv3duo_c48_cut2dx.nc"),
++     ("amip_production.yaml", "/machine/default_sso.nc"),
++ ])
++ def test_launcher_sso_default_never_replaces_a_decks_own_file(deck, sso):
++     """The launchers pass the MPAS 2-deg subgrid orography as a machine
++     DEFAULT; the duo decks name their two-cell-cutoff files and keep them."""
++     from legoesm.driver.run_config_yaml import load_yaml_config
++     parser = build_arg_parser()
++     keys = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser)
++     parser.set_defaults(**keys, _config_keys=frozenset(keys))
++     argv = _AMIP_DUMMY_PATHS + ["--default-subgrid-orography-file",
++                                 "/machine/default_sso.nc"]
++     args = _postprocess_args(parser.parse_args(argv), parser, argv)
++     assert build_config_from_args(args).subgrid_orography_path == sso
++
++
++ def _two_cell_cutoff_report(attrs, cell):
++     """None when a file's recorded cutoff is two cells snapped down to its
++     source sampling and the loader's scale guard accepts it on this grid."""
++     from legoesm.grids.topography import _check_sso_scale_decomposition
++     fine, cutoff = float(attrs["fine_res_deg"]), float(attrs["resolved_cutoff_deg"])
++     if not 2 * cell - fine < cutoff <= 2 * cell:
++         return f"cutoff {cutoff} is not two {cell}-deg cells at {fine}-deg sampling"
++     if cutoff < float(attrs["block_deg"]):
++         return "cutoff below the block"
++     built = {k: float(attrs[k]) for k in ("block_deg", "fine_res_deg",
++                                           "resolved_cutoff_deg")}
++     return _check_sso_scale_decomposition(built, cell, "f.nc", "warn")
++
++
++ @pytest.mark.parametrize("res, cell", [(24, 3.454), (48, 1.727)])
++ def test_duo_sso_product_cutoff_is_two_cells(res, cell):
++     """User 2026-11-15: resolved cutoff = two grid cells at C24 and C48. Reads
++     the product the deck names (skips where it is not staged)."""
++     import yaml
++     import xarray as xr
++     deck = yaml.safe_load((_repo_root() / "config" / "amip" /
++                            f"amip_production_fv3duo_c{res}.yaml").read_text())
++     path = _repo_root() / deck["subgrid_orography_file"]
++     if not path.is_file():
++         pytest.skip(f"{path} not staged")
++     with xr.open_dataset(path) as ds:
++         attrs = dict(ds.attrs)
++     assert _two_cell_cutoff_report(attrs, cell) is None
++     # planted violation: the old one-block, no-cutoff-like coarse cutoff
++     assert _two_cell_cutoff_report({**attrs, "resolved_cutoff_deg": 4 * cell},
++                                    cell) is not None
++
++
++ def test_no_deck_can_set_ml_pipeline(tmp_path):
++     """The pipeline exemption is for ML entry points only: a deck key is refused."""
++     from legoesm.driver.run_config_yaml import load_yaml_config
++     deck = tmp_path / "deck.yaml"
++     deck.write_text("ml_pipeline: true\n")
++     with pytest.raises((SystemExit, ValueError, KeyError)):
++         load_yaml_config(str(deck), build_arg_parser())
+++>>>>>>> origin/main
+
+Resolved conflict files vs HEAD
+diff --git a/packages/coupler/legoesm/driver/config.py b/packages/coupler/legoesm/driver/config.py
+index 852769bf86..8fe134493b 100644
+--- a/packages/coupler/legoesm/driver/config.py
++++ b/packages/coupler/legoesm/driver/config.py
+@@ -429,6 +429,10 @@ class DycoreConfig(NamedTuple):
+     # A/B; it carries #930 (lat-lon), #1029 (MPAS) and the lat-lon 50 K floor.
+     # validate_strict refuses any other form off those two lanes.
+     vertical_form: str = "legacy"
++    # Spectral lane, CAM-SE top Laplacian sponge (dyn_comp.F90 nu_top): del2
++    # viscosity [m2/s] x (4, 2, 1) on vor, div and T of the top three levels.
++    # 0.0 = off (bit-identical).  (appended after vertical_form: positional ABI)
++    spectral_sponge_nu_top_m2s: float = 0.0
+     # ASKED(user), 2026-11-15: lat-lon HYBRID selector; MPAS always van Leer.
+     # None resolves per lane: hybrid lat-lon SB, hybrid MPAS van Leer;
+     # sigma retains its existing operator and refuses explicit selections.
+@@ -550,7 +554,7 @@ _CLUBB_LITE_WARNED = False  # one stand-in warning per process
+
+ VALID_TURBULENCE = (
+     "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
+-    "holtslag_boville", "ysu", "edmf", "none",
++    "holtslag_boville", "ysu", "edmf", "ifs_vdf", "none",
+ )
+
+ VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg", "ecrad_ifs")
+@@ -1415,6 +1419,10 @@ class ExperimentConfig(NamedTuple):
+     # slab knobs (C_land, emissivity_land) become unused and
+     # the multilayer config below takes over.
+     use_multilayer_land: bool = False
++    # ML/AIMIP training entry points only: lets full physics (multilayer land)
++    # run on the compiled pipeline, which production refuses.  Not a run_amip
++    # argument, so no deck can set it.
++    ml_pipeline: bool = False
+     # Land-tile call interval [s]; 0.0 (default) advances the land every
+     # host step (legacy).  A positive value calls the tile every
+     # round(land_update_seconds/dt) steps with the atmosphere forcing
+@@ -2718,6 +2726,14 @@ class ExperimentConfig(NamedTuple):
+                 "multilayer land step (column_loop_lane and "
+                 "use_multilayer_land); this run has neither, so it would be "
+                 "ignored")
++        if (self.use_multilayer_land and not self.column_loop_lane
++                and not self.ml_pipeline):
++            errors.append(
++                "use_multilayer_land runs in production only on the column "
++                "loop (MPAS, or dycore.column_lane); the compiled pipeline "
++                f"(discretization={d.discretization!r}) keeps multilayer land "
++                "only for ML training entry points, which set "
++                "ml_pipeline=True.")
+         if self.microphysics_compute_precision not in ("policy", "fp64"):
+             errors.append(
+                 "microphysics_compute_precision must be one of "
+@@ -2890,11 +2906,12 @@ class ExperimentConfig(NamedTuple):
+                 "land_snow_insulation requires use_multilayer_land: only the "
+                 "multilayer soil has a snow thermal node — the knob would be "
+                 "silently inert.")
+-        if self.land_snow_insulation and self.land_surface_scheme != "two_leaf":
++        if (self.land_snow_insulation
++                and self.land_surface_scheme not in ("two_leaf", "simple_seb")):
+             errors.append(
+                 "land_snow_insulation is not supported with land_surface_scheme="
+-                f"{self.land_surface_scheme!r}: only the two-leaf canopy (explicit "
+-                "ground flux) is supported; the land step would refuse at its "
++                f"{self.land_surface_scheme!r}: only the two-leaf canopy and "
++                "SimpleSEB are supported; the land step would refuse at its "
+                 "first call.")
+         if self.land_snow_insulation and self.land_snow_scheme != "bulk":
+             errors.append(
+@@ -3493,7 +3510,7 @@ class ExperimentConfig(NamedTuple):
+             )
+         _valid_stability = ("dyer1974", "beljaars_holtslag1991",
+                             "grachev2007_sheba", "gryanik2020", "gfs",
+-                            "wrf_revmm5", "mynn_sfc")
++                            "wrf_revmm5", "mynn_sfc", "most_revisit_j3")
+         # A tiled surface WITH REAL LAND is exempt from the second check
+         # below: its land tile is ocean_cfg._replace(bulk_scheme="most", ...)
+         # (physics_pipeline ~:701), so it INHERITS the injected
+@@ -4381,6 +4398,20 @@ class ExperimentConfig(NamedTuple):
+         # Vertical advection scheme: membership first, then the same
+         # silently-inert refusal as k_h_scale (MPAS + sigma only).
+         _vert_adv_options = ("upwind", "van_leer", "sb")
++        _snu = d.spectral_sponge_nu_top_m2s
++        if not (isinstance(_snu, (int, float)) and not isinstance(_snu, bool)
++                and math.isfinite(_snu) and _snu >= 0.0):
++            errors.append(
++                f"dycore.spectral_sponge_nu_top_m2s must be a finite number >= 0 (got {_snu!r})")
++        elif _snu > 0 and (d.discretization != "spectral" or d.model_type != "hydrostatic"):
++            errors.append(
++                "dycore.spectral_sponge_nu_top_m2s is wired into the hydrostatic spectral "
++                "dycore only; it would be silently inert here.")
++        elif _snu > 0 and not (d.column_lane and d.energy_fixer):
++            errors.append(
++                "dycore.spectral_sponge_nu_top_m2s needs dycore.column_lane and "
++                "dycore.energy_fixer: only the column-lane ssp_rk54 step returns the "
++                "sponge's energy loss (global energy fixer); legacy/leapfrog steps do not.")
+         _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
+         if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
+             errors.append(
+diff --git a/scripts/run/run_amip.py b/scripts/run/run_amip.py
+index c77a99cd5d..ed4ea80bfb 100644
+--- a/scripts/run/run_amip.py
++++ b/scripts/run/run_amip.py
+@@ -576,6 +576,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
+                              "derived for a UNIFORM grid -- measured max "
+                              "0.0642 on that run, 15.6x inside it; needs "
+                              "nlev>=4).  Default = bit-identical.")
++    parser.add_argument("--spectral-sponge-nu-top-m2s", type=float, default=None,
++                        dest="spectral_sponge_nu_top_m2s",
++                        help="spectral lane CAM-SE top sponge: del2 viscosity [m2/s] "
++                             "x (4, 2, 1) on vor/div/T of the top three levels (0 = off)")
+     parser.add_argument("--mpas-sponge-del2-top-layers", type=int, default=None,
+                         dest="mpas_sponge_del2_top_layers",
+                         help="CAM-style top diffusion sponge: number of top layers whose "
+@@ -991,7 +995,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
+                         dest="surface_stability_scheme", default="dyer1974",
+                         choices=["dyer1974", "beljaars_holtslag1991",
+                                  "grachev2007_sheba", "gryanik2020", "gfs",
+-                                 "wrf_revmm5", "mynn_sfc"],
++                                 "wrf_revmm5", "mynn_sfc", "most_revisit_j3"],
+                         help="Stable-branch (zeta>0) Monin-Obukhov similarity "
+                              "functions for the surface layer (bulk_flux psi_m/"
+                              "psi_h). dyer1974 (default) is byte-identical: "
+@@ -1975,6 +1979,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
+                              "per-column launch height comes from this field "
+                              "(real mountains, ~0 over ocean) instead of the "
+                              "scalar 500 m default.")
++    parser.add_argument("--default-subgrid-orography-file", type=str,
++                        default="",
++                        help="Machine default for --subgrid-orography-file, "
++                             "used only when neither the --config deck nor the "
++                             "command line names one (the launchers pass it, "
++                             "so a deck built for one grid keeps its own file).")
+     parser.add_argument("--albedo-land-month", type=int, default=0,
+                         help="Month (1-12) to pick from a monthly land-albedo "
+                              "climatology; 0 = annual mean (default).")
+@@ -3003,6 +3013,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+             else tuple(args.mpas_vert4_log_form_tracers or ())),
+         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
+         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
++        spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
++                                    if args.spectral_sponge_nu_top_m2s is not None else 0.0),
+         tracer_vertical_scheme=args.tracer_vertical_scheme,
+         tracer_van_leer_width=args.tracer_van_leer_width,
+         tracer_van_leer_flux_width=args.tracer_van_leer_flux_width,
+@@ -3532,6 +3544,8 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
+
+ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
+                       argv: list[str] | None = None) -> argparse.Namespace:
++    if not args.subgrid_orography_file:
++        args.subgrid_orography_file = args.default_subgrid_orography_file
+     # Auto-detect MPI environment.
+     # SLURM_NTASKS=1 is always set in batch jobs even for single-task GPU runs;
+     # only treat it as an MPI signal when > 1 actual tasks are allocated.
+diff --git a/tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py b/tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py
+index b87e9cc844..4f1740305b 100644
+--- a/tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py
++++ b/tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py
+@@ -181,14 +181,16 @@ def test_unknown_tracer_name_raises_with_the_filter_off(names):
+
+ def test_new_fields_are_appended_last():
+     """Positional ABI: the new fields sit at the end of both NamedTuples,
+-    followed by the later-appended vertical form and tracer smoothing width."""
++    followed by the vertical form, main's spectral sponge (DycoreConfig),
++    and this branch's tracer scheme and smoothing widths."""
+     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
+     from legoesm.driver.config import DycoreConfig
+     assert MPASPrimitiveEquationConfig._fields[-5:] == (
+         "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form",
+         "tracer_van_leer_width", "tracer_van_leer_flux_width")
+-    assert DycoreConfig._fields[-6:] == (
++    assert DycoreConfig._fields[-7:] == (
+         "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers", "vertical_form",
++        "spectral_sponge_nu_top_m2s",
+         "tracer_vertical_scheme", "tracer_van_leer_width", "tracer_van_leer_flux_width")
+
+
+diff --git a/tests/unit/test_run_amip_cli.py b/tests/unit/test_run_amip_cli.py
+index 2a53253614..fcd4fe382f 100644
+--- a/tests/unit/test_run_amip_cli.py
++++ b/tests/unit/test_run_amip_cli.py
+@@ -402,7 +402,7 @@ def test_transient_land_cover_validate_strict_requires_multilayer_and_surfdata()
+         "--land-mask-file", "lsm.nc", "--use-multilayer-land",
+         "--transient-land-cover",
+         "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
+-    ]), parser))
++    ]), parser))._replace(ml_pipeline=True)
+     cfg.validate_strict()  # complete config: no error
+
+     # transient cover but no surfdata path -> reject
+@@ -675,7 +675,7 @@ def test_land_surface_scheme_flag_flows_to_config():
+     cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
+         "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
+         "--use-multilayer-land", "--land-mask-file", "lsm.nc",
+-    ]), parser))
++    ]), parser))._replace(ml_pipeline=True)
+     assert cfg_clm.land_surface_scheme == "clm_ml"
+     cfg_clm.validate_strict()  # must not raise
+
+@@ -992,6 +992,19 @@ def test_land_snow_insulation_with_clm_ml_canopy_is_refused():
+         cfg.validate_strict()
+
+
++def test_land_snow_insulation_with_simple_seb_is_accepted():
++    parser = build_arg_parser()
++    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
++        ["--dataset", "analytical", "--use-multilayer-land",
++         "--land-surface-scheme", "simple_seb",
++         "--land-snow-insulation"]), parser))
++    assert cfg.land_snow_insulation and cfg.land_surface_scheme == "simple_seb"
++    try:          # this bare analytical deck fails other checks (no land mask)
++        cfg.validate_strict()
++    except ValueError as err:
++        assert "land_snow_insulation" not in str(err)
++
++
+ def test_land_snow_insulation_with_layered_snowpack_is_refused():
+     parser = build_arg_parser()
+     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+@@ -2365,6 +2378,10 @@ _STRICT_FAILING_DECKS = {
+         "campaign deck: land_update_seconds/land_calibrated_physics without multilayer land",
+     "amip_aug13_control.yaml":
+         "rerun of the 13 Aug campaign reference; inherits amip_campaign_mpas.yaml's errors",
++    "amip_land_v6.yaml":
++        "land overlay, not a standalone deck: no grid, so multilayer land lands off the column loop",
++    "amip_sota.yaml":
++        "historical cdgrid deck (user 2026-11-11): multilayer land off the column loop",
+ }
+
+
+@@ -2405,7 +2422,9 @@ def test_amip_sota_config_builds_valid_experiment_config():
+         _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc",
+                              "--land-mask-file", "/dummy/lsm.nc"]), parser)
+     cfg = build_config_from_args(args)
+-    cfg.validate_strict()  # raises if the SOTA combo is inconsistent
++    # historical (user 2026-11-11): full physics off the column loop is refused
++    with pytest.raises(ValueError, match="ml_pipeline=True"):
++        cfg.validate_strict()
+     assert cfg.use_multilayer_land is True
+     # aerosol_ccn is DISABLED in the shipped SOTA config (#745): as wired the
+     # indirect effect is ~15x too strong (-24 W/m^2 vs IPCC -1 to -1.7); it
+@@ -5391,6 +5410,8 @@ _DUO_DECK_OWN_ROWS = frozenset({
+     "physics_update_steps", "rad_update_steps",
+     # the same land IC recipe on this grid's own columns (a per-grid file)
+     "land_ic_path",
++    # subgrid orography with a two-cell resolved cutoff (user 2026-11-15)
++    "subgrid_orography_path",
+     # hardware, not physics: GPU g-point batch (fluxes differ by summation order)
+     "rrtmgp_gpoint_batch_size",
+     # RRTMGP scan vs unrolled recurrence: the MPAS deck's scan row was measured
+@@ -5424,8 +5445,9 @@ def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
+     own = migrate_renamed_keys(yaml.safe_load(
+         (amip / "amip_production_fv3duo_c24.yaml").read_text()))
+     assert own.get("include") == "amip_production.yaml"
+-    own_dests = ({k.split(".")[-1] for k in _DUO_DECK_OWN_ROWS} - {"land_ic_path"}
+-                 | {"land_ic"})
++    own_dests = ({k.split(".")[-1] for k in _DUO_DECK_OWN_ROWS}
++                 - {"land_ic_path", "subgrid_orography_path"}
++                 | {"land_ic", "subgrid_orography_file"})
+     extra = set(own) - {"include"} - own_dests
+     assert not extra, f"duo deck sets rows that are not its own: {sorted(extra)}"
+     mpas = _resolved_deck_fields(amip / "amip_production.yaml")
+@@ -5444,7 +5466,7 @@ def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
+
+ _DUO_C48_OWN_ROWS = frozenset({
+     "grid.resolution", "dycore.dt", "physics_update_steps", "rad_update_steps",
+-    "land_ic_path",
++    "land_ic_path", "subgrid_orography_path",
+ })
+
+
+@@ -5455,8 +5477,9 @@ def test_duo_c48_deck_differs_from_the_c24_duo_deck_only_in_resolution_rows():
+     own = migrate_renamed_keys(yaml.safe_load(
+         (amip / "amip_production_fv3duo_c48.yaml").read_text()))
+     assert own.get("include") == "amip_production_fv3duo_c24.yaml"
+-    own_dests = ({k.split(".")[-1] for k in _DUO_C48_OWN_ROWS} - {"land_ic_path"}
+-                 | {"land_ic"})
++    own_dests = ({k.split(".")[-1] for k in _DUO_C48_OWN_ROWS}
++                 - {"land_ic_path", "subgrid_orography_path"}
++                 | {"land_ic", "subgrid_orography_file"})
+     extra = set(own) - {"include"} - own_dests
+     assert not extra, f"C48 duo deck sets rows that are not its own: {sorted(extra)}"
+     c24 = _resolved_deck_fields(amip / "amip_production_fv3duo_c24.yaml")
+@@ -6448,3 +6471,63 @@ def test_production_tracer_borrow_resolved_on(deck):
+     parser.set_defaults(**load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser))
+     cfg = build_config_from_args(_postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+     assert cfg.dycore.mpas_conservative_tracer_clamp is True
++
++
++@pytest.mark.parametrize("deck, sso", [
++    ("amip_production_fv3duo_c24.yaml", "data/amip/sso_stdh_fv3duo_c24_cut2dx.nc"),
++    ("amip_production_fv3duo_c48.yaml", "data/amip/sso_stdh_fv3duo_c48_cut2dx.nc"),
++    ("amip_production.yaml", "/machine/default_sso.nc"),
++])
++def test_launcher_sso_default_never_replaces_a_decks_own_file(deck, sso):
++    """The launchers pass the MPAS 2-deg subgrid orography as a machine
++    DEFAULT; the duo decks name their two-cell-cutoff files and keep them."""
++    from legoesm.driver.run_config_yaml import load_yaml_config
++    parser = build_arg_parser()
++    keys = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser)
++    parser.set_defaults(**keys, _config_keys=frozenset(keys))
++    argv = _AMIP_DUMMY_PATHS + ["--default-subgrid-orography-file",
++                                "/machine/default_sso.nc"]
++    args = _postprocess_args(parser.parse_args(argv), parser, argv)
++    assert build_config_from_args(args).subgrid_orography_path == sso
++
++
++def _two_cell_cutoff_report(attrs, cell):
++    """None when a file's recorded cutoff is two cells snapped down to its
++    source sampling and the loader's scale guard accepts it on this grid."""
++    from legoesm.grids.topography import _check_sso_scale_decomposition
++    fine, cutoff = float(attrs["fine_res_deg"]), float(attrs["resolved_cutoff_deg"])
++    if not 2 * cell - fine < cutoff <= 2 * cell:
++        return f"cutoff {cutoff} is not two {cell}-deg cells at {fine}-deg sampling"
++    if cutoff < float(attrs["block_deg"]):
++        return "cutoff below the block"
++    built = {k: float(attrs[k]) for k in ("block_deg", "fine_res_deg",
++                                          "resolved_cutoff_deg")}
++    return _check_sso_scale_decomposition(built, cell, "f.nc", "warn")
++
++
++@pytest.mark.parametrize("res, cell", [(24, 3.454), (48, 1.727)])
++def test_duo_sso_product_cutoff_is_two_cells(res, cell):
++    """User 2026-11-15: resolved cutoff = two grid cells at C24 and C48. Reads
++    the product the deck names (skips where it is not staged)."""
++    import yaml
++    import xarray as xr
++    deck = yaml.safe_load((_repo_root() / "config" / "amip" /
++                           f"amip_production_fv3duo_c{res}.yaml").read_text())
++    path = _repo_root() / deck["subgrid_orography_file"]
++    if not path.is_file():
++        pytest.skip(f"{path} not staged")
++    with xr.open_dataset(path) as ds:
++        attrs = dict(ds.attrs)
++    assert _two_cell_cutoff_report(attrs, cell) is None
++    # planted violation: the old one-block, no-cutoff-like coarse cutoff
++    assert _two_cell_cutoff_report({**attrs, "resolved_cutoff_deg": 4 * cell},
++                                   cell) is not None
++
++
++def test_no_deck_can_set_ml_pipeline(tmp_path):
++    """The pipeline exemption is for ML entry points only: a deck key is refused."""
++    from legoesm.driver.run_config_yaml import load_yaml_config
++    deck = tmp_path / "deck.yaml"
++    deck.write_text("ml_pipeline: true\n")
++    with pytest.raises((SystemExit, ValueError, KeyError)):
++        load_yaml_config(str(deck), build_arg_parser())
+
+Resolved conflict files vs origin/main
+diff --git a/packages/coupler/legoesm/driver/config.py b/packages/coupler/legoesm/driver/config.py
+index 860a721b6f..8fe134493b 100644
+--- a/packages/coupler/legoesm/driver/config.py
++++ b/packages/coupler/legoesm/driver/config.py
+@@ -16,7 +16,7 @@ import json
+ import math
+ import os
+ from pathlib import Path
+-from typing import Any, NamedTuple
++from typing import Any, Literal, NamedTuple
+
+ from legoesm import constants
+ from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
+@@ -433,6 +433,12 @@ class DycoreConfig(NamedTuple):
+     # viscosity [m2/s] x (4, 2, 1) on vor, div and T of the top three levels.
+     # 0.0 = off (bit-identical).  (appended after vertical_form: positional ABI)
+     spectral_sponge_nu_top_m2s: float = 0.0
++    # ASKED(user), 2026-11-15: lat-lon HYBRID selector; MPAS always van Leer.
++    # None resolves per lane: hybrid lat-lon SB, hybrid MPAS van Leer;
++    # sigma retains its existing operator and refuses explicit selections.
++    tracer_vertical_scheme: Literal["sb", "van_leer"] | None = None
++    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
++    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
+
+
+ class EvaluationConfig(NamedTuple):
+@@ -689,6 +695,25 @@ CLUBB_PROGNOSTIC_ONLY = frozenset({
+     "clubb_c_k10"})
+
+
++def resolve_tracer_vertical_scheme(value, solver_name, *, hybrid: bool) -> str | None:
++    """Resolve the hybrid tracer operator; None on lanes retaining their operator.
++
++    An explicit selection must be honored by the lane, including direct factory
++    callers. Widths only affect van Leer; each can independently be zero.
++    """
++    if value not in (None, "sb", "van_leer"):
++        raise ValueError("dycore.tracer_vertical_scheme must be None, 'sb' or 'van_leer'")
++    defaults = {"latlon_cgrid_primitive_equations": "sb",
++                "mpas_primitive_equations": "van_leer"}
++    if not hybrid or solver_name not in defaults:
++        if value is not None:
++            raise ValueError("dycore.tracer_vertical_scheme would be silently inert on this lane; use None")
++        return None
++    if solver_name == "mpas_primitive_equations" and value == "sb":
++        raise ValueError("dycore.tracer_vertical_scheme on MPAS hybrid must be None or 'van_leer'")
++    return defaults[solver_name] if value is None else value
++
++
+ def resolve_sea_ice_albedo_scheme(cfg) -> str:
+     """The sea-ice albedo scheme a run actually uses.
+
+@@ -4489,6 +4514,20 @@ class ExperimentConfig(NamedTuple):
+                 errors.append(
+                     f"dycore.vertical_form={d.vertical_form!r} is untested on the "
+                     "lat-lon MPI and 2-D tiled lanes; they take 'legacy'.")
++        from legoesm.driver.component_factory import driver_solver_name
++        if d.tracer_vertical_scheme not in (None, "sb", "van_leer"):
++            errors.append("dycore.tracer_vertical_scheme must be None, 'sb' or 'van_leer'")
++        else:
++            try:
++                resolve_tracer_vertical_scheme(
++                    d.tracer_vertical_scheme, driver_solver_name(self),
++                    hybrid=g.vertical_coord in ("hybrid", "cam_l32"))
++            except ValueError as exc:
++                errors.append(str(exc))
++        for name in ("tracer_van_leer_width", "tracer_van_leer_flux_width"):
++            width = getattr(d, name)
++            if not math.isfinite(width) or width < 0.0:
++                errors.append(f"dycore.{name} must be finite and nonnegative")
+         if d.mpas_vert_advection_scheme not in _vert_adv_options:
+             errors.append(
+                 f"dycore.mpas_vert_advection_scheme must be one of "
+diff --git a/scripts/run/run_amip.py b/scripts/run/run_amip.py
+index 95a45fe2ea..ed4ea80bfb 100644
+--- a/scripts/run/run_amip.py
++++ b/scripts/run/run_amip.py
+@@ -551,6 +551,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
+                              "decision 2026-08-16: conserving form always); "
+                              "--no-mpas-conservative-tracer-clamp restores the "
+                              "legacy clamp for bit-comparison runs.")
++    parser.add_argument("--tracer-vertical-scheme", choices=("sb", "van_leer"),
++                        default=_DYCORE_DEFAULTS.tracer_vertical_scheme,
++                        help="Hybrid tracer scheme; omitted = lane default (lat-lon SB, MPAS van Leer). "
++                             "Sigma lanes require omission; MPAS hybrid refuses SB.")
++    parser.add_argument("--tracer-van-leer-width", type=float,
++                        default=_DYCORE_DEFAULTS.tracer_van_leer_width,
++                        help="Hybrid van Leer mixing-ratio increment width [kg/kg]; zero = hard faces.")
++    parser.add_argument("--tracer-van-leer-flux-width", type=float,
++                        default=_DYCORE_DEFAULTS.tracer_van_leer_flux_width,
++                        help="Hybrid van Leer mass-flux width [Pa/s]; zero = hard flux split. "
++                             "Both widths zero recover the old hard operator.")
+     parser.add_argument("--mpas-vert-advection-scheme",
+                         choices=("upwind", "van_leer", "sb"),
+                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
+@@ -3004,6 +3015,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
+         spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
+                                     if args.spectral_sponge_nu_top_m2s is not None else 0.0),
++        tracer_vertical_scheme=args.tracer_vertical_scheme,
++        tracer_van_leer_width=args.tracer_van_leer_width,
++        tracer_van_leer_flux_width=args.tracer_van_leer_flux_width,
+         mpas_sponge_del2_top_layers=(args.mpas_sponge_del2_top_layers
+                                      if args.mpas_sponge_del2_top_layers is not None else 0),
+         mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor
+diff --git a/tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py b/tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py
+index 051c2c19b0..4f1740305b 100644
+--- a/tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py
++++ b/tests/atmosphere/hydrostatic/unit/test_mpas_vert4_flux_form.py
+@@ -181,15 +181,17 @@ def test_unknown_tracer_name_raises_with_the_filter_off(names):
+
+ def test_new_fields_are_appended_last():
+     """Positional ABI: the new fields sit at the end of both NamedTuples,
+-    followed only by the later-appended ``vertical_form`` and
+-    ``spectral_sponge_nu_top_m2s``."""
++    followed by the vertical form, main's spectral sponge (DycoreConfig),
++    and this branch's tracer scheme and smoothing widths."""
+     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
+     from legoesm.driver.config import DycoreConfig
+-    assert MPASPrimitiveEquationConfig._fields[-3:] == (
+-        "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form")
+-    assert DycoreConfig._fields[-4:] == (
++    assert MPASPrimitiveEquationConfig._fields[-5:] == (
++        "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form",
++        "tracer_van_leer_width", "tracer_van_leer_flux_width")
++    assert DycoreConfig._fields[-7:] == (
+         "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers", "vertical_form",
+-        "spectral_sponge_nu_top_m2s")
++        "spectral_sponge_nu_top_m2s",
++        "tracer_vertical_scheme", "tracer_van_leer_width", "tracer_van_leer_flux_width")
+
+
+ def test_every_builder_forwarding_the_filter_forwards_the_form():
+diff --git a/tests/unit/test_run_amip_cli.py b/tests/unit/test_run_amip_cli.py
+index 26ad27fca7..fcd4fe382f 100644
+--- a/tests/unit/test_run_amip_cli.py
++++ b/tests/unit/test_run_amip_cli.py
+@@ -5399,6 +5399,7 @@ _DUO_DECK_OWN_ROWS = frozenset({
+     "grid.grid_type", "grid.resolution",
+     "dycore.discretization", "dycore.dt", "dycore.column_lane",
+     "dycore.vertical_form",  # as83 adopted for MPAS only (user 2026-11-11)
++    "dycore.tracer_vertical_scheme",  # F2: FV3 uses its own operator
+     "dycore.fv3_duo_sponge_layers", "dycore.fv3_duo_sponge_factor",
+     "dycore.fv3_duo_sponge_d2_top", "dycore.fv3_duo_nord",
+     "dycore.fv3_duo_d4_bg", "dycore.fv3_duo_fill",
+@@ -6421,6 +6422,57 @@ def test_fp32_land64_micro64_deck_selects_fp64_land_and_micro():
+     assert args.microphysics != "none"
+
+
++@pytest.mark.parametrize("scheme,width,flux_width", [("sb", 1e-10, 1e-6), ("van_leer", 2e-10, 3e-6), ("van_leer", 0.0, 0.0), (None, 1e-10, 0.0)])
++def test_tracer_vertical_flags_round_trip(scheme, width, flux_width):
++    from legoesm.driver.config import experiment_config_to_dict, experiment_config_from_dict
++    parser = build_arg_parser()
++    args = _postprocess_args(parser.parse_args([
++        "--dataset", "analytical", "--grid-type", "latlon", "--discretization", "latlon_cgrid",
++        "--tracer-van-leer-width", str(width), "--tracer-van-leer-flux-width", str(flux_width),
++        *([] if scheme is None else ["--tracer-vertical-scheme", scheme])]), parser)
++    cfg = build_config_from_args(args)
++    assert cfg.dycore.tracer_vertical_scheme == scheme
++    assert cfg.dycore.tracer_van_leer_flux_width == flux_width
++    assert cfg.dycore.tracer_van_leer_width == width
++    restored = experiment_config_from_dict(experiment_config_to_dict(cfg))
++    assert restored.dycore.tracer_vertical_scheme == scheme
++    assert restored.dycore.tracer_van_leer_flux_width == flux_width
++    assert restored.dycore.tracer_van_leer_width == width
++    with pytest.raises(ValueError, match="tracer_vertical_scheme"):
++        cfg._replace(dycore=cfg.dycore._replace(tracer_vertical_scheme="typo")).validate_strict()
++    for name in ("tracer_van_leer_width", "tracer_van_leer_flux_width"):
++        for invalid in (-1.0, float("nan"), float("inf")):
++            with pytest.raises(ValueError, match=name):
++                cfg._replace(dycore=cfg.dycore._replace(**{name: invalid})).validate_strict()
++
++
++
++@pytest.mark.parametrize("deck,scheme", [("amip_production.yaml", "van_leer"),
++                                         ("amip_production_latlon48.yaml", "sb")])
++def test_production_decks_explicitly_select_tracer_smoothing(deck, scheme):
++    from legoesm.driver.run_config_yaml import load_yaml_config
++    parser = build_arg_parser()
++    rows = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser)
++    assert rows["tracer_vertical_scheme"] == scheme
++    assert rows["tracer_van_leer_width"] == 1e-10
++    assert rows["tracer_van_leer_flux_width"] == 1e-6
++    parser.set_defaults(**rows)
++    cfg = build_config_from_args(_postprocess_args(
++        parser.parse_args(_AMIP_DUMMY_PATHS), parser))
++    assert cfg.dycore.tracer_vertical_scheme == scheme
++    assert cfg.dycore.tracer_van_leer_width == 1e-10
++    assert cfg.dycore.tracer_van_leer_flux_width == 1e-6
++
++
++@pytest.mark.parametrize("deck", ["amip_production.yaml", "amip_production_latlon48.yaml"])
++def test_production_tracer_borrow_resolved_on(deck):
++    from legoesm.driver.run_config_yaml import load_yaml_config
++    parser = build_arg_parser()
++    parser.set_defaults(**load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser))
++    cfg = build_config_from_args(_postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
++    assert cfg.dycore.mpas_conservative_tracer_clamp is True
++
++
+ @pytest.mark.parametrize("deck, sso", [
+     ("amip_production_fv3duo_c24.yaml", "data/amip/sso_stdh_fv3duo_c24_cut2dx.nc"),
+     ("amip_production_fv3duo_c48.yaml", "data/amip/sso_stdh_fv3duo_c48_cut2dx.nc"),

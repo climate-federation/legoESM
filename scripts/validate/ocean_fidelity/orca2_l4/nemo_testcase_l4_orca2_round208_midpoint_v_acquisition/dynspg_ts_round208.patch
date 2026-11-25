@@ -1,0 +1,106 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -154,6 +154,7 @@
+       INTEGER  ::   ji, jj, jk, jn        ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios, l2_drag_unit, l2_drag_ios, l2_adv_unit, l2_adv_ios
+       INTEGER  ::   l2_ord_unit, l2_ord_ios
++      INTEGER  ::   r208_unit, r208_ios
+       LOGICAL  ::   ll_fw_start           ! =T : forward integration 
+       LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
+ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backward dissipation
+@@ -192,12 +193,16 @@
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_drag_u, l2_drag_v
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_adv_before_u, l2_adv_before_v
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_du, l2_dv, l2_zhdiv
++      REAL(wp), DIMENSION(jpi,jpj) :: r208_hv_e, r208_zhv_bck, r208_hv_kmm
++      REAL(wp), DIMENSION(jpi,jpj) :: r208_z1_hv, r208_va_pre
+       REAL(wp) :: l2_mid_za1, l2_mid_za2, l2_mid_za3
+       CHARACTER(LEN=96) :: l2_filename
+       CHARACTER(LEN=96) :: l2_drag_filename
+       CHARACTER(LEN=96) :: l2_adv_filename
+       CHARACTER(LEN=96) :: l2_ord_filename
++      CHARACTER(LEN=256) :: r208_filename
+       CHARACTER(LEN=16) :: l2_magic
++      CHARACTER(LEN=16) :: r208_magic
+       REAL(wp) ::   zttide   ! Time of day for tidal updates
+       !!----------------------------------------------------------------------
+       !
+@@ -602,6 +608,11 @@
+          l2_magic = 'NEMO_L2_BTORD_2'
+          WRITE(l2_ord_unit) l2_magic, 2, kt, 2, jpi, jpj, STORAGE_SIZE(1._wp), rDt_e
+       ENDIF
++      r208_hv_e   (:,:) = 0._wp
++      r208_zhv_bck(:,:) = 0._wp
++      r208_hv_kmm (:,:) = 0._wp
++      r208_z1_hv  (:,:) = 0._wp
++      r208_va_pre (:,:) = 0._wp
+ 
+       !                                             ! ==================== !
+       DO jn = 1, icycle                             !  sub-time-step loop  !
+@@ -881,6 +892,12 @@
+                !                    ! inverse depth at jn+1
+                z1_hu = ssumask(ji,jj) / ( hu_0(ji,jj) + zsshu_a(ji,jj) + 1._wp - ssumask(ji,jj) )
+                z1_hv = ssvmask(ji,jj) / ( hv_0(ji,jj) + zsshv_a(ji,jj) + 1._wp - ssvmask(ji,jj) )
++               IF( kt == nit000 .AND. jn == 1 ) THEN
++                  r208_hv_e   (ji,jj) = hv_e(ji,jj)
++                  r208_zhv_bck(ji,jj) = zhv_bck
++                  r208_hv_kmm (ji,jj) = hv(ji,jj,Kmm)
++                  r208_z1_hv  (ji,jj) = z1_hv
++               ENDIF
+                !
+                ua_e(ji,jj) = (               hu_e  (ji,jj) *   un_e (ji,jj)      & 
+                     &            + rDt_e * (  zhu_bck        * zu_spg (ji,jj)  &   !
+@@ -891,8 +908,31 @@
+                     &            + rDt_e * (  zhv_bck        * zv_spg (ji,jj)  &   !
+                     &                       + zhvp2_e(ji,jj) * zv_trd (ji,jj)  &   !
+                     &                       +  hv(ji,jj,Kmm) * zv_frc (ji,jj)  )   ) * z1_hv
++               IF( kt == nit000 .AND. jn == 1 )   r208_va_pre(ji,jj) = va_e(ji,jj)
+             END_2D
+          ENDIF
++         IF( kt == nit000 .AND. jn == 1 ) THEN
++            IF( STORAGE_SIZE(1._wp) /= 64 )   CALL ctl_stop( 'round208 midpoint V record requires 64-bit wp' )
++            WRITE(r208_filename,'("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round208/acquisition/orca2_omt0_midv_10step_np2/oracle_r208_midv_rank",I4.4,"_kt",I8.8,".bin")') narea-1, kt
++            OPEN( NEWUNIT=r208_unit, FILE=TRIM(r208_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++               &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r208_ios )
++            IF( r208_ios /= 0 )   CALL ctl_stop( 'round208 cannot open midpoint V record' )
++            r208_magic = 'NEMO_L4_R208MV1'
++            WRITE(r208_unit) r208_magic
++            WRITE(r208_unit) 1, kt, jn, narea-1, jpi, jpj, 1, nimpp, njmpp, &
++               & ntsi, ntsj, ntei, ntej, STORAGE_SIZE(1._wp), 10, 0
++            CALL r208_write_2d( r208_unit, 'hv_e',       r208_hv_e    )
++            CALL r208_write_2d( r208_unit, 'zhv_bck',    r208_zhv_bck )
++            CALL r208_write_2d( r208_unit, 'hv_kmm',     r208_hv_kmm  )
++            CALL r208_write_2d( r208_unit, 'vn_e',       vn_e          )
++            CALL r208_write_2d( r208_unit, 'zv_spg',     zv_spg        )
++            CALL r208_write_2d( r208_unit, 'zhvp2_e',    zhvp2_e       )
++            CALL r208_write_2d( r208_unit, 'zv_trd',     zv_trd        )
++            CALL r208_write_2d( r208_unit, 'zv_frc',     zv_frc        )
++            CALL r208_write_2d( r208_unit, 'z1_hv',      r208_z1_hv   )
++            CALL r208_write_2d( r208_unit, 'va_pre_lbc', r208_va_pre  )
++            CLOSE(r208_unit)
++         ENDIF
+ !jth implicit bottom friction:
+          IF ( ll_wd ) THEN ! revert to explicit for bit comparison tests in non wad runs
+             DO_2D( 0, 0, 0, 0 )
+@@ -1227,6 +1267,21 @@
+       CALL iom_put( "baro_v" , pvv_b(:,:,Kmm) )  ! Barotropic  V Velocity
+       !
+    END SUBROUTINE dyn_spg_ts
++
++
++   SUBROUTINE r208_write_2d( kunit, cname, pfield )
++      INTEGER, INTENT(in) :: kunit
++      CHARACTER(LEN=*), INTENT(in) :: cname
++      REAL(wp), DIMENSION(:,:), INTENT(in) :: pfield
++      CHARACTER(LEN=16) :: zname
++      INTEGER :: idim1, idim2
++      zname = cname
++      idim1 = SIZE(pfield, 1)
++      idim2 = SIZE(pfield, 2)
++      WRITE(kunit) zname
++      WRITE(kunit) 2, idim1, idim2, 1
++      WRITE(kunit) pfield
++   END SUBROUTINE r208_write_2d
+ 
+    
+    SUBROUTINE ts_wgt( ll_av, ll_fw, Kpit, zwgt1, zwgt2)

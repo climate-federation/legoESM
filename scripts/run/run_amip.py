@@ -316,6 +316,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                                  "voronoi", "icosahedral", "mpas_voronoi"])
     parser.add_argument("--use-duogrid", action="store_true", default=False,
                         help="Enable FV3 Duo-Grid halo exchange (required for MPI multi-node)")
+    parser.add_argument("--mpas-mesh-file", type=str, default="",
+                        dest="mpas_mesh_file",
+                        help="Saved global MPAS mesh (.npz from "
+                             "scripts/grids/save_mpas_mesh.py). The run loads "
+                             "it instead of regenerating the mesh, so every "
+                             "machine steps the same cells in the same order. "
+                             "Needs --mpas-mesh-sha256; the file's resolution "
+                             "must equal --resolution. Default: regenerate.")
+    parser.add_argument("--mpas-mesh-sha256", type=str, default="",
+                        dest="mpas_mesh_sha256",
+                        help="SHA-256 the --mpas-mesh-file must have (printed "
+                             "by save_mpas_mesh.py); the run refuses any other "
+                             "mesh.")
+    parser.add_argument("--mpas-mesh-variable", action=argparse.BooleanOptionalAction,
+                        default=False, dest="mpas_mesh_variable",
+                        help="The --mpas-mesh-file is a variable-resolution mesh "
+                             "(marked variable_mesh in its metadata): its cell count "
+                             "is checked against the file's own record instead of "
+                             "10*4^r+2, and --resolution is not compared.")
     # The canonical names in `supported_matrix.py` are:
     #   - centered       (cubed_sphere, latlon)
     #   - finite_volume  (cubed_sphere, latlon)
@@ -525,6 +544,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="MPAS vertical biharmonic hyperdiffusion of T "
                              "[1/s] — #930 2Δσ vertical-checkerboard cure "
                              "(0 disables)")
+    parser.add_argument("--mpas-nu-vert4-tracer", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_nu_vert4_tracer,
+                        dest="mpas_nu_vert4_tracer",
+                        help="MPAS vertical del4 filter rate for tracers "
+                             "[1/s] (default: follow --mpas-nu-vert4-t; 0 "
+                             "leaves tracers unfiltered while T keeps its "
+                             "filter)")
     parser.add_argument("--mpas-vert4-flux-form-tracers", nargs="*",
                         default=list(_DYCORE_DEFAULTS.mpas_vert4_flux_form_tracers),
                         help="tracer names whose MPAS vertical del4 filter uses "
@@ -551,8 +577,72 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "decision 2026-08-16: conserving form always); "
                              "--no-mpas-conservative-tracer-clamp restores the "
                              "legacy clamp for bit-comparison runs.")
+    parser.add_argument("--tracer-vertical-scheme", choices=("sb", "van_leer"),
+                        default=_DYCORE_DEFAULTS.tracer_vertical_scheme,
+                        help="Hybrid tracer scheme; omitted = lane default (lat-lon SB, MPAS van Leer). "
+                             "Sigma lanes require omission; MPAS hybrid refuses SB.")
+    parser.add_argument("--tracer-van-leer-width", type=float,
+                        default=_DYCORE_DEFAULTS.tracer_van_leer_width,
+                        help="Hybrid van Leer mixing-ratio increment width [kg/kg]; zero = hard faces.")
+    parser.add_argument("--tracer-van-leer-flux-width", type=float,
+                        default=_DYCORE_DEFAULTS.tracer_van_leer_flux_width,
+                        help="Hybrid van Leer mass-flux width [Pa/s]; zero = hard flux split. "
+                             "Both widths zero recover the old hard operator.")
+    parser.add_argument("--positivity-condensate-from-vapour",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.positivity_condensate_from_vapour,
+                        help="Positivity stage (MPAS, lat-lon): pay a column's "
+                             "net-negative condensate from the same column's "
+                             "vapour with its latent heat before the borrow. "
+                             "ON by default; --no-positivity-condensate-from-"
+                             "vapour restores the legacy borrow, which creates "
+                             "water when the globe cannot repay the deficit.")
+    parser.add_argument("--mpas-vert-ppm-limiter-sharpness", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_vert_ppm_limiter_sharpness,
+                        dest="mpas_vert_ppm_limiter_sharpness",
+                        help="sharpness of the PPM limiter's branch decisions "
+                             "under --mpas-vert-advection-scheme ppm; inf = "
+                             "CAM-FV's hard limiter exactly")
+    parser.add_argument("--mpas-tracer-horizontal-scheme",
+                        choices=("advective", "flux_fct"),
+                        default=_DYCORE_DEFAULTS.mpas_tracer_horizontal_scheme,
+                        dest="mpas_tracer_horizontal_scheme",
+                        help="MPAS horizontal tracer transport (shared PE core): "
+                             "'advective' (centred) or 'flux_fct' (flux form + "
+                             "Zalesak FCT)")
+    parser.add_argument("--mpas-fct-smoothing-width", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_fct_smoothing_width,
+                        dest="mpas_fct_smoothing_width",
+                        help="relative band of the flux_fct limiter's smooth "
+                             "min/max and sign splits; 0 = hard Zalesak")
+    parser.add_argument("--mpas-fct-upwind-width-ms", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_fct_upwind_width_ms,
+                        dest="mpas_fct_upwind_width_ms",
+                        help="speed scale [m/s] of the flux_fct smooth upwind "
+                             "selection; 0 = hard upwind")
+    parser.add_argument("--mpas-kh-pressure-surfaces",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.mpas_kh_pressure_surfaces,
+                        dest="mpas_kh_pressure_surfaces",
+                        help="MPAS K_h temperature diffusion on pressure surfaces "
+                             "(CAM3 leading-term terrain correction)")
+    parser.add_argument("--mpas-edge-scaled-damping",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.mpas_edge_scaled_damping,
+                        dest="mpas_edge_scaled_damping",
+                        help="scale MPAS horizontal damping per edge with the "
+                             "mesh density (variable-resolution meshes)")
+    parser.add_argument("--mpas-damping-exp-del2", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_damping_exp_del2,
+                        dest="mpas_damping_exp_del2",
+                        help="spacing exponent of the per-edge del2 / K_h damping")
+    parser.add_argument("--mpas-damping-exp-del4", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_damping_exp_del4,
+                        dest="mpas_damping_exp_del4",
+                        help="spacing exponent of the per-edge del4 / ps del4 / "
+                             "ldiv4 damping")
     parser.add_argument("--mpas-vert-advection-scheme",
-                        choices=("upwind", "van_leer", "sb"),
+                        choices=("upwind", "van_leer", "sb", "ppm"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
                         help="Vertical advection scheme on the MPAS sigma lane "
                              "(theta, tracers, edge winds).  'upwind' (default) "
@@ -1264,6 +1354,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "and the two disagree. Requires --turbulence clubb "
                              "and --clubb-prognostic. Default off = the "
                              "historical bridge (byte-identical).")
+    parser.add_argument("--clubb-host-omega", dest="clubb_host_omega",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Hand prognostic CLUBB the host's large-scale "
+                             "pressure velocity, as CAM6 does (wm_zt = "
+                             "-omega/(rho g)), so its fluxes and variances feel "
+                             "the subsidence. MPAS lane. Requires --turbulence "
+                             "clubb and --clubb-prognostic. Default off = wm 0, "
+                             "the historical bridge (byte-identical).")
+    parser.add_argument("--clubb-mf", dest="clubb_mf",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM7 CLUBB-MF: a stochastic plume ensemble whose "
+                             "mass-flux convergence of thl and qt forces "
+                             "prognostic CLUBB (fixed L0 = 200 m, CAM's random "
+                             "draws). Requires --turbulence clubb and "
+                             "--clubb-prognostic. Default off = no mass flux.")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -1339,6 +1444,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "increment only, no canopy snow). Default off. "
                              "Requires the two-leaf multilayer land with snow "
                              "albedo feedback.")
+    parser.add_argument("--land-canopy-snow",
+                        dest="land_canopy_snow",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow,
+                        help="Intercepted canopy snow (CLM5 snowveg_flag ON_RAD): "
+                             "canopy snow store, unloading, sublimation and "
+                             "snow-whitened canopy albedo. Default off. Requires "
+                             "--land-canopy-snow-masking and the bulk snowpack.")
+    parser.add_argument("--land-canopy-snow-temperature-width-K",
+                        dest="land_canopy_snow_temperature_width_K", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_temperature_width_K,
+                        help="RULE 5 width [K] of the canopy-snow temperature "
+                             "switches (0 = CLM5 hard). Default: CanopySnowConfig.")
+    parser.add_argument("--land-canopy-snow-relative-width",
+                        dest="land_canopy_snow_relative_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_relative_width,
+                        help="RULE 5 relative width of the canopy-snow caps "
+                             "(0 = CLM5 hard, <= 1). Default: CanopySnowConfig.")
+    parser.add_argument("--land-canopy-snow-fcansno-ramp",
+                        dest="land_canopy_snow_fcansno_ramp", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_fcansno_ramp,
+                        help="RULE 5 store fraction below which the canopy snow "
+                             "fraction's 0.15 power is a C1 quadratic (0 = CLM5 "
+                             "hard, <= 1). Default: CanopySnowConfig.")
     parser.add_argument("--land-canopy-rh-cap-smoothing-width",
                         dest="land_canopy_rh_cap_smoothing_width", type=float,
                         default=_EXPERIMENT_DEFAULTS.land_canopy_rh_cap_smoothing_width,
@@ -1362,6 +1491,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Two-leaf canopy: columns per batch of the Newton "
                              "solve, 0 = one batch per GPU. Default: the land "
                              "CanopyConfig value.")
+    parser.add_argument("--land-canopy-implicit-ground-flux",
+                        dest="land_canopy_implicit_ground_flux",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_implicit_ground_flux,
+                        help="Two-leaf canopy: hand the soil the ground heat "
+                             "flux with its derivative with respect to the "
+                             "ground temperature (semi-implicit top boundary, "
+                             "CLM5 eqs. 2.5.123-2.5.124 and 2.6.15). Default: "
+                             "the land CanopyConfig value (on).")
+    parser.add_argument("--land-canopy-fallback-from-last-iterate",
+                        dest="land_canopy_fallback_from_last_iterate",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_fallback_from_last_iterate,
+                        help="Two-leaf canopy: a column stopped at the iteration "
+                             "cap takes its last admissible iterate's fluxes "
+                             "(CLM5 2.5.3.2) instead of the cold state. Default: "
+                             "the land CanopyConfig value (on).")
     parser.add_argument("--land-snow-insulation", dest="land_snow_insulation",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_snow_insulation,
@@ -1404,6 +1550,60 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             help=f"CAM6 ice-stratus ramp cldfrc2m {_nm} "
                                  f"(cloud scheme cam6_clubb; bounds {_lo}..{_hi}); "
                                  f"None = {_dv} (CAM6 CLUBB default)")
+    parser.add_argument("--cloud-cam6-conv-water-in-rad",
+                        dest="cloud_cam6_conv_water_in_rad", type=int,
+                        choices=(0, 1), default=0,
+                        help="CAM6 conv_water_in_rad (cloud scheme cam6_clubb): "
+                             "1 adds the deep convective in-cloud water over "
+                             "deepcu to the radiation's cloud water "
+                             "(conv_water.F90); 0 (default) = stratiform only.")
+    parser.add_argument("--cloud-cam6-conv-water-frac-limit",
+                        dest="cloud_cam6_conv_water_frac_limit", type=float,
+                        default=None,
+                        help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
+                             "None = 0.01 (CAM6 namelist)")
+    parser.add_argument("--clubb-mf-alphturb", dest="clubb_mf_alphturb",
+                        type=float, default=None,
+                        help="CAM7 CLUBB-MF TKE-enhanced entrainment "
+                             "clubb_mf_alphturb (bounds 0..6); None = 0 (off), "
+                             "CAM7 uses 3. Needs --clubb-mf.")
+    parser.add_argument("--cloud-clubb-mf-cldfrac-fac",
+                        dest="cloud_clubb_mf_cldfrac_fac", type=float,
+                        default=None,
+                        help="CAM7 CLUBB-MF plume-area to deep-cloud-fraction "
+                             "factor (bounds 1..20); None = 10 (CAM7). Needs "
+                             "--clubb-mf and cloud_scheme cam6_clubb.")
+    parser.add_argument("--cloud-cam6-do-subgrid-growth",
+                        dest="cloud_cam6_do_subgrid_growth",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM6 cldfrc2m_do_subgrid_growth: MG2 scales its "
+                             "saturation below freezing by qsatfac from the "
+                             "aist ramp (cam6 namelist .true.). Default off "
+                             "(qsfm = 1).")
+    parser.add_argument("--cloud-cam6-snow-in-rad", dest="cloud_cam6_snow_in_rad",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM6 snow in the radiation (cloud scheme "
+                             "cam6_clubb, McICA): snow fraction, in-cloud snow "
+                             "path and MG2 snow diameter through the Mitchell "
+                             "ice optics. Default off.")
+    parser.add_argument("--cloud-cam6-snow-optics-file",
+                        dest="cloud_cam6_snow_optics_file", type=str, default="",
+                        help="path of CESM inputdata "
+                             "atm/cam/physprops/iceoptics_c080917.nc (Mitchell "
+                             "table, sha256 checked) for --cloud-cam6-snow-in-rad")
+    parser.add_argument("--cloud-cam6-rad-specified-nc",
+                        dest="cloud_cam6_rad_specified_nc",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="With specified droplets (Morrison/MG2, no "
+                             "prognostic number) the radiation uses MG2's "
+                             "Nc_0 in cloud, as CAM6 micro_mg_nccons, not the "
+                             "N_c tracer. Default off.")
+    parser.add_argument("--cloud-cam6-rad-gate-log-width",
+                        dest="cloud_cam6_rad_gate_log_width", type=float,
+                        default=None,
+                        help="RULE 5 width (ln space) of the CAM6 convective-"
+                             "water and snow-in-radiation thresholds; 0 = "
+                             "CAM6's hard switches; None = 0.01")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -1553,6 +1753,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "of the carried cloud water, ice, rain, snow and "
                              "number tracers. "
                              f"Default {_EXPERIMENT_DEFAULTS.zm_transport_cloud_tracers}.")
+    parser.add_argument("--positivity-after-zm",
+                        dest="positivity_after_zm",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.positivity_after_zm,
+                        help="Water positivity right after Zhang-McFarlane's "
+                             "update in the macmic loop (where CAM6 runs qneg3): "
+                             "the column-conserving borrow, MPAS lane with "
+                             "cld_macmic_num_steps >= 2. "
+                             f"Default {_EXPERIMENT_DEFAULTS.positivity_after_zm}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -1703,6 +1912,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "RULE 5 smooth forms; the cloud "
                              "levels are exact either way. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_hard_switches}.")
+    parser.add_argument("--bechtold-ifs-openifs-cloud-top-fixer",
+                        dest="bechtold_ifs_openifs_cloud_top_fixer",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_ifs_openifs_cloud_top_fixer,
+                        help="Faithful IFS chain: OpenIFS's cloud-top "
+                             "negative-humidity fixer as written (adds the deficit "
+                             "to the detrained condensate, driving humidity more "
+                             "negative, #2594) instead of the corrected one. "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_openifs_cloud_top_fixer}.")
     parser.add_argument("--bechtold-use-ifs-land-rhebc",
                         dest="bechtold_use_ifs_land_rhebc",
                         action=argparse.BooleanOptionalAction,
@@ -2259,6 +2478,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "over land (--mpas-land-stress-from-land, "
                              "default auto) and radiation != none); --no-... "
                              "= off.")
+    parser.add_argument("--sea-ice-flux-split",
+                        action=_BoolOneSpelling, default=None,
+                        dest="sea_ice_flux_split",
+                        help="MPAS lane: in partly ice-covered sea cells "
+                             "evaluate the turbulent exchange separately on "
+                             "the ice skin and the open water and charge the "
+                             "ice skin its own sensible/latent heat (#2573; "
+                             "radiation not split). Unset = AUTO (on wherever "
+                             "--ocean-flux-on-ocean-surface and the prognostic "
+                             "ice skin are on); --no-... = one blended "
+                             "surface.")
     parser.add_argument("--land-params-refresh", "--mpas-land-params-refresh",
                         action=_BoolOneSpelling, default=True,
                         dest="land_params_refresh",
@@ -2451,6 +2681,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "size reset in the sedimentation fall speeds, "
                              "prognostic droplet number only; 0 = MG2's hard "
                              "clip.")
+    parser.add_argument("--morrison-qsfm-freeze-ramp-K", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_qsfm_freeze_ramp_K"],
+                        dest="morrison_qsfm_freeze_ramp_K",
+                        help="RULE 5 width [K] of CAM6 MG2's qsfm switch at "
+                             "freezing (cloud_cam6_do_subgrid_growth only); 0 = "
+                             "MG2's hard switch.")
+    parser.add_argument("--morrison-cirrus-T-width-K", type=float,
+                        default=ExperimentConfig._field_defaults["morrison_cirrus_T_width_K"],
+                        dest="morrison_cirrus_T_width_K",
+                        help="RULE 5 width [K] of the CAM6 cirrus nucleation "
+                             "temperature switches (cam6_liu_penner only); 0 = "
+                             "CAM6's hard switches.")
+    parser.add_argument("--morrison-cirrus-rel-width", type=float,
+                        default=ExperimentConfig._field_defaults["morrison_cirrus_rel_width"],
+                        dest="morrison_cirrus_rel_width",
+                        help="RULE 5 relative width of the CAM6 cirrus nucleation "
+                             "humidity/updraft/ice/number switches (cam6_liu_penner "
+                             "only); 0 = CAM6's hard switches.")
     parser.add_argument("--morrison-warm-rain-incloud",
                         action=argparse.BooleanOptionalAction,
                         default=ExperimentConfig._field_defaults[
@@ -2471,12 +2720,57 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="CAM6 MG2 prognostic droplet number with CAM6 "
                              "prescribed-aerosol activation (MPAS lane). "
                              "Needs --cam6-aerosol-dir.")
+    parser.add_argument("--morrison-specified-nc-droplet-sedimentation",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_specified_nc_droplet_sedimentation"],
+                        dest="morrison_specified_nc_droplet_sedimentation",
+                        help="CAM6 MG2 cloud-droplet sedimentation with the "
+                             "specified droplet number (MG2 nccons). Needs "
+                             "--morrison-warm-rain-incloud and specified "
+                             "droplets. Default off = no cloud-water "
+                             "sedimentation under specified droplets.")
+    parser.add_argument("--morrison-relvar-scheme", type=str,
+                        choices=["cam6_clubb", "boutle2014"],
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_relvar_scheme"],
+                        dest="morrison_relvar_scheme",
+                        help="Source of MG2's subgrid cloud-water variance "
+                             "(relvar) on the CLUBB liquid-partition lane: "
+                             "cam6_clubb (CLUBB's own, default) or boutle2014 "
+                             "(Boutle et al. 2014 liquid FSD from cloud "
+                             "fraction and cell size). MPAS lane; needs "
+                             "--morrison-warm-rain-incloud.")
+    parser.add_argument("--morrison-boutle-fsd-factor", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_boutle_fsd_factor"],
+                        dest="morrison_boutle_fsd_factor",
+                        help="Multiplier on the Boutle et al. (2014) FSD "
+                             "(relvar = 1/(factor*FSD)^2); boutle2014 only.")
+    parser.add_argument("--morrison-boutle-overcast-ramp-width", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_boutle_overcast_ramp_width"],
+                        dest="morrison_boutle_overcast_ramp_width",
+                        help="Cloud-fraction width of the smooth blend of "
+                             "Boutle's FSD coefficient jump at full cover; "
+                             "0 = the published hard jump.")
     parser.add_argument("--cam6-aerosol-dir", type=str,
                         default=ExperimentConfig._field_defaults["cam6_aerosol_dir"],
                         dest="cam6_aerosol_dir",
                         help="Directory of the CAM6 PPE member-000 aerosol "
                              "climatology and MAM4 property files (sha256-pinned) "
                              "read by --morrison-prognostic-droplet-number.")
+    parser.add_argument("--morrison-cirrus-nucleation", choices=["fixed", "cam6_liu_penner"],
+                        default=ExperimentConfig._field_defaults["morrison_cirrus_nucleation"],
+                        dest="morrison_cirrus_nucleation",
+                        help="Cirrus ice nucleation: 'fixed' (Koop threshold, fixed "
+                             "number) or 'cam6_liu_penner' (CAM6 nucleate_ice with "
+                             "pre-existing ice; needs --cirrus-aerosol-file).")
+    parser.add_argument("--cirrus-aerosol-file", type=str,
+                        default=ExperimentConfig._field_defaults["cirrus_aerosol_file"],
+                        dest="cirrus_aerosol_file",
+                        help="npz of a CAM prescribed MAM3 aerosol climatology mapped "
+                             "onto the run's cells, read by cam6_liu_penner.")
     parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
                         default="mg", dest="morrison_flavor",
                         help="Morrison parameter flavor: 'mg' (E3SM/CESM "
@@ -2903,9 +3197,12 @@ def _resolve_land_model(args, parser=None, argv=None):
         # one is a contradiction: the run would have land while its own
         # selector said it did not.  Refuse rather than print a name that is
         # not what the run resolves to.
-        if args.land_model == "none" and getattr(args, "land_mask_file", ""):
-            msg = ("--land-model none conflicts with --land-mask-file "
-                   f"{args.land_mask_file!r}: a land-mask file activates the "
+        _mask_flag = next((f"--{n.replace('_', '-')} {getattr(args, n)!r}"
+                           for n in ("land_mask_file", "geography")
+                           if getattr(args, n, "")), "")
+        if args.land_model == "none" and _mask_flag:
+            msg = (f"--land-model none conflicts with {_mask_flag}: a land-mask "
+                   "or geography file activates the "
                    "land tile by itself, so the run would have a land surface "
                    "while asking for none. Drop one of the two.")
             if parser is not None:
@@ -2946,6 +3243,8 @@ def dry_run_check_inputs(config: ExperimentConfig,
                          args: argparse.Namespace) -> int:
     """Print found / MISSING / not used for every input file; 0 if none missing."""
     entries = [(f, getattr(config, f)) for f in DRY_RUN_CONFIG_INPUTS]
+    entries.append(("mpas_mesh_file",
+                    getattr(config.grid, "mpas_mesh_file", "")))
     entries += [(f, getattr(args, f, None)) for f in DRY_RUN_ARG_INPUTS]
     from legoesm.ml.checkpoint_io import checkpoint_path
     missing = []
@@ -3009,6 +3308,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                             if args.sigma_refine_width is not None else 0.45),
         sigma_layout=(args.sigma_layout if args.sigma_layout is not None else "standard"),
         use_duogrid=getattr(args, "use_duogrid", False),
+        mpas_mesh_file=getattr(args, "mpas_mesh_file", "") or "",
+        mpas_mesh_sha256=getattr(args, "mpas_mesh_sha256", "") or "",
+        mpas_mesh_variable=bool(getattr(args, "mpas_mesh_variable", False)),
     )
 
     dycore_config = DycoreConfig(
@@ -3030,6 +3332,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
+        mpas_nu_vert4_tracer=args.mpas_nu_vert4_tracer,
         mpas_vert4_flux_form_tracers=(
             (args.mpas_vert4_flux_form_tracers,)
             if isinstance(args.mpas_vert4_flux_form_tracers, str)   # YAML scalar
@@ -3039,9 +3342,21 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             if isinstance(args.mpas_vert4_log_form_tracers, str)    # YAML scalar
             else tuple(args.mpas_vert4_log_form_tracers or ())),
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
+        positivity_condensate_from_vapour=args.positivity_condensate_from_vapour,
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
+        mpas_vert_ppm_limiter_sharpness=args.mpas_vert_ppm_limiter_sharpness,
+        mpas_tracer_horizontal_scheme=args.mpas_tracer_horizontal_scheme,
+        mpas_fct_smoothing_width=args.mpas_fct_smoothing_width,
+        mpas_fct_upwind_width_ms=args.mpas_fct_upwind_width_ms,
+        mpas_kh_pressure_surfaces=args.mpas_kh_pressure_surfaces,
+        mpas_edge_scaled_damping=args.mpas_edge_scaled_damping,
+        mpas_damping_exp_del2=args.mpas_damping_exp_del2,
+        mpas_damping_exp_del4=args.mpas_damping_exp_del4,
         spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
                                     if args.spectral_sponge_nu_top_m2s is not None else 0.0),
+        tracer_vertical_scheme=args.tracer_vertical_scheme,
+        tracer_van_leer_width=args.tracer_van_leer_width,
+        tracer_van_leer_flux_width=args.tracer_van_leer_flux_width,
         mpas_sponge_del2_top_layers=(args.mpas_sponge_del2_top_layers
                                      if args.mpas_sponge_del2_top_layers is not None else 0),
         mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor
@@ -3181,6 +3496,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
         clubb_liquid_partition=args.clubb_liquid_partition,
+        clubb_host_omega=args.clubb_host_omega,
+        clubb_mf=args.clubb_mf,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
            for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS,
@@ -3236,6 +3553,15 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_rhmaxi=args.cloud_cam6_rhmaxi,
         cloud_cam6_rhminis=args.cloud_cam6_rhminis,
         cloud_cam6_rhmaxis=args.cloud_cam6_rhmaxis,
+        cloud_cam6_do_subgrid_growth=args.cloud_cam6_do_subgrid_growth,
+        cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
+        cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
+        cloud_clubb_mf_cldfrac_fac=args.cloud_clubb_mf_cldfrac_fac,
+        clubb_mf_alphturb=args.clubb_mf_alphturb,
+        cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,
+        cloud_cam6_snow_optics_file=args.cloud_cam6_snow_optics_file,
+        cloud_cam6_rad_specified_nc=args.cloud_cam6_rad_specified_nc,
+        cloud_cam6_rad_gate_log_width=args.cloud_cam6_rad_gate_log_width,
         cloud_cap_floor_on=args.cloud_cap_floor_on,
         cloud_cap_floor_lat_deg=args.cloud_cap_floor_lat_deg,
         cloud_cap_floor_p_max_pa=args.cloud_cap_floor_p_max_pa,
@@ -3251,6 +3577,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
         land_canopy_snow_masking=args.land_canopy_snow_masking,
+        land_canopy_snow=args.land_canopy_snow,
+        land_canopy_snow_temperature_width_K=args.land_canopy_snow_temperature_width_K,
+        land_canopy_snow_relative_width=args.land_canopy_snow_relative_width,
+        land_canopy_snow_fcansno_ramp=args.land_canopy_snow_fcansno_ramp,
         land_snow_insulation=args.land_snow_insulation,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
@@ -3314,6 +3644,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_beta_soil=args.land_beta_soil,
         land_stress_from_land=args.land_stress_from_land,
         ocean_flux_on_ocean_surface=args.ocean_flux_on_ocean_surface,
+        sea_ice_flux_split=args.sea_ice_flux_split,
         land_params_refresh=args.land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s
@@ -3337,17 +3668,29 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_mg2_drop_readjust_log_width=args.morrison_mg2_drop_readjust_log_width,
         morrison_mg2_drop_early_reset_log_width=args.morrison_mg2_drop_early_reset_log_width,
         morrison_mg2_drop_sed_reset_log_width=args.morrison_mg2_drop_sed_reset_log_width,
+        morrison_qsfm_freeze_ramp_K=args.morrison_qsfm_freeze_ramp_K,
+        morrison_cirrus_T_width_K=args.morrison_cirrus_T_width_K,
+        morrison_cirrus_rel_width=args.morrison_cirrus_rel_width,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         morrison_do_graupel=args.morrison_do_graupel,
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
         morrison_prognostic_droplet_number=args.morrison_prognostic_droplet_number,
+        morrison_specified_nc_droplet_sedimentation=(
+            args.morrison_specified_nc_droplet_sedimentation),
+        morrison_relvar_scheme=args.morrison_relvar_scheme,
+        morrison_boutle_fsd_factor=args.morrison_boutle_fsd_factor,
+        morrison_boutle_overcast_ramp_width=args.morrison_boutle_overcast_ramp_width,
         cam6_aerosol_dir=args.cam6_aerosol_dir,
+        morrison_cirrus_nucleation=args.morrison_cirrus_nucleation,
+        cirrus_aerosol_file=args.cirrus_aerosol_file,
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
         land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
         land_canopy_most_n_iters=args.land_canopy_most_n_iters,
         land_canopy_solve_group=args.land_canopy_solve_group,
+        land_canopy_implicit_ground_flux=args.land_canopy_implicit_ground_flux,
+        land_canopy_fallback_from_last_iterate=args.land_canopy_fallback_from_last_iterate,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None
@@ -3447,6 +3790,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         zm_land_fraction=args.zm_land_fraction,
         kain_fritsch_variant=args.kain_fritsch_variant,
         zm_transport_cloud_tracers=args.zm_transport_cloud_tracers,
+        positivity_after_zm=args.positivity_after_zm,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,
@@ -3469,6 +3813,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
         bechtold_ifs_hard_switches=args.bechtold_ifs_hard_switches,
+        bechtold_ifs_openifs_cloud_top_fixer=args.bechtold_ifs_openifs_cloud_top_fixer,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
         bechtold_snow_refill_width_kg_m2_s=args.bechtold_snow_refill_width_kg_m2_s,

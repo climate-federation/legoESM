@@ -11,7 +11,8 @@ from legoesm.ocean.eos import (
 )
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import OceanState, OceanTendencies
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
+from legoesm.ocean.vertical import (OceanZStarCoordinate, compute_layer_thickness,
+                                    compute_ocean_jacobian)
 from legoesm.ocean.physics.vertical_mixing.config import (
     VALID_VERTICAL_MIXING_SCHEMES,
     VerticalMixingConfig,
@@ -271,6 +272,11 @@ def _make_kpp(config: VerticalMixingConfig,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=apply_diffusion, ice_frac=_kpp_ice_fr,
             eos_fn=eos_fn,
+            # live thicknesses with partial bottom cells (lat-lon C-grid), so
+            # the explicit non-local term conserves the column content
+            h_k=(None if getattr(state, "H_bathy", None) is None else
+                 compute_layer_thickness(state.eta.data, state.H_bathy.data,
+                                         z_coord)),
         )
         # When apply_diffusion is False, KPP returns zero du/dv at
         # cell-center shape (from the C-grid u/v interpolation above).

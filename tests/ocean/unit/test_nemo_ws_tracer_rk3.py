@@ -212,6 +212,7 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
         (np.float64(0.5) * p_w[..., 1:-1]) * sum_w) * wmask_inner
     expected = expected - (
         (flux_w[..., :-1] - flux_w[..., 1:]) * r1_area) / e3t
+    literal_storage_expected = expected.copy()
     expected[tmask == 0.0] = 0.0
 
     actual = np.asarray(jax.jit(
@@ -220,6 +221,27 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
         jnp.asarray(tracer), jnp.asarray(p_u), jnp.asarray(p_v),
         jnp.asarray(p_w), jnp.asarray(e3t), jnp.asarray(tmask)))
     np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
+
+    # The certified WS/FCT production route preserves the lane's literal
+    # accumulator on inactive storage.  Both contracts are bit-identical on
+    # wet and partial-bottom cells (tmask > 0, e3t > 0), and differ only where
+    # the main contract masks inactive cells to exact zero.
+    certified_storage = np.asarray(jax.jit(
+        lambda tr, pu, pv, pw, h, tm: model_module._nemo_cen2_tracer_rhs(
+            tr, pu, pv, pw, h, tm, grid,
+            _certified_nemo_storage=True,
+        ))(
+        jnp.asarray(tracer), jnp.asarray(p_u), jnp.asarray(p_v),
+        jnp.asarray(p_w), jnp.asarray(e3t), jnp.asarray(tmask)))
+    active = tmask > 0.0
+    np.testing.assert_array_equal(
+        certified_storage[active].view(np.uint64), actual[active].view(np.uint64)
+    )
+    np.testing.assert_array_equal(
+        certified_storage[~active].view(np.uint64),
+        literal_storage_expected[~active].view(np.uint64),
+    )
+    assert np.any(certified_storage[~active] != actual[~active])
 
     # The cropped GYRE card stores its unowned perimeter as zero-thickness
     # cells.  Seed the pullback only at such a cell: the outer selection must
