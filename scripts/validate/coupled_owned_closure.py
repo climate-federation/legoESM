@@ -420,6 +420,9 @@ def main(argv=None) -> int:
     DT_req, DT = DT, float(atm.config.dycore.dt)
     tc = d._tile_config
     ocfg = cc.ocean_config
+    # the 3-D ocean (LatLonCGridOceanConfig) has no slab column: its heat row
+    # is N/A (NaN); the water rows book the fluxes it receives, as for a slab
+    slab_ocean = hasattr(ocfg, "mode")
     area = _np(atm.grid.grid_area).reshape(-1)
     n = area.size
     f_land = _np(tc.f_land).reshape(-1)
@@ -429,7 +432,7 @@ def main(argv=None) -> int:
              # one-layer slab only: the two-layer slab's deep layer and its
              # restoring are not booked, so its heat row is N/A (NaN)
              C_mix=(ocfg.rho_ocean * ocfg.c_ocean * ocfg.h_mix
-                    if ocfg.mode == "slab" else float("nan")),
+                    if slab_ocean and ocfg.mode == "slab" else float("nan")),
              g=constants.g, rho_water=constants.rho_water,
              rho_ice=constants.rho_ice)
     print("CONFIG", json.dumps(dict(grid=args.grid,
@@ -498,7 +501,10 @@ def main(argv=None) -> int:
             canopy=z if L.W_canopy is None else _np(L.W_canopy).reshape(-1),
             h_ice=_np(st.h_ice).reshape(-1),
             conc=_np(st.concentration).reshape(-1),
-            T_slab=_np(d._ocean_state.T_sfc).reshape(-1))
+            # zeros, not NaN, under the 3-D ocean: the NaN trap reads these
+            # arrays (C_mix is NaN there, so the heat row stays N/A)
+            T_slab=(_np(d._ocean_state.T_sfc).reshape(-1) if slab_ocean
+                    else np.zeros(n)))
 
     n0 = len(MPAS_SFC_DIAG_BASE_KEYS)
     SL = {key: i for i, key in enumerate(MPAS_SFC_DIAG_BASE_KEYS)}
@@ -929,10 +935,11 @@ def main(argv=None) -> int:
         H, O = d._surface_handback, d._owned_to_ocean
         F["H_debit"] += I(H.evap) * dt_seg
         F["fw_out"] += I(O.ice_lake_freshwater_flux) * dt_seg
-        F["q_flux"] += float(np.sum(ocfg.Q_flux * k["f_water"] * area)) * dt_seg
-        F["q_freeze"] += float(np.sum(
-            _np(d._ocean_state.Q_freeze).reshape(-1) * k["f_water"] * area)
-        ) * dt_seg
+        if slab_ocean:
+            F["q_flux"] += float(np.sum(ocfg.Q_flux * k["f_water"] * area)) * dt_seg
+            F["q_freeze"] += float(np.sum(
+                _np(d._ocean_state.Q_freeze).reshape(-1) * k["f_water"] * area)
+            ) * dt_seg
         prev["H"], prev["O"] = H, O
         n_ex[0] += 1
         if args.trace:   # per-window land row, to localise a land residual

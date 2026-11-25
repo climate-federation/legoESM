@@ -60,8 +60,6 @@ def test_configs_carry_the_tuned_parameters():
     assert slab["ocean"] == "two_layer"                  # slab's own
 
     d3 = load_yaml_config(str(CMIP_CONFIGS[1]), parser)
-    assert d3["surface_bulk_scheme"] == "coare3"         # same base physics
-    assert d3["surface_gustiness_zi"] == 300.0
     assert d3["ocean"] == "dynamic"                      # 3D's own
     assert d3["ocean_ic"] == "woa"
     assert d3["ocean_restore_sst_tau_days"] == 5.0
@@ -142,17 +140,19 @@ def test_orbital_insolation_flag_and_yaml_roundtrip(tmp_path):
 
 
 def test_morrison_warm_rain_flag_and_cmip_configs_name_the_law():
-    """The coupled lane has no CLUBB relvar: the CMIP configs name kk2000
-    (an unset law resolves to kk2000_cam6 under mg); the flag is unset by
-    default and an explicit CLI law wins over the config."""
+    """The CMIP configs name the law (an unset law resolves to kk2000_cam6
+    under mg): both decks run CLUBB on the column lane and take production's
+    kk2000_cam6.  The flag is unset by default and an explicit CLI law wins
+    over the config."""
     assert "morrison_warm_rain_scheme" in _dests()
     parser = mod.build_parser()
     assert parser.parse_args([]).morrison_warm_rain_scheme is None
-    for cfg in CMIP_CONFIGS:
+    expect = {CMIP_CONFIGS[0]: "kk2000_cam6", CMIP_CONFIGS[1]: "kk2000_cam6"}
+    for cfg, law in expect.items():
         loaded = load_yaml_config(str(cfg), mod.build_parser())
-        assert loaded["morrison_warm_rain_scheme"] == "kk2000", cfg.name
+        assert loaded["morrison_warm_rain_scheme"] == law, cfg.name
     parser.set_defaults(**load_yaml_config(str(CMIP_CONFIGS[0]), parser))
-    assert parser.parse_args([]).morrison_warm_rain_scheme == "kk2000"
+    assert parser.parse_args([]).morrison_warm_rain_scheme == "kk2000_cam6"
     assert parser.parse_args(
         ["--morrison-warm-rain-scheme", "seifert_beheng_sb2001"]
     ).morrison_warm_rain_scheme == "seifert_beheng_sb2001"
@@ -316,6 +316,12 @@ def test_slab_deck_runs_the_atmosphere_owned_column_lane():
     assert slab["clouds"] == "cam6_clubb"
     assert (slab["physics_update_steps"], slab["rad_update_steps"],
             slab["cld_macmic_num_steps"]) == (2, 4, 3)
+    # the 3-D deck is the slab deck with only its ocean rows changed
     d3 = load_yaml_config(str(CMIP_CONFIGS[1]), parser)
-    assert not d3.get("column_lane") and not d3.get("atm_owns_surface")
-    assert not d3.get("use_multilayer_land")
+    ocean_rows = {"ocean", "ocean_ic", "ocean_nlev", "ocean_dt",
+                  "ocean_restore_sst_tau_days", "ocean_restore_sss_tau_days",
+                  "couple_surface_radiation"}
+    assert set(d3) - set(slab) <= ocean_rows
+    assert {k: v for k, v in d3.items() if k not in ocean_rows} == {
+        k: v for k, v in slab.items() if k not in ocean_rows}
+    assert d3["couple_surface_radiation"] is False

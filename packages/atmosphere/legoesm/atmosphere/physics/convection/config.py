@@ -1611,6 +1611,12 @@ class BechtoldConfig(NamedTuple):
     # quantity); True = OpenIFS's exact switches.  The level/flag structure is
     # hard either way (KNOWN DIFFERENCE in _ifs_cumastrn).
     ifs_hard_switches: bool = False
+    # Faithful chain only (#2594, owner decision 2026-11-24): cloud-top
+    # negative-humidity fixer.  False (default) = corrected: the deficit is
+    # taken out of the detrained condensate.  True = OpenIFS as written
+    # (cumastrn.F90:1171 adds it, driving q more negative).  KNOWN DIFFERENCE
+    # in _ifs_cumastrn.cumastrn_column.
+    ifs_openifs_cloud_top_fixer: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.

@@ -248,6 +248,35 @@ class GridRemapper(NamedTuple):
     a2o: ConservativeRegridWeights | None
     o2a: ConservativeRegridWeights | None
     identity: bool
+    # True for the exact one-to-one map between a column mesh and the lat-lon
+    # grid it ravels: the same cells in another shape (weights 1.0).
+    reshape: bool = False
+
+
+def _is_column_ravel_of(atm_grid, ocean_grid) -> bool:
+    """True iff ``atm_grid`` is a :class:`ColumnMesh` whose cells are exactly
+    ``ocean_grid``'s lat-lon cells raveled row-major (latitude rows, longitude
+    fastest): centres and areas equal element by element."""
+    from legoesm.grids.column_mesh import ColumnMesh
+    if not (isinstance(atm_grid, ColumnMesh) and _is_regular_latlon(ocean_grid)):
+        return False
+    shp = (int(ocean_grid.n_lat), int(ocean_grid.n_lon))
+    if int(atm_grid.nCells) != shp[0] * shp[1]:
+        return False
+    return all(np.array_equal(np.asarray(c), np.asarray(g, dtype=np.asarray(c).dtype)
+                              .reshape(-1))
+               for c, g in ((atm_grid.latCell, ocean_grid.lat2d),
+                            (atm_grid.lonCell, ocean_grid.lon2d),
+                            (atm_grid.areaCell, ocean_grid.grid_area)))
+
+
+def _ravel_weights(src_shape, dst_shape) -> ConservativeRegridWeights:
+    """Cell k of the source is cell k of the destination (weight 1.0)."""
+    n = int(np.prod(src_shape))
+    idx = jnp.arange(n, dtype=jnp.int32)
+    return ConservativeRegridWeights(
+        src_idx_flat=idx, dst_idx_flat=idx, weights=jnp.ones(n),
+        src_shape=tuple(src_shape), dst_shape=tuple(dst_shape), n_dst_cells=n)
 
 
 def _grids_equivalent(a, b) -> bool:
@@ -286,6 +315,14 @@ def make_grid_remapper(atm_grid, ocean_grid, *, ocean_wet=None) -> GridRemapper:
     """
     if _grids_equivalent(atm_grid, ocean_grid):
         return GridRemapper(a2o=None, o2a=None, identity=True)
+    # Column lane: the atmosphere's columns ARE the ocean's lat-lon cells,
+    # raveled; the map is a reshape, exact in both directions.
+    if _is_column_ravel_of(atm_grid, ocean_grid):
+        ncol = (int(atm_grid.nCells),)
+        shp = (int(ocean_grid.n_lat), int(ocean_grid.n_lon))
+        return GridRemapper(a2o=_ravel_weights(ncol, shp),
+                            o2a=_ravel_weights(shp, ncol),
+                            identity=False, reshape=True)
     if _is_regular_latlon(atm_grid) and _is_regular_latlon(ocean_grid):
         return GridRemapper(
             a2o=make_latlon_remapper(atm_grid, ocean_grid),
@@ -383,7 +420,7 @@ def attach_wet_masks(remapper, atm_grid, ocean_grid, ocean_wet):
     (shared-grid) remapper -> returned UNCHANGED (byte-identical single-grid run;
     the traced apply stays a pure ``segment_sum`` in every case).
     """
-    if remapper is None or remapper.identity:
+    if remapper is None or remapper.identity or remapper.reshape:
         return remapper
     if ocean_wet is None:
         return remapper
