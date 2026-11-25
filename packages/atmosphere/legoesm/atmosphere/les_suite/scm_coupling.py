@@ -58,7 +58,8 @@ def liquid_water_theta(theta: Array, q_c: Array, exner: Array) -> Array:
 
 
 def saturation_adjust(
-    theta_l: Array, q_t: Array, exner: Array, p: Array,
+    theta_l: Array, q_t: Array, exner: Array, p: Array, *,
+    q_sat_fn=saturation_mixing_ratio,
 ) -> tuple[Array, Array, Array]:
     """(θ_l, q_t) → (θ, q_v, q_c): the INVERSE of :func:`liquid_water_theta`.
 
@@ -74,13 +75,15 @@ def saturation_adjust(
     released latent heat, so ``q_v + q_c = q_t`` and ``liquid_water_theta(θ, q_c)``
     recovers θ_l (to machine tolerance).  Fixed trip count
     (``_SAT_ADJUST_ITERS``) ⇒ JIT/AD-safe.  Saturation uses the canonical
-    ``thermo.saturation_mixing_ratio`` (no re-derived Clausius–Clapeyron).
+    ``thermo.saturation_mixing_ratio`` (no re-derived Clausius–Clapeyron) unless
+    ``q_sat_fn`` is given -- pass ``thermo.saturation_specific_humidity`` when q_t
+    is a specific humidity, as legoESM's microphysics treats it.
     """
     q_c = jnp.zeros_like(q_t)
     for _ in range(_SAT_ADJUST_ITERS):
         theta = theta_l + constants.L_v / (constants.c_pd * exner) * q_c
         T = theta * exner
-        q_sat = saturation_mixing_ratio(T, p)
+        q_sat = q_sat_fn(T, p)
         q_c = 0.5 * (q_c + jnp.clip(q_t - q_sat, 0.0, None))   # damped
     theta = theta_l + constants.L_v / (constants.c_pd * exner) * q_c
     return theta, q_t - q_c, q_c

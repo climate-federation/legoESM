@@ -93,6 +93,7 @@ from legoesm.atmosphere.physics.radiation.simple_lw import (  # noqa: E402
 )
 
 from legoesm import constants  # noqa: E402
+from legoesm.thermo import saturation_specific_humidity  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
@@ -276,6 +277,16 @@ def parse_args():
     p.add_argument("--sdm-seed", type=int, default=0)
     p.add_argument("--sdm-segment-steps", type=int, default=64)
     p.add_argument("--n-tracers", type=int, default=9)
+    p.add_argument("--budget", action="store_true",
+                   help="record planar-mean theta_l and q_t tendencies split by operator "
+                        "(dynamics = advection + SGS + surface flux; subsidence; longwave; "
+                        "microphysics) between record frames, in <output>/budget/.")
+    p.add_argument("--perturb", choices=["gaussian", "sam"], default="gaussian",
+                   help="initial noise: gaussian = N(0, 0.1 K) on theta below the inversion "
+                        "(default); sam = SAM perturb_type=1, uniform +-0.1 K on theta_l where "
+                        "q_t > 6 g/kg, saturation-adjusted per cell.")
+    p.add_argument("--save-state", action="store_true",
+                   help="save the final 3D u, v, w, theta and q_v/q_c/q_r to <output>/final_state.npz.")
     p.add_argument("--scalar-advection", choices=["van_leer","weno5","weno5_hv"], default="van_leer",
                    help="monotone scalar reconstruction (weno5=less diffusive).")
     p.add_argument("--w-hyperdiff", type=float, default=0.0,
@@ -372,7 +383,13 @@ def build(args, dtype):
     z_c = np.asarray(g.z_c)
     z_snd = np.asarray(snd.z)
     thl_prof = np.interp(z_c, z_snd, np.asarray(snd.theta))   # θ_l!
-    qt_prof = np.interp(z_c, z_snd, np.asarray(snd.q_v))      # q_t [kg/kg]
+    # SAM soundings give q as a MIXING RATIO (SAM's qsatw = 0.622 e/(p - e)); legoESM's
+    # microphysics (gSAM satadj_liquid port, M2005, Morrison) treats q_v as SPECIFIC
+    # humidity. Convert, and saturation-adjust the IC on the specific-humidity curve
+    # below, so the first microphysics call does not condense extra cloud (it added
+    # ~15 g/m^2 of LWP on RF02 when the IC used the mixing-ratio curve).
+    qt_mr = np.interp(z_c, z_snd, np.asarray(snd.q_v))        # q_t mixing ratio [kg/kg]
+    qt_prof = qt_mr / (1.0 + qt_mr)                           # q_t specific humidity [kg/kg]
     u_prof = np.interp(z_c, z_snd, np.asarray(snd.u))
     v_prof = np.interp(z_c, z_snd, np.asarray(snd.v))
     zl = np.asarray(lsf.z[0]); order = np.argsort(zl)
@@ -389,23 +406,37 @@ def build(args, dtype):
     exner = jnp.asarray(ref.exner_c, dtype)
     p_c = jnp.asarray(ref.p_c, dtype)
     th_col, qv_col, qc_col = saturation_adjust(
-        jnp.asarray(thl_prof, dtype), jnp.asarray(qt_prof, dtype), exner, p_c)
+        jnp.asarray(thl_prof, dtype), jnp.asarray(qt_prof, dtype), exner, p_c,
+        q_sat_fn=saturation_specific_humidity)
 
     ny, nx, nz = args.ny, args.nx, args.nz
     key = jax.random.PRNGKey(0)
     # Seed the theta noise below the CASE's inversion (840 m for RF01, 795 m
     # for RF02): a literal here perturbs the free troposphere of any case whose
     # inversion is lower.
-    seed = (jnp.asarray(z_c) < args.perturb_z_m).astype(dtype)
-    th3 = (jnp.broadcast_to(th_col, (ny, nx, nz))
-           + 0.1 * jax.random.normal(key, (ny, nx, nz), dtype) * seed)
+    if args.perturb == "sam":
+        # SAM setperturb.f90 perturb_type=1: uniform +-0.1 K on the liquid-water
+        # temperature variable wherever the sounding's q_t > 6 g/kg, then
+        # saturation-adjusted cell by cell (q_t unchanged).
+        seed = jnp.asarray(qt_prof > 6.0e-3, dtype)
+        thl3 = (jnp.broadcast_to(jnp.asarray(thl_prof, dtype), (ny, nx, nz))
+                + 0.1 * jax.random.uniform(key, (ny, nx, nz), dtype, -1.0, 1.0) * seed)
+        th3, qv3, qc3 = saturation_adjust(
+            thl3, jnp.broadcast_to(jnp.asarray(qt_prof, dtype), (ny, nx, nz)), exner, p_c,
+            q_sat_fn=saturation_specific_humidity)
+    else:
+        seed = (jnp.asarray(z_c) < args.perturb_z_m).astype(dtype)
+        th3 = (jnp.broadcast_to(th_col, (ny, nx, nz))
+               + 0.1 * jax.random.normal(key, (ny, nx, nz), dtype) * seed)
+        qv3 = jnp.broadcast_to(qv_col, (ny, nx, nz))
+        qc3 = jnp.broadcast_to(qc_col, (ny, nx, nz))
     u3 = jnp.broadcast_to(jnp.asarray(u_prof, dtype), (ny, nx, nz))
     v3 = jnp.broadcast_to(jnp.asarray(v_prof, dtype), (ny, nx, nz))
     w3 = jnp.zeros((ny, nx, nz + 1), dtype)
     u3, v3, w3 = sl.project(u3, v3, w3, dt=args.dt, g=g)
     tr = jnp.zeros((ny, nx, nz, args.n_tracers), dtype)
-    tr = tr.at[..., 0].set(qv_col[None, None, :])
-    tr = tr.at[..., 1].set(qc_col[None, None, :])
+    tr = tr.at[..., 0].set(qv3)
+    tr = tr.at[..., 1].set(qc3)
     # Droplet number is STORED per MASS [1/kg]; the case value is a
     # concentration [1/m^3], so divide by the reference density of the layer it
     # is seeded into.  ``Nc_0`` below stays per volume — that is a scheme
@@ -509,8 +540,16 @@ def main():
         return _run_lagrangian_sdm(args, dtype, g, st, ref, forc, lw_tend, w_ls,
                                    ddz_up, spc, spf, tau_sp)
 
+    exner_c = jnp.asarray(ref.exner_c, dtype)
+
+    def _thl_qt_means(th, tr):
+        """Planar-mean theta_l (q_c only, as recorded) and q_t = q_v + q_c, shape (2, nz)."""
+        return jnp.stack([liquid_water_theta(th, tr[..., 1], exner_c).mean((0, 1)),
+                          (tr[..., 0] + tr[..., 1]).mean((0, 1))])
+
     @partial(jax.jit, static_argnames=("first", "do_micro", "do_rad"))
     def step(state, dt, first=False, do_micro=True, do_rad=True):
+        m = [_thl_qt_means(state.theta, state.tracers)] if args.budget else None
         state, us = sl.step(state, g=g, dt=dt,
                             u_geo=(forc["ug"], forc["vg"]), f_cor=args.f_cor,
                             first=first, force=(0.0, 0.0),
@@ -518,11 +557,14 @@ def main():
                             sfc_qv_flux=forc["qv_flux"])
         th = state.theta
         tr = state.tracers
+        if m: m.append(_thl_qt_means(th, tr))
         th = th - dt * w_ls * ddz_up(th)
         tr = tr.at[..., 0].set(tr[..., 0] - dt * w_ls * ddz_up(tr[..., 0]))
         tr = tr.at[..., 1].set(tr[..., 1] - dt * w_ls * ddz_up(tr[..., 1]))
+        if m: m.append(_thl_qt_means(th, tr))
         if do_rad:
             th = th + dt * args.rad_every * lw_tend(tr)
+        if m: m.append(_thl_qt_means(th, tr))
         state = state._replace(theta=th, tracers=tr)
         if do_micro:
             dth, dtr, _pr = micro(state.theta, state.tracers)
@@ -541,7 +583,13 @@ def main():
         v = state.v - rc * (state.v - state.v.mean((0, 1), keepdims=True))
         w = state.w - rf * state.w
         u, v, w = sl.project(u, v, w, dt=dt, g=g)
-        return state._replace(u=u, v=v, w=w), us, created
+        # Sponge and projection touch momentum only, so the four increments sum to the
+        # full step change of the scalar means.
+        bud = None
+        if m:
+            m.append(_thl_qt_means(state.theta, state.tracers))
+            bud = jnp.stack([m[k + 1] - m[k] for k in range(4)])   # (4 operators, 2 vars, nz)
+        return state._replace(u=u, v=v, w=w), us, created, bud
 
     T = args.hours * 3600.0
     n_steps = int(round(T / dt0))
@@ -570,9 +618,24 @@ def main():
                 qc3=np.asarray(st.tracers[..., 1]),
                 qr3=np.asarray(st.tracers[..., 2]),
                 rho_z=np.asarray(ref.rho_c))
+            if args.budget and _last_rec_h[0] is not None:
+                # Mean tendency over the interval since the previous frame [per second].
+                span_s = (t_hours - _last_rec_h[0]) * 3600.0
+                (args.output / "budget").mkdir(exist_ok=True)
+                np.savez(args.output / "budget" / f"budget_{frame:03d}.npz",
+                         t0_hours=_last_rec_h[0], t1_hours=t_hours, z=zc_np,
+                         operators=np.array(["dynamics", "subsidence", "longwave", "microphysics"]),
+                         variables=np.array(["theta_l [K/s]", "q_t [kg/kg/s]"]),
+                         tendency=bud_acc / span_s,
+                         theta_l=np.asarray(_thl_qt_means(st.theta, st.tracers))[0],
+                         q_t=np.asarray(_thl_qt_means(st.theta, st.tracers))[1],
+                         rho=np.asarray(ref.rho_c), exner=np.asarray(ref.exner_c),
+                         sfc_theta_flux=forc["th_flux"], sfc_qv_flux=forc["qv_flux"])
+                bud_acc[:] = 0.0
             frame += 1
             _last_rec_h[0] = t_hours
 
+    bud_acc = np.zeros((4, 2, zc_np.shape[0]))
     dt = jnp.asarray(dt0, dtype)
     if rec:
         _save(0.0)
@@ -594,11 +657,13 @@ def main():
     next_rec = T / args.record_frames if rec else np.inf
     t0 = time.time()
     while t < T:
-        st, us, created = step(
+        st, us, created, bud = step(
             st, dt, first=(i == 0),
             do_micro=((i + 1) % args.micro_every == 0),
             do_rad=((i + 1) % args.rad_every == 0))
         created_tot += float(created)
+        if bud is not None:
+            bud_acc += np.asarray(bud)
         t += dt0; i += 1
         if i % args.print_every == 0:
             mw = float(jnp.max(jnp.abs(st.w)))
@@ -629,6 +694,10 @@ def main():
     d = _diag(st, g, ref)
     cc_avg = cc_sum / n_cavg if n_cavg else float(d["cloud_cover"])
     lwp_avg = lwp_sum / n_cavg if n_cavg else float(d["lwp"])
+    if args.save_state:
+        np.savez(args.output / "final_state.npz", t_hours=t / 3600.0,
+                 u=np.asarray(st.u), v=np.asarray(st.v), w=np.asarray(st.w),
+                 theta=np.asarray(st.theta), tracers=np.asarray(st.tracers[..., :3]))
     np.savez(args.output / "dycoms_les_final.npz", z=zc_np,
              theta=np.asarray(st.theta).mean((0, 1)),
              qv=np.asarray(st.tracers[..., 0]).mean((0, 1)),
