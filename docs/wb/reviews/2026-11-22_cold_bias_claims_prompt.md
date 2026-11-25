@@ -1,0 +1,14 @@
+READ-ONLY adversarial review of CLAIMS (no code edits). Repo: /glade/u/home/pg2328/legoesm (legoESM, differentiable ESM in JAX). Reference sources: /glade/derecho/scratch/pg2328/cesm_src/{CAM (cam_cesm2_1_rel_60), CLM5 (release-clm5.0.34), CICE}.
+
+Context: production AMIP deck config/amip/amip_production.yaml (CAM6 physics on MPAS res6, two-leaf multilayer land, prescribed SST/SIC). 1979 one-year run vs ERA5/CERES: global tas -1.12 K, cold concentrated over NH high-latitude land (Siberia, Canada), Antarctica, Greenland, Tibet; TOA albedo +0.10..+0.15 over Siberia/Canada and Arctic Ocean; evaporation -0.24 mm/d, precip -0.43 mm/d; cloud cover +40% over Antarctica (also in CMIP6 MMM).
+
+CLAIMS to refute or confirm (each: CONFIRMED / REFUTED / PLAUSIBLE, with file:line evidence; say which parts you verified in code). Proposed actions follow each; challenge them too.
+
+C1 (READ-OFF-CODE + offline probe scripts/tmp/probe_snow_albedo_canopy.py): with land_canopy_snow_masking unset (default False, packages/coupler/legoesm/driver/config.py:1424) every snow-covered land column, including boreal evergreen forest, exports the snowy-ground albedo (~0.74-0.79 broadband, multilayer_land.py:913-930), vs CLM5 canopy-over-snow ~0.10-0.30. This is the main driver of the boreal cold bias. Proposed: turn masking on in production.
+C2 (probe): masking ON gives evergreen spruce 0.14, darker than CLM5 with intercepted canopy snow (fcansno 0.5 -> 0.16, 1.0 -> 0.30), because canopy_masked_snow_albedo fixes fcansno=0 (canopy/radiative_transfer.py:630-650). Proposed: port CLM5 canopy snow (snocan -> fcansno, CanopyHydrologyMod/SurfaceAlbedoMod) so masking is faithful. Check: does our land carry a canopy snow store at all? What does CLM5 0.34 actually compute for fcansno?
+C3 (probe): production land_snow_tau_days 150 + snow_age_activation_K 5000 keeps snow at 0.735 after 90 cold days + 10 melting days; calibration's 3.674 d gives 0.51. Spring snow too bright -> later melt -> cold. Proposed: user decision on the value (no code).
+C4 (READ-OFF-CODE): MPAS lane radiation (integration.py ~641-650, ~2294) passes only q_c, q_i to RRTMG; CAM6 adds MG2 snow to SW+LW optics with cldfsnow and cldfprime=max(cld,cldfsnow) (CAM rrtmg/radiation.F90 ~888-986, micro_mg_cam.F90 ~2309). Missing snow -> less downwelling LW at the surface in polar winter -> cold. Proposed: port radiatively active snow.
+C5 (READ-OFF-CODE): land tas diagnostic (diagnostics.py ~875-888) uses ocean drag law and treats lowest model level (~60 m on L32) as 10 m; biased WARM in stable conditions, so it hides, not causes, cold bias. Proposed: fix the diagnostic to CLM-style 2 m from land roughness at true level height.
+C6: sea-ice albedo flat 0.80 (albedo_ice) vs CICE prescribed-ice -> Arctic albedo excess. Proposed: lower priority.
+
+Also: anything bigger we missed that would cool land by >1 K annually? Rank C1-C6 by expected impact on annual land tas. Under 500 words.
