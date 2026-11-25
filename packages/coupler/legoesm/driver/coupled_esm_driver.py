@@ -322,6 +322,13 @@ class CoupledESMDriver:
         cfg = self.coupled_cfg
         if (cfg.atm_owns_surface and cfg.ocean_mode == "dynamic"
                 and cfg.ocean_ic == "woa"):
+            if self._ocean_grid_arg is not None:
+                # vote 2026-11-25 (3-0): one partition needs the ocean on the
+                # cells the atmosphere's land fraction is defined on
+                raise ValueError(
+                    "atm_owns_surface with the WOA 3-D ocean needs the ocean on "
+                    "the atmosphere's own lat-lon cells; an explicit ocean grid "
+                    "cannot share the atmosphere's land/sea partition.")
             self._atm._land_fraction_hook = self._owned_land_fraction_hook
         self._atm.setup()
 
@@ -435,8 +442,8 @@ class CoupledESMDriver:
         fraction (atm_owns_surface) and the ocean initialisation read the same
         domain."""
         cache = getattr(self, "_woa_geometry_cache", None)
-        if cache is not None:
-            return cache
+        if cache is not None and cache[0] is grid:
+            return cache[1]
         from legoesm.ocean.init_latlon_cgrid import make_partial_cell_latlon
         from legoesm.ocean.init_woa import woa_ocean_bathymetry, woa_ocean_mask
         from legoesm.ocean.vertical import create_ocean_z_star
@@ -451,9 +458,9 @@ class CoupledESMDriver:
         H_woa = woa_ocean_bathymetry(grid, cfg.woa_t_path, H_max=cfg.ocean_H_max_m)
         # Smooth + thin-cell snap + shallow-mask -> partial-cell coordinate
         # (this is the coord the MODEL steps on, NOT the plain z-star).
-        self._woa_geometry_cache = make_partial_cell_latlon(
-            z_star, H_woa, ocean_mask)
-        return self._woa_geometry_cache
+        geom = make_partial_cell_latlon(z_star, H_woa, ocean_mask)
+        self._woa_geometry_cache = (grid, geom)
+        return geom
 
     def _owned_land_fraction_hook(self, atm, f_land):
         """atm_owns_surface + 3-D WOA ocean: cells the ocean holds dry are land
@@ -462,8 +469,14 @@ class CoupledESMDriver:
         atmosphere's setup, before it packs its land columns."""
         native = getattr(atm, "_latlon_native_grid", None)
         grid = native if native is not None else atm.grid
-        wet = np.asarray(self._woa_geometry(grid)[2]).reshape(np.shape(f_land))
-        return jnp.where(jnp.asarray(wet) > 0.5, f_land, 1.0).astype(f_land.dtype)
+        wet = np.asarray(self._woa_geometry(grid)[2]).reshape(np.shape(f_land)) > 0.5
+        n_bad = int(np.sum(wet & (np.asarray(f_land) >= 1.0)))
+        if n_bad:
+            # vote 2026-11-25 (3-0): such a cell would get no atmospheric forcing
+            raise ValueError(
+                f"{n_bad} cells are wet for the 3-D ocean but full land in the "
+                "atmosphere's land mask; the two cannot share one partition.")
+        return jnp.where(jnp.asarray(wet), f_land, 1.0).astype(f_land.dtype)
 
     def _init_ocean(self):
         """Initialize the slab/two-layer ocean (on the ocean grid)."""
