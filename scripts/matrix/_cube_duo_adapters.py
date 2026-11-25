@@ -311,6 +311,14 @@ def build_duo_cosine_bell(n: int, alpha: float, dt: float = 1800.0):
 #: between the analytic L5/L10 and FV3 L40).
 DUO_HYDRO_KM = 32
 DUO_HYDRO_ETA = "cam6_l32"
+#: The duo deck's outer step: dt_atmos = 1920 s with its n_split = 8
+#: acoustic sub-steps (~240 s each).  NOT clamped by the driver's generic
+#: advective+acoustic CFL heuristic: FV3's dimensionless per-substep
+#: damping (vtdm4 del-6 on delp/pt/vorticity, divergence damping) is tuned
+#: per acoustic substep, so the clamp (C36: 1920 -> 200 s at fixed n_split)
+#: applied it ~9.6x more often per day and drove the rest_state_topo
+#: spurious wind (C36 1 d: 13.5 m/s clamped vs 7.4 at the deck step).
+DUO_HYDRO_DT_ATMOS = 1920.0
 
 
 def _cam6_l32_coord(model, what: str):
@@ -622,8 +630,8 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
                     ic_kwargs: dict | None = None):
     """FV3DuoDynamicsModel (production deck defaults) on C``n``.
 
-    ``dt`` follows the driver lane: the deck dt 1920 s clamped by the
-    driver's generic ``cfl_check_and_adjust`` (``ModelDriver``).
+    ``dt`` is the deck's ``DUO_HYDRO_DT_ATMOS`` (1920 s, n_split 8), not the
+    driver's generic CFL clamp (see the constant).
     ``rotated_alpha`` (not None): DCMIP 2008 rotated JW -- the planet's
     rotation axis tilted by alpha (``create_fv3_duo_grid(rotation_alpha)``)
     and :func:`rotated_jw_bundle` as the IC.
@@ -636,7 +644,6 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     jax.config.update("jax_enable_x64", True)
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
         FV3DuoConfig, FV3DuoDynamicsModel)
-    from legoesm.core.cfl import cfl_check_and_adjust
     from legoesm.grids.factory import create_fv3_duo_grid
 
     spec = None
@@ -668,8 +675,7 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     else:
         bundle = rotated_jw_bundle(model, perturbed=perturbed,
                                    alpha=rotated_alpha)
-    dt = float(cfl_check_and_adjust(1920.0, n, model_type="primitive_eq",
-                                    grid_type="cubed_sphere"))
+    dt = DUO_HYDRO_DT_ATMOS
 
     hs_fn = None
     if held_suarez:
@@ -721,8 +727,8 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
 
     note = (f"fv3_duo FV3DuoDynamicsModel km={km} eta={eta} hydrostatic, "
             f"nord={cfg.nord} d4_bg={cfg.d4_bg} sponge={cfg.sponge_del2_top_layers}"
-            f"L, n_split={cfg.n_split}, dt={dt:g}s (deck 1920 s + driver "
-            f"CFL clamp); " + (
+            f"L, n_split={cfg.n_split}, dt={dt:g}s (deck dt_atmos, no "
+            f"driver CFL clamp); " + (
                 f"shared cube IC {spec.label} on the duo cells + CAM6 L32"
                 + ("" if spec.phis_fn is None else
                    ", grid terrain = the IC's phis (unfiltered)")
