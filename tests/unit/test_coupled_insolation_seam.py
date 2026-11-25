@@ -43,7 +43,7 @@ def _as_after_one_segment(drv):
     the coupler refuses to build surface forcing before one exists."""
     z = jnp.zeros_like(drv._atm.state.p_s.data)
     drv._atm._carry_aux = {"held_sw_net_sfc": z, "held_lw_net_sfc": z, "seg_precip": z}
-    if drv.atm_config.diurnal_cycle:
+    if drv._atm.config.diurnal_cycle:
         drv._atm._carry_aux.update(seg_sw_net_sfc=z, seg_lw_net_sfc=z)
     return drv
 
