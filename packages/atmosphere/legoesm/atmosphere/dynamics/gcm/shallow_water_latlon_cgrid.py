@@ -37,10 +37,17 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.grids.operator_adapters import latlon_cgrid_operators
+from legoesm.grids.halo import (
+    get_halo_backend, get_mpi_topology, get_spmd_mesh,
+)
 from legoesm.grids.operators_latlon_cgrid import (
     get_band_mpi_cut_layout,
+    lat_ends_are_poles,
     pad_lon_cgrid,
 )
+from legoesm.parallel.latlon_mpi import LatLon2DLayout
+from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+from legoesm.parallel.reductions import global_sum_mpi
 from legoesm.core.williamson_sw_analytic import (
     W5_H0_M,
     W5_UBAR_MS,
@@ -158,6 +165,100 @@ def latlon_vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
     return jnp.concatenate([-pole, f, pole], axis=0)
 
 
+def latlon_pole_end_masks(grid: LatLonGrid):
+    """``(south, north)`` booleans: is this array's end v-face row a
+    GEOGRAPHIC pole?  Both the backend says the end is a physical lat end
+    (serial / pole-owning MPI band / SPMD end band -- never an interior cut)
+    AND the geometry puts it at the pole (``cos lat_v`` ~ 0; regional and
+    Cartesian beta-plane walls are not poles)."""
+    south = grid.cos_lat_v[0] < _POLE_COS_TOL
+    north = grid.cos_lat_v[-1] < _POLE_COS_TOL
+    ends = spmd_pole_end_masks()
+    if ends is None:
+        ends = lat_ends_are_poles()
+    return south & ends[0], north & ends[1]
+
+
+# cos(lat_v) below this marks a v-face row at a geographic pole
+# (compute_v_face_coords clamps the pole value to 1e-10).
+_POLE_COS_TOL = 1e-6
+
+
+def latlon_pole_cell_v(v_c, v, grid: LatLonGrid):
+    """Cell-row v from lat-face v, ``v_c`` = plain face mean.
+
+    On the pole-adjacent rows the polar v-face has zero length, so its wall
+    v=0 is not a value -- the plain mean halves v there (spurious f*v and KE
+    gradient under cross-polar flow).  Extrapolate v to the cell-centre
+    latitude from the two nearest real faces instead (2nd order); other rows
+    unchanged.  Used for the KE and for v at u-faces (Coriolis).
+    The stencil needs two REAL faces per pole; where the local tile cannot
+    supply them (a one-row pole tile, or a two-row grid whose second face is
+    the other pole's wall) the single nearest real face is used (1st order).
+    Never raises, so no rank-local refusal can desynchronise a collective."""
+    v_c, v = jnp.asarray(v_c), jnp.asarray(v)
+    pole_s, pole_n = latlon_pole_end_masks(grid)
+    if v.shape[0] < 3:
+        v_s, v_n = v[1], v[0]
+    else:
+        lat, lat_v = grid.lat, grid.lat_v
+        v_s = v[1] + (v[1] - v[2]) * ((lat_v[1] - lat[0]) / (lat_v[2] - lat_v[1]))
+        v_n = v[-2] + (v[-2] - v[-3]) * ((lat[-1] - lat_v[-2]) / (lat_v[-2] - lat_v[-3]))
+        if v.shape[0] == 3:   # second face is the opposite end's face
+            v_s = jnp.where(pole_n, v[1], v_s)
+            v_n = jnp.where(pole_s, v[1], v_n)
+    v_c = v_c.at[0].set(jnp.where(pole_s, v_s, v_c[0]))
+    return v_c.at[-1].set(jnp.where(pole_n, v_n, v_c[-1]))
+
+
+def _lon_ring_sum(x):
+    """Complete a per-rank partial LONGITUDE sum over the whole circle.
+
+    Local / lat-band: identity.  SPMD ``("lat", "lon")`` mesh: ``psum`` over
+    ``"lon"``.  2-D MPI with ``proc_lon > 1``: each rank writes its partial
+    into its lat-band slot and one AD-safe ``global_sum_mpi`` completes every
+    band's row sum (no sub-communicator needed)."""
+    backend = get_halo_backend()
+    if backend == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is not None and "lon" in tuple(
+                getattr(mesh, "axis_names", ())):
+            return jax.lax.psum(x, "lon")
+    elif backend == "mpi":
+        topo = get_mpi_topology()
+        if isinstance(topo, LatLon2DLayout) and topo.proc_lon > 1:
+            slots = jnp.zeros((topo.proc_lat,) + x.shape, x.dtype)
+            return global_sum_mpi(slots.at[topo.proc_row].set(x))[topo.proc_row]
+    return x
+
+
+def _pole_cap_vorticity(zeta, u, grid):
+    """Overwrite the geographic-pole vertex rows of ``zeta`` with the
+    polar-cap Stokes vorticity (see ``absolute_vorticity_coriolis``)."""
+    # Per-rank partial sums of u over the owned u-faces (drop the wrap
+    # column) and the face count, both completed over the longitude circle.
+    sums = _lon_ring_sum(jnp.stack([
+        jnp.sum(u[0, :-1], axis=0), jnp.sum(u[-1, :-1], axis=0),
+        jnp.full(u.shape[2:], u.shape[1] - 1, u.dtype),
+    ]))
+    u_s, u_n = sums[0] / sums[2], sums[1] / sums[2]   # zonal-mean pole-row u
+    pole_s, pole_n = latlon_pole_end_masks(grid)
+    # Stokes: zeta = circulation / cap area, cap from the pole to the first
+    # cell-centre row at angular distance d:  (-+ u R sin d 2pi) /
+    # (R^2 2pi (1 - cos d)),  1 - cos d = 2 sin^2(d/2)  (fp32-safe near the
+    # pole).  Inactive ends get a unit denominator (no inf/NaN, finite grads).
+    d_s = grid.lat[0] + 0.5 * jnp.pi
+    d_n = 0.5 * jnp.pi - grid.lat[-1]
+    den_s = jnp.where(pole_s, 2.0 * jnp.sin(0.5 * d_s) ** 2, 1.0)
+    den_n = jnp.where(pole_n, 2.0 * jnp.sin(0.5 * d_n) ** 2, 1.0)
+    z_s = -u_s * grid.cos_lat[0] / (grid.radius * den_s)
+    z_n = u_n * grid.cos_lat[-1] / (grid.radius * den_n)
+    zeta = zeta.at[0].set(jnp.where(
+        pole_s, jnp.broadcast_to(z_s, zeta[0].shape).astype(zeta.dtype), zeta[0]))
+    return zeta.at[-1].set(jnp.where(
+        pole_n, jnp.broadcast_to(z_n, zeta[-1].shape).astype(zeta.dtype), zeta[-1]))
+
+
 def absolute_vorticity_coriolis(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -208,7 +309,6 @@ def absolute_vorticity_coriolis(
     # ``(south_mask, north_mask)`` traced booleans inside the shard_map, or None
     # for serial/MPI/cube (those paths keep their static branch — additive).
     # Mirrors curl_vertex_cgrid's SPMD pole handling.
-    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
     _spmd_pm = spmd_pole_end_masks()
     _rotated = latlon_coriolis_is_rotated(grid)
 
@@ -222,6 +322,13 @@ def absolute_vorticity_coriolis(
         u, v, u_ext=u_lat_pad,
         lat_pad_pole=lat_pad_pole, cos_lat_pad=cos_lat_pad,
     )  # (n_lat+1, n_lon+1[, nlev])
+    # Pole vertex rows: the curl leaves the free-slip WALL value 0 there, but
+    # the pole is an interior point of the sphere.  Use Stokes over the polar
+    # cap -- the zonal sum of the pole-row wedge circulations -u dx (south) /
+    # +u dx (north) over the cap area -- so cross-polar flow sees its real
+    # relative vorticity.  Applied only where the end v-face is a true pole
+    # (cos lat_v ~ 0); interior band cuts and regional walls are untouched.
+    zeta = _pole_cap_vorticity(zeta, u, grid)
 
     # --- Planetary vorticity at vertices ---
     lat = grid.lat  # cell-center latitudes
@@ -314,7 +421,16 @@ def absolute_vorticity_coriolis(
     v_pad = pad_lon_cgrid(v, halo=1)
     ve = v_pad[:, 1:]    # cell j   bordering u-face j
     vw = v_pad[:, :-1]   # cell j-1 bordering u-face j
-    v_at_u = 0.25 * (ve[:-1] + ve[1:] + vw[:-1] + vw[1:])  # (n_lat, n_lon+1)
+    v_at_u = jnp.asarray(0.25 * (ve[:-1] + ve[1:] + vw[:-1] + vw[1:]))  # (n_lat, n_lon+1)
+    # Pole-adjacent rows: the polar v-face has zero length, so its wall v=0
+    # is not a value -- averaging it in halves v (spurious f*v/2 under
+    # cross-polar flow).  Use v extrapolated from the real faces there;
+    # other rows unchanged.
+    pole_s, pole_n = latlon_pole_end_masks(grid)
+    v_ext = 0.5 * (latlon_pole_cell_v(0.5 * (ve[:-1] + ve[1:]), ve, grid)
+                   + latlon_pole_cell_v(0.5 * (vw[:-1] + vw[1:]), vw, grid))
+    v_at_u = v_at_u.at[0].set(jnp.where(pole_s, v_ext[0], v_at_u[0]))
+    v_at_u = v_at_u.at[-1].set(jnp.where(pole_n, v_ext[-1], v_at_u[-1]))
 
     # --- Average η to v-faces ---
     # v-face[i, j] is flanked by vertex[i, j] (west) and vertex[i, j+1] (east)

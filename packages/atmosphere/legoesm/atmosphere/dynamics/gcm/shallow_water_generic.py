@@ -40,7 +40,7 @@ from legoesm.grids.operator_adapters import (
     mpas_neighbour_operators,
     rbffd_operators,
 )
-from legoesm.grids.operators_latlon_cgrid import kinetic_energy_cgrid
+from legoesm.grids.operators_latlon_cgrid import cell_winds_cgrid, kinetic_energy_cgrid  # noqa: F401 (re-exported)
 
 Edge = tuple[jax.Array, ...]
 
@@ -80,6 +80,7 @@ def latlon_sw_operators(grid: Any, config: Any, dt: Any = None) -> SWOperators:
     Coriolis, optional del-2 / del-4 viscosity, polar wall on v)."""
     from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         absolute_vorticity_coriolis,
+        latlon_pole_cell_v,
         nu_del4_row_profiles,
     )
     from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
@@ -130,8 +131,12 @@ def latlon_sw_operators(grid: Any, config: Any, dt: Any = None) -> SWOperators:
         # never see polar v feeding divergence/Coriolis.
         return (dvel[0], jnp.pad(dvel[1][1:-1, :], ((1, 1), (0, 0))))
 
-    return SWOperators(grid_ops, mass_tendency,
-                       lambda vel: kinetic_energy_cgrid(vel[0], vel[1]),
+    def kinetic_energy(vel):
+        # pole rows: v extrapolated from real faces, not the wall v=0
+        u_c, v_c = cell_winds_cgrid(vel[0], vel[1])
+        return 0.5 * (u_c**2 + latlon_pole_cell_v(v_c, vel[1], grid)**2)
+
+    return SWOperators(grid_ops, mass_tendency, kinetic_energy,
                        vorticity_term, dissipation, boundary)
 
 

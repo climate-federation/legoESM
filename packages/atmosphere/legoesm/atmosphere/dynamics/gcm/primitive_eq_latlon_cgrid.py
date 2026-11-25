@@ -59,6 +59,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import (
 )
 from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
+    latlon_pole_cell_v,
     nu_del4_row_profiles,
 )
 from legoesm.core.operators_fv_latlon_3d import (
@@ -758,7 +759,8 @@ def latlon_legacy_pe_tendencies(
     # --- 3. KE at cell centres from C-grid face velocities ---
     u_c = _face_to_cell_u(u)
     v_c = _face_to_cell_v(v)
-    KE = 0.5 * (u_c**2 + v_c**2)
+    v_ke = latlon_pole_cell_v(v_c, v, grid)   # pole rows: no wall-v=0 sample
+    KE = 0.5 * (u_c**2 + v_ke**2)
 
     # --- 4. Bernoulli function B = Φ + KE ---
     B = Phi + KE

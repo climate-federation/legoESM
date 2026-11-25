@@ -300,6 +300,7 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
     from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         absolute_vorticity_coriolis,
         latlon_coriolis_is_rotated,
+        latlon_pole_cell_v,
         latlon_vertex_coriolis,
     )
     from legoesm.core.conservation import zero_mean_tendency
@@ -308,7 +309,6 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
         cell_winds_cgrid,
         interp_cell_to_uface,
         interp_cell_to_vface_halo,
-        kinetic_energy_cgrid,
     )
 
     gops_ll = latlon_sw_grid_operators(grid)
@@ -375,7 +375,8 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
     as83 = vertical_form != "sb81_theta"
     vorticity_term = vorticity_term_energy if as83 else vorticity_term_current
     kinetic_energy = (kinetic_energy_dual if as83
-                      else (lambda vel: kinetic_energy_cgrid(vel[0], vel[1])))
+                      else (lambda vel: 0.5 * (cell_winds_cgrid(*vel)[0] ** 2 + latlon_pole_cell_v(
+                          cell_winds_cgrid(*vel)[1], vel[1], grid) ** 2)))
 
     def v_dot_grad_L(ctx):
         u_c, v_c = cell_winds_cgrid(*ctx["vel"])
