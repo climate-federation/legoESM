@@ -501,8 +501,10 @@ def main(argv=None) -> int:
             canopy=z if L.W_canopy is None else _np(L.W_canopy).reshape(-1),
             h_ice=_np(st.h_ice).reshape(-1),
             conc=_np(st.concentration).reshape(-1),
+            # zeros, not NaN, under the 3-D ocean: the NaN trap reads these
+            # arrays (C_mix is NaN there, so the heat row stays N/A)
             T_slab=(_np(d._ocean_state.T_sfc).reshape(-1) if slab_ocean
-                    else np.full(n, np.nan)))
+                    else np.zeros(n)))
 
     n0 = len(MPAS_SFC_DIAG_BASE_KEYS)
     SL = {key: i for i, key in enumerate(MPAS_SFC_DIAG_BASE_KEYS)}
