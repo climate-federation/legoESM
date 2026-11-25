@@ -5285,18 +5285,19 @@ class ExperimentConfig(NamedTuple):
             #     coupled climate spin-up grows its own circulation from the T
             #     gradient (no balanced-jet IC needed, unlike a baroclinic-wave
             #     test).  See ModelDriver._apply_standard_atmosphere_ic.
+            #   * mpas: T / p_s overlay applied, jet skipped (edge-normal u);
+            #     refused at setup over non-flat topography (flat seed p_s).
             # Still not wired (fail early, before setup):
             #   * gaussian/spectral: temperature lives in spectral space (T_hat),
-            #     no grid-space T Field;
-            #   * mpas: not wired.
+            #     no grid-space T Field.
             _gt_std = normalize_grid_type(self.grid.grid_type)
-            if _gt_std not in ("latlon", "cubed_sphere"):
+            if _gt_std not in ("latlon", "cubed_sphere", "mpas"):
                 errors.append(
                     f"ic='standard' is implemented for grid_type "
-                    f"'latlon' and 'cubed_sphere'; got "
+                    f"'latlon', 'cubed_sphere' and 'mpas'; got "
                     f"grid_type={self.grid.grid_type!r} "
                     f"(discretization={self.dycore.discretization!r}). "
-                    f"Use ic='default', or ic='era5' for spectral/mpas."
+                    f"Use ic='default', or ic='era5' for spectral."
                 )
             # T_init is the equator surface temperature; the pole is
             # T_init - 40 K (StandardAtmosphereConfig.equator_pole_delta_K). A

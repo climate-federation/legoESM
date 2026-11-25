@@ -39,6 +39,7 @@ def test_deck_builds(deck, tmp_path):
     assert c.atm_owns_surface and c.land_mode == "none" and c.ocean_mode == "dynamic"
     assert a.use_multilayer_land and a.gravity_wave_drag == "none" and not a.unfused_radiation
     assert a.zm_land_fraction == ("none" if shape == "aquaplanet" else "required")
+    assert a.ic == "standard" and a.T_init == 300.0
 
 
 def test_atmosphere_owned_land_keeps_its_rows_and_mesh_alias_is_eligible(tmp_path):

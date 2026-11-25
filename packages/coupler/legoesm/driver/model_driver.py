@@ -4270,17 +4270,19 @@ class ModelDriver:
         # T / p_s overlay below is GRID-AGNOSTIC (standard_atmosphere_temperature
         # accepts any lat shape); only the balanced zonal jet (step 5) is
         # lat-lon-specific (the A-grid u is geographic-east) and is skipped on
-        # the cube.  spectral/MPAS are rejected in ExperimentConfig.validate_strict
+        # the cube and MPAS.  spectral is rejected in ExperimentConfig.validate_strict
         # (no grid-space T Field), so the else here is defensive.
         if gt == "latlon":
             lat_h = self.grid.lat2d                   # (n_lat, n_lon)
         elif gt == "cubed_sphere":
             lat_h = self.grid.lat                     # (6, n, n) geographic lat [rad]
+        elif gt == "mpas":
+            lat_h = self.grid.latCell                 # (nCells,) geographic lat [rad]
         else:
             raise NotImplementedError(
                 f"ic='standard' not yet wired for grid_type={gt!r} "
-                f"(discretization={cfg.dycore.discretization!r}); 'latlon' and "
-                "'cubed_sphere' are supported. Use ic='default' or 'era5'."
+                f"(discretization={cfg.dycore.discretization!r}); 'latlon', "
+                "'cubed_sphere' and 'mpas' are supported. Use ic='default' or 'era5'."
             )
 
         sa_cfg = StandardAtmosphereConfig(T_sfc_equator_K=cfg.T_init)
@@ -4298,6 +4300,15 @@ class ModelDriver:
         #     standard surface temperature, p_s = p0*exp(-phis/(R_d*T_sfc)),
         #     as a relative correction (exact no-op where phis == 0).
         phis = self.state.phis.data
+        if gt == "mpas" and bool(jnp.any(phis != 0)):
+            # The MPAS seed p_s is deliberately FLAT (see _init_state), so the
+            # relative correction below, which assumes a seed reduced against
+            # T_init, does not apply.
+            raise NotImplementedError(
+                "ic='standard' on grid_type='mpas' requires flat topography "
+                "(phis == 0 everywhere): the MPAS seed surface pressure is not "
+                "reduced over terrain. Use ic='default' or 'era5'."
+            )
         p_s_old = self.state.p_s.data
         p_s_new = p_s_old * jnp.exp(
             -phis / constants.R_d * (1.0 / T_sfc_std - 1.0 / cfg.T_init)
@@ -4349,7 +4360,7 @@ class ModelDriver:
         else:
             logger.info(
                 "  ic='standard' on %s: applied realistic T + p_s; balanced "
-                "zonal jet skipped (cube-local winds need grid-angle rotation) "
+                "zonal jet skipped (cube-local / edge-normal winds need rotation) "
                 "— circulation spins up from the T gradient.", gt,
             )
 

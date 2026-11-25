@@ -359,6 +359,17 @@ class TestDriverStandardIC:
         with pytest.raises(ValueError, match="grid_type"):
             cfg.validate_strict()
 
+    def test_standard_accepted_for_mpas(self):
+        from legoesm.driver.config import (
+            ExperimentConfig, GridConfig, DycoreConfig,
+        )
+        cfg = ExperimentConfig(
+            grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+            dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+            ic="standard",
+        )
+        cfg.validate_strict()  # must not raise
+
     def test_standard_accepted_for_latlon(self):
         from legoesm.driver.config import (
             ExperimentConfig, GridConfig, DycoreConfig,
@@ -395,3 +406,42 @@ class TestDriverStandardIC:
             d2.state.p_s.data, d2.sigma.dsigma)
         # Uniform-300 K default holds far more column water vapour.
         assert float(jnp.mean(cwv_def)) > 2.0 * float(jnp.mean(cwv_std))
+
+
+class TestDriverStandardICMPAS:
+    """ic='standard' on the MPAS Voronoi grid: T / p_s overlay, winds at rest."""
+
+    @pytest.fixture(scope="class")
+    def drv(self):
+        from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = ExperimentConfig(
+            grid=GridConfig(grid_type="mpas", resolution=2, nlev=8,
+                            vertical_coord="hybrid"),
+            dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+            dataset="analytical", radiation="gray", ic="standard",
+            precision="fp64", distributed=False,
+        )
+        cfg.validate_strict()
+        d = ModelDriver(cfg, output_dir=tempfile.mkdtemp(prefix="std_ic_mpas_"))
+        d.setup()
+        return d
+
+    def test_realistic_t_cwv_and_rest_winds(self, drv):
+        T = np.asarray(drv.state.T.data)                  # (nCells, nlev)
+        lat = np.degrees(np.asarray(drv.grid.latCell))
+        assert T.shape == (lat.size, 8)
+        eq = T[np.abs(lat) < 15.0, -1].mean()
+        pole = T[np.abs(lat) > 70.0, -1].mean()
+        assert eq > pole + 10.0
+        assert T.min() < 230.0
+        cwv = column_water_vapor(drv.tracers["q_v"], drv.state.p_s.data,
+                                 drv.sigma.dsigma)
+        assert 5.0 < float(jnp.mean(cwv)) < 40.0
+        assert float(jnp.max(jnp.abs(drv.state.u.data))) == 0.0
+
+    def test_refused_over_topography(self, drv):
+        drv.state = drv.state._replace(
+            phis=drv.state.phis.replace(data=jnp.ones_like(drv.state.phis.data)))
+        with pytest.raises(NotImplementedError, match="flat topography"):
+            drv._apply_standard_atmosphere_ic()
