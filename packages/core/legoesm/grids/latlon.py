@@ -100,6 +100,13 @@ class LatLonGrid(NamedTuple):
     # S = -cos(lon) cos(lat) sin(alpha) + sin(lat) cos(alpha)).  Appended with
     # a default; ``0.0`` keeps every existing path bit-identical.
     coriolis_alpha: float = 0.0
+    # True only for a GLOBAL grid whose outermost v-faces are the geographic
+    # poles (set by ``create_latlon_grid``).  Operators that treat the pole
+    # as an interior point of the sphere (Stokes polar-cap vorticity, pole-row
+    # v estimate) require it, so a regional / Mercator / Cartesian wall can
+    # never be mistaken for a pole however close to 90 deg it sits.  Appended
+    # with a default (False: no pole treatment).
+    global_poles: bool = False
 
     # ------------------------------------------------------------------
     # GridProtocol properties
@@ -216,7 +223,7 @@ def create_latlon_grid(
     grid = build_uniform_latlon_grid_from_axes(
         lat=lat, lon=lon, dlat=dlat, dlon=dlon,
         radius=radius, omega=omega, dtype=dtype,
-    )
+    )._replace(global_poles=True)
     if coriolis_alpha != 0.0:
         # Rotated planet (DCMIP 2008 rotated tests): cell-centre f here; the
         # vertex planetary vorticity is rebuilt by ``latlon_vertex_coriolis``.

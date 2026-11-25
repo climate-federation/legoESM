@@ -80,7 +80,7 @@ def latlon_sw_operators(grid: Any, config: Any, dt: Any = None) -> SWOperators:
     Coriolis, optional del-2 / del-4 viscosity, polar wall on v)."""
     from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         absolute_vorticity_coriolis,
-        latlon_pole_cell_v,
+        latlon_cell_ke,
         nu_del4_row_profiles,
     )
     from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
@@ -133,8 +133,7 @@ def latlon_sw_operators(grid: Any, config: Any, dt: Any = None) -> SWOperators:
 
     def kinetic_energy(vel):
         # pole rows: v extrapolated from real faces, not the wall v=0
-        u_c, v_c = cell_winds_cgrid(vel[0], vel[1])
-        return 0.5 * (u_c**2 + latlon_pole_cell_v(v_c, vel[1], grid)**2)
+        return latlon_cell_ke(*cell_winds_cgrid(vel[0], vel[1]), vel[1], grid)
 
     return SWOperators(grid_ops, mass_tendency, kinetic_energy,
                        vorticity_term, dissipation, boundary)

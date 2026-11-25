@@ -37,6 +37,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.grids.operator_adapters import latlon_cgrid_operators
+from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
 from legoesm.grids.halo import (
     get_halo_backend, get_mpi_topology, get_spmd_mesh,
 )
@@ -45,7 +46,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     lat_ends_are_poles,
     pad_lon_cgrid,
 )
-from legoesm.parallel.latlon_mpi import LatLon2DLayout
+from legoesm.parallel.latlon_mpi import LatLon2DLayout, LatLonBandLayout
 from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
 from legoesm.parallel.reductions import global_sum_mpi
 from legoesm.core.williamson_sw_analytic import (
@@ -167,12 +168,17 @@ def latlon_vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
 
 def latlon_pole_end_masks(grid: LatLonGrid):
     """``(south, north)`` booleans: is this array's end v-face row a
-    GEOGRAPHIC pole?  Both the backend says the end is a physical lat end
-    (serial / pole-owning MPI band / SPMD end band -- never an interior cut)
-    AND the geometry puts it at the pole (``cos lat_v`` ~ 0; regional and
-    Cartesian beta-plane walls are not poles)."""
-    south = grid.cos_lat_v[0] < _POLE_COS_TOL
-    north = grid.cos_lat_v[-1] < _POLE_COS_TOL
+    GEOGRAPHIC pole?  Requires all three: the grid is a global pole-to-pole
+    grid (``grid.global_poles``), the backend says this end is the physical
+    end of the global domain (serial / pole-owning MPI band / SPMD end band --
+    never an interior cut), and the face sits at the pole (``cos lat_v`` ~ 0).
+    Regional, Mercator and Cartesian walls never match."""
+    flag = getattr(grid, "global_poles", False)
+    if flag is False:                      # static: not a global polar grid
+        return jnp.asarray(False), jnp.asarray(False)
+    flag = jnp.asarray(flag)               # True, or traced (grid as jit arg)
+    south = flag & (grid.cos_lat_v[0] < _POLE_COS_TOL)
+    north = flag & (grid.cos_lat_v[-1] < _POLE_COS_TOL)
     ends = spmd_pole_end_masks()
     if ends is None:
         ends = lat_ends_are_poles()
@@ -184,6 +190,31 @@ def latlon_pole_end_masks(grid: LatLonGrid):
 _POLE_COS_TOL = 1e-6
 
 
+def _thin_band_layout() -> bool:
+    """Static and identical on every rank: can some latitude tile of the
+    active MPI decomposition hold a single cell row?  (Then every rank joins
+    the extra v-face halo exchange, so the collective stays matched.)"""
+    if get_halo_backend() != "mpi":
+        return False
+    topo = get_mpi_topology()
+    if isinstance(topo, LatLon2DLayout):
+        n_bands = topo.proc_lat
+    elif isinstance(topo, LatLonBandLayout):
+        n_bands = topo.n_ranks
+    else:
+        return False
+    return topo.n_lat_global // n_bands < 2
+
+
+def _extrap_to_centre(v1, v2, l1, l2, lc, active):
+    """v at latitude ``lc`` linearly extrapolated from faces (l1, v1) and
+    (l2, v2); returns ``v1`` where the stencil is inactive or degenerate."""
+    ok = active & (jnp.cos(l2) >= _POLE_COS_TOL) & (l2 != l1)
+    w = jnp.where(ok, (l1 - lc) / jnp.where(ok, l2 - l1, 1.0), 0.0)
+    v2 = jnp.where(ok, v2, v1)      # an invalid sample never enters the sum
+    return v1 + (v1 - v2) * w.astype(v1.dtype)
+
+
 def latlon_pole_cell_v(v_c, v, grid: LatLonGrid):
     """Cell-row v from lat-face v, ``v_c`` = plain face mean.
 
@@ -192,23 +223,61 @@ def latlon_pole_cell_v(v_c, v, grid: LatLonGrid):
     gradient under cross-polar flow).  Extrapolate v to the cell-centre
     latitude from the two nearest real faces instead (2nd order); other rows
     unchanged.  Used for the KE and for v at u-faces (Coriolis).
-    The stencil needs two REAL faces per pole; where the local tile cannot
-    supply them (a one-row pole tile, or a two-row grid whose second face is
-    the other pole's wall) the single nearest real face is used (1st order).
-    Never raises, so no rank-local refusal can desynchronise a collective."""
+    A one-row pole tile fetches its second real face (and its latitude) from
+    the neighbouring tile through the lat halo, so the result does not depend
+    on the decomposition.  Only a two-row GLOBAL grid, whose second face is
+    the other pole's wall, falls back to the single real face.  Grids that
+    are not global pole-to-pole grids return ``v_c`` untouched (statically,
+    when ``global_poles`` is the stored Python bool; a grid passed as a
+    traced jit argument still returns the same values but stages the
+    pole-only exchanges)."""
     v_c, v = jnp.asarray(v_c), jnp.asarray(v)
+    if getattr(grid, "global_poles", False) is False:
+        return v_c          # static: no geographic pole, no extra halo traffic
     pole_s, pole_n = latlon_pole_end_masks(grid)
-    if v.shape[0] < 3:
-        v_s, v_n = v[1], v[0]
+    lat, lat_v = grid.lat, grid.lat_v
+    fetch = v.shape[0] == 2 or _thin_band_layout()
+    if fetch:
+        # v-face tiles share their end faces, so the neighbour's next real
+        # face is the north ghost of v[1:] and the south ghost of v[:-1]
+        # (cell-row-sized arrays, halo 1, so any tile size >= 1 row works).
+        v2s_, l2s_ = (pad_with_pole_bc_lat(a[1:], halo=1)[-1] for a in (v, lat_v))
+        v2n_, l2n_ = (pad_with_pole_bc_lat(a[:-1], halo=1)[0] for a in (v, lat_v))
+    if v.shape[0] == 2:
+        v2s, l2s, v2n, l2n = v2s_, l2s_, v2n_, l2n_
+        v1s, l1s, v1n, l1n = v[1], lat_v[1], v[0], lat_v[0]
     else:
-        lat, lat_v = grid.lat, grid.lat_v
-        v_s = v[1] + (v[1] - v[2]) * ((lat_v[1] - lat[0]) / (lat_v[2] - lat_v[1]))
-        v_n = v[-2] + (v[-2] - v[-3]) * ((lat[-1] - lat_v[-2]) / (lat_v[-2] - lat_v[-3]))
-        if v.shape[0] == 3:   # second face is the opposite end's face
-            v_s = jnp.where(pole_n, v[1], v_s)
-            v_n = jnp.where(pole_s, v[1], v_n)
+        v2s, l2s, v2n, l2n = v[2], lat_v[2], v[-3], lat_v[-3]
+        v1s, l1s, v1n, l1n = v[1], lat_v[1], v[-2], lat_v[-2]
+        if fetch:
+            # Wider tile in a thin layout: keep a zero-weight dependence on the
+            # fetched faces so this rank also enters the REVERSE-mode exchange
+            # that returns the thin neighbour's cotangent (no DCE mismatch).
+            # (non-finite ghosts, e.g. a NaN wall sample, are zeroed first).
+            def _dep(x):
+                return 0.0 * jnp.where(jnp.isfinite(x), x, 0.0)
+            v2s, l2s = v2s + _dep(v2s_), l2s + _dep(l2s_)
+            v2n, l2n = v2n + _dep(v2n_), l2n + _dep(l2n_)
+    # A second sample that is itself a pole face (two-row global grid, local
+    # or fetched through the halo) is a wall, not a value: use the single real
+    # face there.  Inactive stencils get a unit denominator BEFORE dividing
+    # (no inf/NaN in the forward value or the reverse-mode cotangent).
+    v_s = _extrap_to_centre(v1s, v2s, l1s, l2s, lat[0], pole_s)
+    v_n = _extrap_to_centre(v1n, v2n, l1n, l2n, lat[-1], pole_n)
+    if v.shape[0] == 2:   # a one-cell tile owning BOTH poles has no real face
+        both = pole_s & pole_n
+        pole_s, pole_n = pole_s & ~both, pole_n & ~both
+        v_c = jnp.where(both, jnp.zeros_like(v_c), v_c)   # v = 0: walls only
     v_c = v_c.at[0].set(jnp.where(pole_s, v_s, v_c[0]))
     return v_c.at[-1].set(jnp.where(pole_n, v_n, v_c[-1]))
+
+
+def latlon_cell_ke(u_c, v_c, v, grid: LatLonGrid):
+    """Cell-centre kinetic energy from cell winds ``(u_c, v_c)`` (plain face
+    means) and the lat-face ``v``: pole rows use :func:`latlon_pole_cell_v`.
+    The ONE KE used by the lat-lon legacy PE, generic PE (sb81_theta) and SW
+    cores."""
+    return 0.5 * (u_c**2 + latlon_pole_cell_v(v_c, v, grid)**2)
 
 
 def _lon_ring_sum(x):
@@ -235,6 +304,8 @@ def _lon_ring_sum(x):
 def _pole_cap_vorticity(zeta, u, grid):
     """Overwrite the geographic-pole vertex rows of ``zeta`` with the
     polar-cap Stokes vorticity (see ``absolute_vorticity_coriolis``)."""
+    if getattr(grid, "global_poles", False) is False:
+        return zeta         # static: no geographic pole, no lon reduction
     # Per-rank partial sums of u over the owned u-faces (drop the wrap
     # column) and the face count, both completed over the longitude circle.
     sums = _lon_ring_sum(jnp.stack([
