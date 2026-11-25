@@ -361,7 +361,11 @@ def test_two_wiggly_pole_to_pole_barriers_split_the_ocean(mesh, grid_kind, seed)
     g = create_latlon_grid(45, 90) if grid_kind == "latlon" else mesh
     rng = np.random.default_rng(seed)
     lat = np.linspace(-90.0, 90.0, 73)
-    lines = [(lat, c + np.cumsum(rng.normal(0.0, 1.5, lat.size))) for c in (0.0, 180.0)]
+    lines = []
+    for c in (0.0, 180.0):
+        lon = c + np.cumsum(rng.normal(0.0, 1.5, lat.size))
+        lon[0], lon[-1] = lon[1], lon[-2]   # a pole has no longitude of its own
+        lines.append((lat, lon))
     owners = geo.barrier_owners(g, lines)
     assert geo.barrier_gaps(g, owners) == 0
     wet = ~geo.closed_barrier_cells(g, owners, 1)
@@ -382,8 +386,11 @@ def test_land_tile_stamps_the_geography_file(tmp_path):
     from legoesm.driver.model_driver import build_multilayer_land_tile
     from legoesm.land.restart import HYDRAULICS_SOURCE_CLM_MAP, soil_hydraulics_stamp
     p = _gen(tmp_path, "aquaplanet")
-    tile = build_multilayer_land_tile(ExperimentConfig(geography=p),
-                                      np.zeros(2), np.zeros(2), None)
+    # simple_seb: the two-leaf canopy needs the harmonized surfdata, which a
+    # geography does not carry in this PR
+    tile = build_multilayer_land_tile(
+        ExperimentConfig(geography=p, land_surface_scheme="simple_seb"),
+        np.zeros(2), np.zeros(2), None)
     assert tile["surfdata_file"] == p
     st = soil_hydraulics_stamp(tile["cfg"].hydraulics.retention_curve,
                                HYDRAULICS_SOURCE_CLM_MAP, tile["surfdata_file"])
