@@ -54,9 +54,15 @@ def test_spectral_nh_conserves_dry_and_tracer_mass():
         return float(jnp.sum(wgt * rho)), float(jnp.sum(wgt * rq))
 
     d0, t0 = masses(s)
+    rq0 = sh_synthesis_3d(grid, s.tracers_hat.data[..., 0])
     for _ in range(20):
         s = model.step(s, 5.0)
     d1, t1 = masses(s)
+    # non-vacuous: the tracer field was actually transported (a frozen
+    # tracer would conserve its integral trivially)
+    moved = float(jnp.max(jnp.abs(sh_synthesis_3d(grid, s.tracers_hat.data[..., 0]) - rq0))
+                  / jnp.max(jnp.abs(rq0)))
+    assert moved > 1e-3, moved  # measured 0.082 relative after 20 steps
     assert abs(d1 / d0 - 1.0) < 1e-13
     leak = t1 / t0 - 1.0
     assert abs(leak) < 1e-13, leak
