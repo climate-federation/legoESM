@@ -28,8 +28,8 @@ or the surface is closed (``W`` identically zero there), so a closed
 boundary stays closed, else the top interface's mean (a uniform
 throughflow is kept); elsewhere the shift applies at every column, including columns where the
 caller's ``W`` was zero.  The matrix DCMIP 1-3 rows pass the flow restricted
-to ``h0 <= z <= z_top`` (``dcmip13_flow_fraction``), whose ``W`` vanishes
-at the top and the surface; a nonzero boundary ``W`` is an open boundary,
+to ``h0 <= z <= z_top`` (``dcmip13_flow_fraction``) on the Kent et al.
+(2014, App. B) hybrid levels, whose ``W`` vanishes at the top and the surface; a nonzero boundary ``W`` is an open boundary,
 where the tracer flux takes the adjacent layer's value.
 
 The tracer flux of the corrected air fluxes then keeps ``q = 1`` to
@@ -64,6 +64,37 @@ def _require_x64():
     if not jax.config.jax_enable_x64:
         raise ValueError("consistent mass fluxes close the continuity to "
                          "round-off in float64: enable JAX x64")
+
+
+def _layer_dp(sigma_coord, p_s):
+    """Steady layer air mass [Pa] (cells..., nlev) of surface pressure
+    ``p_s`` (cells...): ``p_s dsigma`` on a sigma coordinate, ``dA p_ref +
+    dB p_s`` (:func:`legoesm.grids.vertical.dp_from_hybrid`) on a hybrid
+    sigma-pressure one.  Float64."""
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate, dp_from_hybrid
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        from legoesm.grids.vertical import hybrid_min_valid_surface_pressure
+        # dp = dA p_ref + dB p_s > 0 only for p_s strictly above the shared
+        # threshold: refuse a collapsed/inverted layer
+        p_min = hybrid_min_valid_surface_pressure(
+            sigma_coord.A_half, sigma_coord.B_half, sigma_coord.p_ref)
+        dp = dp_from_hybrid(sigma_coord, p_s).astype(jnp.float64)
+        if not bool(jnp.all(jnp.isfinite(p_s)) and jnp.all(p_s > p_min)
+                    and jnp.all(jnp.isfinite(dp)) and jnp.all(dp > 0)):
+            raise ValueError(f"hybrid layer air mass dA p_ref + dB p_s must be strictly "
+                             f"positive: p_s must exceed {p_min:.6g} Pa")
+        return dp
+    return p_s[..., None] * jnp.asarray(np.asarray(sigma_coord.dsigma, np.float64))
+
+
+def _face_air_flux(sigma_coord, p_face, wind):
+    """``wind`` (faces..., nlev) times the layer air mass of the face surface
+    pressure ``p_face`` (faces...): sigma ``p_face wind dsigma`` (the
+    original operation order), hybrid ``wind (dA p_ref + dB p_face)``."""
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        return wind * _layer_dp(sigma_coord, p_face)
+    return p_face[..., None] * wind * jnp.asarray(np.asarray(sigma_coord.dsigma, np.float64))
 
 
 def _require_positive(p_s):
@@ -110,7 +141,10 @@ def van_leer_vertical_flux(q, w, sigma_coord):
     """Monotone van-Leer vertical tracer flux at the nlev+1 interfaces: ``w``
     times the upwind face value of the shared sigma reconstruction
     :func:`legoesm.grids.vertical.van_leer_face_values_sigma` (the lat-lon
-    1-3 row, codex vote: halves the donor-cell centroid drift); the top and
+    1-3 row, codex vote: halves the donor-cell centroid drift).  Its weights
+    are ratios of ``sigma_coord`` spacings: exact for a sigma column and for
+    the DCMIP 1-3 hybrid levels, whose pressure is affine in eta in every
+    column (``create_dcmip13_hybrid``); the top and
     surface take the adjacent layer's value (as
     :func:`donor_cell_vertical_flux`).  ``q`` (..., nlev, ntr)."""
     from legoesm.grids.vertical import van_leer_face_values_sigma
@@ -257,25 +291,24 @@ def consistent_mass_flux_latlon(grid, sigma_coord, wind_geo_fn, p_s, *, t=0.0,
     from legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon import (
         uface_coords, vface_coords)
     f64 = jnp.float64
-    dsig = jnp.asarray(np.asarray(sigma_coord.dsigma, np.float64))
     ps = jnp.asarray(np.asarray(p_s, np.float64))
     _require_positive(ps)
     lon_u, lat_u = uface_coords(grid)
     u_int = jnp.asarray(wind_geo_fn(t, lon_u, lat_u, sigma_coord)[0], f64)
     ps_u = 0.5 * (ps + jnp.roll(ps, 1, axis=1))
-    fu = ps_u[..., None] * u_int * dsig
+    fu = _face_air_flux(sigma_coord, ps_u, u_int)
     fu = jnp.concatenate([fu, fu[:, :1]], axis=1)
     lon_v, lat_v = vface_coords(grid)
     v_face = jnp.asarray(wind_geo_fn(t, lon_v, lat_v, sigma_coord)[1], f64)
     ps_v = 0.5 * (ps[1:] + ps[:-1])
-    fv_in = ps_v[..., None] * v_face[1:-1] * dsig
+    fv_in = _face_air_flux(sigma_coord, ps_v, v_face[1:-1])
     z = jnp.zeros_like(fv_in[:1])
     fv = jnp.concatenate([z, fv_in, z], axis=0)
     sd = np.asarray(wind_geo_fn(t, grid.lon2d, grid.lat2d, sigma_coord)[2], np.float64)
     w_raw = np.asarray(ps)[..., None] * sd
     w, wmean = _area_mean_removed(w_raw, grid.area)
     w = jnp.asarray(w)
-    dp = ps[..., None] * dsig
+    dp = _layer_dp(sigma_coord, ps)
     mf = PrescribedMassFlux(dp, (fu, fv), w, jnp.asarray(wmean))
     if refine == 0:
         return mf
@@ -331,10 +364,9 @@ def consistent_mass_flux_mpas(mesh, sigma_coord, u_edge, sigma_dot, p_s, *,
     ``ru``, as :func:`tracer_transport_mpas._mpas_stage_fluxes`)."""
     _require_x64()
     from legoesm.core.operators_voronoi import gradient_edge_3d
-    dsig = jnp.asarray(np.asarray(sigma_coord.dsigma, np.float64))
     ps = jnp.asarray(np.asarray(p_s, np.float64))
     _require_positive(ps)
-    dp = ps[:, None] * dsig
+    dp = _layer_dp(sigma_coord, ps)
     c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
     fm = jnp.asarray(u_edge, jnp.float64) * (0.5 * (dp[c1] + dp[c2]))
     w_raw = np.asarray(ps)[:, None] * np.asarray(sigma_dot, np.float64)
@@ -391,7 +423,7 @@ def consistent_mass_flux_spectral(grid, sigma_coord, wind_geo_fn, p_s, mask, *,
     ps = jnp.asarray(np.asarray(p_s, np.float64))
     p_t = sh_synthesis_3d(grid, mask[:, None] * sh_analysis_3d(grid, ps[..., None]))[..., 0]
     _require_positive(p_t)
-    dp = p_t[..., None] * dsig
+    dp = _layer_dp(sigma_coord, p_t)
     u, v, sd = wind_geo_fn(t, grid.lon2d, grid.lat2d, sigma_coord)
     cosl = grid.cos_lat[:, None, None]
     fu = dp * jnp.asarray(u, f64) * cosl

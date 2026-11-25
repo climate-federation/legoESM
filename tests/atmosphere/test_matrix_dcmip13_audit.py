@@ -15,11 +15,46 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 
-def _row(tmp_path, grid, res):
+def _row(tmp_path, grid, res, vert="hybrid"):
     from scripts.matrix.run_atmosphere_test_matrix import TestCase, run_dcmip_transport
-    tc = TestCase("hydrostatic", "dcmip_transport_13", grid, res, "sigma", 12, 1,
+    tc = TestCase("hydrostatic", "dcmip_transport_13", grid, res, vert, 12, 1,
                   {"test_num": 13})
     return run_dcmip_transport(tc, tmp_path, 0.05)
+
+
+def test_13_matrix_rows_use_the_kent_hybrid_levels():
+    """1-3 on lat-lon / MPAS / spectral runs the Kent et al. (2014, App. B)
+    hybrid levels; the cube 1-3 row and the 1-1/1-2 rows stay sigma."""
+    from scripts.matrix.run_atmosphere_test_matrix import TEST_MATRIX
+    vert = {(tc.case, tc.grid_type): tc.vertical_coord for tc in TEST_MATRIX
+            if tc.case.startswith("dcmip_transport_")}
+    for g in ("latlon", "icosahedral", "spectral"):
+        assert vert[("dcmip_transport_13", g)] == "hybrid"
+    assert vert[("dcmip_transport_13", "cubed_sphere")] == "sigma"
+    assert all(v == "sigma" for (c, _), v in vert.items() if c != "dcmip_transport_13")
+
+
+def test_vcoord_probe_override_leaves_dcmip_transport_rows(monkeypatch):
+    """The #1029 LEGOESM_MATRIX_VCOORD probe override does not relabel the
+    DCMIP transport rows (their coordinate is part of the test)."""
+    import scripts.matrix.run_atmosphere_test_matrix as M
+    monkeypatch.delenv("LEGOESM_MATRIX_VCOORD", raising=False)
+    base = {(tc.case, tc.grid_type): tc.vertical_coord for tc in M._build_test_matrix()}
+    for v in ("hybrid", "sigma"):
+        monkeypatch.setenv("LEGOESM_MATRIX_VCOORD", v)
+        got = {(tc.case, tc.grid_type): tc.vertical_coord for tc in M._build_test_matrix()}
+        assert all(got[k] == base[k] for k in got if k[0].startswith("dcmip_transport_"))
+        assert any(got[k] == v != base[k] for k in got)          # others still overridden
+
+
+def test_hybrid_refused_outside_the_13_flux_form_rows(tmp_path):
+    from scripts.matrix.run_atmosphere_test_matrix import TestCase, run_dcmip_transport
+    for case, tn, grid in (("dcmip_transport_11", 11, "latlon"),
+                           ("dcmip_transport_13", 13, "cubed_sphere")):
+        tc = TestCase("hydrostatic", case, grid, "C6" if grid == "cubed_sphere" else "18x36",
+                      "hybrid", 12, 1, {"test_num": tn})
+        with pytest.raises(ValueError, match="hybrid"):
+            run_dcmip_transport(tc, tmp_path, 0.05)
 
 
 def test_skip_rows_stay_out_of_cross_grid_comparisons(tmp_path):
@@ -33,10 +68,11 @@ def test_skip_rows_stay_out_of_cross_grid_comparisons(tmp_path):
     assert set(got) == {"latlon"}
 
 
+@pytest.mark.parametrize("vert", ["hybrid", "sigma"])
 @pytest.mark.parametrize("grid,res", [("latlon", "18x36"), ("spectral", "T10"),
                                       ("icosahedral", "ico2")])
-def test_13_rows_pass_the_conservation_criteria(tmp_path, grid, res):
-    status, _, notes = _row(tmp_path, grid, res)
+def test_13_rows_pass_the_conservation_criteria(tmp_path, grid, res, vert):
+    status, _, notes = _row(tmp_path, grid, res, vert)
     assert status == "PASS"
     assert "UNSUPPORTED" not in notes
     drift = float(re.search(r"air-mass closure drift ([0-9.e+-]+)", notes).group(1))
@@ -69,7 +105,7 @@ def test_13_spectral_full_row_passes_every_criterion(tmp_path):
     included (the lat-lon 72x144 and MPAS ico5 rows take 5-25 min; measured
     in the commit)."""
     from scripts.matrix.run_atmosphere_test_matrix import TestCase, run_dcmip_transport
-    tc = TestCase("hydrostatic", "dcmip_transport_13", "spectral", "T21", "sigma", 12, 1,
+    tc = TestCase("hydrostatic", "dcmip_transport_13", "spectral", "T21", "hybrid", 12, 1,
                   {"test_num": 13})
     status, _, notes = run_dcmip_transport(tc, tmp_path, 12.0)
     assert status == "PASS", notes
@@ -84,7 +120,7 @@ def test_13_full_period_without_terrain_crossing_fails(tmp_path, monkeypatch):
     qualifying shift; spectral T10, 144 steps)."""
     import scripts.matrix.run_atmosphere_test_matrix as M
     monkeypatch.setattr(M, "_DCMIP13_TERRAIN_MIN_M", 1.0e9)
-    tc = M.TestCase("hydrostatic", "dcmip_transport_13", "spectral", "T10", "sigma", 12, 1,
+    tc = M.TestCase("hydrostatic", "dcmip_transport_13", "spectral", "T10", "hybrid", 12, 1,
                     {"test_num": 13})
     status, _, notes = M.run_dcmip_transport(tc, tmp_path, 12.0)
     assert status == "FAIL", notes

@@ -144,11 +144,28 @@ class TracerAirMassState(NamedTuple):
 
 
 def air_mass_state(state: TracerState, p_s, sigma_coord: SigmaCoordinate) -> TracerAirMassState:
-    """Attach the layer air mass ``dp = p_s dsigma`` [Pa] of a sigma column
-    (``p_s`` [Pa], scalar or (nCells,)) to a :class:`TracerState`."""
+    """Attach the layer air mass ``dp = p_s dsigma`` [Pa] of a sigma column,
+    or ``dp = dA p_ref + dB p_s`` of a hybrid one (``p_s`` [Pa], scalar or
+    (nCells,)), to a :class:`TracerState`."""
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate, dp_from_hybrid
     q = state.tracers.data
     p_s = jnp.broadcast_to(jnp.asarray(p_s, q.dtype), q.shape[:1])
-    dp = p_s[:, None] * jnp.asarray(sigma_coord.dsigma, q.dtype)[None, :]
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        from legoesm.grids.vertical import hybrid_min_valid_surface_pressure
+        # dA p_ref + dB p_s > 0 only for p_s strictly above the shared
+        # threshold: refuse a collapsed/inverted layer.  Host check on
+        # concrete input (every caller initialises eagerly); traced input
+        # keeps the calculation traceable and is validated by its caller
+        p_min = hybrid_min_valid_surface_pressure(
+            sigma_coord.A_half, sigma_coord.B_half, sigma_coord.p_ref)
+        dp = dp_from_hybrid(sigma_coord, p_s).astype(q.dtype)
+        if not isinstance(dp, jax.core.Tracer) and not bool(
+                jnp.all(jnp.isfinite(p_s)) and jnp.all(p_s > p_min)
+                and jnp.all(jnp.isfinite(dp)) and jnp.all(dp > 0)):
+            raise ValueError(f"hybrid layer air mass dA p_ref + dB p_s must be strictly "
+                             f"positive: p_s must exceed {p_min:.6g} Pa")
+    else:
+        dp = p_s[:, None] * jnp.asarray(sigma_coord.dsigma, q.dtype)[None, :]
     return TracerAirMassState(
         tracers=state.tracers,
         air_mass=Field(data=dp, name="air_mass", dims=("cell", "level"), units="Pa"),

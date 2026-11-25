@@ -426,3 +426,264 @@ def test_van_leer_boundary_layers_donate_their_own_value(sc):
     w3 = jnp.asarray(np.random.default_rng(4).standard_normal((2, 4)))
     np.testing.assert_array_equal(cmf.van_leer_vertical_flux(q3, w3, sc),
                                   cmf.donor_cell_vertical_flux(q3, w3))
+
+
+# ----------------------------------------------------------------------------
+# DCMIP 1-3 on the Kent et al. (2014, App. B) hybrid levels (matrix 1-3 rows)
+# ----------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def hc():
+    from tests.test_cases.dcmip_transport import create_dcmip13_hybrid
+    return create_dcmip13_hybrid(NLEV)
+
+
+def test_dcmip13_hybrid_levels(hc, sc):
+    """B = (eta - eta_top)/(1 - eta_top), A = eta - B on the DCMIP eta levels:
+    flat lid at z_top (A = eta_top, B = 0), surface p = p_s, pressure affine in
+    eta in every column, and the coordinate-crossing flux B p_s V.grad(z_s)/H
+    (zero at the lid)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import dp_from_hybrid, pressure_from_hybrid
+    from tests.atmosphere.hydrostatic.test_cases.dcmip_transport import _ztop
+    eta_top = float(np.exp(-_ztop / _H))
+    np.testing.assert_allclose(np.asarray(hc.A_half[0]), eta_top, rtol=1e-15)
+    assert float(hc.B_half[0]) == 0.0 and float(hc.B_half[-1]) == 1.0
+    assert float(hc.A_half[-1]) == 0.0
+    np.testing.assert_allclose(np.asarray(hc.sigma_half), np.asarray(sc.sigma_half), rtol=1e-6)
+    # full levels: arithmetic interface means (Kent et al. 2014 eqs. 58-59)
+    for full, half in ((hc.A_full, hc.A_half), (hc.B_full, hc.B_half)):
+        np.testing.assert_array_equal(np.asarray(full),
+                                      0.5 * (np.asarray(half)[:-1] + np.asarray(half)[1:]))
+    g = create_latlon_grid(18, 36)
+    ps = _ps(g.lon2d, g.lat2d)
+    ph = np.asarray(pressure_from_hybrid(hc, ps, full=False))
+    np.testing.assert_allclose(ph[..., 0], _p0 * eta_top, rtol=1e-15)
+    np.testing.assert_allclose(ph[..., -1], np.asarray(ps), rtol=1e-15)
+    r = np.asarray(dp_from_hybrid(hc, ps)) / np.diff(np.asarray(hc.sigma_half))
+    np.testing.assert_allclose(r, r[..., :1] * np.ones_like(r), rtol=1e-13)
+    sd_h = np.asarray(dcmip13_wind_geo(0.0, g.lon2d, g.lat2d, hc)[2])
+    sd_s = np.asarray(dcmip13_wind_geo(0.0, g.lon2d, g.lat2d, sc)[2])
+    tc = sd_s[..., -1:] / np.asarray(sc.sigma_half[-1])          # V.grad(z_s)/H
+    np.testing.assert_allclose(sd_h, np.asarray(hc.B_half) * tc, rtol=1e-6, atol=1e-20)
+    assert np.all(sd_h[..., 0] == 0)
+
+
+def test_dcmip13_hybrid_flow_fraction(hc):
+    """Band h0 <= z <= z_top in pressure: frac = layer dp overlap / dp; the lid
+    is z_top so the flat columns keep every layer above h0 = 2 km."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import pressure_from_hybrid
+    from tests.atmosphere.hydrostatic.test_cases.dcmip_transport import _ztop
+    from tests.test_cases.dcmip_transport import dcmip13_flow_fraction
+    g = create_latlon_grid(18, 36)
+    frac, mh = (np.asarray(x) for x in dcmip13_flow_fraction(g.lon2d, g.lat2d, hc))
+    ph = np.asarray(pressure_from_hybrid(hc, _ps(g.lon2d, g.lat2d), full=False))
+    ov = np.diff(np.clip(ph, _p0 * np.exp(-_ztop / _H), _p0 * np.exp(-2000.0 / _H)), axis=-1)
+    np.testing.assert_allclose(frac, ov / np.diff(ph, axis=-1), rtol=0, atol=1e-14)
+    assert np.all(mh[..., 0] == 0) and np.all(mh[..., -1] == 0)
+    flat = np.asarray(_mountain_height(g.lon2d, g.lat2d)) == 0
+    np.testing.assert_allclose(frac[flat][:, :-2], 1.0, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(frac[flat][:, -2:], 0.0, rtol=0, atol=1e-12)
+    # interior interfaces: the crossing flux is cut exactly where z < h0 and
+    # kept unchanged where h0 <= z (and nonzero there over the terrain)
+    from tests.test_cases.dcmip_transport import dcmip13_wind_geo_banded
+    sd = np.asarray(dcmip13_wind_geo(0.0, g.lon2d, g.lat2d, hc)[2])
+    sdb = np.asarray(dcmip13_wind_geo_banded(0.0, g.lon2d, g.lat2d, hc)[2])
+    zh = -_H * np.log(ph / _p0)
+    below = (zh < 2000.0)[..., 1:-1]
+    assert np.count_nonzero(sd[..., 1:-1][below]) > 0
+    assert np.all(sdb[..., 1:-1][below] == 0)
+    above = ~below
+    assert np.count_nonzero(sd[..., 1:-1][above]) > 0
+    np.testing.assert_array_equal(sdb[..., 1:-1][above], sd[..., 1:-1][above])
+
+
+def test_dcmip13_hybrid_latlon_closed_and_conservative(hc):
+    """Banded 1-3 flow on the hybrid levels: dp = dA p0 + dB p_s, continuity
+    closed to round-off, no air through lid or surface, q = 1 kept, and
+    sum(area dp q) of a random tracer kept to round-off (RULE 0)."""
+    from legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon import (
+        TracerTransportLatLonModel)
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import dp_from_hybrid
+    from tests.test_cases.dcmip_transport import dcmip13_wind_geo_banded
+    g = create_latlon_grid(18, 36)
+    ps = _ps(g.lon2d, g.lat2d)
+    mf = cmf.consistent_mass_flux_latlon(g, hc, dcmip13_wind_geo_banded, ps)
+    np.testing.assert_allclose(np.asarray(mf.dp), np.asarray(dp_from_hybrid(hc, ps)), rtol=1e-15)
+    assert np.all(np.asarray(mf.w[..., 0]) == 0) and np.all(np.asarray(mf.w[..., -1]) == 0)
+    assert _rel(cmf.continuity_residual_latlon(mf, g), mf) < 1e-17
+    model = TracerTransportLatLonModel(g, hc, lambda *a: None, mass_flux=mf)
+    st = dcmip13_init_latlon(g, hc)
+    one = model.step(st._replace(tracers=st.tracers.replace(
+        data=jnp.ones_like(st.tracers.data, dtype=jnp.float64))), 600.0)
+    assert float(jnp.max(jnp.abs(one.tracers.data - 1.0))) < 1e-13
+    q = jnp.asarray(np.random.default_rng(3).random(st.tracers.data.shape))
+    s = st._replace(tracers=st.tracers.replace(data=q))
+    m0 = _mass(q, mf.dp, g.area)
+    for _ in range(5):
+        s = model.step(s, 600.0)
+    np.testing.assert_allclose(_mass(s.tracers.data, mf.dp, g.area), m0, rtol=1e-13)
+
+
+def test_dcmip13_hybrid_mpas_steady_air_and_mass(hc):
+    """MPAS: the state's air mass is the hybrid dp (air_mass_state), the
+    consistent fluxes keep it steady, q = 1 and sum(area dp q) to round-off."""
+    from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
+        TracerTransportMPASConfig, TracerTransportMPASModel)
+    from legoesm.grids.vertical import dp_from_hybrid
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from tests.test_cases.dcmip_transport import dcmip13_flow_fraction
+    m = create_voronoi_mesh(2)
+    ps = _ps(m.lonCell, m.latCell)
+    st = dcmip_air_mass_state_mpas(13, dcmip13_init_mpas(m, hc), m, hc)
+    np.testing.assert_allclose(np.asarray(st.air_mass.data),
+                               np.asarray(dp_from_hybrid(hc, ps)), rtol=1e-15)
+    ue, sd = dcmip_wind_mpas(13, 0.0, m, hc)
+    fe = dcmip13_flow_fraction(m.lonEdge, m.latEdge, hc)[0]
+    mc = dcmip13_flow_fraction(m.lonCell, m.latCell, hc)[1]
+    mf = cmf.consistent_mass_flux_mpas(m, hc, ue * fe, sd * mc, ps)
+    np.testing.assert_allclose(np.asarray(mf.dp), np.asarray(st.air_mass.data), rtol=1e-15)
+    assert _rel(cmf.continuity_residual_mpas(mf, m), mf) < 1e-17
+    assert np.all(np.asarray(mf.w[:, 0]) == 0) and np.all(np.asarray(mf.w[:, -1]) == 0)
+    cfg = TracerTransportMPASConfig(hyperdiff_coeff=0.0, time_integrator="mpas_rk3",
+                                    vertical_scheme="mpas_flux", horizontal_scheme="mpas_fct")
+    model = TracerTransportMPASModel(
+        m, hc, lambda t, mesh, s: dcmip_wind_mpas(13, t, mesh, s), cfg, mass_flux=mf)
+    one = model.step(st._replace(tracers=st.tracers.replace(data=jnp.ones_like(st.tracers.data))),
+                     600.0)
+    assert float(jnp.max(jnp.abs(one.tracers.data - 1.0))) < 1e-13
+    m0, s = _mass(st.tracers.data, st.air_mass.data, m.areaCell), st
+    for _ in range(4):
+        s = model.step(s, 600.0)
+    np.testing.assert_allclose(_mass(s.tracers.data, s.air_mass.data, m.areaCell), m0, rtol=1e-13)
+    np.testing.assert_allclose(np.asarray(s.air_mass.data), np.asarray(st.air_mass.data),
+                               rtol=1e-13)
+
+
+def test_dcmip13_hybrid_spectral_closed(hc):
+    """Spectral: dp = dA p0 + dB p_T (p_T the band projection), in-band
+    closure to round-off and q = 1 kept."""
+    from legoesm.atmosphere.dynamics.gcm.tracer_transport_spectral import (
+        SpectralTracerTransportModel, TracerTransportSpectralConfig)
+    from legoesm.grids.gaussian import create_gaussian_grid, dealiasing_mask
+    from tests.test_cases.dcmip_transport import dcmip13_wind_geo_banded
+    g = create_gaussian_grid(10)
+    mask = dealiasing_mask(g, 0.667)
+    mf = cmf.consistent_mass_flux_spectral(g, hc, dcmip13_wind_geo_banded,
+                                           _ps(g.lon2d, g.lat2d), mask)
+    from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
+    p_t = np.asarray(sh_synthesis_3d(g, mask[:, None] * sh_analysis_3d(
+        g, _ps(g.lon2d, g.lat2d)[..., None]))[..., 0])              # band-projected p_s
+    np.testing.assert_allclose(np.asarray(mf.dp), np.asarray(hc.dA) * _p0
+                               + np.asarray(hc.dB) * p_t[..., None], rtol=1e-12)
+    assert _rel(cmf.continuity_residual_spectral(mf, g, mask), mf) < 1e-17
+    model = SpectralTracerTransportModel(g, hc, None, TracerTransportSpectralConfig(),
+                                         mass_flux=mf)
+    q0 = dcmip13_init_latlon(g, hc).tracers.data.astype(jnp.float64)
+    st_u = model.state_from_grid(jnp.ones_like(q0))
+    assert float(jnp.max(jnp.abs(model.grid_values(model.step(st_u, 1800.0)) - 1.0))) < 1e-13
+
+
+def test_sigma_uncorrected_fluxes_keep_their_exact_expressions(sc):
+    """The hybrid generalisation leaves the sigma builders bit-identical:
+    lat-lon F0 = p_s,face u dsigma and dp = p_s dsigma (same operation
+    order), MPAS / spectral dp = p_s dsigma, exactly."""
+    from legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon import (
+        uface_coords, vface_coords)
+    from legoesm.grids.gaussian import create_gaussian_grid, dealiasing_mask
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    dsig = jnp.asarray(np.asarray(sc.dsigma, np.float64))
+    g = create_latlon_grid(18, 36)
+    ps = jnp.asarray(np.asarray(_ps(g.lon2d, g.lat2d), np.float64))   # the builder's cast
+    mf = cmf.consistent_mass_flux_latlon(g, sc, dcmip13_wind_geo, ps, refine=0)
+    lon_u, lat_u = uface_coords(g)
+    u = jnp.asarray(dcmip13_wind_geo(0.0, lon_u, lat_u, sc)[0], jnp.float64)
+    fu = 0.5 * (ps + jnp.roll(ps, 1, axis=1))[..., None] * u * dsig
+    np.testing.assert_array_equal(np.asarray(mf.flux_h[0][:, :-1]), np.asarray(fu))
+    lon_v, lat_v = vface_coords(g)
+    v = jnp.asarray(dcmip13_wind_geo(0.0, lon_v, lat_v, sc)[1], jnp.float64)
+    fv = 0.5 * (ps[1:] + ps[:-1])[..., None] * v[1:-1] * dsig
+    np.testing.assert_array_equal(np.asarray(mf.flux_h[1][1:-1]), np.asarray(fv))
+    np.testing.assert_array_equal(np.asarray(mf.dp), np.asarray(ps[..., None] * dsig))
+    m = create_voronoi_mesh(2)
+    ue, sd = dcmip_wind_mpas(13, 0.0, m, sc)
+    pm = jnp.asarray(np.asarray(_ps(m.lonCell, m.latCell), np.float64))
+    mm = cmf.consistent_mass_flux_mpas(m, sc, ue, sd, pm, refine=0)
+    np.testing.assert_array_equal(np.asarray(mm.dp), np.asarray(pm[:, None] * dsig))
+    from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
+    gg = create_gaussian_grid(10)
+    mask = jnp.asarray(dealiasing_mask(gg, 0.667), jnp.float64)
+    pg = jnp.asarray(np.asarray(_ps(gg.lon2d, gg.lat2d), np.float64))
+    ms = cmf.consistent_mass_flux_spectral(gg, sc, dcmip13_wind_geo, pg, mask, refine=0)
+    p_t = sh_synthesis_3d(gg, mask[:, None] * sh_analysis_3d(gg, pg[..., None]))[..., 0]
+    np.testing.assert_array_equal(np.asarray(ms.dp), np.asarray(p_t[..., None] * dsig))
+
+
+def test_dcmip13_hybrid_uncorrected_face_fluxes_and_dp_guard(hc):
+    """Hybrid lat-lon F0 = wind (dA p0 + dB p_s,face) on both face sets
+    (refine=0, before the continuity correction can mask a wrong mass), and
+    a surface pressure at or below the lid (dp <= 0) is refused."""
+    from legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon import (
+        uface_coords, vface_coords)
+    from legoesm.grids.latlon import create_latlon_grid
+    g = create_latlon_grid(18, 36)
+    ps = jnp.asarray(np.asarray(_ps(g.lon2d, g.lat2d), np.float64))
+    mf = cmf.consistent_mass_flux_latlon(g, hc, dcmip13_wind_geo, ps, refine=0)
+    dA, dB = np.asarray(hc.dA), np.asarray(hc.dB)
+    lon_u, lat_u = uface_coords(g)
+    u = np.asarray(dcmip13_wind_geo(0.0, lon_u, lat_u, hc)[0], np.float64)
+    pu = np.asarray(0.5 * (ps + jnp.roll(ps, 1, axis=1)))[..., None]
+    np.testing.assert_allclose(np.asarray(mf.flux_h[0][:, :-1]), u * (dA * _p0 + dB * pu),
+                               rtol=1e-14, atol=1e-9)
+    lon_v, lat_v = vface_coords(g)
+    v = np.asarray(dcmip13_wind_geo(0.0, lon_v, lat_v, hc)[1], np.float64)[1:-1]
+    pv = np.asarray(0.5 * (ps[1:] + ps[:-1]))[..., None]
+    np.testing.assert_allclose(np.asarray(mf.flux_h[1][1:-1]), v * (dA * _p0 + dB * pv),
+                               rtol=1e-14, atol=1e-9)
+    p_top = _p0 * float(hc.A_half[0])
+    for bad in (0.5 * p_top, p_top):                 # inverted / collapsed column
+        with pytest.raises(ValueError, match="strictly positive"):
+            cmf.consistent_mass_flux_latlon(g, hc, dcmip13_wind_geo,
+                                            ps.at[3, 4].set(bad), refine=0)
+
+
+def test_mpas_hybrid_air_mass_state_refuses_nonpositive_layers(hc):
+    """air_mass_state on the hybrid levels: p_s below the lid gives dp < 0,
+    refused at the initialisation entry point."""
+    from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import air_mass_state
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    m = create_voronoi_mesh(2)
+    st = dcmip13_init_mpas(m, hc)
+    st = st._replace(tracers=st.tracers.replace(data=st.tracers.data.astype(jnp.float64)))
+    air_mass_state(st, _ps(m.lonCell, m.latCell), hc)             # valid: no raise
+    for bad in (0.5, 1.0):                           # inverted / collapsed (p_s = p_top)
+        with pytest.raises(ValueError, match="strictly positive"):
+            air_mass_state(st, bad * _p0 * float(hc.A_half[0]), hc)
+    # traceable: under jit a valid p_s gives the eager air mass (to XLA
+    # fusion round-off)
+    pv = _ps(m.lonCell, m.latCell)
+    np.testing.assert_allclose(
+        np.asarray(jax.jit(lambda p: air_mass_state(st, p, hc).air_mass.data)(pv)),
+        np.asarray(air_mass_state(st, pv, hc).air_mass.data), rtol=1e-15)
+
+
+def test_hybrid_guards_check_the_stored_dp_itself(hc, monkeypatch):
+    """p_s above the threshold but a non-positive computed dp (forced) is
+    refused at both entry points: the dp predicate is independent."""
+    import legoesm.grids.vertical as V
+    from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import air_mass_state
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    real = V.dp_from_hybrid
+    monkeypatch.setattr(V, "dp_from_hybrid", lambda c, p: real(c, p).at[..., 0].set(0.0))
+    g = create_latlon_grid(18, 36)
+    with pytest.raises(ValueError, match="strictly positive"):
+        cmf.consistent_mass_flux_latlon(g, hc, dcmip13_wind_geo, _ps(g.lon2d, g.lat2d),
+                                        refine=0)
+    m = create_voronoi_mesh(2)
+    st = dcmip13_init_mpas(m, hc)
+    with pytest.raises(ValueError, match="strictly positive"):
+        air_mass_state(st, _ps(m.lonCell, m.latCell), hc)
