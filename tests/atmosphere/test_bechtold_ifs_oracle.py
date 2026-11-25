@@ -245,8 +245,10 @@ def test_wrapper_tunable_defaults_are_sucumf():
     tun = _tunables(BechtoldConfig(use_ifs_ascent=True, dx_m=_DX))
     # main #2253 (user 2026-10-28): the run's default no-supply shallow mode
     # is "zero", a recorded departure; the default smooth switches (RULE 5,
-    # #2281) another; everything else is sucumf's.
-    assert tun == IfsTunables()._replace(shallow_nosupply="zero", hard_switches=False)
+    # #2281) another; the corrected cloud-top humidity fixer (#2594, owner
+    # 2026-11-24) a third; everything else is sucumf's.
+    assert tun == IfsTunables()._replace(shallow_nosupply="zero", hard_switches=False,
+                                         openifs_cloud_top_fixer=False)
 
 
 def _wrapper_out(fix, cfg, g="L32"):
@@ -1489,3 +1491,117 @@ def test_switch_scales_probe_covers_every_class(fix):
     assert (M._W_MF, _ifs_smooth.IfsSmooth.max) == before
     assert set(scales) == set(probe._classes().values())
     assert all(np.isfinite(s) and s > 0.0 and n > 0 for s, n in scales.values())
+
+
+# --- #2594: cloud-top negative-humidity fixer (cumastrn.F90:1159-1180).  It
+# fires on no fixture column at the fixture step; STRESS column 0 at ten
+# times the step makes it fire in both switch modes (measured 2026-11-25:
+# the only firing case of step factors 1/3/10 x four upper-humidity
+# reductions x the 24 fixture columns).
+_FIRE_G, _FIRE_COL, _FIRE_DT = "STRESS", 0, 10.0
+_CUM_JIT = jax.jit(cumastrn, static_argnums=(0, 1), static_argnames=("tun",))
+
+
+def _fire_run(fix, hard, openifs, q_scale=1.0):
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    th = _thermo(fix, "L")
+    x = {k: v[_FIRE_COL:_FIRE_COL + 1] for k, v in _inputs(fix, _FIRE_G).items()}
+    x["q"] = x["q"] * q_scale
+    return _CUM_JIT(th, _FIRE_DT * float(fix["dt"]), qsat=satur_qsat(th, x["T"], x["p_full"]),
+                    tun=IfsTunables(hard_switches=hard, openifs_cloud_top_fixer=openifs), **x)
+
+
+def _cloudsc_water(fix, out):
+    """Column water as CLOUDSC receives it [kg m-2 s-1]: vapour tendency +
+    detrained liquid and ice (PLUDELI1/2, its species sources) + detrained
+    rain/snow + surface rain/snow; and the column drying (the scale)."""
+    dp = np.diff(fix[f"{_FIRE_G}_p_half"][_FIRE_COL:_FIRE_COL + 1], axis=1)
+    dq = np.asarray(out.ptenq) - fix[f"{_FIRE_G}_dq_other"][_FIRE_COL:_FIRE_COL + 1]
+    col = np.sum(dq * dp, axis=1) / _thermo(fix, "L").RG
+    li = np.asarray(out.pludeli)[:, 0] + np.asarray(out.pludeli)[:, 1]
+    res = (col + np.sum(li + np.asarray(out.psnde).sum(axis=1), axis=1)
+           + np.asarray(out.pmflxr)[:, -1] + np.asarray(out.pmflxs)[:, -1])
+    return float(res[0]), float(col[0])
+
+
+@pytest.mark.parametrize("hard", [True, False])
+def test_cloud_top_fixer_takes_the_deficit_from_the_condensate(fix, hard):
+    """#2594 (owner decision 2026-11-24): the default fixer REMOVES the
+    humidity deficit from the detrained condensate (OpenIFS adds it), keeps
+    PLUDELI1 + PLUDELI2 = PLUDE >= 0, and leaves more vapour than OpenIFS at
+    the fired levels."""
+    cor, ref = _fire_run(fix, hard, False), _fire_run(fix, hard, True)
+    pc, pr = np.asarray(cor.plude)[0], np.asarray(ref.plude)[0]
+    fired = pc != pr
+    assert np.any(fired)
+    assert np.all(pc[fired] < pr[fired]) and np.all(pc >= 0.0)
+    li = np.asarray(cor.pludeli)[0, 0] + np.asarray(cor.pludeli)[0, 1]
+    np.testing.assert_allclose(li, pc, rtol=1e-12, atol=1e-12 * np.max(pr))
+    lir = np.asarray(ref.pludeli)[0, 0] + np.asarray(ref.pludeli)[0, 1]
+    assert np.max(np.abs(lir - pr)) > 1e-3 * np.max(np.abs(pr - pc))
+    assert np.all(np.asarray(cor.ptenq)[0][fired] > np.asarray(ref.ptenq)[0][fired])
+
+
+@pytest.mark.parametrize("hard", [True, False])
+def test_cloud_top_fixer_water_closes_only_when_corrected(fix, hard):
+    """RULE 0, #2594: with the fixer firing, the water CLOUDSC receives
+    (vapour + PLUDELI liquid/ice + detrained and surface precipitation)
+    closes over the column to the oracle tolerance (fp64) in the default;
+    OpenIFS's form, which rescales PLUDELI by the updated PLUDE, does not."""
+    res_c, dry_c = _cloudsc_water(fix, _fire_run(fix, hard, False))
+    res_r, dry_r = _cloudsc_water(fix, _fire_run(fix, hard, True))
+    print("hard", hard, "water residual default / OpenIFS [kg m-2 s-1]", res_c, res_r)
+    assert abs(res_c) / abs(dry_c) <= _TOL
+    assert abs(res_r) / abs(dry_r) > 1.0e3 * _TOL
+
+
+@pytest.mark.parametrize("hard", [True, False])
+def test_cloud_top_fixer_energy_difference_is_the_openifs_mismatch(fix, hard):
+    """RULE 0, #2594: the column frozen-MSE residual of OpenIFS's fixer
+    exceeds the default's by exactly Lv x its PLUDELI-PLUDE mismatch (the
+    default's mismatch is 0), so the corrected fixer adds nothing to the
+    column energy budget.  (This column's absolute residual is #2571's.)"""
+    th = _thermo(fix, "L")
+    sl = slice(_FIRE_COL, _FIRE_COL + 1)
+    sub = {f"{_FIRE_G}_{k}": fix[f"{_FIRE_G}_{k}"][sl] for k in ("p_half", "dT_other", "dq_other")}
+    r, mism = {}, {}
+    for openifs in (False, True):
+        o = _fire_run(fix, hard, openifs)
+        r[openifs] = _mse_residual({**fix, **sub}, _FIRE_G, o.ptent, o.ptenq,
+                                   np.asarray(o.pmflxs)[:, -1], np.asarray(o.pludeli)[:, 1].sum(1),
+                                   np.asarray(o.psnde)[:, 1].sum(1), o.pvdiscu)[0]
+        mism[openifs] = float(np.sum(np.asarray(o.pludeli)[0, 0] + np.asarray(o.pludeli)[0, 1]
+                                     - np.asarray(o.plude)[0]))
+    print("hard", hard, "MSE residual default / OpenIFS [W m-2]", r[False], r[True])
+    # The fixer moves only PLUDE (vapour sink, Lv x -dPLUDE via the humidity
+    # tendency) and PLUDELI (heating RLVTT dLI1 + RLSTT dLI2, minus Lf dLI2
+    # in the budget; RLSTT - RLMLT = RLVTT), so the residual changes by
+    # RLVTT x d(LI1 + LI2 - PLUDE): the mismatch difference of the two forms.
+    assert th.RLSTT - th.RLMLT == pytest.approx(th.RLVTT, rel=1e-15)
+    assert mism[True] != 0.0
+    assert abs(mism[False]) <= 1e-12 * abs(mism[True])
+    np.testing.assert_allclose(r[True] - r[False], th.RLVTT * (mism[True] - mism[False]),
+                               rtol=1e-6)
+
+
+def test_cloud_top_fixer_gradient_at_default(fix):
+    """RULE 5 (d): reverse-mode derivative through the smooth corrected fixer
+    on the firing column agrees with finite differences (check_grads)."""
+    from jax.test_util import check_grads
+
+    def f(s):
+        o = _fire_run(fix, False, False, q_scale=s)
+        return jnp.sum(o.plude) + jnp.sum(o.ptenq)
+
+    one = jnp.asarray(1.0)
+    g = float(jax.grad(f)(one))
+    assert np.isfinite(g) and g != 0.0
+    check_grads(f, (one,), order=1, modes=("rev",), eps=1e-6, atol=1e-3 * abs(g), rtol=1e-3)
+
+
+def test_cloud_top_fixer_switch_is_validated():
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    with pytest.raises(ValueError, match="openifs_cloud_top_fixer"):
+        cumastrn(lego_thermo(), 1.0, *([None] * 22), tun=IfsTunables(openifs_cloud_top_fixer=1))

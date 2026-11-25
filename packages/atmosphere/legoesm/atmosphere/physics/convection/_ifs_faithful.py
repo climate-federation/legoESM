@@ -77,7 +77,7 @@ _TUNABLES = ("epsilon_deep", "delta_deep", "epsilon_shallow", "rprcon", "dnoprc"
              "cape_qadv_weight")
 # Main #2253's no-supply shallow mode and its smoothing width, by name.
 _NOSUPPLY_FIELDS = ("ifs_shallow_nosupply", "ifs_shallow_supply_width_w_m2",
-                    "ifs_hard_switches")
+                    "ifs_hard_switches", "ifs_openifs_cloud_top_fixer")
 _READ_FIELDS = ("use_ifs_ascent", "dx_m") + _TUNABLES + _NOSUPPLY_FIELDS
 
 
@@ -133,7 +133,8 @@ def _tunables(config):
         zdnoprc=config.dnoprc, rcapqadv=config.cape_qadv_weight,
         shallow_nosupply=config.ifs_shallow_nosupply,
         shallow_supply_width_w_m2=config.ifs_shallow_supply_width_w_m2,
-        hard_switches=config.ifs_hard_switches)
+        hard_switches=config.ifs_hard_switches,
+        openifs_cloud_top_fixer=config.ifs_openifs_cloud_top_fixer)
 
 
 def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, dt, config, shf_w_m2,
