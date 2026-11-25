@@ -29,7 +29,7 @@ from legoesm.core.field import Field
 from legoesm.core.state import TracerState
 from legoesm.core.operators import global_integral
 from legoesm.grids.cubed_sphere import CubedSphereGrid, rotate_winds_geo_to_grid
-from legoesm.grids.vertical import SigmaCoordinate
+from legoesm.grids.vertical import HybridSigmaPressureCoordinate, SigmaCoordinate
 from legoesm import constants
 
 # ============================================================================
@@ -96,6 +96,56 @@ def create_dcmip_sigma(n_levels: int) -> SigmaCoordinate:
         fractional_sigma=fractional_sigma,
         dsigma_full=dsigma_full,
     )
+
+
+def create_dcmip13_hybrid(n_levels: int) -> HybridSigmaPressureCoordinate:
+    """DCMIP 1-3 hybrid sigma-pressure levels of Kent, Ullrich & Jablonowski
+    (2014, QJRMS 140, Appendix B)::
+
+        p = A p0 + B p_s,   B(eta) = (eta - eta_top) / (1 - eta_top),
+        A(eta) = eta - B(eta),
+
+    at the interface eta levels of :func:`create_dcmip_sigma` (``eta =
+    exp(-z/H)``, geometric heights uniformly spaced in ``[0, z_top]``); the
+    full-level A and B are the arithmetic means of the adjacent interface
+    values (Kent et al. 2014, App. B eqs. 58-59, which note the resulting
+    departure from the geometric mid-heights; the
+    :func:`~legoesm.grids.vertical.create_hybrid_coordinate` convention).
+    The top interface is the flat pressure surface ``p_top = p0 eta_top``
+    (``z = z_top`` everywhere, B = 0), the surface ``p = p_s`` (A = 0, B =
+    1).  ``p - p_top = (eta - eta_top)(p_s - p_top)/(1 - eta_top)`` is affine
+    in eta in every column, so ``dp`` and the full-level spacings are the
+    eta ones scaled per column (ratio-based vertical reconstruction weights
+    in eta are exact).  Coefficients in float64 under JAX x64, else float32."""
+    import numpy as np
+    from legoesm.grids.vertical import create_hybrid_coordinate
+    if n_levels <= 0:
+        raise ValueError(f"n_levels must be > 0, got {n_levels!r}")
+    z_half = np.linspace(_ztop, 0.0, n_levels + 1)
+    eta_half = np.exp(-z_half / _H)
+    eta_top = eta_half[0]
+    b_half = (eta_half - eta_top) / (1.0 - eta_top)
+    a_half = eta_half - b_half
+    a_half[-1], b_half[0], b_half[-1] = 0.0, 0.0, 1.0      # exact surface / top
+    dtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    return create_hybrid_coordinate(n_levels, a_half, b_half, p_ref=_p0, dtype=dtype)
+
+
+def _is_hybrid(coord) -> bool:
+    return isinstance(coord, HybridSigmaPressureCoordinate)
+
+
+def dcmip13_full_level_height(lon, lat, coord):
+    """Geometric height [m] (*spatial, nlev) of the full levels of the 1-3
+    isothermal atmosphere over the mountains, ``p_s = p0 exp(-z_s/H)``:
+    sigma ``z = z_s - H ln(sigma)``; hybrid ``z = -H ln(p/p0)`` with ``p =
+    A p0 + B p_s`` (:func:`create_dcmip13_hybrid`)."""
+    zs = _mountain_height(lon, lat)
+    if not _is_hybrid(coord):
+        return -_H * jnp.log(coord.sigma_full) + zs[..., None]
+    from legoesm.grids.vertical import pressure_from_hybrid
+    ps = _p0 * jnp.exp(-zs / _H)
+    return -_H * jnp.log(pressure_from_hybrid(coord, ps, full=True) / _p0)
 
 
 def _height_from_sigma(sigma, ps=_p0):
@@ -481,7 +531,12 @@ def dcmip13_wind_geo(
         u_east * dzs_dlon / (_a * cos_lat) + v_north * dzs_dlat / _a
     )  # (*spatial), units m/s
 
-    sigma_half = sigma_coord.sigma_half  # (nlev+1,)
+    # Hybrid (Kent et al. 2014 App. B): the coordinate-crossing air-mass flux
+    # of the w = 0 flow is eta_dot dp/deta = -V.grad(p)|_eta = B ps V.grad(zs)/H
+    # (grad p|_eta = B grad ps, ps = p0 exp(-zs/H)); returned divided by ps,
+    # as sigma_dot (B = sigma) is, so ``ps * sigma_dot`` is that flux for both.
+    sigma_half = (sigma_coord.B_half if _is_hybrid(sigma_coord)
+                  else sigma_coord.sigma_half)  # (nlev+1,)
     sigma_dot = sigma_half * terrain_crossing[..., None] / _H  # (*spatial, nlev+1)
 
     return u_east_3d, v_north_3d, sigma_dot
@@ -503,7 +558,22 @@ def dcmip13_flow_fraction(lon, lat, sigma_coord: SigmaCoordinate):
     interface height lies in the band, multiplying ``sigma_dot``.  With
     ``p_s sigma`` at the band edges constant (``p0 exp(-h0/H)``, ``p0
     exp(-z_top/H)``) these keep the layer continuity analytically closed.
-    Static geometry (not model state): exact steps (RULE 5 out of scope)."""
+    Static geometry (not model state): exact steps (RULE 5 out of scope).
+
+    Hybrid coordinate (:func:`create_dcmip13_hybrid`): the same band in
+    pressure, ``frac`` the fraction of each layer's ``dp`` (``p = A p0 + B
+    p_s``) inside ``[p0 exp(-z_top/H), p0 exp(-h0/H)]``; its top is the flat
+    ``z = z_top`` surface, so only the ``z < h0`` cut is active there."""
+    if _is_hybrid(sigma_coord):
+        from legoesm.grids.vertical import pressure_from_hybrid
+        zs = _mountain_height(lon, lat)
+        ph = pressure_from_hybrid(sigma_coord, _p0 * jnp.exp(-zs / _H), full=False)
+        clipped = jnp.clip(ph, _p0 * jnp.exp(-_ztop / _H), _p0 * jnp.exp(-_h0_mt / _H))
+        frac = (clipped[..., 1:] - clipped[..., :-1]) / (ph[..., 1:] - ph[..., :-1])
+        z_half = -_H * jnp.log(ph / _p0)
+        mask_half = ((z_half >= _h0_mt) & (z_half <= _ztop)).astype(frac.dtype)
+        mask_half = mask_half.at[..., 0].set(0.0).at[..., -1].set(0.0)
+        return frac, mask_half
     zs = _mountain_height(lon, lat)[..., None]
     sh = jnp.asarray(sigma_coord.sigma_half, jnp.result_type(zs))
     s_lo = jnp.exp(-(_ztop - zs) / _H)          # sigma at z = z_top
@@ -612,6 +682,8 @@ def dcmip_air_mass_state_mpas(test_num, state: TracerState, mesh,
         raise ValueError("the MPAS DCMIP benchmark state is stored in float64: enable "
                          "JAX x64 (JAX_ENABLE_X64=1)")
     if test_num in (11, 12):
+        if _is_hybrid(sigma_coord):
+            raise ValueError("the DCMIP hybrid coordinate is defined for test 1-3 only")
         return air_mass_state(state, _p0, sigma_coord)
     if test_num == 13:
         zs = _mountain_height(mesh.lonCell, mesh.latCell)
@@ -752,10 +824,7 @@ def dcmip13_init_latlon(grid, sigma_coord: SigmaCoordinate) -> TracerState:
     """
     lon = grid.lon2d  # (n_lat, n_lon)
     lat = grid.lat2d
-    zs = _mountain_height(lon, lat)  # (n_lat, n_lon)
-
-    sigma_full = sigma_coord.sigma_full  # (nlev,)
-    z = -_H * jnp.log(sigma_full) + zs[..., None]  # (n_lat, n_lon, nlev)
+    z = dcmip13_full_level_height(lon, lat, sigma_coord)  # (n_lat, n_lon, nlev)
 
     q1, q2, q3, q4 = dcmip13_tracers_at_points(lon, lat, z)
     tracers_data = jnp.stack([q1, q2, q3, q4], axis=-1)
@@ -784,10 +853,7 @@ def dcmip13_init_mpas(mesh, sigma_coord: SigmaCoordinate) -> TracerState:
     """
     lon = mesh.lonCell  # (nCells,)
     lat = mesh.latCell
-    zs = _mountain_height(lon, lat)  # (nCells,)
-
-    sigma_full = sigma_coord.sigma_full  # (nlev,)
-    z = -_H * jnp.log(sigma_full) + zs[..., None]  # (nCells, nlev)
+    z = dcmip13_full_level_height(lon, lat, sigma_coord)  # (nCells, nlev)
 
     q1, q2, q3, q4 = dcmip13_tracers_at_points(lon, lat, z)
     tracers_data = jnp.stack([q1, q2, q3, q4], axis=-1)

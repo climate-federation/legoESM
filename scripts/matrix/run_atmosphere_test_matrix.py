@@ -434,10 +434,14 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "hydrostatic", "baroclinic_steady", g, res[g], "sigma", 10, 2,
             {"perturbed": False}))
-        # DCMIP transport: sigma only
+        # DCMIP transport: sigma, except 1-3 on lat-lon / icosahedral /
+        # spectral, which runs the Kent et al. (2014, App. B) hybrid levels
+        # (flat z_top lid; the cube 1-3 legacy model stays sigma)
         for tn in [11, 12, 13]:
+            vert = ("hybrid" if tn == 13 and g in ("latlon", "icosahedral", "spectral")
+                    else "sigma")
             matrix.append(TestCase(
-                "hydrostatic", f"dcmip_transport_{tn}", g, res[g], "sigma",
+                "hydrostatic", f"dcmip_transport_{tn}", g, res[g], vert,
                 12, 1, {"test_num": tn}))
         # AMIP: hybrid only
         matrix.append(TestCase(
@@ -512,7 +516,11 @@ def _build_test_matrix() -> list[TestCase]:
         # the summary rows, the run directory and — the part that matters —
         # the known-failure lookup are all keyed on it, so an overridden arm
         # does not silently inherit another coordinate's xfail waiver.
-        tc.vertical_coord = _matrix_vcoord(tc.vertical_coord)
+        # DCMIP transport rows are exempt: their coordinate is part of the
+        # test definition (prescribed winds, no pressure-gradient force for
+        # the probe to measure), and the runner refuses unsupported ones
+        if not tc.case.startswith("dcmip_transport_"):
+            tc.vertical_coord = _matrix_vcoord(tc.vertical_coord)
 
     return matrix
 
@@ -4915,7 +4923,8 @@ def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
     """DCMIP 1-3 acceptance criteria with the row's own discrete fluxes.
 
     Returns ``(notes, failed)``.  The analytic 1-3 atmosphere has ``p_s =
-    p0 exp(-z_s/H)`` and ``z = z_s - H ln(sigma)``; its flow is horizontal
+    p0 exp(-z_s/H)`` and ``z = z_s - H ln(sigma)`` (hybrid rows: ``z = -H
+    ln(p/p0)``, ``p = A p0 + B p_s``); its flow is horizontal
     at fixed HEIGHT, so tracers must cross sigma surfaces over the terrain.
     Every 1-3 row (lat-lon, MPAS, spectral) transports in flux form on the
     steady air mass ``dp`` with the consistent air fluxes
@@ -4927,7 +4936,8 @@ def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
     * uniform-tracer preservation: one model step from q = 1 (a round-off
       check).
     * global tracer conservation: ``sum area dp q`` with the model's own
-      air mass (lat-lon/MPAS ``p_s(z_s) dsigma``, spectral its Orszag-band
+      air mass (lat-lon/MPAS ``p_s(z_s) dsigma`` or hybrid ``dA p0 + dB
+      p_s``, spectral its Orszag-band
       ``p_s``; MPAS the state's prognostic ``dp``), every tracer at every
       diagnostic sample.
     * terrain crossing: q1-weighted mean height ``z`` of the cloud and mean
@@ -4941,7 +4951,8 @@ def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
     an "AUDIT INCOMPLETE" note instead, and fails only if it covered the
     ``full_period``."""
     from legoesm.atmosphere.dynamics.gcm import consistent_mass_flux as cmf
-    from tests.test_cases.dcmip_transport import _H, _mountain_height
+    from tests.test_cases.dcmip_transport import (
+        _H, _mountain_height, dcmip13_full_level_height)
     notes, failed = [], []
     mf = model.mass_flux
     if tc.grid_type == "icosahedral":
@@ -4954,7 +4965,6 @@ def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
         lon, lat = grid.lon2d, grid.lat2d
         resid = cmf.continuity_residual_spectral(mf, grid, model._dealias_state)
     zs = np.asarray(_mountain_height(lon, lat), np.float64)
-    sig = np.asarray(sigma_coord.sigma_full, np.float64)
     w = np.asarray(area, np.float64)[..., None] * np.asarray(mf.dp, np.float64)
 
     # local air-mass closure
@@ -5011,7 +5021,10 @@ def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
         f"q{i + 1} {e:.2e}" for i, e in enumerate(edge / np.where(m0 != 0, m0, np.nan))))
 
     # terrain crossing from the saved q1 snapshots
-    z = zs[..., None] - _H * np.log(sig)
+    if tc.vertical_coord == "hybrid":
+        z = np.asarray(dcmip13_full_level_height(lon, lat, sigma_coord), np.float64)
+    else:
+        z = zs[..., None] - _H * np.log(np.asarray(sigma_coord.sigma_full, np.float64))
     zbar, zsbar = [], []
     for step in sorted(snapshots):
         qq = np.asarray(snapshots[step]["q1_3d"], np.float64) * w     # signed q1 weights
@@ -5064,7 +5077,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
 
     # --- Shared imports (grid-independent IC/wind helpers) ---
     from tests.test_cases.dcmip_transport import (
-        create_dcmip_sigma,
+        create_dcmip_sigma, create_dcmip13_hybrid,
         dcmip11_wind_geo, dcmip11_tracers_at_points,
         dcmip12_wind_geo, dcmip12_tracers_at_points,
         dcmip13_wind_geo, dcmip13_tracers_at_points,
@@ -5108,7 +5121,18 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             dt = 120.0   # CFL < 0.8 at pole-nearest grid point
         elif tc.grid_type == "icosahedral":
             dt = 600.0   # reduce dispersion errors in centered scheme
-    sigma_coord = create_dcmip_sigma(nlev)
+    if tc.vertical_coord == "hybrid":
+        # Kent et al. (2014, App. B) hybrid levels: 1-3 on the flux-form rows only
+        if test_num != 13 or tc.grid_type not in ("latlon", "icosahedral", "spectral"):
+            raise ValueError(f"DCMIP transport hybrid levels are wired for test 1-3 on "
+                             f"latlon/icosahedral/spectral only, not test {test_num} "
+                             f"on {tc.grid_type}")
+        sigma_coord = create_dcmip13_hybrid(nlev)
+    elif tc.vertical_coord == "sigma":
+        sigma_coord = create_dcmip_sigma(nlev)
+    else:
+        raise ValueError(f"DCMIP transport: unknown vertical coordinate "
+                         f"{tc.vertical_coord!r}")
 
     # Grid-space view of a state.  Identity on the grid-point models; the
     # spectral branch overrides it with the SH synthesis.  ``state_init_grid``
@@ -5284,9 +5308,13 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             u_e13, sd13 = mpas_wind(0.0, grid, sigma_coord)
             frac_e = dcmip13_flow_fraction(grid.lonEdge, grid.latEdge, sigma_coord)[0]
             mask_c = dcmip13_flow_fraction(grid.lonCell, grid.latCell, sigma_coord)[1]
+            if tc.vertical_coord == "hybrid":
+                from tests.test_cases.dcmip_transport import _H, _mountain_height, _p0
+                ps13 = _p0 * jnp.exp(-_mountain_height(grid.lonCell, grid.latCell) / _H)
+            else:
+                ps13 = state_init.air_mass.data[:, -1] / sigma_coord.dsigma[-1]
             mass_flux = consistent_mass_flux_mpas(
-                grid, sigma_coord, u_e13 * frac_e, sd13 * mask_c,
-                state_init.air_mass.data[:, -1] / sigma_coord.dsigma[-1])
+                grid, sigma_coord, u_e13 * frac_e, sd13 * mask_c, ps13)
         model = TracerTransportMPASModel(
             grid, sigma_coord, mpas_wind,
             TracerTransportMPASConfig(
@@ -5578,7 +5606,7 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=field_specs_2d,
         field_3d_key="q1_3d", level_values=level_values,
-        level_label="Sigma level",
+        level_label=("Eta level" if tc.vertical_coord == "hybrid" else "Sigma level"),
         scalar_units={"q1_min": "kg/kg", "q1_max": "kg/kg",
                       "q1_mean": "kg/kg"})
 
