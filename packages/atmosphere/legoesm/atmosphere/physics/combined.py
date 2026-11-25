@@ -169,6 +169,7 @@ def _clubb_liquid_partition_on(turbulence_config) -> bool:
 def make_physics(
     config: PhysicsConfig,
     model_type: str = "hydrostatic",
+    *,
     dt: float = 300.0,  # coeff-ok: default physics timestep [s]
     column_mesh=None,
     sfc_albedo_override=None,
@@ -401,8 +402,8 @@ def make_physics(
         if config.convection.zhang_mcfarlane.positivity_after_zm:
             raise ValueError("FIVE is not built with positivity_after_zm (the fine "
                              "grid replays the host ZM tendency)")
-        if getattr(config.microphysics.morrison, "cirrus_nucleation",
-                   "fixed") != "fixed":
+        # Direct access: a config without the field must fail, not pass as "fixed".
+        if config.microphysics.morrison.cirrus_nucleation != "fixed":
             raise ValueError("FIVE is not built with cirrus_nucleation="
                              f"{config.microphysics.morrison.cirrus_nucleation!r} "
                              "(the cirrus aerosol is on the host levels)")
