@@ -1912,6 +1912,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "RULE 5 smooth forms; the cloud "
                              "levels are exact either way. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_hard_switches}.")
+    parser.add_argument("--bechtold-ifs-openifs-cloud-top-fixer",
+                        dest="bechtold_ifs_openifs_cloud_top_fixer",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_ifs_openifs_cloud_top_fixer,
+                        help="Faithful IFS chain: OpenIFS's cloud-top "
+                             "negative-humidity fixer as written (adds the deficit "
+                             "to the detrained condensate, driving humidity more "
+                             "negative, #2594) instead of the corrected one. "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_openifs_cloud_top_fixer}.")
     parser.add_argument("--bechtold-use-ifs-land-rhebc",
                         dest="bechtold_use_ifs_land_rhebc",
                         action=argparse.BooleanOptionalAction,
@@ -3785,6 +3795,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
         bechtold_ifs_hard_switches=args.bechtold_ifs_hard_switches,
+        bechtold_ifs_openifs_cloud_top_fixer=args.bechtold_ifs_openifs_cloud_top_fixer,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
         bechtold_snow_refill_width_kg_m2_s=args.bechtold_snow_refill_width_kg_m2_s,

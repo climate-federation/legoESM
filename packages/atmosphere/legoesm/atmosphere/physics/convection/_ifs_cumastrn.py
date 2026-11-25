@@ -45,7 +45,18 @@ rescale ZMFS, momentum limiter); also hard, as division guards / safety
 floors: ZTD_MIN/MAX, ZRFL_MIN and the PLUDE < 0 floor (fires on no fixture
 column; its PLUDE feeds both the humidity tendency and the detrained
 condensate, so it moves no water).  Smoothing them is
-a soft-level rewrite (a new scheme), not done.  Gap of the smooth default
+a soft-level rewrite (a new scheme), not done.
+KNOWN DIFFERENCE, the cloud-top negative-humidity fixer (cumastrn.F90:
+1159-1180, #2594, owner decision 2026-11-24): OpenIFS adds the humidity
+deficit ZFAC to the detrained condensate PLUDE, which drives q MORE negative
+(the humidity tendency carries -PLUDE), and rescales PLUDELI by the updated
+PLUDE, so PLUDELI1+PLUDELI2 falls short of PLUDE by ZFAC**2/PLUDE (a column
+energy leak, and a water leak where CLOUDSC reads PLUDELI).  The default
+removes ZFAC from PLUDE and PLUDELI in proportion (water and energy neutral);
+``IfsTunables.openifs_cloud_top_fixer`` = True (BechtoldConfig.
+ifs_openifs_cloud_top_fixer) gives OpenIFS's form.  The fixer fires on no
+oracle fixture column, so the oracle match is the same in both forms.
+Gap of the smooth default
 against the oracle per fixture column: tests/atmosphere/
 test_bechtold_ifs_oracle.py (``_SWITCH_GAP``).
 """
@@ -234,6 +245,11 @@ class IfsTunables(NamedTuple):
     # source, this NamedTuple's default); the host passes its run's
     # BechtoldConfig.ifs_hard_switches (default False = the C1 smooth forms).
     hard_switches: bool = True
+    # Cloud-top negative-humidity fixer (cumastrn.F90:1159-1180, #2594).
+    # False = corrected: the deficit is taken out of the detrained condensate
+    # PLUDE.  True = OpenIFS as written (adds it to PLUDE: q more negative).
+    # The host passes BechtoldConfig.ifs_openifs_cloud_top_fixer.
+    openifs_cloud_top_fixer: bool = True
 
 
 SHALLOW_NOSUPPLY_MODES = ("zero", "first_guess")
@@ -1073,10 +1089,26 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
         zneed = sm.pos(-(pqen + zmfa) / zdzt, _W_LUDE)
         zfacl = _cap_min(sm, zneed, plude, _W_LUDE)
         lim2 = near
-    plude_n = jnp.where(lim2, plude + zfacl, plude)
-    pdiv = lim2 & (plude_n != 0.0)
-    pludeli1 = jnp.where(lim2, pludeli1 + zfacl * sdiv(pludeli1, plude_n, pdiv), pludeli1)
-    pludeli2 = jnp.where(lim2, pludeli2 + zfacl * sdiv(pludeli2, plude_n, pdiv), pludeli2)
+    if tun.openifs_cloud_top_fixer:
+        # OpenIFS :1171-1173 as written: ADDS ZFAC to PLUDE, so the humidity
+        # (tendency -PLUDE) goes more negative, and scales PLUDELI by the
+        # updated PLUDE, so PLUDELI1+PLUDELI2 - PLUDE = -ZFAC**2/PLUDE_new
+        # (energy and, via CLOUDSC's PLUDELI, water leak).  KNOWN DIFFERENCE,
+        # #2594: reachable only through this switch.
+        plude_n = jnp.where(lim2, plude + zfacl, plude)
+        pdiv = lim2 & (plude_n != 0.0)
+        pludeli1 = jnp.where(lim2, pludeli1 + zfacl * sdiv(pludeli1, plude_n, pdiv), pludeli1)
+        pludeli2 = jnp.where(lim2, pludeli2 + zfacl * sdiv(pludeli2, plude_n, pdiv), pludeli2)
+    else:
+        # Corrected (#2594, owner decision 2026-11-24): ZFAC (<= PLUDE) of the
+        # detrained condensate stays vapour -- q + ZMFA rises to 0 (or by
+        # PLUDE*ZDZ when capped) -- and PLUDELI1/2 shrink in proportion, so
+        # PLUDELI1 + PLUDELI2 = PLUDE still holds: water (q + condensate) and
+        # the column frozen moist static energy are unchanged by the fixer.
+        plude_n = jnp.where(lim2, plude - zfacl, plude)
+        pdiv = lim2 & (plude != 0.0)
+        pludeli1 = jnp.where(lim2, pludeli1 - zfacl * sdiv(pludeli1, plude, pdiv), pludeli1)
+        pludeli2 = jnp.where(lim2, pludeli2 - zfacl * sdiv(pludeli2, plude, pdiv), pludeli2)
     negl = near & (plude_n < 0.0)
     plude = jnp.where(negl, 0.0, plude_n)
     pludeli1 = jnp.where(negl, 0.0, pludeli1)
@@ -1224,6 +1256,9 @@ def cumastrn(th, dt, pgaw, T, q, u, v, plitot, omega, qsat, ahfs, qhfl, p_full,
     if not isinstance(tun.hard_switches, bool):
         raise ValueError(
             f"hard_switches must be a python bool (static), got {tun.hard_switches!r}.")
+    if not isinstance(tun.openifs_cloud_top_fixer, bool):
+        raise ValueError("openifs_cloud_top_fixer must be a python bool (static), "
+                         f"got {tun.openifs_cloud_top_fixer!r}.")
     if not tun.shallow_supply_width_w_m2 >= 0.0:
         raise ValueError(
             "shallow_supply_width_w_m2 must be >= 0 (0 = hard max(ZDHPBL, 0)), "
