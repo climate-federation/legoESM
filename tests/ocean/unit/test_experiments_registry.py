@@ -62,6 +62,7 @@ NON_EXPERIMENT_MODULES = {
     "silvestri_baroclinic_jet",  # builder used via recipe_map (no EXPERIMENT_CONFIG)
     "silvestri_turbulence_2d",  # 2-D turbulence driver helper
     "idealized_ic",             # shared analytic-IC primitives (#519 item 3)
+    "pacific_zoom",             # regional Pacific zoom config builder (no EXPERIMENT_CONFIG)
 }
 
 

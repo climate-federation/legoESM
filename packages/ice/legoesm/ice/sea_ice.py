@@ -969,6 +969,8 @@ def _si3_orca2_o2_step_with_trace(
             forcing.stress._replace(at_i=final.state.aggregated.at_i),
             config=config.si3_orca2,
             ln_drgice_imp=forcing.ln_drgice_imp,
+            nn_fsbc=config.si3_orca2.nn_fsbc,
+            kt=1,  # SI3FinalizeForcing is the frozen nn_fsbc=1 SAS boundary.
         )
         return final.state, SI3FinalizeResponse(
             correction=correction,

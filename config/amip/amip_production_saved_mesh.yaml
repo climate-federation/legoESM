@@ -1,0 +1,12 @@
+# The production AMIP deck on a SAVED, hash-pinned MPAS mesh.
+#
+# Identical to amip_production.yaml except that the resolution-6 Voronoi mesh
+# is loaded from a file instead of regenerated, so every machine steps the same
+# cells in the same order (a regenerated mesh is not bitwise portable: cell
+# order differs between machines, and per-cell inputs then land on the wrong
+# cells).  Build the file once with
+#   python scripts/grids/save_mpas_mesh.py 6 data/grids/mpas_l6_lloyd50.npz
+# which prints the SHA-256 pinned below; the run refuses any other mesh.
+include: amip_production.yaml
+mpas_mesh_file: data/grids/mpas_l6_lloyd50.npz
+mpas_mesh_sha256: 67560ec7b427f5c566973de201c0fd60d6081d03de5699c11fce9984156aa5fc

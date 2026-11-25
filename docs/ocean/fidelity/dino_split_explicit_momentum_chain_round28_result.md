@@ -149,8 +149,8 @@ their executable scorers now refuse to print a verdict. NEMO's dumped stage-8
 `naa_B` is already barotropic-free. Round 33 injected that field at the public
 `_apply_implicit_vertical_mixing` entry, where production
 `zdf_baroclinic_only` subtracts the mean again
-(`ocean_model_latlon_cgrid.py:7520-7541`) and later re-splices the saved mean
-(`:7550-7557`). It therefore double-stripped the fed field and compared a
+(`ocean_model_latlon_cgrid.py:7539-7560`) and later re-splices the saved mean
+(`:7569-7576`). It therefore double-stripped the fed field and compared a
 post-splice result with NEMO's pre-splice `dyn_zdf` output. Round 34 captured
 that same invalid arm, so its apparent RHS owner was a harness artifact.
 

@@ -28,6 +28,7 @@ import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
+from legoesm.core.smooth import validate_smoothing_width
 from legoesm.grids.latlon import (
     LatLonGrid,
     compute_v_face_coords,
@@ -3081,6 +3082,67 @@ def _nemo_ws_rk3_tracer_pair_step(
     return out_a, out_b
 
 
+def _coriolis_pair_operator(grid, h_u, h_v, dtype):
+    """Energy-conserving C-grid Coriolis operator (coriolis_baroclinic_operator
+    = "energy_conserving"): returns cor_u(v), cor_v(u).
+
+    The force is assembled at cell centres, as CROCO's rhs3d.F (UV_COR: the
+    flux Hz f/(mn) times the velocity averaged to the rho point, half to each
+    adjacent face), so every u face / v face pair of a cell exchanges energy
+    with equal and opposite coefficients K = 1/4 f_T A_T min(h_a, h_b):
+
+        w_u cor_u =  sum over the two cells of the face and their v faces of K v
+        w_v cor_v = -sum over the two cells of the face and their u faces of K u
+
+    with w = h A the kinetic energy weight of each face (min-rule h, masked).
+    sum w_u u cor_u(v) + sum w_v v cor_v(u) = 0 for any (u, v), pair by pair.
+    In a uniform interior this is f times the four point average.  The pair
+    thickness is the thinner face (the corner min rule of MITgcm's hFacZ), so
+    a dry face couples to nothing.  Not for a tripolar fold.
+    """
+    if getattr(getattr(grid, "fold", None), "is_active", False):
+        raise ValueError(
+            'coriolis_baroclinic_operator="energy_conserving" does not '
+            "support a tripolar fold")
+    f_T = jnp.asarray(grid.f_T, dtype)
+    A_T = jnp.asarray(grid.area_T, dtype)
+    w_u = h_u * (jnp.asarray(grid.dx_u, dtype) * jnp.asarray(grid.dy_u, dtype))[..., None]
+    w_v = h_v * (jnp.asarray(grid.dx_v, dtype) * jnp.asarray(grid.dy_v, dtype))[..., None]
+    hw, he = h_u[:, :-1], h_u[:, 1:]
+    hs, hn = h_v[:-1], h_v[1:]
+    c = 0.25 * (f_T * A_T)[..., jnp.newaxis]
+    k_ws, k_wn = c * jnp.minimum(hw, hs), c * jnp.minimum(hw, hn)
+    k_es, k_en = c * jnp.minimum(he, hs), c * jnp.minimum(he, hn)
+    inv_u = jnp.where(w_u > 0, 1.0 / jnp.where(w_u > 0, w_u, 1.0), 0.0)
+    inv_v = jnp.where(w_v > 0, 1.0 / jnp.where(w_v > 0, w_v, 1.0), 0.0)
+
+    def cor_u(v):
+        vs, vn = v[:-1], v[1:]
+        f_west = k_ws * vs + k_wn * vn        # to the west face of each cell
+        f_east = k_es * vs + k_en * vn        # to the east face
+        g = f_west + jnp.roll(f_east, 1, axis=1)   # face i: cell i and cell i-1
+        g = jnp.concatenate([g, g[:, 0:1]], axis=1)  # periodic duplicate face
+        return g * inv_u
+
+    def cor_v(u):
+        uw, ue = u[:, :-1], u[:, 1:]
+        f_south = -(k_ws * uw + k_es * ue)    # to the south face of each cell
+        f_north = -(k_wn * uw + k_en * ue)    # to the north face
+        z = jnp.zeros_like(f_south[:1])
+        g = (jnp.concatenate([z, f_north], axis=0)
+             + jnp.concatenate([f_south, z], axis=0))
+        return g * inv_v
+
+    return cor_u, cor_v
+
+
+# Fixed-point passes of the trapezoidal Coriolis rotation (coriolis_time_scheme
+# = "trapezoidal"): the error falls by about |f| dt / 2 per pass, so 12 passes
+# leave about 1e-15 of the increment at |f| dt = 0.13 (30N, dt = 1800 s), the
+# round-off of the energy neutral rotation.
+_N_CORIOLIS_TRAPEZOIDAL_ITER = 12
+
+
 def _forward_backward_coriolis_3d(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -3093,6 +3155,8 @@ def _forward_backward_coriolis_3d(
     land_mask: jnp.ndarray,
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,
+    u_old: jnp.ndarray | None = None,
+    v_old: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Apply forward-backward (Matsuno) Coriolis to baroclinic perturbation velocity.
 
@@ -3118,6 +3182,8 @@ def _forward_backward_coriolis_3d(
     v_mask : (n_lat+1, n_lon)
     land_mask : (n_lat, n_lon)
     eta, H_bathy : (n_lat, n_lon) for layer thickness computation
+    u_old, v_old : velocity before the explicit tendency was added to (u, v);
+        required by, and only used by, coriolis_time_scheme="trapezoidal_step"
 
     Returns
     -------
@@ -3161,17 +3227,7 @@ def _forward_backward_coriolis_3d(
     from legoesm.ocean.dynamics.barotropic_common import coriolis_at_faces
     f_u, f_v = coriolis_at_faces(grid, u.dtype)  # (n_lat, n_lon+1), (n_lat+1, n_lon)
 
-    # --- Forward step: update u' using old v' ---
-    # Average v' to u-points (Sadourny 4-point average)
-    v_west = jnp.roll(v_prime, 1, axis=1)
-    v_at_u = 0.25 * (v_prime[:-1] + v_prime[1:]
-                      + v_west[:-1] + v_west[1:])
-    v_at_u = jnp.concatenate([v_at_u, v_at_u[:, 0:1, :]], axis=1)
-
-    u_prime_new = (u_prime + dt * f_u[:, :, jnp.newaxis] * v_at_u) * u_mask_3d
-
-    # --- Backward step: update v' using NEW u' ---
-    # Average u'_new to v-points (Sadourny 4-point average) via the
+    # Average u' to v-points (Sadourny 4-point average) via the
     # shared cell-pad-first helper: the MPI band partition-cut v-face
     # averages the neighbour rank's true u' row instead of the old
     # interior-then-pad_ns_vector_u refill (one face row off at a cut).
@@ -3180,9 +3236,64 @@ def _forward_backward_coriolis_3d(
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         interp_u_to_vface_4pt,
     )
-    u_at_v = interp_u_to_vface_4pt(u_prime_new, grid)
 
-    v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
+    # dt times the Coriolis acceleration of u' (from v') and minus that of v'
+    # (from u'), so that u' + du(v') and v' - dv(u') are the updates.
+    if getattr(config, "coriolis_baroclinic_operator",
+               "four_point") == "energy_conserving":
+        cor_u, cor_v = _coriolis_pair_operator(grid, h_u * u_mask_3d,
+                                               h_v * v_mask_3d, u.dtype)
+
+        def du(vp):
+            return dt * cor_u(vp)
+
+        def dv(up):
+            return -dt * cor_v(up)
+    else:
+        def du(vp):
+            # Average v' to u-points (Sadourny 4-point average)
+            v_west = jnp.roll(vp, 1, axis=1)
+            v_at_u = 0.25 * (vp[:-1] + vp[1:] + v_west[:-1] + v_west[1:])
+            v_at_u = jnp.concatenate([v_at_u, v_at_u[:, 0:1, :]], axis=1)
+            return dt * f_u[:, :, jnp.newaxis] * v_at_u
+
+        def dv(up):
+            u_at_v = interp_u_to_vface_4pt(up, grid)
+            return dt * f_v[:, :, jnp.newaxis] * u_at_v
+
+    time_scheme = getattr(config, "coriolis_time_scheme", "forward_backward")
+    if (time_scheme == "trapezoidal_step") != (u_old is not None and v_old is not None):
+        raise ValueError(
+            'u_old and v_old are required by, and only by, coriolis_time_scheme="trapezoidal_step" '
+            f"(got {time_scheme!r} with u_old {'set' if u_old is not None else 'None'})")
+    if time_scheme in ("trapezoidal", "trapezoidal_step"):
+        # Crank-Nicolson rotation x1 = x0 + dt L((x0 + x1)/2), solved by
+        # fixed-point iteration; each pass contracts the error by about
+        # |f| dt / 2 (0.066 at 30N, dt = 1800 s).  "trapezoidal" centres it on
+        # the rotation alone (x0 = the velocity after the explicit tendency);
+        # "trapezoidal_step" on the whole step, x1 = u_old + dt T + dt L((u_old
+        # + x1)/2), so the energy change is dt times the work of T on the
+        # centred velocity and a forward tendency balanced by Coriolis (the
+        # pressure gradient of geostrophic flow) adds no (1/2) dt^2 |T|^2.
+        if time_scheme == "trapezoidal_step":
+            u_c = (u_old - depth_average_to_faces(u_old, h_u, u_mask, min_water_col)[..., jnp.newaxis]) * u_mask_3d
+            v_c = (v_old - depth_average_to_faces(v_old, h_v, v_mask, min_water_col)[..., jnp.newaxis]) * v_mask_3d
+        else:
+            u_c, v_c = u_prime, v_prime
+
+        def _pass(_, uv):
+            u_mid = 0.5 * (u_c + uv[0])
+            v_mid = 0.5 * (v_c + uv[1])
+            return ((u_prime + du(v_mid)) * u_mask_3d,
+                    (v_prime - dv(u_mid)) * v_mask_3d)
+
+        u_prime_new, v_prime_new = jax.lax.fori_loop(
+            0, _N_CORIOLIS_TRAPEZOIDAL_ITER, _pass, (u_prime, v_prime))
+    else:
+        # --- Forward step: update u' using old v' ---
+        u_prime_new = (u_prime + du(v_prime)) * u_mask_3d
+        # --- Backward step: update v' using NEW u' ---
+        v_prime_new = (v_prime - dv(u_prime_new)) * v_mask_3d
 
     # --- Reconstruct full velocity ---
     u_new = u_prime_new + U_bar[..., jnp.newaxis]
@@ -4221,6 +4332,24 @@ class LatLonCGridOceanModel:
         config: LatLonCGridOceanConfig,
     ) -> LatLonCGridOceanConfig:
         """Resolve conditional defaults, then validate configuration ranges."""
+        validate_smoothing_width("open_boundary_smooth_width",
+                                 config.open_boundary_smooth_width)
+        if config.omp25 is not None:
+            validate_smoothing_width("omp25.smooth_width", config.omp25.smooth_width)
+        if getattr(config, "momentum_face_mask", "2d") not in ("2d", "3d"):
+            raise ValueError(
+                "momentum_face_mask must be '2d' or '3d', got "
+                f"{config.momentum_face_mask!r}")
+        if getattr(config, "coriolis_time_scheme", "forward_backward") not in (
+                "forward_backward", "trapezoidal", "trapezoidal_step"):
+            raise ValueError(
+                "coriolis_time_scheme must be 'forward_backward', 'trapezoidal' or "
+                f"'trapezoidal_step', got {config.coriolis_time_scheme!r}")
+        if getattr(config, "coriolis_baroclinic_operator", "four_point") not in (
+                "four_point", "energy_conserving"):
+            raise ValueError(
+                "coriolis_baroclinic_operator must be 'four_point' or "
+                f"'energy_conserving', got {config.coriolis_baroclinic_operator!r}")
         nonnegative = {
             "A_h": config.lateral_viscosity.A_h,
             "B_h": config.lateral_viscosity.B_h,
@@ -5044,6 +5173,9 @@ class LatLonCGridOceanModel:
                     "store_mass_flux (the tracer-advecting flux is formed "
                     "inside the advective-form tendency, not in a shared "
                     "mass-flux block the step can capture)")
+            if getattr(config, "store_tracer_budget", False):
+                _unsupported.append(
+                    "store_tracer_budget (the record is collected in _step_impl)")
             if getattr(config, "store_salt_flux", False):
                 # codex round-1 RED 3: same bypass -- _unsplit_ab2_step never
                 # runs _step_impl's capture, so the seeded 2-D slots would sit
@@ -6019,7 +6151,9 @@ class LatLonCGridOceanModel:
                 "the model via legoesm.ocean.physics.bbl_adv."
                 "apply_bbl_adv_step (the driver-side path run_omip_core2.py "
                 "uses via --bbl-adv).")
-        if getattr(config, "store_salt_flux", False):
+        _flux_caps = [n for n in ("store_salt_flux", "store_tracer_budget")
+                      if getattr(config, n, False)]
+        for _cap_name in _flux_caps:
             # Refuse-not-ignore: the capture stores "the flux the model
             # applied", which is only well-defined per step on the euler
             # path with a scheme that exposes its horizontal fluxes.  AB2
@@ -6029,7 +6163,7 @@ class LatLonCGridOceanModel:
             # with the right shape.
             if config.tracer_time_integrator != "euler":
                 raise ValueError(
-                    "store_salt_flux requires tracer_time_integrator="
+                    f"{_cap_name} requires tracer_time_integrator="
                     f"'euler' (got {config.tracer_time_integrator!r}): under "
                     "AB2/RK3 the applied salt flux is a multi-level/staged "
                     "combination the capture would misrepresent.")
@@ -6043,7 +6177,7 @@ class LatLonCGridOceanModel:
                 # the applied flux.  Leapfrog applies 2*dt*F^n to the BEFORE
                 # state (a different base and weight).  Refuse both.
                 raise ValueError(
-                    "store_salt_flux requires outer_integrator="
+                    f"{_cap_name} requires outer_integrator="
                     f"'forward_euler' (got {_outer_for_salt!r}): the outer "
                     "AB2/leapfrog combine explicit tracer increments across "
                     "time levels, so a single-step captured flux would not "
@@ -6051,7 +6185,7 @@ class LatLonCGridOceanModel:
             if config.tracer_advection in ("ppm_fct", "fct2",
                                            "dst3_multidim", "som", "none"):
                 raise ValueError(
-                    "store_salt_flux is not supported with tracer_advection="
+                    f"{_cap_name} is not supported with tracer_advection="
                     f"{config.tracer_advection!r}: the scheme does not expose "
                     "its horizontal face fluxes (FCT/multidim form them "
                     "in-kernel; SOM advects moments).  Use upwind/tvd/"
@@ -6729,6 +6863,10 @@ class LatLonCGridOceanModel:
                 "implicit_ice_ocean_top_drag=True requires the recorded "
                 "OceanSurfaceForcing.ice_ocean_top_drag_rCdu input")
         state = cast_pytree(state, None, "compute")
+        # store_tracer_budget (static): collect the record of this step's
+        # temperature content changes; ``None`` keeps every path untouched.
+        _tb = ({"T0": state.T.data}
+               if bool(getattr(_cfg_b, "store_tracer_budget", False)) else None)
         # ``_ab2_scope_override`` (private): the leap-frog step (``_leapfrog_step``)
         # drives this method in "advective" scope to WITHHOLD the dissipative
         # tendencies from ``state_expl`` (so they land on the returned
@@ -6806,6 +6944,17 @@ class LatLonCGridOceanModel:
         u_mask_3d = state.u_mask.data[..., jnp.newaxis]
         v_mask_3d = state.v_mask.data[..., jnp.newaxis]
         mask_3d = state.land_mask.data[..., jnp.newaxis]
+        # momentum_face_mask="3d": close the faces below the shallower
+        # seafloor for the velocity as for the tracers (see the config field).
+        _mom_mask_3d = (getattr(_cfg_b, "momentum_face_mask", "2d") == "3d"
+                        and isinstance(_zc, OceanPartialCellCoordinate))
+        if _mom_mask_3d:
+            u_mask_3d, v_mask_3d = compute_face_masks_3d(_zc.is_active, _grid)
+            u_mask_3d = u_mask_3d.astype(state.u.data.dtype)
+            v_mask_3d = v_mask_3d.astype(state.v.data.dtype)
+            state = state._replace(
+                u=state.u.replace(data=state.u.data * u_mask_3d),
+                v=state.v.replace(data=state.v.data * v_mask_3d))
 
         # 1. Baroclinic tendencies (non-Coriolis)
         # The geometry + density (EOS) + baroclinic pressure anomaly depend
@@ -8042,10 +8191,13 @@ class LatLonCGridOceanModel:
         # Applying the Matsuno rotation here too would DOUBLE-count Coriolis.
         # Static Python branch on the config string ⇒ default is bit-identical.
         if getattr(_cfg_b, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+            _old = ({"u_old": state.u.data, "v_old": state.v.data}
+                    if getattr(_cfg_b, "coriolis_time_scheme", "forward_backward") == "trapezoidal_step"
+                    else {})
             u_star, v_star = _forward_backward_coriolis_3d(
                 u_star, v_star, dt_mom, _grid, _zc, _cfg_b,
                 state.u_mask.data, state.v_mask.data, state.land_mask.data,
-                state.eta.data, state.H_bathy.data,
+                state.eta.data, state.H_bathy.data, **_old,
             )
 
         # Enforce periodic wrap column: u[:,n_lon] must equal u[:,0].
@@ -8063,6 +8215,13 @@ class LatLonCGridOceanModel:
             state_mid.eta.data, state_mid.H_bathy.data, _zc,
             min_water_column_m=_cfg_b.min_water_column_m,
         )
+        if _tb is not None:
+            if tend.dT_budget is None:
+                raise ValueError("store_tracer_budget: the tendency function "
+                                 "returned no dT_budget")
+            _tb["h0"] = h_k_old
+            _tb["R"] = tend.dT_budget
+            _tb["R_total"] = tend.dT_dt.data
 
         # 6. Barotropic step.  Two paths:
         #    - explicit_substep: split-explicit forward-backward substepping
@@ -8159,6 +8318,12 @@ class LatLonCGridOceanModel:
                 tend.dv_diss.data * h_v_pre, axis=-1) / H_v_pre
                 ) * state.v_mask.data
 
+        if (getattr(sponge, "open_boundary", None) is not None
+                and _cfg_b.barotropic.barotropic_solver in ("rigid_lid", "implicit_cn")):
+            raise ValueError(
+                "open lateral boundaries are implemented in the standard-halo "
+                "explicit substep solver only, not barotropic_solver="
+                f"{_cfg_b.barotropic.barotropic_solver!r}")
         if _cfg_b.barotropic.barotropic_solver == "rigid_lid":
             # Rigid lid: no free surface — solve the barotropic streamfunction
             # from the (Coriolis-augmented) slow forcing.  eta is left unchanged.
@@ -8597,6 +8762,20 @@ class LatLonCGridOceanModel:
                     "the standard-halo explicit substep solver's loop-entry "
                     "seed; this configuration routes the external solve "
                     "elsewhere, so the control would silently not land.")
+            _open_boundary = getattr(sponge, "open_boundary", None)
+            if _open_boundary is not None:
+                if _cfg_b.fix_eta_drift:
+                    raise ValueError(
+                        "fix_eta_drift=True holds the domain volume fixed after "
+                        "every step and cancels any net flow through open "
+                        "boundaries; set fix_eta_drift=False with open_boundary "
+                        "(the boundary's own volume correction is in "
+                        "OpenBoundaryData)")
+                if _baro_fn is not barotropic_substeps_latlon_cgrid:
+                    raise ValueError(
+                        "open lateral boundaries are implemented in the "
+                        "standard-halo explicit substep solver only")
+                _baro_seed = {**_baro_seed, "open_boundary": _open_boundary}
             _baro_result = _baro_fn(
                 state_mid, dt_s, _nbaro,
                 _grid, _zc, _cfg_b,
@@ -11038,6 +11217,11 @@ class LatLonCGridOceanModel:
                 # above (bit-identical on pure z-star where active_3d==mask_3d).
                 T_mid = T_mid + dt * dT_gm * active_3d
                 S_mid = S_mid + dt * dS_gm * active_3d
+                if _tb is not None:
+                    # store_tracer_budget: T's GM-Redi rate, applied on h0 before advection like the
+                    # explicit stages; in R and R_total so that step_terms books it (stream A's hmix)
+                    _tb["R"] = dict(_tb["R"], gm=dT_gm * active_3d)
+                    _tb["R_total"] = _tb["R_total"] + dT_gm * active_3d
             if eke_new is not None:
                 state_new = state_new._replace(eke=eke_new)
             # Carry the EKE dissipation (Veros eke_diss_iw) for the prognostic-TKE
@@ -11545,6 +11729,28 @@ class LatLonCGridOceanModel:
                         tr_a_before=_T_adv_before, tr_b_before=_S_adv_before,
                     )
 
+            if _tb is not None:
+                if _tti in ("rk3", "rk3_ws", "ab2") or _pair_divs[0] is None:
+                    raise ValueError("store_tracer_budget needs the euler "
+                                     "tracer integrator")
+                _tb_d, _tb_v, _tb_fu, _tb_fv = _compute_advection_flux_div(
+                    T_mid, _adv, mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
+                    h_k_old, h_u_old, h_v_old, _grid, dt,
+                    recon_fill_mask=_wall_fill_mask,
+                    linssh_top_flux=_linssh,
+                    tr_before=_T_adv_before,
+                    return_h_fluxes=True,
+                )
+                _tb["T_mid"] = T_mid
+                _tb["div_x"] = divergence_cgrid(
+                    _tb_fu, jnp.zeros_like(_tb_fv), _grid)
+                _tb["div_y"] = divergence_cgrid(
+                    jnp.zeros_like(_tb_fu), _tb_fv, _grid)
+                _tb["div_h"] = _tb_d
+                _tb["div_z"] = _tb_v
+                _tb["Fu"] = _tb_fu
+                _tb["Fv"] = _tb_fv
+                _tb["w"] = w_baro_tr
             for tr_name in ['T', 'S']:
                 tr = T_mid if tr_name == 'T' else S_mid
 
@@ -11666,6 +11872,10 @@ class LatLonCGridOceanModel:
             S=state_new.S.replace(data=S_corrected),
             w=w_field,
         )
+        if _tb is not None:
+            _tb["T_adv"] = T_corrected
+            _tb["h1"] = h_k_new
+            _tb["active"] = active_3d
 
         # #1442: keep the tracer-advecting mass fluxes instead of discarding
         # them.  PURE DIAGNOSTIC -- read-only capture of values this step
@@ -11969,6 +12179,9 @@ class LatLonCGridOceanModel:
                 # ``state_new`` is the working copy). None ⇒ BIT-IDENTICAL.
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
+                if _tb is not None:
+                    # tracer budget: the implicit solve stage, as on the non-prognostic path below
+                    _tb["T_pre_zdf"] = state_new.T.data
                 _tke_result = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -12016,9 +12229,13 @@ class LatLonCGridOceanModel:
                      _nemo_ws_budget_v_no_stress) = _tke_result
                 else:
                     state_new, tke_new, _nemo_ws_vertical_solve_trace = (_tke_result if _return_vertical_solve_trace else (*_tke_result, None))
+                if _tb is not None:
+                    _tb["T_post_zdf"] = state_new.T.data
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
+                if _tb is not None:
+                    _tb["T_pre_zdf"] = state_new.T.data
                 _zdf_result = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -12053,6 +12270,8 @@ class LatLonCGridOceanModel:
                      _nemo_ws_budget_v_no_stress) = _zdf_result
                 else:
                     state_new, _nemo_ws_vertical_solve_trace = (_zdf_result if _return_vertical_solve_trace else (_zdf_result, None))
+                if _tb is not None:
+                    _tb["T_post_zdf"] = state_new.T.data
             if _return_momentum_budget_trace:
                 _nemo_ws_budget_v_after_zdf = state_new.v.data
         if _return_tracer_process_trace:
@@ -12453,6 +12672,10 @@ class LatLonCGridOceanModel:
                 stage3_damping_rate=_nemo_ws_stage3_damping_rate,
                 stage3_explicit_temperature=T_corrected,
             )
+        if _mom_mask_3d:
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=state_new.u.data * u_mask_3d),
+                v=state_new.v.replace(data=state_new.v.data * v_mask_3d))
         if not _apply_implicit_vmix:
             # Faithful AB2 path: return the explicit-only state plus the
             # implicit-mixing diffusivity profiles (evaluated from u^n, like
@@ -12489,6 +12712,9 @@ class LatLonCGridOceanModel:
                 _aux = _aux + (
                     _eta_after_spg_literal, Hu_avg, Hv_avg)
             return state_new, _aux
+        if _tb is not None:
+            _tb["T1"] = state_new.T.data
+            state_new = state_new._replace(tbudget=_tb)
         return state_new
 
     def _fixed_depth_means(self, st, z_coord=None, config=None, grid=None):
@@ -15685,6 +15911,33 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
+        # Open lateral boundaries, baroclinic and tracer part: run the step,
+        # then set the ring cells and open faces (CROCO u3dbc/v3dbc/t3dbc).
+        # Eager wrapper, so every outer integrator and diagnostic path below
+        # stays untouched; the barotropic part acts inside the substeps.
+        _ob = getattr(sponge, "open_boundary", None)
+        if (_ob is not None and getattr(_ob, "tau_in", None) is not None
+                and not getattr(self, "_open_boundary_post", False)):
+            from legoesm.ocean.dynamics.open_boundary_latlon import (
+                apply_baroclinic_open_boundary,
+            )
+            self._open_boundary_post = True
+            try:
+                _new = self.step(
+                    state, dt, freshwater, surface_forcing, sponge, grid=grid,
+                    vertex_mask=vertex_mask, t_seconds=t_seconds,
+                    external_tracer_rate=external_tracer_rate,
+                    _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
+                    _vertical_K_test_override=_vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override=(
+                        _nemo_stage1_zad_eta_after_override),
+                )
+            finally:
+                self._open_boundary_post = False
+            return apply_baroclinic_open_boundary(
+                state, _new, _ob, dt,
+                compute_layer_thickness(_new.eta.data, _new.H_bathy.data, self.z_coord),
+                width=self.config.open_boundary_smooth_width)
         # A direct eager step is also a valid cold-start driver.  Seed the
         # NEMO pre-tke_avn coefficient memory here as well as in
         # seed_scan_carry(); otherwise only scan/restart drivers get the

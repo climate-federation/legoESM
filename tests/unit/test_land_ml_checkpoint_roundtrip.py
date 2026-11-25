@@ -218,3 +218,34 @@ def test_snow_node_initialised_when_checkpoint_lacks_it(tmp_path):
                            _carry_aux=short, _land_ml_state=tmpl)
     with pytest.raises(ValueError, match="snow_age"):
         ModelDriver._restore_land_ml_from_carry_aux(dst2)
+
+
+def test_canopy_snow_store_starts_empty_when_checkpoint_lacks_it(tmp_path):
+    """Canopy snow on, restarting from a checkpoint written without the store:
+    the restore keeps the template's empty store (no mass, vote 2026-11-22);
+    a checkpoint CARRYING the store into a run without it still refuses."""
+    saved = _state(1.0)
+    src = SimpleNamespace(
+        state=SimpleNamespace(), _carry_aux={}, _land_ml_state=saved,
+        _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64),
+        config=SimpleNamespace(convection="none"),
+    )
+    aux = ModelDriver._checkpoint_carry_aux(src)
+    assert "land_ml_W_canopy_snow" not in aux
+    np.savez(tmp_path / "c.npz", **aux)
+    loaded = dict(np.load(tmp_path / "c.npz"))
+    tmpl = _state(99.0)._replace(W_canopy_snow=np.zeros(4, np.float32))
+    dst = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
+                          _carry_aux=dict(loaded), _land_ml_state=tmpl)
+    ModelDriver._restore_land_ml_from_carry_aux(dst)
+    np.testing.assert_array_equal(np.asarray(dst._land_ml_state.W_canopy_snow), 0.0)
+    np.testing.assert_allclose(dst._land_ml_state.snow_depth, saved.snow_depth)
+    with_store = _state(1.0)._replace(W_canopy_snow=np.full(4, 2.0, np.float32))
+    src.__dict__["_land_ml_state"] = with_store
+    aux2 = ModelDriver._checkpoint_carry_aux(src)
+    assert "land_ml_W_canopy_snow" in aux2
+    dst2 = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
+                           _carry_aux=dict(aux2), _land_ml_state=_state(99.0))
+    with pytest.raises(ValueError, match="W_canopy_snow"):
+        ModelDriver._restore_land_ml_from_carry_aux(dst2)

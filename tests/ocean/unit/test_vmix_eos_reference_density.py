@@ -1,6 +1,7 @@
-"""The lat-lon model's vertical-mixing EOS uses the run's reference density
-exactly as its dynamics does (#2243): ``rho0 = config.rho_0`` on the
-geometric-depth path, the module default otherwise.
+"""The lat-lon model's vertical-mixing EOS reference density is card-routed.
+
+Main's route uses ``rho0 = config.rho_0`` on the geometric-depth path; the
+certified GYRE and ORCA2 cards retain the prior module-default route.
 
 ``rho0`` only enters the NEMO EOS80/TEOS-10 polynomials (their depth
 reconstruction ``zh = p/(rho0*g)``), so the probe evaluates every captured EOS
@@ -52,28 +53,45 @@ def test_probe_sees_the_reference_density():
     assert gap > 1e3 * _RTOL * _expected("geometric")
 
 
-def test_certified_gyre_variant_keeps_prior_rho0_route_selectable():
+def test_certified_gyre_variant_and_orca2_keep_prior_rho0_route_selectable():
+    from pathlib import Path
+
     from legoesm.ocean.eos import make_eos_fn
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_gyre_zco_card,
         build_gyre_zco_lane_certified_card,
+        build_orca2_zps_card,
     )
 
     main_cfg = build_gyre_zco_card().recipe.model_config
     lane_cfg = build_gyre_zco_lane_certified_card().recipe.model_config
     assert main_cfg.vmix_eos_use_config_rho0 is True
     assert lane_cfg.vmix_eos_use_config_rho0 is False
-    explicit = make_eos_fn(
-        eos=lane_cfg.eos, eos_linear=lane_cfg.eos_linear,
-        eos_nemo_seos=lane_cfg.eos_nemo_seos, rho0=lane_cfg.rho_0)
-    prior_default = make_eos_fn(
-        eos=lane_cfg.eos, eos_linear=lane_cfg.eos_linear,
-        eos_nemo_seos=lane_cfg.eos_nemo_seos)
-    explicit_rho = np.asarray(explicit(
-        jnp.asarray(_T), jnp.asarray(_S), jnp.asarray(_P)))
-    prior_rho = np.asarray(prior_default(
-        jnp.asarray(_T), jnp.asarray(_S), jnp.asarray(_P)))
-    assert not np.array_equal(explicit_rho, prior_rho)
+    cards = [build_gyre_zco_lane_certified_card()]
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if deck.is_dir():
+        cards.append(build_orca2_zps_card(deck))
+    for card in cards:
+        cfg = card.recipe.model_config
+        assert cfg.eos_depth == "geometric"
+        assert cfg.vmix_eos_use_config_rho0 is False
+        explicit = make_eos_fn(
+            eos=cfg.eos, eos_linear=cfg.eos_linear,
+            eos_nemo_seos=cfg.eos_nemo_seos, rho0=cfg.rho_0)
+        prior_default = make_eos_fn(
+            eos=cfg.eos, eos_linear=cfg.eos_linear,
+            eos_nemo_seos=cfg.eos_nemo_seos)
+        explicit_rho = np.asarray(explicit(
+            jnp.asarray(_T), jnp.asarray(_S), jnp.asarray(_P)))
+        prior_rho = np.asarray(prior_default(
+            jnp.asarray(_T), jnp.asarray(_S), jnp.asarray(_P)))
+        assert not np.array_equal(explicit_rho, prior_rho)
+        assert float(explicit_rho - prior_rho) == pytest.approx(
+            4.8386165508418344e-4 if cfg.eos == "nemo_teos10"
+            else 4.873468174082518e-4,
+            rel=1e-12,
+            abs=0.0,
+        )
 
 
 def _model(eos_depth, physics, monkeypatch=None, spy_physics=None):

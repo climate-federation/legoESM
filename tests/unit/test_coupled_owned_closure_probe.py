@@ -109,6 +109,12 @@ def test_injected_atmosphere_source_fails_the_bar():
     (["--surfdata", "s.nc"], "--land real"),
     (["--grid", "fv3duo", "--dt", "300"], "--resolution and --dt"),
     (["--grid", "fv3duo", "--resolution", "12"], "--resolution and --dt"),
+    (["--grid", "latlon", "--dt", "300"], "--resolution and --dt"),
+    (["--grid", "latlon", "--resolution", "12"], "--resolution and --dt"),
+    (["--surfdata-path", "s.nc"], "unrecognized arguments"),
+    (["--deck", "d.yaml", "--energy-terms"], "--energy-terms"),
+    (["--deck", "d.yaml", "--days", "1.5"], "whole --days"),
+    (["--deck", "d.yaml", "--dt", "300"], "the deck sets --dt"),
 ])
 def test_real_case_options_refuse_missing_or_stray_paths(argv, msg, capsys):
     with pytest.raises(SystemExit):
@@ -164,6 +170,32 @@ def test_duo_column_lane_closes_atmosphere_water(tmp_path, capsys):
     e_atm = abs(res["fluxes"]["E_atm"])
     assert abs(res["rows"]["atm_water"]) < 1.0e-6 * e_atm, (
         res["rows"]["atm_water"], e_atm)
+
+
+def _latlon_run(tmp_path, capsys):
+    import json
+    out = tmp_path / "latlon.json"
+    assert probe.main(["--grid", "latlon", "--resolution", "12", "--dt",
+                       "600", "--vertical-coord", "cam_l32", "--nlev", "32",
+                       "--days", "0.0625", "--json", str(out)]) == 0
+    cfg = json.loads(next(ln[len("CONFIG "):] for ln in capsys.readouterr()
+                          .out.splitlines() if ln.startswith("CONFIG ")))
+    return cfg, json.loads(out.read_text())
+
+
+@pytest.mark.slow
+def test_latlon_column_lane_closes_land_and_atmosphere(tmp_path, capsys):
+    """--grid latlon runs the lat-lon C-grid's column lane (n_lat x 2 n_lat
+    columns) and its land and atmosphere rows close over three coupling
+    windows, as on MPAS and the duo.  The driver's CFL clamp cuts the
+    requested 600 s to 300 s, so a flux sum taken on the requested step
+    (not the one the model took) fails by 2x."""
+    cfg, res = _latlon_run(tmp_path, capsys)
+    assert (cfg["grid"], cfg["ncells"], cfg["dt_requested"], cfg["dt"]) == (
+        "latlon", 12 * 24, 600.0, 300.0)
+    rows, e_atm = res["rows"], abs(res["fluxes"]["E_atm"])
+    assert abs(rows["land_water"]) < 1.0e3, rows["land_water"]
+    assert abs(rows["atm_water"]) < 1.0e-6 * e_atm, (rows["atm_water"], e_atm)
 
 
 def test_land_emission_terms_split():
@@ -226,3 +258,125 @@ def test_stale_emission_term_is_the_one_call_lag(capsys):
     assert abs(float(lines["stale"][2])) > 1e-6 * e_atm   # non-vacuous
     assert abs(float(lines["stale_minus_lag"][2])) < 1e-12 * e_atm, (
         lines["stale_minus_lag"])
+
+
+def test_held_evaporation_in_flight_follows_the_physics_schedule():
+    """The atmosphere first applies a land call's held evaporation at the next
+    physics step: with physics every 6 steps a call at the end of step 7 is
+    still wholly in flight at step 12 (measured on the CMIP slab deck: debit
+    minus receipt = 6 steps of the last call's rate)."""
+    assert probe.steps_applied(7, 12, 6) == 0
+    assert probe.steps_applied(1, 12, 6) == 6
+    assert probe.steps_applied(10, 12, 1) == 2       # physics every step: n
+    fl, area, ev, dt, K = np.ones(2), np.ones(2), np.full(2, 1e-5), 300.0, 6
+    full = float(np.sum(fl * ev * area)) * K * dt
+    assert np.isclose(probe.land_in_flight(fl, area, 0.0, ev, 5, K, dt,
+                                           n_applied=0), full)
+    assert np.isclose(probe.land_in_flight(fl, area, 0.0, ev, 5, K, dt),
+                      full / K)
+
+
+@pytest.mark.slow
+def test_step_trace_pairs_each_step_with_the_state_it_made(tmp_path):
+    """The driver installs a step's state only after the probe's hook
+    returns, so each record is completed on the next call: the per-step
+    water changes then sum to the run's whole change, and the first step is
+    not the identity.  A dump needs no trace."""
+    import json
+    base = ["--grid", "latlon", "--resolution", "12", "--dt", "600",
+            "--vertical-coord", "cam_l32", "--nlev", "32", "--days", "0.0625"]
+    out = tmp_path / "trace.json"
+    assert probe.main(base + ["--trace-atm-steps", "--json", str(out)]) == 0
+    res = json.loads(out.read_text())
+    steps = res["atm_steps"]
+    assert [r["step"] for r in steps] == list(range(1, res["steps"] + 1))
+    total = res["stores1"]["W_atm"] - res["stores0"]["W_atm"]
+    assert np.isclose(sum(r["dW"] for r in steps), total,
+                      rtol=1e-9, atol=1.0), (sum(r["dW"] for r in steps), total)
+    assert steps[0]["dW"] != 0.0
+    out2 = tmp_path / "dump.json"
+    assert probe.main(base + ["--dump-step", "2", "--json", str(out2)]) == 0
+    assert (tmp_path / "dump.step2.npz").exists()
+
+
+@pytest.mark.slow
+def test_a_land_call_after_the_last_step_is_booked(tmp_path):
+    """With the land called every step (K=1) the run ends on a land call
+    made after the last dycore step; its debit and its whole interval in
+    flight must be booked, or the land row is off by one step of land
+    evaporation."""
+    import json
+    out = tmp_path / "k1.json"
+    assert probe.main(["--grid", "latlon", "--resolution", "12", "--dt",
+                       "600", "--vertical-coord", "cam_l32", "--nlev", "32",
+                       "--days", "0.0625", "--land-update-s", "300",
+                       "--json", str(out)]) == 0
+    res = json.loads(out.read_text())
+    assert abs(res["rows"]["land_water"]) < 1.0e3, res["rows"]["land_water"]
+    assert abs(res["rows"]["land_water_debit"]) < 1.0e3
+
+
+def test_water_bar_fails_rows_past_the_bar_and_nan_but_not_slab_heat():
+    rel = {"atm_water": -3.2e-4, "system_water": 2e-3,
+           "land_water": float("nan"), "slab_heat": 0.5}
+    assert probe.water_bar_failures(rel) == ["system_water", "land_water"]
+
+
+def test_water_bar_verdict_is_na_only_for_zero_precipitation():
+    ok = {"atm_water": 1e-4, "slab_heat": 0.5}
+    assert probe.water_bar_verdict(ok, 0.0) is None
+    assert probe.water_bar_verdict(ok, 1.0e9) == []
+    assert probe.water_bar_verdict(ok, float("nan")) == ["precipitation"]
+    assert probe.water_bar_verdict(ok, float("inf")) == ["precipitation"]
+
+
+def test_first_nonfinite_names_the_leaf_and_skips_the_canopy_cache():
+    tree = {"land": {"canopy_x": np.full((3, 6), np.nan),
+                     "theta": np.ones((3, 2))},
+            "zatm": {"u": np.array([[1.0, np.inf], [np.nan, 2.0]])}}
+    hit = probe.first_nonfinite(tree, "entering")
+    assert hit["field"] == "['zatm']['u']" and hit["n_bad"] == 2
+    assert hit["first_idx"] == [[0, 1], [1, 0]]
+    tree["zatm"]["u"] = np.zeros((2, 2))
+    assert probe.first_nonfinite(tree, "entering") is None
+
+
+def test_stage_flags_need_the_trap():
+    with pytest.raises(SystemExit):
+        probe.main(["--nan-stages"])
+    with pytest.raises(SystemExit):
+        probe.main(["--nan-trap", "--replay-copy-col", "1", "0"])
+
+
+@pytest.mark.slow
+def test_nan_trap_names_a_planted_stage_and_saves_the_origin(
+        tmp_path, capsys, monkeypatch):
+    """A NaN planted in the dynamics tendency is caught at step 1 in that
+    stage from finite inputs; the entering state is saved finite and every
+    patch the trap installed is removed."""
+    import json
+    import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as llm
+    real = llm.cgrid_latlon_pe_tendencies
+
+    def planted(*a, **kw):
+        du, *rest = real(*a, **kw)
+        return (du * float("nan"), *rest)
+    monkeypatch.setattr(llm, "cgrid_latlon_pe_tendencies", planted)
+    out = tmp_path / "trap.json"
+    with pytest.raises(SystemExit) as e:
+        probe.main(["--grid", "latlon", "--resolution", "12", "--dt", "600",
+                    "--vertical-coord", "cam_l32", "--nlev", "32",
+                    "--days", "0.0625", "--nan-trap", "--nan-stages",
+                    "--json", str(out)])
+    assert e.value.code == 2
+    hit = json.loads(next(ln[len("NANTRAP "):] for ln in capsys.readouterr()
+                          .out.splitlines() if ln.startswith("NANTRAP ")))
+    assert hit["step"] == 1 and hit["where"] == "step_output"
+    assert hit["stages"]["first_stage"] == "cgrid_latlon_pe_tendencies"
+    origin = np.load(out.with_suffix(".nantrap_origin.npz"))
+    assert origin.files and all(np.all(np.isfinite(origin[k]))
+                                for k in origin.files
+                                if origin[k].dtype.kind == "f"
+                                and "canopy_x" not in k)
+    assert llm.cgrid_latlon_pe_tendencies is planted
+    assert llm.fourier_filter_3d.__module__ != probe.__name__

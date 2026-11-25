@@ -80,10 +80,11 @@ def _mesh():
                              axis_names=("lat",))
 
 
-def _model_and_state(use_ppm_transport=True, use_polar_filter=False):
+def _model_and_state(use_ppm_transport=True, use_polar_filter=False,
+                     coriolis_alpha=0.0):
     grid = create_latlon_grid(
         n_lat=N_LAT, n_lon=N_LON, radius=constants.R_earth,
-        omega=constants.Omega)
+        omega=constants.Omega, coriolis_alpha=coriolis_alpha)
     sigma = create_sigma_coordinate(n_levels=NLEV)
     cfg = CGridLatLonPrimitiveEquationConfig(
         fix_mass=True,                 # exercises the psum'd mass fixer
@@ -116,6 +117,39 @@ def _fields(state):
 # ==============================================================================
 # (i) segment == sequential sharded steps == serial
 # ==============================================================================
+
+def test_rotated_coriolis_segment_matches_serial():
+    """DCMIP rotated planet (coriolis_alpha != 0) on the lat-band SPMD lane:
+    each band evaluates the rotated planetary vorticity on its own vertex rows
+    (interior cuts are not poles), so the sharded trajectory equals serial
+    exactly (no PPM), and differs from the untilted one (non-vacuity)."""
+    mesh = _mesh()
+    n_steps = 5
+    alpha = float(np.pi / 4.0)
+    ser_model, c0 = _model_and_state(use_ppm_transport=False, coriolis_alpha=alpha)
+    seg_model, _ = _model_and_state(use_ppm_transport=False, coriolis_alpha=alpha)
+    flat_model, _ = _model_and_state(use_ppm_transport=False)
+    s, f = c0, c0
+    for _ in range(n_steps):
+        s, _ = ser_model._step_cgrid(s, DT)
+        f, _ = flat_model._step_cgrid(f, DT)
+    serial_out, flat_out = _fields(s), _fields(f)
+    # The band step rebuilds its geometry from a template whose non-array
+    # fields stay Python scalars, so the tilt reaching the band body is a
+    # concrete float (never a tracer that could fall back to the untilted rows).
+    from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
+        atm_grid_array_field_names, build_band_grids_atm)
+    template = build_band_grids_atm(seg_model.grid, N_DEV)[0]
+    assert "coriolis_alpha" not in atm_grid_array_field_names(template)
+    assert type(template.coriolis_alpha) is float and template.coriolis_alpha == alpha
+    seg = make_sharded_atm_latlon_segment(seg_model, mesh, n_steps)
+    c_seg, ok = seg(shard_state_atm_latlon(c0, mesh), DT)
+    assert bool(ok)
+    seg_out = _fields(gather_state_atm_latlon(c_seg, mesh))
+    for k in ("u", "v", "T", "p_s"):
+        np.testing.assert_allclose(seg_out[k], serial_out[k], rtol=1e-12, atol=1e-12)
+    assert np.max(np.abs(serial_out["u"] - flat_out["u"])) > 1e-6
+
 
 @pytest.mark.parametrize("use_ppm", [False, True])
 def test_segment_matches_sequential_and_serial(use_ppm):

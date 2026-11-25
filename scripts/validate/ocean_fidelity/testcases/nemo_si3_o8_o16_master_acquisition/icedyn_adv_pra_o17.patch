@@ -1,0 +1,20 @@
+--- icedyn_adv_pra.F90
++++ icedyn_adv_pra.F90
+@@ -27,0 +28,3 @@
++! O8O16_OBSERVER_BEGIN
++   USE o17_master_writer, ONLY : o17_prather
++! O8O16_OBSERVER_END
+@@ -108,0 +112,6 @@
++! O8O16_OBSERVER_BEGIN
++      CALL o17_prather(29,sxice,syice,sxxice,syyice,sxyice,sxsn,sysn,sxxsn,syysn,sxysn, &
++         & sxa,sya,sxxa,syya,sxya,sxage,syage,sxxage,syyage,sxyage,sxsal,sysal,sxxsal,syysal,sxysal, &
++         & sxap,syap,sxxap,syyap,sxyap,sxvp,syvp,sxxvp,syyvp,sxyvp,sxvl,syvl,sxxvl,syyvl,sxyvl, &
++         & sxc0,syc0,sxxc0,syyc0,sxyc0,sxe,sye,sxxe,syye,sxye,sxsi,sysi,sxxsi,syysi,sxysi)
++! O8O16_OBSERVER_END
+@@ -486,0 +496,6 @@
++! O8O16_OBSERVER_BEGIN
++      CALL o17_prather(30,sxice,syice,sxxice,syyice,sxyice,sxsn,sysn,sxxsn,syysn,sxysn, &
++         & sxa,sya,sxxa,syya,sxya,sxage,syage,sxxage,syyage,sxyage,sxsal,sysal,sxxsal,syysal,sxysal, &
++         & sxap,syap,sxxap,syyap,sxyap,sxvp,syvp,sxxvp,syyvp,sxyvp,sxvl,syvl,sxxvl,syyvl,sxyvl, &
++         & sxc0,syc0,sxxc0,syyc0,sxyc0,sxe,sye,sxxe,syye,sxye,sxsi,sysi,sxxsi,syysi,sxysi)
++! O8O16_OBSERVER_END

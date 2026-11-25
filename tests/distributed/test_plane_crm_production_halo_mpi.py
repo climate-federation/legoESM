@@ -113,6 +113,8 @@ def _layout_or_skip(nry, nrx, halo):
 
 
 DECOMPS = [(2, 1), (1, 2), (2, 2), (4, 2), (2, 4)]
+MIXED_HALO_RTOL = 1e-5   # measured max 5.3e-7 (voted 2-1)
+MIXED_HALO_TRACER_TOL = 1e-7    # = the serial mixed tracer-mass test tolerance
 
 
 def _run(model, state, dt, lay, owned):
@@ -222,3 +224,79 @@ def test_production_step_halo_gradient_matches_single_rank(nry, nrx):
     assert np.isfinite(g_multi) and g_multi != 0.0
     np.testing.assert_allclose(g_multi, g_ref, rtol=1e-9)
     np.testing.assert_allclose(g_multi, g_fd, rtol=1e-5)
+
+
+@pytest.mark.parametrize("nry,nrx", [(2, 1), (1, 2), (2, 2)])
+def test_mixed_precision_step_halo_matches_single_rank(nry, nrx):
+    """--precision mixed (fp32 state, fp64 acoustic substeps and fixer sums):
+    the halo path keeps every leaf's dtype and matches the serial step."""
+    rargs = rcp.parse_args([*bench.RCEMIP1_DECK_ARGV, "--nx", str(NX),
+                            "--ny", str(NY), "--nlev", str(NLEV),
+                            "--precision", "mixed"])
+    hc, _, _ = rcp.build_rcemip_height_coord(rargs, rcp.P_SFC_RCEMIP,
+                                             jnp.float32)
+    cfg = rcp.build_dycore_config(rargs)._replace(
+        acoustic_moist_global_mean=True, fix_mass=True)
+    assert cfg.mixed_precision
+    halo = horizontal_advection_halo_width(cfg)
+    lay = _layout_or_skip(nry, nrx, halo)
+    g_glob = create_plane_grid(nx=NX, ny=NY, nlev=NLEV, dx=rargs.dx,
+                               dy=rargs.dx, dtype=jnp.float32)
+    s64 = _global_state(create_plane_grid(nx=NX, ny=NY, nlev=NLEV, dx=rargs.dx,
+                                          dy=rargs.dx, dtype=jnp.float64),
+                        hc)
+    s_glob = jax.tree.map(lambda a: a.astype(jnp.float32)
+                          if jnp.issubdtype(a.dtype, jnp.floating) else a, s64)
+    lay1 = make_plane_pencil_layout(rank=0, n_ranks=1, n_ranks_y=1,
+                                    n_ranks_x=1, ny_global=NY, nx_global=NX,
+                                    halo=halo)
+    m_ref = PlaneCompressibleEulerModel(
+        g_glob, hc, make_flat_plane_terrain_metric(g_glob, hc), cfg)
+    ref = _run(m_ref, s_glob, rargs.dt, lay1, None)
+    g_loc = create_plane_grid(nx=lay.nx_local, ny=lay.ny_local, nlev=NLEV,
+                              dx=rargs.dx, dy=rargs.dx, dtype=jnp.float32)
+    m_loc = PlaneCompressibleEulerModel(
+        g_loc, hc, make_flat_plane_terrain_metric(g_loc, hc), cfg)
+    owned = jnp.ones((lay.ny_local, lay.nx_local), jnp.float32)
+    loc = _run(m_loc, _slice(s_glob, lay), rargs.dt, lay, owned)
+    for f in FIELDS:
+        assert getattr(loc[-1], f).data.dtype == jnp.float32, f
+    gathered = [{f: gather_plane_field(getattr(s, f).data, lay)
+                 for f in FIELDS} for s in loc]
+    if lay.rank != 0:
+        return
+    for n in range(1, N_STEPS + 1):
+        for f in FIELDS:
+            a = np.asarray(gathered[n][f], np.float64)
+            b = np.asarray(getattr(ref[n], f).data, np.float64)
+            rel = np.max(np.abs(a - b)) / max(np.max(np.abs(b)), 1e-300)
+            print(f"MIXED_HALO {nry}x{nrx} {f} step {n} rel={rel:.3e}")
+            assert rel <= MIXED_HALO_RTOL, (f, n, rel)
+    # RULE 0 on the multi-rank mixed run (fp32 storage, fp64 sums). Dry mass:
+    # the fp64 fixer sets the fp64 sum to the anchor every step, then storing
+    # rho' in fp32 moves it by at most sum_i ulp32(rho'_i)/2 dz_i (vote
+    # B16-revised: this derived bound, for the multi-rank and the single-rank
+    # run, each against its own initial mass). hc is the mixed run's stored
+    # fp32 geometry, the one the fixer's fp64 sums use. Tracer mass: fp32
+    # storage round-off (serial tolerance).
+    dz = np.asarray(hc.dz, np.float64)
+    rho_ref = np.asarray(hc.rho_ref, np.float64)
+
+    def masses(g):
+        rho_p = np.asarray(g["rho_prime"], np.float32)
+        rho = rho_ref + rho_p.astype(np.float64)
+        q = np.asarray(g["tracers"], np.float64)
+        bound = (0.5 * np.spacing(np.abs(rho_p)).astype(np.float64) * dz).sum()
+        return ((rho * dz).sum(), (rho[..., None] * q * dz[:, None]).sum((0, 1, 2)),
+                bound)
+    d0, t0, _ = masses(gathered[0])
+    d0s = masses({f: getattr(ref[0], f).data for f in FIELDS})[0]
+    for n in range(1, N_STEPS + 1):
+        d, t, bound = masses(gathered[n])
+        ds, _, bound_s = masses({f: getattr(ref[n], f).data for f in FIELDS})
+        print(f"MIXED_HALO {nry}x{nrx} step {n} dry={abs(d - d0) / d0:.3e} "
+              f"serial_dry={abs(ds - d0s) / d0s:.3e} bound={bound / d0:.3e} "
+              f"tracer={np.max(np.abs(t - t0) / t0):.3e}")
+        assert abs(d - d0) <= bound + 1e-14 * d0, (n, d, d0, bound)
+        assert abs(ds - d0s) <= bound_s + 1e-14 * d0s, (n, ds, d0s, bound_s)
+        assert np.max(np.abs(t - t0) / t0) <= MIXED_HALO_TRACER_TOL, (n, t, t0)

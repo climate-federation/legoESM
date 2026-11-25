@@ -1,0 +1,19 @@
+--- icestp.f90
++++ icestp.f90
+@@ -87,1 +87,2 @@
+-   USE prtctl         ! Print control
++   USE prtctl         ! Print control
++   USE o8_o16_master_writer, ONLY : o8o16_set_context, o8o16_update
+@@ -184,1 +185,3 @@
+-      IF( ln_timing )   CALL timing_start('icestp')
++      IF( ln_timing )   CALL timing_start('icestp')
++      CALL o8o16_set_context( kt, Kmm, nit000, narea-1, jpni, jpnj, &
++         &                    rDt_ice, r1_Dt_ice )
+@@ -259,1 +262,2 @@
+-                                        CALL ice_var_agg(2)
++                                        CALL ice_var_agg(2)
++                                        CALL o8o16_update(15)
+@@ -261,1 +265,2 @@
+-                                        CALL ice_update_flx( kt )     ! -- Update ocean surface mass, heat and salt fluxes
++                                        CALL ice_update_flx( kt )     ! -- Update ocean surface mass, heat and salt fluxes
++                                        CALL o8o16_update(16)

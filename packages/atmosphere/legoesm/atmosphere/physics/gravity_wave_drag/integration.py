@@ -956,20 +956,16 @@ def _make_mpas_gwd(
                 z_full, z_half, rho, lat, dt, scheme_config,
             )
 
-        # ``mesh.cellsOnEdge`` has shape ``(2, nEdges)``; slice axis 0
-        # to get per-edge cell-index vectors.
         du_cell = gwd_out.du_dt
         dv_cell = gwd_out.dv_dt
         if _cell_winds:
             du_edge_normal, _dv_leaf = du_cell, dv_cell
         else:
-            c0 = mesh.cellsOnEdge[0]
-            c1 = mesh.cellsOnEdge[1]
-            du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
-            dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
-            angle = mesh.angleEdge[:, None]
-            du_edge_normal = (du_e_east * jnp.cos(angle)
-                              + dv_e_north * jnp.sin(angle))
+            # The shared projection (same plain two-cell mean and the same
+            # operation order as the inline copy it replaces); under MPI it
+            # takes the owners' cell values on the partition cut.
+            from legoesm.grids.voronoi import cell_vector_to_edge_normal
+            du_edge_normal = cell_vector_to_edge_normal(du_cell, dv_cell, mesh)
             _dv_leaf = None
         dT_cell = gwd_out.dT_dt
 

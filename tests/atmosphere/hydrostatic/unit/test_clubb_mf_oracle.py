@@ -11,7 +11,7 @@ except for making ``poisson`` public (gfortran 11.2, fp64), twice per column
 ``scripts/validate/oracle/clubb_mf/{build.sh,make_fixture.py}`` on the 15
 tier-2 audit columns + 1 stable column.
 
-* Hard limit: the JAX reference (``_clubb_mf_reference``) with every
+* Hard limit: the JAX reference (``turbulence.clubb_mf``) with every
   sharpness at inf matches the oracle to 1e-10 (max |diff| / max |oracle| per
   field over the fixture; the repo oracle tolerance, user 2026-10-19).
 * RULE 5: each smooth switch at its default (others hard), per column and
@@ -38,7 +38,7 @@ from legoesm.atmosphere.physics.turbulence import edmf as E
 from legoesm.atmosphere.physics.turbulence.config import TurbulentEDMFConfig
 
 from legoesm import constants
-from tests.atmosphere.hydrostatic.unit._clubb_mf_reference import (
+from legoesm.atmosphere.physics.turbulence.clubb_mf import (
     HARD,
     KSPAN_MIN,
     LTS_INHIBIT_THRESH,
@@ -331,7 +331,7 @@ def test_check_grads_through_condensation_exit_at_default(fx):
     """RULE 5, switch ``conv`` (V7'): at the condensation call site, on a total water where
     CAM's iteration count flips, check_grads at the default; the derivative differs from the
     same point with the exit hard."""
-    from tests.atmosphere.hydrostatic.unit._clubb_mf_reference import condensation_mf
+    from legoesm.atmosphere.physics.turbulence.clubb_mf import condensation_mf
 
     c = {k: v[0] for k, v in _cols(fx).items()}
     k = 5
@@ -477,6 +477,41 @@ def test_our_edmf_known_difference_per_case(fx):
                 v, stored[step][k], rtol=1e-6, atol=1e-9, err_msg=f"{step}/{k}"
             )
 
+
+
+ALPHTURB_FIXTURE = FIXTURE.with_name("clubb_mf_alphturb3.npz")
+
+
+@pytest.mark.parametrize("step", (1, 2))
+def test_alphturb_hard_limit_matches_cam_oracle(step):
+    """TKE-enhanced entrainment (clubb_mf_alphturb = 3, CAM7's value): same
+    driver/columns as clubb_mf.npz (make_fixture.py --alphturb 3.0)."""
+    f = dict(np.load(ALPHTURB_FIXTURE, allow_pickle=True))
+    run = jax.jit(jax.vmap(lambda c, e, z: integrate_mf(c, e, z, HARD, 3.0)))
+    cols = dict(_cols(f), tke=jnp.asarray(f["c_tke"]))
+    got = {k: np.asarray(v) for k, v in run(
+        cols, jnp.asarray(f[f"ora{step}_enti"]), jnp.asarray(f[f"ora{step}_ztopm1_in"])).items()}
+    e = {k: _rel(got[k], f[f"ora{step}_{k}"]) for k in FIELDS}
+    print(f"alphturb=3 step {step} hard limit vs oracle, max rel err", e)
+    assert max(e.values()) <= TOL, e
+    # non-vacuous: the TKE term changed the oracle's plumes
+    assert _rel(f[f"ora{step}_upw"], dict(np.load(FIXTURE))[f"ora{step}_upw"]) > 1e-3
+
+
+def test_alphturb_check_grads_through_tke_at_default(fx):
+    """Gradient of the plume fluxes w.r.t. TKE and alphturb at the default
+    smoothing: finite, non-zero, matching finite differences."""
+    i = int(np.argmax(np.max(np.abs(fx["ora1_qtflx"]), axis=1)))
+    c = {k: jnp.asarray(fx[f"c_{k}"][i]) for k in C_KEYS}
+    e, z = jnp.asarray(fx["ora1_enti"][i]), jnp.asarray(fx["ora1_ztopm1_in"][i])
+    tke0 = jnp.asarray(fx["c_tke"][i])
+
+    def f(tke, al):
+        return jnp.sum(integrate_mf(dict(c, tke=tke), e, z, MFSmoothing(), al)["qtflx"])
+
+    check_grads(f, (tke0, jnp.asarray(3.0)), order=1, modes=("rev",), eps=1e-6, rtol=1e-3)
+    g = jax.grad(f, argnums=(0, 1))(tke0, jnp.asarray(3.0))
+    assert all(np.all(np.isfinite(np.asarray(x))) for x in g) and float(g[1]) != 0.0
 
 if __name__ == "__main__":
     d = dict(np.load(FIXTURE, allow_pickle=True))

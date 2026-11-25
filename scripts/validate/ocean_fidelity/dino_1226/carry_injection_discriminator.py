@@ -146,7 +146,7 @@ def _install_k_hook():
     (returning ``K_v_cell, A_v_cell, tke_new``), imported from the PACKAGE at
     ``:5572``.  The counter is printed every run and a zero raises.
 
-    EVD IS PRESERVED.  ``k_profiles.py:317-340`` composes the closure Kz with
+    EVD IS PRESERVED.  ``k_profiles.py:317-356`` composes the closure Kz with
     the enhanced-diffusion (EVD) field as ``maximum(K_closure, K_conv)``;
     NEMO does the same (``ln_zdfevd=.true.``, ``rn_evd=100``, ``nn_evdm=1`` in
     RUN_TWIN_STEP1/namelist_cfg:388-390) but writes the restart's

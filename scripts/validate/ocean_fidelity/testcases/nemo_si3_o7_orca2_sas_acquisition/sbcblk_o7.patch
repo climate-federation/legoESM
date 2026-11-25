@@ -1,0 +1,42 @@
+--- sbcblk.F90
++++ sbcblk.F90
+@@ -68,0 +69,5 @@
++! O7_OBSERVER_BEGIN
++   USE o7_si3_writer, ONLY : o7_set_coeffs, o7_blk1_entry, o7_blk1_exit, &
++      & o7_blk2_entry, o7_blk2_exit
++
++! O7_OBSERVER_END
+@@ -1076,0 +1082,4 @@
++! O7_OBSERVER_BEGIN
++      CALL o7_set_coeffs( rn_Cd_ia, rn_Ce_ia, rn_Ch_ia )
++      CALL o7_blk1_entry( pwndi, pwndj, ptair, pqair, pslp, ptsui, rhoa, smask0 )
++! O7_OBSERVER_END
+@@ -1176,0 +1186,3 @@
++! O7_OBSERVER_BEGIN
++      CALL o7_blk1_exit( wndm_ice, zsipt, Cd_ice, Ch_ice, Ce_ice, theta_zu_i, q_zu_i, putaui, pvtaui )
++! O7_OBSERVER_END
+@@ -1215,0 +1228,3 @@
++! O7_OBSERVER_BEGIN
++      REAL(wp), DIMENSION(A2D(0),jpl) :: o7_zsq, o7_zsipt, o7_zdqlw, o7_zdqsb
++! O7_OBSERVER_END
+@@ -1216,0 +1232,5 @@
++! O7_OBSERVER_BEGIN
++      CALL o7_blk2_entry( ptsu, phs, phi, palb, a_i_b, ptair, pqair, pslp, pdqlw, pprec, psnow, &
++         & qsr, rhoa, wndm_ice, Ch_ice, Ce_ice, theta_zu_i, q_zu_i, sst_m, emp, at_i_b, &
++         & qns_oce, qsr_oce, cloud_fra, smask0 )
++! O7_OBSERVER_END
+@@ -1260,0 +1281,6 @@
++! O7_OBSERVER_BEGIN
++            o7_zsq(ji,jj,jl) = zsq
++            o7_zsipt(ji,jj,jl) = zsipt
++            o7_zdqlw(ji,jj,jl) = z_dqlw
++            o7_zdqsb(ji,jj,jl) = z_dqsb
++! O7_OBSERVER_END
+@@ -1347,0 +1374,7 @@
++! O7_OBSERVER_BEGIN
++      CALL o7_blk2_exit( qsr_ice, qns_ice, dqns_ice, qla_ice, dqla_ice, evap_ice, devap_ice, &
++         & qprec_ice, qevap_ice, qtr_ice_top, o7_zsq, o7_zsipt, z_qlw, o7_zdqlw, z_qsb, &
++         & o7_zdqsb, tprecip, sprecip, emp_oce, emp_ice, emp_tot, qemp_oce, qemp_ice, &
++         & qns_tot, qsr_tot, zcptrain, zcptsnw, zcptn, zevap, zsnw )
++
++! O7_OBSERVER_END

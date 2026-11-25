@@ -174,8 +174,8 @@ def _declared_unset_fields(tree) -> dict[str, set[str]]:
                                   else [node.target]))):
             return {k.value: {kk.value for kk in v.keys
                               if isinstance(kk, ast.Constant)}
-                    for k, v in zip(node.value.keys, node.value.values)
-                    if isinstance(k, ast.Constant) and isinstance(v, ast.Dict)}
+                     for k, v in zip(node.value.keys, node.value.values)
+                     if isinstance(k, ast.Constant) and isinstance(v, ast.Dict)}
     return {}
 
 

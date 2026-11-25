@@ -238,3 +238,17 @@ def test_driver_rejects_override_launch_p_outside_the_legal_range():
     ov = GravityWaveDragConfig(scheme="hines", hines=HinesConfig())
     ExperimentConfig(gravity_wave_drag="hines",
                      gravity_wave_drag_override=ov).validate_strict()
+
+
+def test_fp64_temperature_and_v_run_in_the_wind_precision():
+    """An fp32 run's column lane hands fp64 T / v next to fp32 u (x64 on):
+    the scans' carries must stay in u's dtype, as for the pressures (the
+    column-lane smoke died with a float32-vs-float64 scan carry)."""
+    if not jax.config.jax_enable_x64:
+        pytest.skip("needs x64 to build fp64 inputs")
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column()
+    out = hines_gwd(u.astype(jnp.float32), v.astype(jnp.float64),
+                    T.astype(jnp.float64), p_full, p_half, z_full, z_half,
+                    rho, lat, 300.0, HinesConfig())
+    assert out.du_dt.dtype == jnp.float32
+    assert np.isfinite(np.asarray(out.du_dt)).all()

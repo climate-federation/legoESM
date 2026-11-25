@@ -1,0 +1,18 @@
+--- zdftke.F90
++++ zdftke.F90
+@@ -45,6 +45,7 @@
+    USE sbc_oce        ! surface boundary condition: ocean
+    USE zdfdrg         ! vertical physics: top/bottom drag coef.
+    USE zdfmxl         ! vertical physics: mixed layer
++   USE zdftke_round326_writer, ONLY : r326_write
+ #if defined key_si3
+    USE ice, ONLY: hm_i, h_i
+ #endif
+@@ -181,6 +182,7 @@
+       !
+       CALL tke_tke( Kbb, Kmm, p_sh2, p_avm, p_avt, z_pdlr )   ! now tke (en)
+       !
++      CALL r326_write( kt, nn_mxlice, ln_mxl0 )   ! round 326: SI3 fields tke_avn reads
+       CALL tke_avn( Kbb, Kmm,        p_avm, p_avt, z_pdlr )   ! now avt, avm, dissl
+       !
+ #if ! defined key_PSYCLONE_2p5p0

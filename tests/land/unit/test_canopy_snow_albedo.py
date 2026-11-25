@@ -241,7 +241,7 @@ def _forcing(sw=SW):
 
 def _step(masking, sw=SW):
     cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
-                               surface_scheme=TwoLeafCanopyConfig(),
+                               surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False),
                                canopy_snow_masking=masking)
     state = init_multilayer_land_state(NCOL, cfg, T_init=265.0)
     # forest no snow / forest deep snow / bare deep snow / forest thin snow
@@ -310,7 +310,7 @@ def _pre_step_masked():
 
 def test_switch_without_canopy_structure_raises():
     cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
-                               surface_scheme=TwoLeafCanopyConfig(),
+                               surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False),
                                canopy_snow_masking=True)
     state = init_multilayer_land_state(NCOL, cfg, T_init=265.0)
     lp = bare_canopy_params(NCOL)
@@ -429,7 +429,7 @@ def test_switch_without_land_params_raises():
     """Two-leaf with no canopy parameters skips the snow layering altogether, so
     the switch would be silently inert: refused."""
     cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
-                               surface_scheme=TwoLeafCanopyConfig(),
+                               surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False),
                                canopy_snow_masking=True)
     state = init_multilayer_land_state(NCOL, cfg, T_init=265.0)
     with pytest.raises(ValueError, match="canopy_snow_masking"):
@@ -497,7 +497,7 @@ def test_switch_off_ignores_the_new_structure_fields():
     """With the switch off, carrying SAI_dom/hbot_dom/pft_dom or not gives the
     same land step bit for bit (the fields are read only by the masking)."""
     cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
-                               surface_scheme=TwoLeafCanopyConfig())
+                               surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     state = init_multilayer_land_state(NCOL, cfg, T_init=265.0)
     state = state._replace(snow_depth=jnp.asarray([0.0, 200.0, 200.0, 5.0]))
     base = bare_canopy_params(NCOL)._replace(
@@ -525,7 +525,7 @@ def test_burial_uses_physical_snow_cover_not_the_albedo_scale():
     from legoesm.surface_albedo import LandAlbedoConfig
     la = LandAlbedoConfig(snow_cover_scale=jnp.full(NCOL, 0.5))
     cfg = MultiLayerLandConfig(snow_albedo_feedback=True, land_albedo=la,
-                               surface_scheme=TwoLeafCanopyConfig(),
+                               surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False),
                                canopy_snow_masking=True)
     lp = bare_canopy_params(NCOL, canopy_structure=True)._replace(
         LAI=jnp.full(NCOL, 0.3), SAI_dom=jnp.full(NCOL, 0.4), hc=jnp.full(NCOL, 0.5),
@@ -554,7 +554,7 @@ def test_masking_uses_clm5_optics_of_the_band():
 
 def test_switch_with_layered_snow_raises():
     cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
-                               surface_scheme=TwoLeafCanopyConfig(),
+                               surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False),
                                canopy_snow_masking=True, snow_scheme="layered")
     # A consistent layered state, so the only raise path is the masking refusal
     # (a bulk state would raise the unrelated missing-snow-layer error).
@@ -583,7 +583,7 @@ def test_zero_ground_albedo_keeps_gradients_finite():
 def test_switch_with_elevation_bands_raises():
     from legoesm.land.snow_bands import ElevationSnowBandConfig
     cfg = MultiLayerLandConfig(
-        snow_albedo_feedback=True, surface_scheme=TwoLeafCanopyConfig(),
+        snow_albedo_feedback=True, surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False),
         canopy_snow_masking=True,
         elev_bands=ElevationSnowBandConfig(band_dz=jnp.zeros((NCOL, 2))))
     state = init_multilayer_land_state(NCOL, cfg._replace(elev_bands=None),

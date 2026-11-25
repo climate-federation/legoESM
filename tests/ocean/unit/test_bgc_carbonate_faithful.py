@@ -89,8 +89,8 @@ _O_KB_OVER_T = (-8966.90, -2890.53, -77.942, 1.728, -0.0996)
 _O_KB_CONST = (148.0248, 137.1942, 1.62142)
 _O_KB_LOGT = (-24.4344, -25.085, -0.2474)
 _O_KB_SQRTS_T = 0.053105
-# Uppström (1974) total boron.
-_O_BT = 0.000416
+# Uppström (1974) total boron, mocsy v2.4.1 optB='u74' form.
+_O_BT_PER_CL, _O_S_PER_CL, _O_M_B = 0.000232, 1.80655, 10.811
 _O_H_INIT = 8.1             # initial-guess pH for the borate iteration
 
 
@@ -138,7 +138,7 @@ def _kb_oracle(T, S):
 
 
 def _bt_oracle(S):
-    return _O_BT * S / 35.0
+    return _O_BT_PER_CL / _O_M_B * S / _O_S_PER_CL
 
 
 def _follows_oracle(DIC_m3, ALK_m3, T, S, niter, rho):

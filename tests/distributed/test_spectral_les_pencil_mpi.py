@@ -6,7 +6,7 @@ a grid chosen so every padding path is live: nkx=13 split over Py∈{2,4} (kx
 padding), ny=16 split over Px=3 in the projection (ky padding) and nz=7 / nz±1
 split over Px∈{2,3,4} (z padding). Tolerances are the slab tests' (same
 operators, same reduction-order class): operators 1e-10, dealiased step 1e-9,
-dynamic-LASD step 1e-4 (``test_lasd_mpi.py``), gradients 1e-5.
+dynamic-LASD step 1e-12 (measured 1.3e-15, ``test_lasd_mpi.py``), gradients 1e-5.
 
 Run (each size exercises different meshes)::
 
@@ -47,8 +47,22 @@ MESHES = _MESHES.get(NPROC, [])
 pytestmark = pytest.mark.skipif(not MESHES, reason=f"no mesh for {NPROC} ranks")
 
 
+PLANES = False   # set per test by the autouse fixture below
+
+
+@pytest.fixture(autouse=True, params=[False, True], ids=["pencil", "planes"])
+def _fft_mode(request):
+    """Every test runs with the pencil FFT and with the planes FFT mode (same
+    physical blocks; one all-to-all to whole horizontal planes per transform)."""
+    global PLANES
+    PLANES = request.param
+    yield
+    PLANES = False
+
+
 def _layout(mesh):
-    return make_spectral_les_pencil_layout(COMM, mesh[0], mesh[1], NY, NX)
+    return make_spectral_les_pencil_layout(COMM, mesh[0], mesh[1], NY, NX,
+                                           planes=PLANES)
 
 
 def _block(f, mesh):
@@ -84,6 +98,15 @@ def _spec_ref(fh_serial, mesh, nzf):
     return pad[:, klo:khi, zlo:zhi]
 
 
+def _planes_spec_ref(fh_serial, nzf):
+    """Serial rfft2 spectrum cut to this rank's planes-mode block: full ky and
+    kx, z chunk RANK of NPROC (zero-padded)."""
+    zlo, zhi = chunk_slice(nzf, NPROC, RANK)
+    pad = np.zeros((NY, NX // 2 + 1, NPROC * (zhi - zlo)), complex)
+    pad[..., :nzf] = np.asarray(fh_serial)
+    return pad[..., zlo:zhi]
+
+
 # --------------------------------------------------------------------------- #
 # Transforms                                                                   #
 # --------------------------------------------------------------------------- #
@@ -94,7 +117,8 @@ def test_pencil_rfft2_matches_serial_and_roundtrips(dz):
     for mesh in MESHES:
         L = _layout(mesh)
         fh = layout_rfft2(_block(f, mesh), L)
-        ref = _spec_ref(jnp.fft.rfft2(f, axes=(0, 1)), mesh, nzf)
+        ref = (_planes_spec_ref(jnp.fft.rfft2(f, axes=(0, 1)), nzf) if PLANES
+               else _spec_ref(jnp.fft.rfft2(f, axes=(0, 1)), mesh, nzf))
         np.testing.assert_allclose(np.asarray(fh), ref, rtol=1e-10, atol=1e-10)
         back = layout_irfft2(fh, L, nzf)
         np.testing.assert_allclose(_gather(back, mesh), np.asarray(f),
@@ -102,6 +126,8 @@ def test_pencil_rfft2_matches_serial_and_roundtrips(dz):
 
 
 def test_pencil_zwhole_roundtrip_and_content():
+    if PLANES:
+        pytest.skip("pencil spectral layout only (planes covered by the step tests)")
     f = _rand(2, (NY, NX, NZ))
     fh_ser = np.asarray(jnp.fft.rfft2(f, axes=(0, 1)))
     for mesh in MESHES:
@@ -255,8 +281,9 @@ def test_pencil_dealiased_step_matches_serial_and_conserves(time_scheme):
 
 def test_pencil_lasd_step_matches_serial():
     """Full oracle closure (3/2 de-aliasing + dynamic LASD SGS) step()
-    trajectory; LASD tolerance 1e-4 as the slab test (raw C_s² is
-    hypersensitive to FFT round-off, the integrated state is not)."""
+    trajectory == serial to round-off. Measured (x64, 4 ranks, meshes 2x2,
+    4x1, 1x4): state 1.3e-15, nu_t < 8e-14, beta < 7e-14, no C_s² mask flips
+    — the former 1e-4 tolerance was never a measured gap."""
     cfg = SpectralLESConfig(nx=NX, ny=NY, nz=NZ, Lx=300.0, Ly=200.0, Lz=100.0,
                             dealias=True, smagorinsky_dynamic=True,
                             spectral_filter=True, time_scheme="rk3")
@@ -268,7 +295,7 @@ def test_pencil_lasd_step_matches_serial():
             np.testing.assert_allclose(
                 _gather(getattr(dist[-1], name), mesh),
                 np.asarray(getattr(ser[-1], name)),
-                rtol=1e-4, atol=1e-4, err_msg=f"{name} mismatch {mesh}")
+                rtol=1e-12, atol=1e-12, err_msg=f"{name} mismatch {mesh}")
 
 
 # --------------------------------------------------------------------------- #
@@ -280,9 +307,8 @@ def _fd_checks(loss, x, v, eps=1e-5, tol=1e-6):
     map does not satisfy): ``Σ_r <∇_r L, v_r>`` vs ``(L(x+εv)-L(x-εv))/2ε``.
     ``loss`` maps this rank's block to the replicated scalar
     ``global_sum_mpi(..., final_loss=True)``; ``v`` is this rank's block of a
-    global direction. First order only: second-order (reverse-over-reverse) AD
-    through the raw mpi4jax all-to-all / sendrecv has no differentiation rule
-    (pre-existing, slab and pencil alike)."""
+    global direction. First order here; second order through the all-to-all
+    and sendrecv is checked in ``test_mpi_second_order_ad.py``."""
     g = jax.grad(loss)(x)
     ad1 = COMM.allreduce(float(jnp.vdot(g, v)))
     fd1 = (float(loss(x + eps * v)) - float(loss(x - eps * v))) / (2 * eps)
@@ -320,7 +346,8 @@ def test_pencil_transpose_and_fft_gradients():
                 return global_sum_mpi(jnp.sum(wt * jnp.sin(y) * y), final_loss=True)
 
             _fd_checks(loss_t, _block(xg, mesh), _block(vg, mesh))
-        wl = jnp.asarray(np.abs(_spec_ref(wg, mesh, NZ)))
+        wl = jnp.asarray(np.abs(_planes_spec_ref(wg, NZ) if PLANES
+                                else _spec_ref(wg, mesh, NZ)))
 
         def loss_fft(x, L=L, wl=wl):
             back = layout_irfft2(layout_rfft2(x, L) * (1.0 + wl), L, NZ)

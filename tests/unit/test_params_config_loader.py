@@ -218,7 +218,9 @@ def test_atm_scalar_map_is_pipeline_threaded():
                 diagnostic_condensate_scheme=getattr(
                     pipe, "_cloud_diagnostic_condensate_scheme", None),
                 adiabatic_lwc_rate=getattr(
-                    pipe, "_cloud_adiabatic_lwc_rate", None))
+                    pipe, "_cloud_adiabatic_lwc_rate", None),
+                mf_cldfrac_fac=getattr(
+                    pipe, "_cloud_clubb_mf_cldfrac_fac", None))
             got = getattr(cc, m.field)
         elif m.config_class == "CLUBBParams":
             got = getattr(pipe.turbulence_config.params, m.field)

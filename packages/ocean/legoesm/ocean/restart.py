@@ -172,7 +172,7 @@ _RESERVED_KEYS: tuple[str, ...] = ("_time_s", "_step", "_sha")
 # ``run_omip._RESTART_DIAGNOSTIC_SLOTS`` for the other npz lane.
 DIAGNOSTIC_SLOTS: tuple[str, ...] = (
     "mass_flux_u", "mass_flux_v", "mass_flux_w",
-    "salt_flux_u_int", "salt_flux_v_int")
+    "salt_flux_u_int", "salt_flux_v_int", "tbudget")
 
 
 # ---------------------------------------------------------------- run restart
@@ -366,6 +366,9 @@ _SLOT_POLICY: dict[str, str] = {
     # single constructor.  Main's other archive format lists all five together
     # in ``DIAGNOSTIC_SLOTS`` above for the same reason.
     "salt_flux_u_int": _SLOT_DIAGNOSTIC, "salt_flux_v_int": _SLOT_DIAGNOSTIC,
+    # store_tracer_budget's per-step record (a dict of arrays, rebuilt every
+    # step, read by nothing in the model).
+    "tbudget": _SLOT_DIAGNOSTIC,
 }
 # The captured-flux slots, named once so the policy and the test that pins
 # their read-only property stay in one place.

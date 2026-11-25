@@ -1,0 +1,10 @@
+# Production deck with the MPAS K_h temperature diffusion on pressure
+# surfaces.
+#
+# Everything is amip_production.yaml except mpas_kh_pressure_surfaces: the
+# leading-term terrain correction of CAM3 (Collins et al. 2004, eq. 3.84),
+# lap_p T = lap T - (dT/dp) B lap(p_s).  Ported from the ENSO fork (Isma Di
+# Carlo).  Not a production candidate: an A/B arm against
+# amip_production.yaml.
+include: amip_production.yaml
+mpas_kh_pressure_surfaces: true

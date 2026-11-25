@@ -440,3 +440,51 @@ class TestConservativeClampMPIStep:
                 got[owned], serial_local[owned], rtol=1e-7, atol=1e-10,
                 err_msg=f"clamp-ON MPI tracer {k} mismatch vs serial "
                         f"on rank {rank}")
+
+
+class TestPPMStepMPI:
+    """The MPI step passes the step dt to the tendency, as the serial step
+    does: PPM's swept-mass face values depend on dt, so with the old default
+    dt=0 the MPI lane ran a different operator than serial."""
+
+    @_xfail_mpi_stack
+    def test_ppm_step_matches_serial(self, mesh):
+        _skip_if_no_mpi()
+        import importlib.util
+        import pathlib
+
+        from legoesm.core.field import Field
+        from legoesm.grids.vertical import make_cam6_l32_levels
+        from legoesm.parallel.voronoi_partition import partition_cells_geometric
+
+        rank, n_ranks = _get_mpi_info()
+        path = pathlib.Path(__file__).parents[1] / "unit" / "test_mpas_atmosphere.py"
+        spec = importlib.util.spec_from_file_location("_mpas_atm_helpers_mpi_ppm", path)
+        h = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(h)
+        coord = make_cam6_l32_levels()
+        nlev = coord.A_full.shape[0]
+        state = h._add_perturbation_hydro(h._make_hydrostatic_state(mesh, nlev), mesh, nlev)
+        qv = jnp.asarray(np.linspace(1e-6, 1.5e-2, nlev)[None, :].repeat(mesh.nCells, 0))
+        state = state._replace(tracers={"q_v": Field(
+            data=qv, name="q_v", dims=("nCells", "nlev"), units="kg/kg")})
+        config = MPASPrimitiveEquationConfig(
+            nu_del2=1.0e5, nu_del4=0.0, nu_del4_ps=0.0, fix_mass=False,
+            time_integrator="ssp_rk3", vert_advection_scheme="ppm")
+        model = MPASPrimitiveEquationModel(mesh, coord, config)
+        serial = model.step(state, DT)
+        layout = make_voronoi_partition_layout(
+            mesh, rank, n_ranks, cell_owner=partition_cells_geometric(mesh, n_ranks))
+        local = scatter_state_voronoi(state, layout.partition)
+        from legoesm.parallel.voronoi_mpi import gather_voronoi_field
+        out = make_voronoi_mpi_step(model, layout, coord, config)(local, DT)
+        mpi = gather_state_voronoi(out, layout.partition)
+        mpi_qv = gather_voronoi_field(out.tracers["q_v"].data, layout.partition, "cell")
+        if rank == 0:
+            for name in ("T", "p_s"):
+                np.testing.assert_allclose(
+                    getattr(mpi, name).data, getattr(serial, name).data,
+                    rtol=1e-8, atol=1e-8, err_msg=f"MPI {name} vs serial (ppm)")
+            np.testing.assert_allclose(
+                mpi_qv, serial.tracers["q_v"].data,
+                rtol=1e-8, atol=1e-12, err_msg="MPI q_v vs serial (ppm)")

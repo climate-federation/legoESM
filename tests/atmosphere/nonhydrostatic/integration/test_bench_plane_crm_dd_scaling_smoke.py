@@ -40,7 +40,8 @@ def test_crm_bench_single_rank(tmp_path, mode):
         "--mode", mode, "--nx", "8", "--ny", "8", "--nlev", "8",
         "--warmup-steps", "1", "--time-steps", "2", "--windows", "2",
         "--semi-implicit", "--theta-noise-amp", "0.1", "--time-physics", "--physics-calls", "1",
-        "--radiation", "gray", "--single-rank-path", "serial",
+        "--radiation", "gray", "--radiation-column-chunk", "0",
+        "--single-rank-path", "serial",
         "--output", str(out),
     ], timeout_s=900)
     fail_on_nonzero(result, "bench_plane_crm_dd_scaling.py",
@@ -53,6 +54,11 @@ def test_crm_bench_single_rank(tmp_path, mode):
     assert rec["dycore_config"]["sgs_vertical_diffusion"] is True
     phys = rec["physics"]
     assert rec["max_abs_dtheta_prime"] > 0.0  # the dynamics actually ran
+    # the dycore compile heap is returned before the radiation compile
+    # (True wherever the C library has malloc_trim)
+    import ctypes
+    has_trim = getattr(ctypes.CDLL(None), "malloc_trim", None) is not None
+    assert rec["heap_trimmed_after_first_step"] is has_trim
     assert phys["non_rad_calls_per_step"] == 3  # SSP-RK3 slow-tendency calls
     assert phys["non_rad_ms"] > 0.0 and phys["rad_ms"] > 0.0
     assert phys["radiation_interval"] > 1  # driver default gates radiation

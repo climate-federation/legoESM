@@ -61,6 +61,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.lasd_core import (
     spectral_test_filter,
+    spectral_test_filters,
     imfilter_box3,
     laguerre_max_real_root_beta,
     lasd_cs2,
@@ -283,6 +284,62 @@ def test_spectral_filter_folds_full_fft_y_axis():
     hi = _np(spectral_test_filter(jnp.asarray(high), cut_y, cut_x))
     assert np.max(np.abs(lo - low)) < 1e-10             # low |k_y| (incl. its fold) preserved
     assert np.max(np.abs(hi)) < 1e-10                   # high |k_y| (incl. its fold) removed
+
+
+def test_level_major_filter_and_box3_equal_default_layout():
+    """``level_major=True`` (the ``(nz, ny, nx)`` order the ``lasd_cs2`` body runs
+    in for speed) returns the default-layout result, transposed (same values)."""
+    fld = jnp.asarray(_F[0])
+    ny, nx, _ = fld.shape
+    c1y, c1x, c2y, c2x = _cutoffs(ny, nx)
+    lm = jnp.moveaxis(fld, 2, 0)
+    for cy, cx in ((c1y, c1x), (c2y, c2x)):
+        np.testing.assert_allclose(
+            _np(jnp.moveaxis(spectral_test_filter(lm, cy, cx, level_major=True), 0, 2)),
+            _np(spectral_test_filter(fld, cy, cx)), rtol=1e-13, atol=1e-15)
+    np.testing.assert_allclose(
+        _np(jnp.moveaxis(imfilter_box3(lm, level_major=True), 0, 2)),
+        _np(imfilter_box3(fld)), rtol=1e-13, atol=1e-15)
+
+
+def test_multi_cut_filter_equals_single_cuts_both_orders():
+    """One forward transform, one inverse per cut: each output equals the
+    single-cut filter (both storage orders). Random field: every mode is
+    present, so both cut levels keep non-zero content."""
+    fld = jnp.asarray(np.random.default_rng(7).standard_normal(_F[0].shape))
+    ny, nx, _ = fld.shape
+    c1y, c1x, c2y, c2x = _cutoffs(ny, nx)
+    cuts = ((c1y, c1x), (c2y, c2x))
+    lm = jnp.moveaxis(fld, 2, 0)
+    for (cy, cx), a, b in zip(cuts, spectral_test_filters(fld, cuts),
+                              spectral_test_filters(lm, cuts, level_major=True)):
+        ref = _np(spectral_test_filter(fld, cy, cx))
+        assert np.max(np.abs(ref)) > 1e-2           # non-vacuous at both cuts
+        np.testing.assert_allclose(_np(a), ref, rtol=1e-14, atol=1e-15)
+        np.testing.assert_allclose(_np(jnp.moveaxis(b, 0, 2)), ref,
+                                   rtol=1e-14, atol=1e-15)
+
+
+def _count_ffts(jaxpr):
+    """Forward / inverse FFT primitives in a jaxpr, recursing into sub-jaxprs
+    (pjit, custom_vjp, scan bodies)."""
+    from jax.extend.core import jaxprs_in_params
+    n = {"fwd": 0, "inv": 0}
+    for eqn in jaxpr.eqns:
+        if eqn.primitive.name == "fft":
+            n["inv" if eqn.params["fft_type"].name.startswith("I") else "fwd"] += 1
+        for sub in jaxprs_in_params(eqn.params):
+            for k, v in _count_ffts(sub).items():
+                n[k] += v
+    return n
+
+
+def test_lasd_cs2_shares_forward_transform_between_test_filters():
+    """21 fields x (2-delta, 4-delta): 21 forward rfft2 + 42 inverse (84 before
+    the forward transform was shared)."""
+    args = [jnp.asarray(a) for a in _F[:-1]]
+    jx = jax.make_jaxpr(lambda *a: lasd_cs2(*a, jnp.asarray(_F[-1])))(*args)
+    assert _count_ffts(jx.jaxpr) == {"fwd": 21, "inv": 42}
 
 
 # ------------------------------- box3 average -------------------------------- #

@@ -1,0 +1,49 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -154,6 +154,8 @@
+       INTEGER  ::   ji, jj, jk, jn        ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios, l2_drag_unit, l2_drag_ios, l2_adv_unit, l2_adv_ios
+       INTEGER  ::   l2_ord_unit, l2_ord_ios
++      INTEGER  ::   r213_unit, r213_ios
++      CHARACTER(LEN=16) :: r213_magic, r213_name
+       LOGICAL  ::   ll_fw_start           ! =T : forward integration 
+       LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
+ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backward dissipation
+@@ -197,6 +199,7 @@
+       CHARACTER(LEN=96) :: l2_drag_filename
+       CHARACTER(LEN=96) :: l2_adv_filename
+       CHARACTER(LEN=96) :: l2_ord_filename
++      CHARACTER(LEN=256) :: r213_filename
+       CHARACTER(LEN=16) :: l2_magic
+       REAL(wp) ::   zttide   ! Time of day for tidal updates
+       !!----------------------------------------------------------------------
+@@ -893,6 +896,29 @@
+                     &                       +  hv(ji,jj,Kmm) * zv_frc (ji,jj)  )   ) * z1_hv
+             END_2D
+          ENDIF
++         IF( kt == nit000 .AND. jn == 1 ) THEN
++            IF( STORAGE_SIZE(1._wp) /= 64 )   CALL ctl_stop( 'round213 vector record requires 64-bit wp' )
++            WRITE(r213_filename,'("oracle_r213_vector_rank",I4.4,"_kt",I8.8,"_jn",I3.3,".bin")') &
++               & narea - 1, kt, jn
++            OPEN( NEWUNIT=r213_unit, FILE=TRIM(r213_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++               & STATUS='REPLACE', ACTION='WRITE', IOSTAT=r213_ios )
++            IF( r213_ios /= 0 )   CALL ctl_stop( 'round213 cannot open vector pre-LBC record' )
++            r213_magic = 'NEMO_L4_R213VV1'
++            WRITE(r213_unit) r213_magic
++            WRITE(r213_unit) 1, kt, jn, Kmm, Krhs, narea - 1, jpi, jpj, nimpp, njmpp, &
++               & ntsi, ntsj, ntei, ntej, STORAGE_SIZE(1._wp), 3
++            r213_name = 'zv_frc'
++            WRITE(r213_unit) r213_name, 2, jpi, jpj, 1
++            WRITE(r213_unit) zv_frc
++            r213_name = 'ssvmask'
++            WRITE(r213_unit) r213_name, 2, jpi, jpj, 1
++            WRITE(r213_unit) ssvmask
++            r213_name = 'va_pre_lbc'
++            WRITE(r213_unit) r213_name, 2, jpi, jpj, 1
++            WRITE(r213_unit) va_e
++            CLOSE(r213_unit)
++            WRITE(numout,*) 'ORCA2_R213_VECTOR_PRE_LBC_DUMP ', kt, jn, narea - 1, TRIM(r213_filename)
++         ENDIF
+ !jth implicit bottom friction:
+          IF ( ll_wd ) THEN ! revert to explicit for bit comparison tests in non wad runs
+             DO_2D( 0, 0, 0, 0 )

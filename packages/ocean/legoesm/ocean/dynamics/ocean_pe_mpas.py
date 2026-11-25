@@ -814,6 +814,9 @@ def _mpas_tendencies_outside_core(
     # Cast sponge arrays to state dtype to prevent float64 promotion when
     # the precision policy stores state in float32 (crashes barotropic scan).
     if sponge is not None:
+        if getattr(sponge, "visc2", None) is not None:
+            raise ValueError("SpongeForcing.visc2 (sponge viscosity) is applied by the lat-lon om4p25 "
+                             "lateral friction only; the MPAS ocean does not apply it")
         dT_dt_3d, dS_dt_3d = apply_sponge_tracer_relaxation(
             dT_dt_3d, dS_dt_3d, T_3d, S_3d, sponge, mask=mask,
             expand_gamma_axis=-1,

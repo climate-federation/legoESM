@@ -52,7 +52,7 @@ def _forcing(n, T_air=_T + 3.0, q=0.0003):
 
 
 def _two_leaf_step(snow_scheme, n_steps=1, swe=60.0):
-    cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(),
+    cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False),
                                snow_scheme=snow_scheme)
     st = init_multilayer_land_state(1, cfg, T_init=_T)
     st = st._replace(snow_depth=jnp.full(1, swe))
@@ -248,7 +248,7 @@ def test_bulk_capped_pack_sends_unmet_demand_to_sh_and_nothing_to_ground():
     exceeds the pack.  The unmet demand leaves as sensible heat; the ice that
     did leave was already charged L_s by the solve, so the ground receives
     exactly the solve's G (#1864 added pack/dt * (L_v - L_s) < 0 here)."""
-    cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig())
+    cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     s0 = init_multilayer_land_state(1, cfg, T_init=_T)
     swe0 = 1.0e-4                                         # [kg m-2], cap binds
     s0 = s0._replace(snow_depth=jnp.full(1, swe0))
@@ -272,7 +272,7 @@ def test_bulk_capped_pack_sends_unmet_demand_to_sh_and_nothing_to_ground():
 def test_snow_step_gradient_is_finite():
     """(f) d(reported latent + sensible heat)/d(air temperature) through one
     snow-covered two-leaf step is finite and nonzero."""
-    cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig())
+    cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     s0 = init_multilayer_land_state(1, cfg, T_init=_T)._replace(snow_depth=jnp.full(1, 60.0))
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.3]))
 
@@ -300,7 +300,7 @@ def test_layered_soil_share_routes_at_its_liquid_charge(monkeypatch):
         return real(soil_evap, has_snow, f_veg, le_canopy, le_soil)
 
     monkeypatch.setattr(ml, "_partition_latent_root_top", spy)
-    cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(), snow_scheme="layered")
+    cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(implicit_ground_flux=False), snow_scheme="layered")
     st = seed_snow_layers(init_multilayer_land_state(1, cfg, T_init=_T)._replace(
         snow_depth=jnp.full(1, 3.0)), cfg)
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.3]))

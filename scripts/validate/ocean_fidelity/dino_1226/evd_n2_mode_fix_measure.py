@@ -57,7 +57,7 @@ T/S and the geometric gdept/gdepw ladders and consults no density helper.
 REUSING A REFERENCE PATH MEANS DECLARING WHAT WAS DROPPED.  This offline block
 reproduces ``_enhanced_diffusion_K``'s density/N^2 chain, and two steps of that
 path are deliberately NOT carried here:
-  * ``extrapolate_below_seafloor`` on both trigger arms (k_profiles.py:377-396).
+  * ``extrapolate_below_seafloor`` on both trigger arms (k_profiles.py:379-398).
     KEPT OUT because the model's own comment records it as moving zero wet
     interfaces, and the census masks to wet interior interfaces anyway.
   * the threaded ``n2_tracers`` / ``n2_tracers_before`` -- this block uses the

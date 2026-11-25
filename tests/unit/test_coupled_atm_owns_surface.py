@@ -499,3 +499,39 @@ def test_owned_restart_is_bitwise_across_exchanges(tmp_path, monkeypatch,
         r.load_coupled_checkpoint(day - r.atm_config.start_day,
                                   checkpoint_dir=str(bad), required=True,
                                   atm_step=step)
+
+
+def test_water_inventory_reads_the_land_that_is_stepped():
+    """Owned mode steps the atmosphere's own land, never the coupler's land
+    tile: the coupled water inventory must count the atmosphere land's soil,
+    snow, ponding and canopy water; a non-owned run keeps the coupler tile."""
+    from types import SimpleNamespace
+
+    import numpy as np
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+
+    n, k = 3, 2
+    dz = np.array([0.1, 0.4])
+    atm_land = SimpleNamespace(
+        theta_soil=jnp.full((n, k), 0.3), snow_depth=jnp.full(n, 5.0),
+        surface_water=jnp.full(n, 0.002), W_canopy=jnp.full(n, 0.7))
+    tile_land = SimpleNamespace(            # stale: never stepped
+        W_bucket=SimpleNamespace(data=jnp.zeros(n)),
+        snow_depth=SimpleNamespace(data=jnp.zeros(n)))
+    f_land = jnp.array([1.0, 0.5, 0.0])
+    drv = SimpleNamespace(
+        coupled_cfg=SimpleNamespace(atm_owns_surface=True),
+        _atm=SimpleNamespace(_land_ml_state=atm_land,
+                             _land_soil_dz=lambda: dz),
+        _sfc_state=SimpleNamespace(land=tile_land))
+    per_col = (0.3 * dz.sum() * constants.rho_water + 5.0
+               + 0.002 * constants.rho_water + 0.7)
+    got = CoupledESMDriver._land_water_per_cell(drv, f_land)
+    np.testing.assert_allclose(np.asarray(got),
+                               np.asarray(f_land) * per_col, rtol=1e-12)
+
+    drv.coupled_cfg.atm_owns_surface = False
+    got = CoupledESMDriver._land_water_per_cell(drv, f_land)
+    np.testing.assert_allclose(np.asarray(got), 0.0)

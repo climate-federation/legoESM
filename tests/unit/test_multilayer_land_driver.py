@@ -1218,6 +1218,37 @@ def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_
                    "flipped": (False, True, True)}
 
 
+def test_canopy_snow_reaches_the_mpas_land(monkeypatch, tmp_path):
+    """``land_canopy_snow`` (with the masking it needs) survives the
+    calibration bake, carries its widths into CanopySnowConfig and allocates
+    the canopy snow store; off leaves neither."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.canopy.interception import CanopySnowConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        land_beta_soil=True, turbulence="louis", land_calibrated_physics=True,
+        land_stomatal_beta=False, land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True, land_canopy_snow_masking=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+    )
+    got = {}
+    for arm, kw in {"off": {}, "on": dict(
+            land_canopy_snow=True, land_canopy_snow_temperature_width_K=0.25)}.items():
+        cfg = base._replace(**kw)
+        cfg.validate_strict()
+        drv = ModelDriver(cfg, output_dir=tmp_path / arm)
+        drv.setup()
+        cs = drv.physics.land_ml_cfg.canopy_snow
+        got[arm] = (cs, drv._land_ml_state.W_canopy_snow is not None)
+    assert got["off"] == (None, False)
+    assert got["on"] == (CanopySnowConfig(temperature_width_K=0.25), True)
+
+
 def test_two_leaf_land_stress_reaches_clubb_winds(monkeypatch, tmp_path):
     """land_stress_from_land on the production pairing: the TWO-LEAF
     canopy's solved stress handed to CLUBB on the mesh lane.  The run must

@@ -37,7 +37,7 @@ Decision-49 per-step boundary from `901cfe0d8` and the landed TKE guard from
 The gate constructs only `build_nemo_testcase_card("GYRE-zco")`; the fail-closed
 card dispatch begins at `nemo_testcase_recipe.py:3351`. Every modeled step
 enters production `LatLonCGridOceanModel._step_jitted` at
-`ocean_model_latlon_cgrid.py:13219`. The harness wiring and explicit fp64 checks
+`ocean_model_latlon_cgrid.py:13238`. The harness wiring and explicit fp64 checks
 begin at `nemo_testcase_l2_gyre_gradient_gate.py:143`.
 
 The compiled GYRE oracle disables FCT during RK3 stages 1 and 2 at

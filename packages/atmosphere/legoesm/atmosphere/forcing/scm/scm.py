@@ -104,6 +104,11 @@ class SCMGrid(NamedTuple):
     land_frac: jax.Array | None = None
 
     @property
+    def lat(self) -> jax.Array:
+        """Column latitude [rad], the name the turbulence lane reads."""
+        return self.grid_lat
+
+    @property
     def grid_n_columns(self) -> int:
         return 1
 

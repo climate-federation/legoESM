@@ -29,7 +29,7 @@ computable, removing the second per-stage epoch.
 The halo arithmetic checks out and the census hits the target:
 
 * `sigma_dot`/`mass_flux` are vertical closures over `cumsum(div_dp)`
-  (`grids/vertical.py:2554-2644`), elementwise in the horizontal — a
+  (`grids/vertical.py:2564-2644`), elementwise in the horizontal — a
   ghost row needs only `div_dp` (+ `p_s` on the sigma lane) at that row.
 * `div_dp` at the ghost row needs `dp_u*u` there (lon-only interp, so
   halo 1 suffices) and the meridional flux at the face beyond it, i.e.

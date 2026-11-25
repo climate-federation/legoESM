@@ -191,6 +191,8 @@ __param_spec__ = {
     "MorrisonConfig": {
         "scheme_key": "atm.micro.MorrisonConfig",
         "excluded": {
+            "boutle_overcast_ramp_width": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM+Claude vote 2026-11-21",
+            "boutle_fsd_factor": "bounds pending: the observed FSD scatter of Boutle et al. (2014, doi:10.1002/qj.2140) is to bound it and is not yet read; tiered once sourced",
             "gsam_satadj_excess_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
@@ -230,6 +232,9 @@ __param_spec__ = {
             "mg2_drop_readjust_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_drop_early_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_drop_sed_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "qsfm_freeze_ramp_K": "numerics: smoothing width of the qsfm freezing switch (RULE 5), not a closure",
+            "cirrus_T_width_K": "numerics: smoothing width of the cirrus nucleation temperature switches (RULE 5), not a closure",
+            "cirrus_rel_width": "numerics: relative smoothing width of the cirrus nucleation switches (RULE 5), not a closure",
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -1181,6 +1186,53 @@ class MorrisonConfig(NamedTuple):
     # (#2216, user 2026-11-01; KNOWN DIFFERENCE in
     # _warm_rain.mg2_droplet_fall_coefficients).
     mg2_drop_sed_reset_log_width: float = 0.01
+    # CAM6 MG2 cloud-droplet sedimentation under a SPECIFIED droplet number
+    # (MG2 nccons=.true., micro_mg2_0.F90:2056-2377, fall speeds from the
+    # constant number at :2074-2076).  APPENDED AT THE TUPLE END (positional
+    # ABI).  Needs warm_rain_incloud=True, predict_Nc=False and
+    # prognostic_droplet_number=False (that mode sediments droplets already).
+    # The specified number is not evolved; only q_c, q_v, T and the surface
+    # flux carry the sedimentation.  False (default) = no cloud-water
+    # sedimentation under specified droplets (byte-identical).
+    specified_nc_droplet_sedimentation: bool = False
+    # RULE 5 width [K] of MG2's qsfm switch at T_freeze (qsfm applied only
+    # below tmelt, micro_mg2_0.F90:911-928; read only with a qsatfac ramp,
+    # CloudConfig.cam6_do_subgrid_growth): qsfm = 1 + s (qsatfac - 1) with s a
+    # C1 smoothstep from 0 at T_freeze to 1 at T_freeze - width.  0 = MG2's
+    # hard switch.  KNOWN DIFFERENCE in morrison.mg2_qsfm.
+    qsfm_freeze_ramp_K: float = 0.1
+    # Cirrus ice nucleation target of the homogeneous-nucleation block
+    # (APPENDED AT THE TUPLE END, positional ABI).  "fixed" (default,
+    # byte-identical): the Koop threshold with the fixed hom_ice_nuc_N.
+    # "cam6_liu_penner": CAM6's activated ice number naai (nucleate_ice.F90,
+    # Liu-Penner 2005 with pre-existing ice, cam6_nucleate_ice.py) passed in by
+    # the caller, applied as MG2 does (micro_mg2_0.F90:1117-1129).  Needs
+    # homogeneous_ice_nucleation=True and warm_rain_incloud=True.
+    cirrus_nucleation: str = "fixed"
+    # RULE 5 widths of the cam6_liu_penner switches on model state (one-sided
+    # C1 ramps, exact on the side the condition holds; KNOWN DIFFERENCE in
+    # cam6_nucleate_ice and the MG2 gate): temperature thresholds [K], and
+    # relative-humidity/updraft/ice/number thresholds as a fraction of the
+    # threshold.  0 = CAM6's hard switches.
+    cirrus_T_width_K: float = 0.1
+    cirrus_rel_width: float = 0.01
+    # Source of the MG2 relvar on the CLUBB liquid-partition lane (APPENDED AT
+    # THE TUPLE END, positional ABI).  "cam6_clubb" (default, byte-identical):
+    # CLUBB's grid-box rcm**2/qclvar (clubb_intr.F90:2416-2425).
+    # "boutle2014": relvar = 1/(boutle_fsd_factor * FSD)**2, FSD the observed
+    # fractional standard deviation of liquid water of Boutle et al. (2014,
+    # QJRMS 140, 583-594) in CLUBB's PDF cloud fraction and the cell size
+    # sqrt(areaCell); MG2's [0.001, relvarmax] clip is kept (mg2_var_coef).
+    # Needs warm_rain_scheme="kk2000_cam6" and warm_rain_incloud=True.
+    relvar_scheme: str = "cam6_clubb"
+    boutle_fsd_factor: float = 1.0
+    # RULE 5 smoothing of Boutle et al.'s coefficient jump at C = 1 (0.20 ->
+    # 0.11): smoothstep width in cloud fraction; 0 = the published hard jump
+    # (KNOWN DIFFERENCE in _warm_rain.boutle2014_fsd).
+    boutle_overcast_ramp_width: float = 0.01
+
+
+RELVAR_SCHEMES = ("cam6_clubb", "boutle2014")
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
@@ -1189,6 +1241,9 @@ class MorrisonConfig(NamedTuple):
 # lane needs 269 (CAM L32 at 1800 s).  ONE definition, imported by the other
 # validators (GLM 2026-09-22: three independent 1024s can drift apart).
 SED_CFL_SUBSTEPS_MAX_LIMIT = 1024
+
+# MorrisonConfig.cirrus_nucleation values (validated by the applier and the scheme).
+CIRRUS_NUCLEATION_SCHEMES = ("fixed", "cam6_liu_penner")
 
 
 class ThompsonConfig(NamedTuple):
@@ -1356,6 +1411,9 @@ def apply_microphysics_experiment_flags(
     morrison_warm_rain_scheme: str | None = None,
     morrison_warm_rain_incloud: bool | None = None,
     morrison_prognostic_droplet_number: bool | None = None,
+    morrison_specified_nc_droplet_sedimentation: bool | None = None,
+    morrison_cirrus_nucleation: str | None = None,
+    morrison_relvar_scheme: str | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1548,6 +1606,35 @@ def apply_microphysics_experiment_flags(
                 f"scheme (got {scheme!r}).")
         scheme_config = scheme_config._replace(
             prognostic_droplet_number=morrison_prognostic_droplet_number)
+    if morrison_specified_nc_droplet_sedimentation is not None:
+        if not isinstance(morrison_specified_nc_droplet_sedimentation, bool):
+            raise TypeError("morrison_specified_nc_droplet_sedimentation must be a "
+                            f"bool, got {morrison_specified_nc_droplet_sedimentation!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_specified_nc_droplet_sedimentation is only read by the "
+                f"morrison scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(
+            specified_nc_droplet_sedimentation=morrison_specified_nc_droplet_sedimentation)
+    if morrison_cirrus_nucleation is not None:
+        if morrison_cirrus_nucleation not in CIRRUS_NUCLEATION_SCHEMES:
+            raise ValueError("morrison_cirrus_nucleation must be one of "
+                             f"{CIRRUS_NUCLEATION_SCHEMES}, got {morrison_cirrus_nucleation!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_cirrus_nucleation is only read by the morrison scheme "
+                f"(got {scheme!r}).")
+        scheme_config = scheme_config._replace(cirrus_nucleation=morrison_cirrus_nucleation)
+    if morrison_relvar_scheme is not None:
+        if scheme != "morrison":
+            raise ValueError(
+                f"morrison_relvar_scheme={morrison_relvar_scheme!r} is only read "
+                f"by the morrison scheme (got {scheme!r}).")
+        if morrison_relvar_scheme not in RELVAR_SCHEMES:
+            raise ValueError(
+                f"Unknown morrison_relvar_scheme {morrison_relvar_scheme!r}; "
+                f"choose one of {RELVAR_SCHEMES}.")
+        scheme_config = scheme_config._replace(relvar_scheme=morrison_relvar_scheme)
     if morrison_warm_rain_scheme is not None:
         if scheme != "morrison":
             raise ValueError(

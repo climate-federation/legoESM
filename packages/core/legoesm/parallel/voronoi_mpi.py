@@ -216,6 +216,21 @@ def reduce_partition_metrics(local: dict) -> dict:
     return out
 
 
+# Complete halo rings the MPAS flux-FCT tracer transport needs on the MPI lane:
+# the limiter factor on an owned edge reads the antidiffusive fluxes on every
+# edge of the neighbouring halo cell, whose low-order bounds take the cells
+# beyond.  MEASURED in the ENSO fork (Di Carlo, d7d10936ef; level 4, ERA5
+# start): one complete ring (halo depth 2) gave q_v off by 2.6e-8 relative
+# after one dynamics step, two (depth 3) matched serial to 5e-16.
+_FLUX_FCT_COMPLETE_RINGS = 2
+
+
+def required_halo_depth(tracer_horizontal_scheme: str) -> int:
+    """Halo depth (cell rings) the MPAS step needs: 3 for ``flux_fct`` (two
+    complete rings), else the default 2."""
+    return _FLUX_FCT_COMPLETE_RINGS + 1 if tracer_horizontal_scheme == "flux_fct" else 2
+
+
 def make_voronoi_partition_layout(
     global_mesh: VoronoiMesh,
     rank: int,
@@ -919,6 +934,14 @@ def make_voronoi_mpi_step(
     )
     if config is None:
         config = model.config
+    if (getattr(config, "tracer_horizontal_scheme", "advective") == "flux_fct"
+            and layout.complete_cell_rings < _FLUX_FCT_COMPLETE_RINGS):
+        raise ValueError(
+            f"flux_fct tracer transport needs {_FLUX_FCT_COMPLETE_RINGS} complete "
+            f"halo rings, this layout certifies {layout.complete_cell_rings} "
+            "(0 = not certified); build it with initialize_voronoi_mpi("
+            "halo_depth=required_halo_depth('flux_fct')), or owned-cell q "
+            "differs from serial along the partition cut")
 
     local_mesh = layout.local_mesh
     owned_mask = layout.owned_mask_cells
@@ -1101,16 +1124,19 @@ def make_voronoi_mpi_step(
                 })
             return new
 
-    def _mpi_tendency_fn(state: MPASHydrostaticState) -> MPASHydrostaticState:
+    def _mpi_tendency_fn(state: MPASHydrostaticState,
+                         dt) -> MPASHydrostaticState:
         """Exchange halos then compute tendencies on local mesh.
 
         Returns a tendency-shaped ``MPASHydrostaticState`` (carrying tracer
         ADVECTION tendencies under the same tracer keys) so the pytree RK
         integrator advances moisture mass-consistently with u/T/p_s —
-        mirroring the serial ``_step_jit.dyn_tendency_fn``.
+        mirroring the serial ``_step_jit.dyn_tendency_fn``, which passes the
+        step ``dt`` too: the flux-FCT tracer limiter divides by it, so the
+        default ``dt=0.0`` made every limited tracer non-finite.
         """
         state_ex = _exchange_mpas_state(state)
-        tend = local_model.tendencies(state_ex)
+        tend = local_model.tendencies(state_ex, dt=dt)
         new = MPASHydrostaticState(
             u=state.u.replace(data=tend.du_dt.data),
             T=state.T.replace(data=tend.dT_dt.data),
@@ -1148,7 +1174,8 @@ def make_voronoi_mpi_step(
         # would otherwise leave p_s in fp64 (carry-dtype instability).
         state = cast_pytree(state, None, "compute")
         state_new = dispatch_integrator(
-            state, _mpi_tendency_fn, dt, config.time_integrator,
+            state, lambda s: _mpi_tendency_fn(s, dt), dt,
+            config.time_integrator,
         )
         if getattr(config, "energy_fixer", False):
             # Dycore energy fixer, mirroring the serial ``_step_jit`` (F15):
@@ -1341,7 +1368,8 @@ def make_voronoi_mpi_step(
                  _state_postfix, state_new),
                 sigma_coord.dsigma, dt,
                 level_weight=getattr(config, "budget_ledger_level_weight",
-                                     None))
+                                     None),
+                layer_dp=sigma_coord.layer_thickness_dp)
 
         return (finalize_to_storage(
                     cast_pytree(state_new, None, "storage")),

@@ -1,0 +1,743 @@
+"""Unit and known-answer tests for ORCA2 Round 342 (1-year standalone S4 comparison)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+from legoesm.ocean import bulk_flux_omip as bulk
+
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round342_s4_year_driver as r342_driver,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round342_s4_year_gate as r342_gate,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round342_s4_year_metrics as r342_metrics,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2x_round1_pilot_metrics as pilot_metrics,
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_precision_policy():
+    previous = get_policy()
+    yield
+    set_policy(previous)
+
+
+def test_calendar_month_day_ranges_full_noleap_year() -> None:
+    windows = r342_metrics.calendar_month_day_ranges(365)
+    assert len(windows) == 12
+    lengths = [w["calendar_days"] for w in windows]
+    assert lengths == [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    assert sum(lengths) == 365
+    assert all(w["complete_month"] for w in windows)
+    assert windows[0]["start_day"] == 1 and windows[0]["end_day"] == 31
+    assert windows[0]["saved_kts"][0] == 8 and windows[0]["saved_kts"][-1] == 248
+    assert windows[-1]["start_day"] == 335 and windows[-1]["end_day"] == 365
+    assert windows[-1]["saved_kts"][0] == 2680 and windows[-1]["saved_kts"][-1] == 2920
+    all_days = [d for w in windows for d in w["available_days"]]
+    assert all_days == list(range(1, 366))
+
+
+def test_calendar_month_day_ranges_partial_window() -> None:
+    windows = r342_metrics.calendar_month_day_ranges(45)
+    assert windows[0]["complete_month"] is True
+    assert windows[0]["available_days"] == list(range(1, 32))
+    assert windows[1]["complete_month"] is False
+    assert windows[1]["available_days"] == list(range(32, 46))
+    assert windows[1]["saved_kts"] == [d * 8 for d in range(32, 46)]
+    for w in windows[2:]:
+        assert w["complete_month"] is False
+        assert w["available_days"] == []
+        assert w["saved_kts"] == []
+
+
+def test_standalone_mld_metric_is_bit_identical_with_explicit_libm_policy() -> None:
+    record = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31/"
+        "oracle_coupled_c_ladder/REF_C4"
+    )
+    policy = PrecisionPolicy.fp64(transcendentals="libm")
+    set_policy(policy)
+    standalone = r342_metrics.K0MLDEvaluator(record)
+    expected = np.asarray(standalone._bundle(standalone.state))
+    explicit = r342_metrics.K0MLDEvaluator(record, precision_policy=policy)
+    recomputed = np.asarray(explicit._bundle(explicit.state))
+    assert recomputed.dtype == expected.dtype
+    assert recomputed.shape == expected.shape
+    assert recomputed.tobytes() == expected.tobytes()
+
+
+def test_decision185_reference_bars_and_no_state_averaging_for_nonlinear_metrics() -> None:
+    bars = r342_metrics.DECISION_185_REFERENCE_BARS
+    assert bars["SST"]["reference_bar"] == 0.01
+    assert bars["T_0-100m"]["reference_bar"] == 0.01
+    assert bars["T_100-1000m"]["reference_bar"] == 0.01
+    assert bars["T_>1000m"]["reference_bar"] == 0.01
+    assert bars["SSS"]["reference_bar"] == 0.002
+    assert bars["S_0-100m"]["reference_bar"] == 0.002
+    assert bars["S_100-1000m"]["reference_bar"] == 0.002
+    assert bars["S_>1000m"]["reference_bar"] == 0.002
+    assert bars["SSH"]["reference_bar"] == 0.001
+    assert bars["KE"]["reference_bar_fraction"] == 0.01
+    assert bars["PSI"]["reference_bar_rms_sv"] == 0.1
+    assert bars["PSI"]["reference_bar_pattern_corr_min"] == 0.999
+    assert bars["DRAKE"]["reference_bar"] == 0.5
+    assert bars["MLD"]["reference_bar"] == 1.0
+    assert not hasattr(r342_metrics, "_mean_fields")
+
+    dummy_scalar = {"bias": 0.0, "rms": 0.0}
+    day1_row = {
+        k: dict(dummy_scalar)
+        for k in (
+            "SST", "T_0-100m", "T_100-1000m", "T_>1000m",
+            "SSS", "S_0-100m", "S_100-1000m", "S_>1000m",
+            "SSH", "ICE_SST", "ICE_SSS",
+        )
+    }
+    day1_row["MLD"] = {"bias": 0.5, "rms": 0.5, "nemo_mean": 40.0, "cand_mean": 40.5}
+    day1_row["KE"] = {"bias": 0.002, "rms": 0.004, "nemo_mean": 0.02, "cand_mean": 0.022}
+    day1_row["PSI"] = {"bias": 0.01, "rms": 0.05, "pattern_corr": 0.9995}
+    day1_row["DRAKE"] = {"nemo_sv": 150.0, "cand_sv": 150.2}
+
+    day2_row = {
+        k: dict(dummy_scalar)
+        for k in (
+            "SST", "T_0-100m", "T_100-1000m", "T_>1000m",
+            "SSS", "S_0-100m", "S_100-1000m", "S_>1000m",
+            "SSH", "ICE_SST", "ICE_SSS",
+        )
+    }
+    day2_row["MLD"] = {"bias": 1.5, "rms": 1.5, "nemo_mean": 60.0, "cand_mean": 61.5}
+    day2_row["KE"] = {"bias": 0.004, "rms": 0.006, "nemo_mean": 0.04, "cand_mean": 0.044}
+    day2_row["PSI"] = {"bias": 0.03, "rms": 0.07, "pattern_corr": 0.9991}
+    day2_row["DRAKE"] = {"nemo_sv": 152.0, "cand_sv": 152.6}
+
+    daily_rows = [day1_row, day2_row]
+    geo = {"area_t": np.ones((2, 2)), "psi_weight": np.ones((2, 2))}
+    maps = [
+        {k: np.zeros((2, 2)) for k in ("SST", "SSS", "SSH", "MLD", "PSI", "KE")},
+        {k: np.zeros((2, 2)) for k in ("SST", "SSS", "SSH", "MLD", "PSI", "KE")},
+    ]
+    monthly_summary = pilot_metrics.monthly(daily_rows, maps, geo)
+    attached = r342_metrics._attach_decision185_reference(monthly_summary, daily_rows)
+    assert set(attached) == set(bars)
+    for entry in attached.values():
+        assert entry["bar_mode"] == "REFERENCE_ONLY"
+        assert entry["verdict"] is None
+
+    # Verify per-saved-state metric averaging matches pilot_metrics.monthly
+    assert attached["KE"]["nemo_mean"] == pytest.approx(0.03)
+    assert attached["KE"]["cand_mean"] == pytest.approx(0.033)
+    assert attached["KE"]["daily_mean_rms"] == pytest.approx(0.005)
+    assert attached["KE"]["relative_rms_fraction"] == pytest.approx(0.005 / 0.03)
+    assert attached["MLD"]["daily_mean_rms"] == pytest.approx(1.0)
+    assert attached["MLD"]["nemo_mean"] == pytest.approx(50.0)
+    assert attached["PSI"]["daily_mean_rms_sv"] == pytest.approx(0.06)
+    assert attached["PSI"]["daily_mean_pattern_corr"] == pytest.approx(0.9993)
+    assert attached["DRAKE"]["abs_mean_diff_sv"] == pytest.approx(0.4)
+
+
+def test_driver_explicit_k0_and_full_year_fld_read_schedule() -> None:
+    bulk.validate_nemo_standalone_k0(r342_driver.EXPLICIT_K0_CONFIG)
+    dt_s = 10800
+    synthetic_monthly = np.arange(12, dtype=np.float64)[:, None, None] * np.ones((12, 2, 2))
+    for kt in range(1, 11):
+        isecsbc = kt * dt_s
+        pair = r342_driver._monthly_pair_for_clock(synthetic_monthly, isecsbc)
+        assert float(pair.before[0, 0]) == 11.0
+        assert float(pair.after[0, 0]) == 0.0
+        assert (pair.nrec_sec_before, pair.nrec_sec_after) == (-1339200, 1339200)
+
+    seen_pairs: set[tuple[int, int]] = set()
+    for kt in range(1, r342_driver.YEAR_STEPS + 1):
+        isecsbc = kt * dt_s
+        retained_kt = kt if kt % 2 else kt - 1
+        retained_clock = retained_kt * dt_s
+        idx_6h = retained_clock // 21600
+        idx_daily = retained_clock // 86400
+        idx_monthly = int(np.searchsorted(r342_driver.MONTH_END_SEC, retained_clock, side="right"))
+        assert 0 <= idx_6h < 1460
+        assert 0 <= idx_daily < 365
+        assert 0 <= idx_monthly < 12
+        pair = r342_driver._monthly_pair_for_clock(synthetic_monthly, isecsbc)
+        assert pair.nrec_sec_before <= isecsbc <= pair.nrec_sec_after
+        seen_pairs.add((int(pair.before[0, 0]), int(pair.after[0, 0])))
+    assert len(seen_pairs) == 12
+
+    if r342_driver.DEFAULT_DECK_ROOT.is_dir():
+        wet = np.ones((148, 180), dtype=bool)
+        chl_1 = ladder.chlorophyll_at_step(r342_driver.DEFAULT_DECK_ROOT, 1, wet, dt_s=10800.0)
+        chl_2920 = ladder.chlorophyll_at_step(
+            r342_driver.DEFAULT_DECK_ROOT, 2920, wet, dt_s=10800.0
+        )
+        assert chl_1.shape == (148, 180) and np.isfinite(chl_1).all()
+        assert chl_2920.shape == (148, 180) and np.isfinite(chl_2920).all()
+
+
+@pytest.mark.parametrize(
+    "expected", ["libm", "native"]
+)
+def test_driver_manifest_records_resolved_transcendentals(
+    expected: str,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / expected
+    output_dir.mkdir()
+    ice_cover = tmp_path / f"{expected}-ice.nc"
+    ice_cover.write_bytes(b"manifest-only fixture")
+    resolved = r342_driver._resolve_transcendentals(expected)
+    assert resolved == expected
+    manifest = r342_driver._write_run_manifest(
+        output_dir,
+        steps=1,
+        dt_s=10800,
+        save_stride=8,
+        k0_config=r342_driver.EXPLICIT_K0_CONFIG._asdict(),
+        deck_root=tmp_path,
+        ice_cover_path=ice_cover,
+        wall_seconds=1.0,
+        devices=[],
+        snapshots=[],
+        worktree={"clean": True, "git_sha": "test"},
+    )
+    written = json.loads((output_dir / "run_manifest.json").read_text())
+    assert written == manifest
+    assert manifest["transcendentals"] == expected
+    if expected == "libm":
+        assert Path(manifest["scalar_libm"]["path"]).is_file()
+        assert len(manifest["scalar_libm"]["sha256"]) == 64
+        assert manifest["scalar_libm"]["gcc_version"]
+        assert manifest["scalar_libm"]["glibc_version"]
+    else:
+        assert manifest["scalar_libm"] is None
+
+
+def test_driver_cli_transcendentals_reaches_card_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, str] = {}
+    recipe = SimpleNamespace(
+        grid="grid", z_coord="z", model_config="model", iwm_forcing="iwm"
+    )
+
+    class FakeOcean:
+        def __init__(self, transcendentals: str = "libm") -> None:
+            self.transcendentals = transcendentals
+            self.recipe = recipe
+
+        def _replace(self, **updates):
+            seen["card_override"] = updates["transcendentals"]
+            return FakeOcean(transcendentals=updates["transcendentals"])
+
+    class FakeCard:
+        def __init__(self, ocean=None) -> None:
+            self.ocean = FakeOcean() if ocean is None else ocean
+            self.k0 = r342_driver.EXPLICIT_K0_CONFIG
+
+        def _replace(self, **updates):
+            return FakeCard(ocean=updates["ocean"])
+
+    class ReachedModelConstructionError(Exception):
+        pass
+
+    def stop_after_card(*_args, **_kwargs):
+        assert seen == {"card_override": "native"}
+        assert get_policy().transcendentals == "native"
+        raise ReachedModelConstructionError
+
+    monkeypatch.setattr(
+        bulk, "build_nemo_orca2_k0_ocean_card", lambda _root: FakeCard()
+    )
+    monkeypatch.setattr(bulk, "validate_nemo_standalone_k0", lambda _k0: None)
+    monkeypatch.setattr(r342_driver, "worktree_stamp", lambda **_kwargs: {"clean": True})
+    monkeypatch.setattr(r342_driver, "LatLonCGridOceanModel", stop_after_card)
+    with pytest.raises(ReachedModelConstructionError):
+        r342_driver.main(
+            [
+                "--steps", "1",
+                "--output-dir", str(tmp_path / "output"),
+                "--transcendentals", "native",
+            ]
+        )
+
+
+def test_driver_default_transcendentals_is_libm_and_native_plant_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run_default() -> str:
+        seen: dict[str, str] = {}
+
+        def fake_run(**kwargs):
+            seen["transcendentals"] = kwargs["transcendentals"]
+            return {
+                "status": "PASS_R342_S4_K0_LEGOESM_RUN",
+                "steps": kwargs["steps"],
+                "wall_seconds": 1.0,
+                "jax_default_backend": "cpu",
+                "transcendentals": kwargs["transcendentals"],
+                "snapshots": [],
+                "output_dir": str(kwargs["output_dir"]),
+            }
+
+        monkeypatch.setattr(r342_driver, "run_standalone_k0_driver", fake_run)
+        assert r342_driver.main(["--steps", "1", "--output-dir", str(tmp_path)]) == 0
+        return seen["transcendentals"]
+
+    def require_certified_default(mode: str) -> None:
+        assert mode == "libm", "round-342 driver default must remain certified libm"
+
+    require_certified_default(run_default())
+
+    original_add_argument = argparse.ArgumentParser.add_argument
+
+    def plant_native_default(parser, *args, **kwargs):
+        if "--transcendentals" in args:
+            kwargs["default"] = "native"
+        return original_add_argument(parser, *args, **kwargs)
+
+    with monkeypatch.context() as planted:
+        planted.setattr(argparse.ArgumentParser, "add_argument", plant_native_default)
+        with pytest.raises(AssertionError, match="must remain certified libm"):
+            require_certified_default(run_default())
+
+
+def test_wrapper_default_transcendentals_is_libm_and_native_plant_fails(
+    tmp_path: Path,
+) -> None:
+    source_wrapper = Path(r342_driver.__file__).with_name(
+        "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
+    )
+
+    def run_default(root: Path, *, plant_native: bool) -> str:
+        script_dir = root / "repo/scripts/validate/ocean_fidelity/orca2_l4"
+        script_dir.mkdir(parents=True)
+        wrapper = script_dir / source_wrapper.name
+        source = source_wrapper.read_text(encoding="utf-8")
+        if plant_native:
+            anchor = 'TRANSCENDENTALS="libm"'
+            assert source.count(anchor) == 1
+            source = source.replace(anchor, 'TRANSCENDENTALS="native"', 1)
+        wrapper.write_text(source, encoding="utf-8")
+        fake_driver = script_dir / "nemo_testcase_l4_orca2_round342_s4_year_driver.py"
+        fake_driver.write_text(
+            "import sys\nprint('FAKE_DRIVER_ARGS', *sys.argv[1:])\n",
+            encoding="utf-8",
+        )
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        fake_git = bin_dir / "git"
+        fake_git.write_text("#!/usr/bin/env bash\nexit 0\n")
+        fake_git.chmod(0o755)
+        fake_free = bin_dir / "free"
+        fake_free.write_text("#!/usr/bin/env bash\nprintf 'Mem: 1000 0 0 0 0 999\\n'\n")
+        fake_free.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        completed = subprocess.run(
+            [
+                "bash", str(wrapper),
+                "--steps", "1",
+                "--output-dir", str(root / "run"),
+                "--wait",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert completed.returncode == 0, completed.stderr
+        return completed.stdout
+
+    def require_certified_default(output: str) -> None:
+        assert "--transcendentals libm" in output, (
+            "round-342 wrapper default must remain certified libm"
+        )
+
+    require_certified_default(run_default(tmp_path / "clean", plant_native=False))
+    with pytest.raises(AssertionError, match="must remain certified libm"):
+        require_certified_default(run_default(tmp_path / "plant", plant_native=True))
+
+
+def test_driver_and_wrapper_refuse_unknown_transcendentals(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="must be 'libm' or 'native'"):
+        r342_driver.run_standalone_k0_driver(
+            steps=1,
+            output_dir=tmp_path,
+            transcendentals="other",
+        )
+
+    wrapper = Path(r342_driver.__file__).with_name(
+        "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
+    )
+    refused = subprocess.run(
+        ["bash", str(wrapper), "--transcendentals", "other"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert refused.returncode == 2
+    assert "REFUSE: --transcendentals must be libm or native" in refused.stderr
+
+
+def test_wrapper_refuses_dirty_tracked_tree(tmp_path: Path) -> None:
+    wrapper = Path(r342_driver.__file__).with_name(
+        "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_git = bin_dir / "git"
+    fake_git.write_text("#!/usr/bin/env bash\nprintf ' M tracked-file\\n'\n")
+    fake_git.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    refused = subprocess.run(
+        ["bash", str(wrapper), "--steps", "1", "--output-dir", str(tmp_path / "out")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert refused.returncode == 1
+    assert "REFUSE: tracked worktree is dirty" in refused.stderr
+
+
+def test_wrapper_trailing_slash_keeps_log_outside_output_and_passes_mode(
+    tmp_path: Path,
+) -> None:
+    source_wrapper = Path(r342_driver.__file__).with_name(
+        "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
+    )
+    script_dir = tmp_path / "repo/scripts/validate/ocean_fidelity/orca2_l4"
+    script_dir.mkdir(parents=True)
+    wrapper = script_dir / source_wrapper.name
+    shutil.copyfile(source_wrapper, wrapper)
+    fake_driver = script_dir / "nemo_testcase_l4_orca2_round342_s4_year_driver.py"
+    fake_driver.write_text(
+        "import sys\nprint('FAKE_DRIVER_ARGS', *sys.argv[1:])\n",
+        encoding="utf-8",
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_git = bin_dir / "git"
+    fake_git.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_git.chmod(0o755)
+    fake_free = bin_dir / "free"
+    fake_free.write_text("#!/usr/bin/env bash\nprintf 'Mem: 1000 0 0 0 0 999\\n'\n")
+    fake_free.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    output_dir = tmp_path / "run"
+    completed = subprocess.run(
+        [
+            "bash", str(wrapper),
+            "--steps", "1",
+            "--output-dir", str(output_dir) + "/",
+            "--transcendentals", "native",
+            "--wait",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "--transcendentals native" in completed.stdout
+    assert Path(str(output_dir) + ".log").is_file()
+    assert not (output_dir / ".log").exists()
+
+
+def test_driver_refuses_nonempty_output_before_loading_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "occupied"
+    output_dir.mkdir()
+    (output_dir / "evidence.json").write_text("{}\n")
+    called = False
+
+    def planted_card_loader(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("card loader must not run")
+
+    monkeypatch.setattr(bulk, "build_nemo_orca2_k0_ocean_card", planted_card_loader)
+    with pytest.raises(RuntimeError, match="output directory must be empty"):
+        r342_driver.run_standalone_k0_driver(steps=1, output_dir=output_dir)
+    assert not called
+
+
+def test_driver_checks_clean_worktree_before_loading_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def dirty_tree(*_args, **_kwargs):
+        raise RuntimeError("planted dirty worktree")
+
+    def planted_card_loader(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("card loader must not run")
+
+    monkeypatch.setattr(r342_driver, "worktree_stamp", dirty_tree)
+    monkeypatch.setattr(bulk, "build_nemo_orca2_k0_ocean_card", planted_card_loader)
+    with pytest.raises(RuntimeError, match="planted dirty worktree"):
+        r342_driver.run_standalone_k0_driver(
+            steps=1,
+            output_dir=tmp_path / "empty-output",
+        )
+    assert not called
+
+
+def test_wrapper_refuses_nonempty_output_directory(
+    tmp_path: Path,
+) -> None:
+    wrapper = Path(r342_driver.__file__).with_name(
+        "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
+    )
+    output_dir = tmp_path / "occupied"
+    output_dir.mkdir()
+    (output_dir / "prior-evidence").write_text("occupied\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_git = bin_dir / "git"
+    fake_git.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_git.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    refused = subprocess.run(
+        ["bash", str(wrapper), "--steps", "1", "--output-dir", str(output_dir)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert refused.returncode == 1
+    assert "output directory must be empty" in refused.stderr
+
+
+@pytest.mark.skipif(
+    not r342_gate.R339_NAMELIST_CFG.is_file(),
+    reason="Round-339 K0 namelist or ppsrc not present on host",
+)
+def test_gate_checklist_controls_and_planted_failures(tmp_path: Path) -> None:
+    ppsrc_dir = r342_gate._ppsrc_dir()
+    run_sh = (
+        Path(r342_gate.__file__).resolve().parent
+        / "nemo_testcase_l4_orca2_round342_s4_year_acquisition"
+        / "run.sh"
+    )
+    staged_namelist = tmp_path / "namelist_cfg"
+    info = r342_gate.stage_s4_year_namelist_cfg(r342_gate.R339_NAMELIST_CFG, staged_namelist)
+    assert info["nn_itend"] == 2920
+    assert info["nn_stock"] == 8
+    assert info["expected_daily_restarts"] == 365
+
+    syntax = r342_gate.verify_run_sh_syntax_and_plant(run_sh)
+    assert syntax["passed"] is True
+
+    disk = r342_gate.verify_disk_space(r342_gate.REPO_ROOT)
+    assert disk["free_gib"] >= r342_gate.REQUIRED_DISK_GIB
+    planted_disk = r342_gate.plant_disk_space_exhaustion(r342_gate.REPO_ROOT, run_sh)
+    assert planted_disk["passed"] is True
+
+    ram = r342_gate.verify_available_ram()
+    assert ram["available_gib"] >= r342_gate.REQUIRED_RAM_GIB
+    planted_ram = r342_gate.plant_ram_exhaustion(run_sh)
+    assert planted_ram["passed"] is True
+
+    planted_dirty = r342_gate.plant_dirty_worktree(run_sh)
+    assert planted_dirty["passed"] is True
+
+    with r342_gate.tempfile.TemporaryDirectory(dir=r342_gate._scratch_root()) as scratch_tmp:
+        stage_bad_root = Path(scratch_tmp) / "stub_stage_bad"
+        missing_ice = Path(scratch_tmp) / "missing_ice_cover.nc"
+        stage_bad = r342_gate.subprocess.run(
+            [
+                "bash",
+                str(run_sh),
+                "--stub-run-dir",
+                str(stage_bad_root),
+                "--stub-steps",
+                "16",
+                "--ice-cover",
+                str(missing_ice),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert stage_bad.returncode != 0
+        assert "R342_REFUSED_ARM_QUARANTINED" in stage_bad.stderr
+        refused_stage = list((stage_bad_root / "refused").glob("*"))
+        assert len(refused_stage) == 1 and r342_gate.TWIN_A_NAME in refused_stage[0].name
+        assert any(refused_stage[0].iterdir())
+        assert not (stage_bad_root / r342_gate.TWIN_A_NAME).exists()
+
+    nml_check = r342_gate.verify_namelist_groups_against_ppsrc(
+        staged_namelist, r342_gate.NAMELIST_REF, ppsrc_dir
+    )
+    assert nml_check["unknown_cfg_groups"] == []
+
+    planted_nml = r342_gate.plant_namelist_error(ppsrc_dir)
+    assert planted_nml["passed"] is True
+    assert "undeclared" in planted_nml["undeclared_group_error"]
+    assert "E R R O R" in planted_nml["ocean_output_error"]
+
+    alloc = r342_gate.verify_allocate_extents(ppsrc_dir)
+    assert set(alloc["verified_allocates"]) == {"oce", "dom_oce", "sbc_oce"}
+    planted_alloc = r342_gate.plant_allocate_mismatch(ppsrc_dir)
+    assert planted_alloc["passed"] is True
+
+    fixture = r342_gate.verify_restart_fortran_fixture(ppsrc_dir)
+    assert fixture["passed"] is True
+    assert "FIXTURE_OK writes=365 first=8 last=2920" in fixture["stdout"]
+    planted_fix = r342_gate.plant_fixture_wrong_time_level(ppsrc_dir)
+    assert planted_fix["passed"] is True
+
+
+def test_real_arm_a_completion_signal_and_plants(tmp_path: Path) -> None:
+    real_logs = r342_gate.REAL_ARM_A_LOGS_DIR
+    assert real_logs.is_dir()
+    assert (real_logs / "mpirun.stderr.log").is_file()
+    assert (real_logs / "mpirun.stdout.log").is_file()
+    assert (real_logs / "mpirun.stdout.log").stat().st_size == 0
+    assert (real_logs / "time.step").is_file()
+    assert (real_logs / "ocean.output").is_file()
+    assert (real_logs / "namelist_cfg").is_file()
+
+    signal = r342_gate.verify_nemo_completion_signal(real_logs, expected_steps=2920)
+    assert signal["nn_itend"] == 2920
+    assert signal["nn_stock"] == 8
+    assert signal["time_step"] == 2920
+    assert signal["stderr_stop_0"] is True
+    assert signal["stderr_last_line"] == "STOP 0"
+    assert signal["stdout_bytes"] == 0
+    assert signal["ocean_output_error_free"] is True
+
+    planted = r342_gate.plant_completion_signal_failures(real_logs)
+    assert planted["passed"] is True
+    assert "STOP 0" in planted["missing_stop_error"]
+    assert "STOP 0" in planted["stdout_only_stop_error"]
+    assert "nonzero STOP" in planted["stop123_error"]
+    assert "time.step (2912) != nn_itend (2920)" in planted["short_timestep_error"]
+    assert "missing time.step" in planted["missing_timestep_error"]
+    assert "E R R O R" in planted["ocean_output_error"]
+
+    # Also verify direct mutations on a temporary copy of the real Arm-A logs
+    work = tmp_path / "real_arm_a_copy"
+    r342_gate.shutil.copytree(real_logs, work)
+    assert r342_gate.verify_nemo_completion_signal(work, expected_steps=2920)["time_step"] == 2920
+
+    # Plant short time.step = 2919
+    (work / "time.step").write_text("     2919\n", encoding="utf-8")
+    with pytest.raises(r342_gate.GateError, match=r"time\.step \(2919\) != nn_itend \(2920\)"):
+        r342_gate.verify_nemo_completion_signal(work, expected_steps=2920)
+    (work / "time.step").write_text("     2920\n", encoding="utf-8")
+
+    # Plant missing STOP 0 on stderr
+    (work / "mpirun.stderr.log").write_text("", encoding="utf-8")
+    with pytest.raises(r342_gate.GateError, match=r"mpirun\.stderr\.log lacks clean STOP 0"):
+        r342_gate.verify_nemo_completion_signal(work, expected_steps=2920)
+
+
+@pytest.mark.skipif(
+    not (
+        r342_driver.DEFAULT_OUTPUT_DIR / "candidate_step00000008.npz"
+    ).is_file()
+    or not r342_gate.R340_RUN_A.is_dir(),
+    reason="20-step legoESM smoke snapshot or R340_RUN_A not present",
+)
+def test_evaluate_month_by_month_on_day1_smoke(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub_nemo = tmp_path / "stub_nemo"
+    r342_gate.stage_s4_year_run_dir(
+        stub_nemo, r342_gate.DEFAULT_ICE_COVER_PATH, nn_itend=8, nn_stock=8
+    )
+    capsys.readouterr()
+    r342_gate.write_stub_s4_year_outputs(stub_nemo)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == "STOP 0"
+    assert (stub_nemo / "time.step").read_text(encoding="utf-8").strip() == "8"
+    (stub_nemo / "mpirun.stdout.log").write_text(captured.out, encoding="utf-8")
+    (stub_nemo / "mpirun.stderr.log").write_text(captured.err, encoding="utf-8")
+    stub_sig = r342_gate.verify_nemo_completion_signal(stub_nemo, expected_steps=8)
+    assert stub_sig["time_step"] == 8 and stub_sig["stderr_stop_0"] is True
+    day1_check = r342_gate.verify_day1_against_admitted_s4_kt9(stub_nemo)
+    assert all(v["max_ulp"] == 0 for v in day1_check.values())
+
+    report = r342_metrics.evaluate_month_by_month(
+        nemo_root=stub_nemo,
+        candidate_root=r342_driver.DEFAULT_OUTPUT_DIR,
+        days=1,
+        skip_mld=True,
+    )
+    assert report["bar_mode"] == "DECISION_185_REFERENCE_ONLY"
+    assert report["verdict"] is None
+    assert report["pass_fail_assigned"] is False
+    assert report["state_averaging_before_nonlinear_metrics"] is False
+    assert report["saved_kts_evaluated"] == [8]
+    m01 = report["months"][0]
+    assert m01["label"] == "M01_Jan"
+    assert m01["status"] == "EVALUATED_PARTIAL_MONTH"
+    assert m01["verdict"] is None
+    assert m01["metrics"]["SST"]["daily_mean_rms"] == 0.0
+    assert m01["metrics"]["SST"]["nemo_mean"] == m01["metrics"]["SST"]["cand_mean"]
+    assert m01["metrics"]["SSS"]["daily_mean_rms"] == 0.0
+    assert m01["metrics"]["SSS"]["nemo_mean"] == m01["metrics"]["SSS"]["cand_mean"]
+    assert m01["metrics"]["SSH"]["daily_mean_rms"] == 0.0
+    assert m01["metrics"]["SSH"]["nemo_rms"] == m01["metrics"]["SSH"]["cand_rms"]
+    assert m01["metrics"]["T_0-100m"]["nemo_mean"] == m01["metrics"]["T_0-100m"]["cand_mean"]
+    assert m01["metrics"]["S_0-100m"]["nemo_mean"] == m01["metrics"]["S_0-100m"]["cand_mean"]
+    assert m01["metrics"]["PSI"]["daily_mean_rms_sv"] == 0.0
+    assert m01["metrics"]["PSI"]["nemo_rms_sv"] == m01["metrics"]["PSI"]["cand_rms_sv"]
+    assert m01["metrics"]["PSI"]["daily_mean_pattern_corr"] == pytest.approx(1.0)
+    assert m01["metrics"]["DRAKE"]["abs_mean_diff_sv"] == 0.0
+    assert m01["metrics"]["ICE_SST"]["nemo_mean"] == m01["metrics"]["ICE_SST"]["cand_mean"]
+    assert m01["metrics"]["ICE_SSS"]["nemo_mean"] == m01["metrics"]["ICE_SSS"]["cand_mean"]
+    md = r342_metrics.format_markdown_report(report, twin_report=report)
+    assert "## Day-by-Day SST RMS Difference Curve" in md
+    for m_pending in report["months"][1:]:
+        assert m_pending["status"] == "PENDING_ACQUISITION"
+        assert m_pending["verdict"] is None
+
+
+def test_callable_default_transcendentals_is_libm_and_native_plant_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def require_certified_default() -> None:
+        assert (
+            r342_driver.run_standalone_k0_driver.__kwdefaults__["transcendentals"]
+            == "libm"
+        ), "round-342 callable default must remain certified libm"
+
+    require_certified_default()
+    with monkeypatch.context() as planted:
+        planted.setitem(
+            r342_driver.run_standalone_k0_driver.__kwdefaults__,
+            "transcendentals",
+            "native",
+        )
+        with pytest.raises(AssertionError, match="must remain certified libm"):
+            require_certified_default()

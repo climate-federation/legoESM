@@ -279,10 +279,10 @@ def test_f38_no_accumulation_when_flag_off():
 
 
 def test_f38_compiled_lane_packs_stress_into_the_atmosphere():
-    """Real C8 run: segment 2 packs the handed-back stress as the
+    """Real lat-lon C-grid run: segment 2 packs the handed-back stress as the
     atmosphere's sfc_taux/tauy_override."""
     from legoesm.driver import compiled_segments as cs
-    drv = _cube_driver(days=2, couple_surface_fluxes=True)
+    drv = _latlon_driver(days=2, couple_surface_fluxes=True)
     seen = []
     real = cs.pack_forcing
 
@@ -314,14 +314,15 @@ def test_f38_refused_on_a_lane_that_never_reads_it():
 # ---------------------------------------------------------------------------
 # F35: segment-mean surface radiation under diurnal_cycle
 # ---------------------------------------------------------------------------
-def _cube_driver(days=2, diurnal=False, couple_surface_fluxes=False,
-                 land_mask_path="", slab_land_active=False):
+def _latlon_driver(days=2, diurnal=False, couple_surface_fluxes=False,
+                   land_mask_path="", slab_land_active=False):
     from legoesm.driver.config import (
         DycoreConfig, ExperimentConfig, GridConfig, OutputConfig)
     from legoesm.driver.coupled_config import PRESETS
     atm = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
+                            discretization="latlon_cgrid"),
         output=OutputConfig(diag_days=1), radiation="gray", days=days,
         diurnal_cycle=diurnal, land_mask_path=land_mask_path,
         slab_land_active=slab_land_active)
@@ -339,7 +340,7 @@ def _cube_driver(days=2, diurnal=False, couple_surface_fluxes=False,
 
 
 def test_f35_surfaces_get_segment_mean_not_one_sun_position():
-    drv = _cube_driver(days=1, diurnal=True)
+    drv = _latlon_driver(days=1, diurnal=True)
     assert drv.run() == "COMPLETED"
     aux = drv._atm._carry_aux
     held = np.asarray(aux["held_sw_net_sfc"])
@@ -374,7 +375,7 @@ def _mask_file(tmp_path):
 
 
 def test_f36_land_mask_feeds_coupler_land_not_atm_slab_land(tmp_path):
-    drv = _cube_driver(days=1, land_mask_path=_mask_file(tmp_path))
+    drv = _latlon_driver(days=1, land_mask_path=_mask_file(tmp_path))
     f_atm = np.asarray(drv._atm._f_land)
     assert f_atm.max() > 0.5                         # real land arrived
     np.testing.assert_array_equal(
@@ -384,5 +385,5 @@ def test_f36_land_mask_feeds_coupler_land_not_atm_slab_land(tmp_path):
 
 def test_f36_explicit_atm_slab_land_refused_in_coupled_run(tmp_path):
     with pytest.raises(ValueError, match="second land model"):
-        _cube_driver(days=1, land_mask_path=_mask_file(tmp_path),
-                     slab_land_active=True)
+        _latlon_driver(days=1, land_mask_path=_mask_file(tmp_path),
+                       slab_land_active=True)

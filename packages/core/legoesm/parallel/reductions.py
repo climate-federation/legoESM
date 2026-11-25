@@ -412,7 +412,7 @@ def _allreduce_sum(local_value, comm, timer: str):
             comm=MPI.COMM_WORLD if comm is None else comm))
 
 
-class _CommParam:
+class CommParam:
     """Hashable primitive parameter wrapping an (unhashable) mpi4py communicator."""
 
     __slots__ = ("comm",)
@@ -424,7 +424,7 @@ class _CommParam:
         return hash(self.comm.py2f())
 
     def __eq__(self, other):
-        return isinstance(other, _CommParam) and self.comm == other.comm
+        return isinstance(other, CommParam) and self.comm == other.comm
 
 
 @functools.cache
@@ -445,7 +445,7 @@ def _replicated_allreduce_p():
 
     # mpi4jax's ordered effect, read off its own jaxpr (public API only); without
     # it the lowering has no MPI token to thread.
-    effects = jax.make_jaxpr(lambda v: raw(v, comm=_CommParam(MPI.COMM_WORLD)))(0.0).effects
+    effects = jax.make_jaxpr(lambda v: raw(v, comm=CommParam(MPI.COMM_WORLD)))(0.0).effects
 
     prim = Primitive("legoesm_replicated_allreduce_sum")
     prim.def_impl(raw)
@@ -469,7 +469,7 @@ def _replicated_sum(local_value, comm, timer):
     with mpi_timer(timer):
         return _replicated_allreduce_p().bind(
             jax.numpy.asarray(local_value),
-            comm=_CommParam(MPI.COMM_WORLD if comm is None else comm))
+            comm=CommParam(MPI.COMM_WORLD if comm is None else comm))
 
 
 def global_sum_mpi(local_value: jax.Array, comm=None, *,

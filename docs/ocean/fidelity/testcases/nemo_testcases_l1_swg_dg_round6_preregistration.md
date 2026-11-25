@@ -33,7 +33,7 @@ as recorded in `SWG_DG/BLD/cfg/parsed_bld.cfg:41-42`.  NEMO evaluates the
 stage-1 continuity statements at `divhor.f90:134-140` and the SSH update at
 `sshwzv.f90:135-149`.  legoESM's production path is
 `swe_rk3.py:246-267` through the JIT dispatch at
-`ocean_model_latlon_cgrid.py:13258-13280`.
+`ocean_model_latlon_cgrid.py:13277-13299`.
 
 ## Instrument and controls
 

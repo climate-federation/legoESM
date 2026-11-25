@@ -1,0 +1,24 @@
+--- icedyn_adv_pra.F90
++++ icedyn_adv_pra.F90
+@@ -31,6 +31,21 @@
+ 
+    PUBLIC   ice_dyn_adv_pra   ! called by icedyn_adv
+    PUBLIC   adv_pra_init      ! called by icedyn_adv
++   ! O4_OBSERVER_BEGIN
++   ! Read-only visibility for the caller-boundary observer.  No executable
++   ! statement is inserted into this production routine or any of its helpers.
++   PUBLIC   sxice, syice, sxxice, syyice, sxyice
++   PUBLIC   sxsn , sysn , sxxsn , syysn , sxysn
++   PUBLIC   sxa  , sya  , sxxa  , syya  , sxya
++   PUBLIC   sxsal, sysal, sxxsal, syysal, sxysal
++   PUBLIC   sxage, syage, sxxage, syyage, sxyage
++   PUBLIC   sxc0 , syc0 , sxxc0 , syyc0 , sxyc0
++   PUBLIC   sxe  , sye  , sxxe  , syye  , sxye
++   PUBLIC   sxsi , sysi , sxxsi , syysi , sxysi
++   PUBLIC   sxap , syap , sxxap , syyap , sxyap
++   PUBLIC   sxvp , syvp , sxxvp , syyvp , sxyvp
++   PUBLIC   sxvl , syvl , sxxvl , syyvl , sxyvl
++   ! O4_OBSERVER_END
+ 
+    ! Moments for advection
+    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:)   ::   sxice, syice, sxxice, syyice, sxyice   ! ice thickness
