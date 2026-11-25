@@ -429,3 +429,25 @@ def test_make_physics_builds_five_only_where_it_can_run(setup):
         with pytest.raises(ValueError, match=f"FIVE is not built with {what}"):
             make_physics(bad, model_type="mpas", dt=600.0, cld_macmic_num_steps=2,
                          five=on, five_host_coord=hc)
+
+
+def test_five_cirrus_refusal_fails_closed_without_the_field(setup):
+    import types
+    from legoesm.atmosphere.physics.combined import make_physics
+    cfg = _clubb_cfg()
+    bare = types.SimpleNamespace(
+        **{k: v for k, v in cfg.microphysics.morrison._asdict().items()
+           if k != "cirrus_nucleation"})
+    bad = cfg._replace(microphysics=cfg.microphysics._replace(morrison=bare))
+    with pytest.raises(AttributeError, match="cirrus_nucleation"):
+        make_physics(bad, model_type="mpas", dt=600.0, cld_macmic_num_steps=2,
+                     five=five.FiveConfig(enabled=True), five_host_coord=setup["hc"])
+
+
+def test_make_physics_options_are_keyword_only():
+    import inspect
+    from legoesm.atmosphere.physics.combined import make_physics
+    params = inspect.signature(make_physics).parameters
+    positional = [n for n, p in params.items()
+                  if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD]
+    assert positional == ["config", "model_type"]
