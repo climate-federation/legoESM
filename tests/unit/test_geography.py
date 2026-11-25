@@ -411,6 +411,37 @@ def test_land_tile_stamps_the_geography_file(tmp_path):
     assert st["parameter_file"] == "aquaplanet.nc"
 
 
+def test_ocean_depth_skips_below_sea_level_land(mesh, tmp_path):
+    """A land point below sea level (land_fraction 1) does not deepen the
+    ocean: same depth as with that point at elevation 0."""
+    ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))
+    el = ds["elevation"].values
+    rng = np.random.default_rng(0)
+    pts = rng.choice(np.flatnonzero(el.ravel() < 0.0), 2000, replace=False)
+    lf = (el > 0.0).astype(float)
+    lf.ravel()[pts] = 1.0
+    dep = ds.copy(deep=True)
+    dep["elevation"].values.ravel()[pts] = -9000.0
+    dep["land_fraction"] = (("lat", "lon"), lf)
+    flat = ds.copy(deep=True)
+    flat["elevation"].values.ravel()[pts] = 0.0
+    kw = dict(H_min=10.0, H_max=1e5)
+    d_dep = geo.geography_ocean_depth(mesh, _write(dep, tmp_path, "dep.nc"), **kw)
+    d_flat = geo.geography_ocean_depth(mesh, _write(flat, tmp_path, "flat.nc"), **kw)
+    assert np.array_equal(d_dep, d_flat)
+    del dep["land_fraction"]     # control: without the mask the points do deepen it
+    assert np.any(geo.geography_ocean_depth(mesh, _write(dep, tmp_path, "d2.nc"), **kw)
+                  > d_flat)
+
+
+def test_ocean_depth_refuses_land_fraction_off_the_elevation_grid(mesh, tmp_path):
+    ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))
+    ds["land_fraction"] = (("lat_lf", "lon_lf"), np.zeros((4, 8)))
+    ds = ds.assign_coords(lat_lf=np.linspace(-67.5, 67.5, 4), lon_lf=np.arange(8) * 45.0)
+    with pytest.raises(ValueError, match="on the elevation grid"):
+        geo.geography_ocean_depth(mesh, _write(ds, tmp_path, "g.nc"), H_min=10.0, H_max=5500.0)
+
+
 @pytest.mark.parametrize("axes", ["lon180", "lat_desc"])
 def test_ocean_depth_refuses_axes_the_terrain_would_reorder(mesh, tmp_path, axes):
     ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))

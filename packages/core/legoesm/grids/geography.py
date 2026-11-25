@@ -272,10 +272,18 @@ def geography_ocean_depth(grid, path: str, *, H_min: float, H_max: float):
         lat = np.asarray(ds["lat"].values, dtype=np.float64)
         lon = np.asarray(ds["lon"].values, dtype=np.float64)
         el = np.asarray(ds["elevation"].values, dtype=np.float64)
+        lf = None
+        if "land_fraction" in ds:
+            if ds["land_fraction"].dims != ("lat", "lon"):
+                raise ValueError(
+                    f"geography {path}: ocean depth needs land_fraction on the "
+                    f"elevation grid (lat, lon), got {ds['land_fraction'].dims}")
+            lf = np.asarray(ds["land_fraction"].values, dtype=np.float64)
     finally:
         ds.close()
     _require_canonical_axes(lat, lon, "geography ocean depth")  # VOTED VA
-    sea = (el < 0.0).astype(np.float64)
+    # below-sea-level LAND (land_fraction 1) is not ocean (VOTED a/a/a)
+    sea = (el < 0.0) * (1.0 if lf is None else 1.0 - lf)
     c_lat, c_lon, _, _ = _grid_cells(grid)
     sea_c, depth_sum = bin_latlon_to_cells(lat, lon, [sea, sea * -el], c_lat, c_lon,
                                            **grid_ownership(grid))
