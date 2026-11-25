@@ -434,7 +434,12 @@ class TestPolarFilter:
         e_v = sum(
             float(jnp.sum(spec_v[r] * (mask_v[r] == 0.0))) for r in rows
         )
-        assert e_v < 1e-8, (
+        # Float-noise floor: the forbidden-band residue of (v + dv) - v is
+        # pure rounding of the +-5 m/s Nyquist v (fp32 state: ~1.5e-5; the
+        # same step in fp64 gives 1.4e-14).  The unfiltered-dv bug leaves ~0.16.
+        tol_v = 10.0 * float(jnp.finfo(state.v.dtype).eps) * float(
+            jnp.max(jnp.abs(state.v))) * grid.n_lon
+        assert e_v < tol_v, (
             f"dv increment leaks {e_v:.3e} spectral amplitude into the "
             f"polar-forbidden band — v is not being polar-filtered"
         )
