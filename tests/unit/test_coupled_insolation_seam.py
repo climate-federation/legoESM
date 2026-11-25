@@ -82,8 +82,10 @@ def _earth_system_driver(insolation_start_doy, tmp_path):
     from legoesm.driver.earth_system_driver import EarthSystemDriver
 
     cfg = ExperimentConfig(
-        grid=GridConfig(resolution=8, nlev=4),
-        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
+                            discretization="latlon_cgrid"),
+        radiation="gray", convection="none", turbulence="none",
         output=OutputConfig(diag_days=1), days=1, dataset="analytical", precision="fp64",
         insolation_start_doy=insolation_start_doy)
     drv = EarthSystemDriver(cfg, output_dir=tmp_path)
