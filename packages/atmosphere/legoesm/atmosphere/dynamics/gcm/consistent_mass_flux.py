@@ -302,7 +302,7 @@ def consistent_mass_flux_latlon(grid, sigma_coord, wind_geo_fn, p_s, *, t=0.0,
     v_face = jnp.asarray(wind_geo_fn(t, lon_v, lat_v, sigma_coord)[1], f64)
     ps_v = 0.5 * (ps[1:] + ps[:-1])
     fv_in = _face_air_flux(sigma_coord, ps_v, v_face[1:-1])
-    z = jnp.zeros_like(fv_in[:1])
+    z = jnp.zeros((1,) + fv_in.shape[1:], fv_in.dtype)  # shape-safe for n_lat=1 (fv_in empty)
     fv = jnp.concatenate([z, fv_in, z], axis=0)
     sd = np.asarray(wind_geo_fn(t, grid.lon2d, grid.lat2d, sigma_coord)[2], np.float64)
     w_raw = np.asarray(ps)[..., None] * sd

@@ -687,3 +687,13 @@ def test_hybrid_guards_check_the_stored_dp_itself(hc, monkeypatch):
     st = dcmip13_init_mpas(m, hc)
     with pytest.raises(ValueError, match="strictly positive"):
         air_mass_state(st, _ps(m.lonCell, m.latCell), hc)
+
+
+def test_latlon_one_row_grid_gets_both_pole_faces(sc):
+    """n_lat=1: no interior v-faces, but the two pole faces (zero flux) must still exist."""
+    from legoesm.grids.latlon import create_latlon_grid
+    g = create_latlon_grid(1, 36)
+    mf = cmf.consistent_mass_flux_latlon(g, sc, dcmip13_wind_geo, _ps(g.lon2d, g.lat2d), refine=0)
+    fv = mf.flux_h[1]
+    assert fv.shape[0] == 2
+    assert np.all(np.asarray(fv) == 0.0)
