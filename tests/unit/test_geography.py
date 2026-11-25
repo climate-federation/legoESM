@@ -454,9 +454,12 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
     assert d._ocean_model.z_coord is d._ocean_z_coord   # model rebuilt on it
 
 
-def test_partitioned_mpas_ocean_refuses_a_geography_with_land(tmp_path, monkeypatch):
-    """Dry->wet flux routing is rank-local; a multi-rank MPAS ocean (the
-    atmosphere's Voronoi MPI layout) under a geography with land is refused."""
+@pytest.mark.parametrize("shape,kw", [("box", dict(box=(-30.0, 30.0, 60.0, 150.0))),
+                                      ("aquaplanet", {})])
+def test_partitioned_mpas_ocean_refuses_a_geography(tmp_path, monkeypatch, shape, kw):
+    """Dry->wet flux routing and the wet-cell checks are rank-local; a
+    multi-rank MPAS ocean (the atmosphere's Voronoi MPI layout) under any
+    geography is refused."""
     from types import SimpleNamespace
 
     from legoesm.driver.coupled_config import CoupledConfig
@@ -469,7 +472,7 @@ def test_partitioned_mpas_ocean_refuses_a_geography_with_land(tmp_path, monkeypa
 
     monkeypatch.setattr(CoupledESMDriver, "_init_ocean", partitioned)
     cc = CoupledConfig(f_land_mode="analytical", land_mode="none", ocean_mode="dynamic")
-    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))),
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, shape, **kw)),
                          cc, output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match="partitioned"):
         d.setup()
