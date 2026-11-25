@@ -55,6 +55,9 @@ References
 - Large, W. G., McWilliams, J. C., & Doney, S. C. (1994). Oceanic
   vertical mixing: A review and a model with a nonlocal boundary layer
   parameterization. Rev. Geophys., 32, 363-403.
+- Van Roekel et al. (2012), JGR 117, C05001, doi:10.1029/2011JC007516.
+- Li et al. (2016), Ocean Modelling 103, 145-160, Table 2 / Eq. (12),
+  doi:10.1016/j.ocemod.2015.07.020 (aligned VR12-AL extension).
 """
 
 from __future__ import annotations
@@ -96,6 +99,7 @@ __physics_contract__ = {
         "eta": "m", "jacobian": "1 (z-star dimensionless)",
         "tau_x": "N/m^2", "tau_y": "N/m^2", "B_f": "m^2/s^3",
         "Q_sfc_T": "degC m/s", "Q_sfc_S": "psu m/s",
+        "u_stokes": "m/s (nonnegative surface magnitude, optional)",
     },
     "outputs": {
         "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
@@ -119,7 +123,11 @@ __physics_contract__ = {
     # diffusion is applied here or deferred to the implicit solver.
     "conserves": ["energy", "salt", "momentum"],
     "differentiable": True,
-    "reference": "Large, McWilliams & Doney (1994), Rev. Geophys. 32, 363-403",
+    "reference": (
+        "Large, McWilliams & Doney (1994), Rev. Geophys. 32, 363-403; "
+        "VR12-AL: Li et al. (2016), doi:10.1016/j.ocemod.2015.07.020, "
+        "Table 2 / Eq. 12"
+    ),
     "idealized_test": (
         "tests/ocean/unit/test_kpp_langmuir.py + "
         "tests/ocean/unit/test_vmix_k_profiles_direct.py — wind/convective "
@@ -371,6 +379,30 @@ def _kpp_unresolved_shear_variance(N, d, w_s, cfg, eps):
                * jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))))
 
 
+def _kpp_langmuir_enhancement(u_star, u_stokes, cfg):
+    """VR12-AL velocity multiplier, shape (...), with an exact no-wave limit.
+
+    Van Roekel et al. (2012), JGR 117, C05001,
+    doi:10.1029/2011JC007516; the aligned implementation in Li et al.
+    (2016), Ocean Modelling 103, 145-160, Table 2 and Eq. (12),
+    doi:10.1016/j.ocemod.2015.07.020:
+    E = sqrt(1 + (3.1*La_t)^-2 + (5.4*La_t)^-4),
+    La_t = sqrt(u_star / |u_s(0)|). Coefficients are the published LES fit,
+    not retuned for a coarse global grid. Wind and waves are assumed aligned;
+    surface-layer averaging and directional projection (VR12-MA) are absent.
+
+    Write r = La_t^-2 to avoid division by zero at a calm spectrum. Surface
+    Stokes input is a nonnegative magnitude; None retains the explicit
+    prescribed-Langmuir-number fallback, and does NOT mean no Langmuir mixing.
+    """
+    if not cfg.enable_langmuir:
+        return jnp.ones_like(u_star)
+    r = (jnp.ones_like(u_star) / cfg.langmuir_number_default**2
+         if u_stokes is None else u_stokes / u_star)
+    return jnp.sqrt(1.0 + r / cfg.langmuir_c1**2
+                    + r**2 / cfg.langmuir_c2**4)
+
+
 def _boundary_layer_depth(
     rho: jnp.ndarray,
     T: jnp.ndarray,
@@ -387,6 +419,7 @@ def _boundary_layer_depth(
     eos_fn=None,
     ice_frac: jnp.ndarray | None = None,
     N2: jnp.ndarray | None = None,
+    langmuir_enhancement: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Estimate boundary layer depth h via bulk Richardson number.
 
@@ -465,6 +498,11 @@ def _boundary_layer_depth(
             f"KPPConfig.vt2_velocity_scale must be 'column' or 'candidate', got {_vt2_scale!r}")
     _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg, eps,
                                      ice_frac=ice_frac)
+    # Li et al. (2016), Eqs. (1)-(3): the same enhanced velocity enters
+    # unresolved shear and diffusivity. This is VR12-AL, not the additional
+    # |u_s(0)|^2 entrainment term of their VR12-EN experiment (Eq. 13).
+    if langmuir_enhancement is not None:
+        w_s_vt = w_s_vt * langmuir_enhancement[..., jnp.newaxis]
     V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)
 
     # Bulk Richardson number
@@ -618,10 +656,14 @@ def kpp_vertical_mixing(
     # --- N^2 at interfaces (V_t^2, interior Ri and convective trigger, core-0030) ---
     N2 = _kpp_interface_n2(rho, T, S, eta, z_coord, jacobian, cfg, g, eos_fn=eos_fn, p_cell=p_cell, h_k=h_k)
 
+    # Compute once so diffusivity and unresolved shear use identical wave input.
+    enhancement = _kpp_langmuir_enhancement(u_star, u_stokes, cfg)
+
     # --- Boundary layer depth ---
     h_bl = _boundary_layer_depth(
         rho, T, S, u, v, z_coord, jacobian, u_star, B_f, cfg, g,
         h_bl_prev=h_bl_prev, eos_fn=eos_fn, ice_frac=ice_frac, N2=N2,
+        langmuir_enhancement=enhancement if cfg.enable_langmuir else None,
     )
 
     # --- Depth coordinate ---
@@ -644,38 +686,13 @@ def kpp_vertical_mixing(
         u_star, B_f, d, h_bl[..., jnp.newaxis], cfg, eps, ice_frac=ice_frac,
     )
 
-    # --- Langmuir turbulence enhancement (KPP-Langmuir) ---
-    # Langmuir circulations (wind + Stokes-drift shear) enhance surface
-    # boundary-layer mixing.  Multiply the KPP velocity scales by the
-    # enhancement factor eps_L = sqrt(1 + C_L / La_t^2) >= 1, where La_t =
-    # sqrt(u* / u_s0) is the turbulent Langmuir number (McWilliams & Sullivan
-    # 2000; Li et al. 2016 CVMix).  With a surface Stokes-drift input
-    # ``u_stokes`` (from a wave model / forcing) La_t is spatially resolved;
-    # without one it falls back to the fully-developed-sea value
-    # ``langmuir_number_default`` (~0.3, Van Roekel et al. 2012) — a uniform
-    # enhancement where wind mixing dominates.  eps_L >= 1 always (C_L, La_t >
-    # 0) so this only ENHANCES mixing, never reduces it; it scales the BL
-    # diffusivity K = h*w*G (conservation of the implicit solve is unaffected).
-    # Gated on the static config bool (feature gating); default off leaves
-    # w_m / w_s byte-identical to classical KPP.  The bulk-Richardson MLD
-    # diagnosis (V_t^2) is intentionally NOT enhanced here — Langmuir
-    # boundary-layer deepening is a documented refinement.
+    # VR12-AL: diffusivity uses the same enhanced scales as V_t^2 above.
+    # The non-local K*gamma product below cancels w_s analytically; do not
+    # multiply that flux by E a second time. The underlying reduced KPP
+    # shape function and differentiable BL-depth selector remain unchanged.
     if cfg.enable_langmuir:
-        if u_stokes is not None:
-            la_t = jnp.sqrt(u_star / jnp.maximum(u_stokes, 1e-4))  # coeff-ok: Stokes floor [m/s]
-        else:
-            la_t = jnp.full_like(u_star, cfg.langmuir_number_default)
-        # Floor the radicand at 1.0 so eps_L >= 1 for ANY config value (a
-        # traced-safe safety floor: Langmuir must ENHANCE, never reduce, mixing,
-        # and it avoids a NaN sqrt if langmuir_coeff is set negative).  Both
-        # langmuir params are tunable (tier 2) so they may be traced — a Python
-        # branch/raise would break the training trace; the floor is a no-op for
-        # the spec-bounded positive range.
-        eps_langmuir = jnp.sqrt(jnp.maximum(
-            1.0, 1.0 + cfg.langmuir_coeff / jnp.maximum(la_t, 1e-3) ** 2  # coeff-ok: La_t floor
-        ))[..., jnp.newaxis]
-        w_m = w_m * eps_langmuir
-        w_s = w_s * eps_langmuir
+        w_m = w_m * enhancement[..., jnp.newaxis]
+        w_s = w_s * enhancement[..., jnp.newaxis]
 
     # --- BL viscosity (momentum, w_m) and diffusivity (scalar, w_s) ---
     K_bl_m_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_m * G, cfg.K_max)

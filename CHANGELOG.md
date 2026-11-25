@@ -7,6 +7,15 @@ All notable changes to legoESM. Format roughly follows
 
 ### Added
 
+- **Optional spectral wave component.** Adds a standalone `legoesm-wave`
+  package with WADEN dynamics, NeuralSWM parameterization interfaces,
+  atmosphere/ocean coupling, Stokes-drift feedback to KPP Langmuir mixing,
+  and checkpoint continuation support. Coupled wave execution is opt-in.
+  The regular latitude–longitude CLI selects the coupled KPP physics stack
+  with `--kpp-langmuir`. With Wave active, a calm initial spectrum supplies
+  zero Stokes on the first ocean sub-step. Active Wave requires the
+  coupler-owned surface exchange.
+
 - **ePBL vertical mixing (`VerticalMixingConfig(scheme="epbl")`).** A JAX
   port of MOM6's `MOM_energetic_PBL` (created by B. G. Reichl and R. Hallberg;
   machine-learned diffusivity options by A. Sane), swappable with KPP and
@@ -41,12 +50,26 @@ All notable changes to legoESM. Format roughly follows
 
 ### Changed
 
+- **KPP wave feedback follows VR12-AL.** The opt-in Langmuir extension now
+  uses the aligned LES scaling in Li et al. (2016), including its effect on
+  unresolved shear in the boundary-layer diagnosis. Published coefficients
+  3.1 and 5.4 replace `langmuir_coeff` / `--langmuir-coeff`; the old option
+  is removed. Single-column forcing accepts surface Stokes magnitude and an
+  explicit EOS. A preregistered comparison retains unmodified upstream KPP
+  separately from the weak-buoyancy correction and the wave-feedback arm.
+
 - **License: MIT.** legoESM is now released under the MIT License, replacing
   PolyForm Noncommercial 1.0.0; the separate commercial license is withdrawn.
   The root package metadata now matches the component packages, which already
   declared MIT. Bundled third-party code keeps its own license.
 
 ### Fixed
+
+- **Weak KPP buoyancy forcing retains its physical magnitude.** Computing
+  the Monin-Obukhov coordinate directly avoids dividing by buoyancy flux;
+  the former single-precision-epsilon floor on that dimensional flux is
+  removed. This affects weak-forcing runs even with Langmuir disabled and is
+  isolated as a separate control in the wave-coupling comparison.
 
 - **Ice-shelf prescribed melt is off in empty bands, as in NEMO.** Where the
   melt band's bottom (`sodepmax_isf`, clipped to the sea floor) is not below

@@ -265,12 +265,15 @@ def _make_kpp(config: VerticalMixingConfig,
         _kpp_ice_fr = (getattr(surface_forcing, "ice_concentration", None)
                        if (_kpp_eice != 0 and surface_forcing is not None)
                        else None)
+        _u_stokes = (getattr(surface_forcing, "u_stokes", None)
+                     if surface_forcing is not None else None)
         out = kpp_vertical_mixing(
             u_data, v_data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, cfg,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=apply_diffusion, ice_frac=_kpp_ice_fr,
+            u_stokes=_u_stokes,
             eos_fn=eos_fn,
             # live thicknesses with partial bottom cells (lat-lon C-grid), so
             # the explicit non-local term conserves the column content

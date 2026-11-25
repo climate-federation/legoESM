@@ -1,6 +1,6 @@
 name: release
 
-# Publishes all nine workspace distributions (legoesm + the eight legoesm-*
+# Publishes all ten workspace distributions (legoesm + the nine legoesm-*
 # members) to PyPI when a version tag is pushed. Uses PyPI trusted publishing:
 # each project lists this repository, this workflow file and its own
 # environment as a trusted publisher: `pypi` for legoesm, `pypi-legoesm-<member>`
@@ -32,13 +32,13 @@ jobs:
           EOF
       - run: python -m pip install uv
       - run: uv build --all-packages -o dist
-      - name: Expect 9 wheels and 9 sdists
-        run: test "$(ls dist/*.whl | wc -l)" = 9 && test "$(ls dist/*.tar.gz | wc -l)" = 9
+      - name: Expect 10 wheels and 10 sdists
+        run: test "$(ls dist/*.whl | wc -l)" = 10 && test "$(ls dist/*.tar.gz | wc -l)" = 10
       - name: Install the wheels in a clean venv and import them
         run: |
           python -m venv /tmp/smoke
           /tmp/smoke/bin/pip install dist/*.whl
-          cd /tmp && /tmp/smoke/bin/python -c "import legoesm.atmosphere, legoesm.ocean, legoesm.land, legoesm.ice, legoesm.coupler"
+          cd /tmp && /tmp/smoke/bin/python -c "import legoesm.atmosphere, legoesm.ocean, legoesm.land, legoesm.ice, legoesm.wave, legoesm.coupler"
           /tmp/smoke/bin/legoesm --help
       - uses: actions/upload-artifact@v4
         with:
@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        member: [core, atmosphere, ocean, land, ice, coupler, ml, tools]
+        member: [core, atmosphere, ocean, land, ice, wave, coupler, ml, tools]
     environment: pypi-legoesm-${{ matrix.member }}
     permissions:
       id-token: write

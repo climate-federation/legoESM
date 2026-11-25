@@ -61,9 +61,18 @@ def test_independent_hand_values():
     assert abs(lego_ws(cfg, 0.01, 1e-8, 100.0) - 0.0051225) < 1e-6
 
 
-def test_default_is_the_legacy_floor():
-    assert KPPConfig().actual_buoyancy_flux is False
-    cfg = KPPConfig()
+def test_default_preserves_actual_weak_flux():
+    assert KPPConfig().actual_buoyancy_flux is True
+    for s in (1.0, -1.0):
+        actual = lego_ws(KPPConfig(), 0.01, s * 1e-8, 100.0)
+        ref, conv = cvmix_ws(0.01, -s * 1e-8, 100.0)
+        assert not conv
+        np.testing.assert_allclose(actual, ref, rtol=1e-12)
+        assert actual != lego_ws(KPPConfig(actual_buoyancy_flux=False), 0.01, s * 1e-8, 100.0)
+
+
+def test_explicit_legacy_floor():
+    cfg = KPPConfig(actual_buoyancy_flux=False)
     for s in (1.0, -1.0):
         np.testing.assert_allclose(lego_ws(cfg, 0.01, s * 1e-8, 100.0), lego_ws(cfg, 0.01, s * LEGACY, 100.0),
                                    rtol=0, atol=0)

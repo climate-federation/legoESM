@@ -204,6 +204,39 @@ class CoupledConfig(NamedTuple):
     ocean_restore_sst_tau_days: float = 0.0   # surface T relaxation [days]
     ocean_restore_sss_tau_days: float = 0.0   # surface S relaxation [days]
 
+    # --- Spectral wave component (optional) ---------------------------------
+    # ``wave_mode`` is "off" (default; no wave initialization or stepping) or
+    # "active". Existing KPP runs retain the shared weak-buoyancy correction
+    # even with waves off; Langmuir enhancement is controlled separately.
+    # Active uses the coupler-owned surface exchange and a dynamic 3-D ocean
+    # for depth/mask. It needs a WaveConfig and, for neural runs, converted weights.
+    # The component is stepped once per coupling_dt with the neutral 10 m wind
+    # derived from the coupler's stress and roughness; its surface Stokes-drift
+    # magnitude is remapped to the ocean grid and consumed by KPP when
+    # KPPConfig.enable_langmuir is set.  ``wave_config`` is a
+    # ``legoesm.wave.WaveConfig`` (kept as ``object`` here so importing the
+    # coupler config does not import the wave package).
+    wave_mode: str = "off"
+    wave_config: object = None
+    wave_weights_path: str = ""
+    # Run the dynamic ocean's KPP vertical-mixing pipeline with the Langmuir
+    # enhancement, which consumes the wave component's surface Stokes drift
+    # (``OceanSurfaceForcing.u_stokes``). With waves off, this uses the
+    # prescribed Langmuir number. Python callers supply a KPP ocean card;
+    # the CLI selects one for the regular lat-lon ocean when requested.
+    kpp_langmuir: bool = False
+
+    def validate_strict(self) -> None:
+        """Check that the requested wave coupling path is supported."""
+        if self.wave_mode not in ("off", "active"):
+            raise ValueError(
+                "CoupledConfig.wave_mode must be 'off' or 'active'; "
+                f"got {self.wave_mode!r}")
+        if self.wave_mode == "active" and self.atm_owns_surface:
+            raise ValueError(
+                "wave_mode='active' does not support atm_owns_surface=True. "
+                "Use the coupler-owned surface exchange for Wave.")
+
 
 # ============================================================================
 # Preset factories

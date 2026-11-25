@@ -419,6 +419,34 @@ def remap_field(field, weights: ConservativeRegridWeights | None):
     return apply_conservative_regrid(field, weights)
 
 
+# Wet-fraction floor for the masked mean: a destination cell with no wet
+# source coverage gets zero rather than a 0/0.
+_MIN_WET_FRACTION = 1e-6
+
+
+def masked_conservative_mean(field, mask, weights):
+    """Conservatively remap ``field`` over WET source cells only.
+
+    Ocean cards fill land bathymetry with the ocean's ``H_max`` (5.5 km), so a
+    plain remap contaminates every coastal destination cell with dry fill.
+    Remapping ``field*mask`` and dividing by the remapped wet fraction returns
+    the wet-cell mean for a partially covered destination cell (zero where no
+    source cell is wet).  ``weights=None`` is the identity remap; a fully wet
+    destination cell is unchanged.
+
+    Returns ``(mean, wet_fraction)``.
+    """
+    wet = jnp.asarray(mask, dtype=field.dtype)
+    weighted = remap_field(field*wet, weights)
+    fraction = remap_field(wet, weights)
+    mean = jnp.where(
+        fraction > _MIN_WET_FRACTION,
+        weighted/jnp.maximum(fraction, _MIN_WET_FRACTION),
+        0.0,
+    )
+    return mean, fraction
+
+
 def remap_surface_fields(obj, weights: ConservativeRegridWeights | None):
     """Remap every 2-D surface field of a pytree ``obj`` onto the target grid.
 

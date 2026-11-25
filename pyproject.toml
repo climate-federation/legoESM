@@ -39,6 +39,8 @@ dependencies = [
     "legoesm-ocean~=1.0.0",
     "legoesm-land~=1.0.0",
     "legoesm-ice~=1.0.0",
+    # Spectral wave component; runtime-optional (off unless CoupledConfig.wave_mode).
+    "legoesm-wave~=1.0.0",
     # The orchestration cluster (coupler/driver, ml/training/da, tools): the meta
     # package's own modules (cli, config, dycore_factory) import these,
     # so the meta-member pulls the whole stack.  They are mutually interdependent
@@ -163,6 +165,7 @@ legoesm-atmosphere = { workspace = true }
 legoesm-ocean = { workspace = true }
 legoesm-land = { workspace = true }
 legoesm-ice = { workspace = true }
+legoesm-wave = { workspace = true }
 legoesm-coupler = { workspace = true }
 legoesm-ml = { workspace = true }
 legoesm-tools = { workspace = true }
@@ -449,6 +452,9 @@ modules = [
     "legoesm.ocean",
     "legoesm.land",
     "legoesm.ice",
+    # Optional wave component: substrate-only like the four above, so it must
+    # not import any of them either (the coupler is the only consumer).
+    "legoesm.wave",
 ]
 unmatched_ignore_imports_alerting = "error"
 # ZERO-IGNORE: the atmosphere/ocean/land/ice components are now genuinely
@@ -488,6 +494,7 @@ source_modules = [
     "legoesm.ocean",
     "legoesm.land",
     "legoesm.ice",
+    "legoesm.wave",
     "legoesm.components",
 ]
 forbidden_modules = [

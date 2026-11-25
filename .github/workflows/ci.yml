@@ -37,6 +37,7 @@ jobs:
           python -c "from legoesm.io.restart import save_restart, load_restart"
           python -c "import legoesm.coupler"
           python -c "import legoesm.ocean"
+          python -c "import legoesm.wave"
           python -c "import legoesm.ml"
           python -c "import legoesm.da"
           echo "All imports successful"
@@ -122,6 +123,35 @@ jobs:
             -k "not test_coupler_with_3d_ocean_fc_gram" \
             --tb=short -q
         timeout-minutes: 30
+
+  wave-tests:
+    name: Wave component
+    runs-on: ubuntu-latest
+    env:
+      JAX_PLATFORMS: "cpu"
+      JAX_ENABLE_X64: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install local workspace and test dependencies
+        run: python scripts/experiment/install_federation.py --all --extras dev
+      - name: Build wave wheel and source distribution
+        run: python -m build --no-isolation packages/wave --outdir dist/wave
+      - name: Wave unit tests (x64)
+        run: python -m pytest tests/wave/unit/ --timeout=300 --tb=short -q
+      - name: Wave unit tests (default float32)
+        env:
+          JAX_ENABLE_X64: "0"
+        run: python -m pytest tests/wave/unit/ --timeout=300 --tb=short -q
+      - name: Wave coupling, KPP and CLI integration
+        run: |
+          python -m pytest tests/wave/integration/ \
+            tests/ocean/unit/test_kpp_langmuir.py \
+            tests/unit/test_run_coupled_wave_cli.py \
+            --timeout=600 --tb=short -q
+    timeout-minutes: 30
 
   top-level-fidelity-tests:
     # Iter-874 (Codex iter-873 stop-time fix): the iter chain's

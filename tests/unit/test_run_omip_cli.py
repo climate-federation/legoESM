@@ -37,7 +37,7 @@ def test_issue484_new_omip_flags_flow_to_config():
 
 
 def test_kpp_cvmix_option_flags_flow_to_config():
-    """The opt-in KPP options reach KPPConfig; absent flags keep the defaults."""
+    """KPP options reach the config; actual weak flux remains on by default."""
     cfg = build_config_from_args(parse_args([
         "--grid", "latlon", "--kpp-vt2-velocity-scale", "candidate",
         "--kpp-actual-buoyancy-flux", "--kpp-gradient-surrogates"]))
@@ -46,7 +46,10 @@ def test_kpp_cvmix_option_flags_flow_to_config():
         "candidate", True, True)
     kpp = build_config_from_args(parse_args(["--grid", "latlon"])).vertical_mixing.kpp
     assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates) == (
-        "column", False, False)
+        "column", True, False)
+    kpp = build_config_from_args(parse_args([
+        "--grid", "latlon", "--no-kpp-actual-buoyancy-flux"])).vertical_mixing.kpp
+    assert kpp.actual_buoyancy_flux is False
 
 
 def test_shortwave_ohlmann_and_skin_fraction_flags_parse():
@@ -64,11 +67,17 @@ def test_langmuir_flag_flows_to_config():
     assert off.vertical_mixing.kpp.enable_langmuir is False
     on = build_config_from_args(parse_args([
         "--grid", "latlon", "--langmuir",
-        "--langmuir-coeff", "0.12", "--langmuir-number-default", "0.25",
+        "--langmuir-number-default", "0.25",
     ]))
     assert on.vertical_mixing.kpp.enable_langmuir is True
-    assert on.vertical_mixing.kpp.langmuir_coeff == 0.12
+    assert on.vertical_mixing.kpp.langmuir_c1 == 3.1
+    assert on.vertical_mixing.kpp.langmuir_c2 == 5.4
     assert on.vertical_mixing.kpp.langmuir_number_default == 0.25
+
+
+def test_removed_langmuir_coefficient_is_not_silently_reinterpreted():
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "latlon", "--langmuir-coeff", "0.12"])
 
 
 def test_default_nlev_is_40_for_climate_fidelity():

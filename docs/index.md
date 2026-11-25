@@ -132,6 +132,7 @@ validation/dycore_validation_catalog
 validation/PHYSICS_PARAMETERIZATION_TESTS
 validation/cmip_readiness
 validation/TESTING
+wave/waden_port_validation
 performance/REAL_HARDWARE_SCALING
 ```
 

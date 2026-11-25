@@ -67,9 +67,7 @@ _O_EPS_LMD = 0.1
 def _wm_ws_oracle(ustar, Bf, d, h, eps):
     """Independent LMD94 App. B similarity velocity scales (plain Python)."""
     d_eff = min(d, _O_EPS_LMD * h)
-    Bf_safe = Bf if abs(Bf) > eps else math.copysign(eps, Bf)
-    L_MO = ustar ** 3 / (_O_KAPPA * Bf_safe)
-    zeta = d_eff / L_MO
+    zeta = d_eff * _O_KAPPA * Bf / ustar ** 3
     abs_zeta = abs(zeta)
     Bf_pos = max(Bf, 0.0)
     base16 = max(1.0 + _O_C16 * abs_zeta, 1.0)
@@ -170,10 +168,8 @@ def test_regime_joins_constructed_and_pinned():
       - zeta < 0.2:  w_m weak,  w_s weak
       - 0.2 < zeta < 1.0 (split): w_m CONVECTIVE, w_s still weak
       - zeta > 1.0:  w_m conv,   w_s CONVECTIVE
-    zeta = d_eff*kappa*B_f/u*^3 with d_eff = d < epsilon*h.  (u*, d) are chosen so
-    the B_f needed for each target zeta stays WELL ABOVE _EPS, otherwise the
-    near-zero copysign(eps, B_f) guard would floor B_f and inflate the effective
-    zeta out of the intended branch.)"""
+    zeta = d_eff*kappa*B_f/u*^3 with d_eff = d < epsilon*h. Each chosen
+    forcing therefore targets the stated physical similarity branch."""
     ustar, d, h = 0.02, 2.0, 100.0                  # d_eff = d = 2 (< 0.1*h = 10)
 
     def bf_for(zeta):
@@ -219,15 +215,17 @@ def test_scalar_exceeds_momentum_weakly_unstable():
     assert ws > wm
 
 
-def test_near_zero_buoyancy_copysign_branch():
-    """|B_f| <= eps takes the copysign(eps, B_f) guard (issue #168); production
-    must match the oracle there too (finite, positive scales)."""
+def test_weak_buoyancy_matches_physical_flux_and_neutral_limit():
+    """LMD94 uses the physical B_f even far below float32 epsilon."""
     ustar, h = 0.01, 100.0
-    for Bf in (0.5 * _EPS, -0.5 * _EPS):
+    for Bf in (0.0, 1e-12, -1e-12, 1e-9, -1e-9, 0.5 * _EPS, -0.5 * _EPS):
         wm, ws = _prod_wm_ws(ustar, Bf, 5.0, h)
         wm_o, ws_o = _wm_ws_oracle(ustar, Bf, 5.0, h, _EPS)
         assert wm == pytest.approx(wm_o, rel=1e-12)
         assert ws == pytest.approx(ws_o, rel=1e-12)
+    wm, ws = _prod_wm_ws(ustar, 0.0, 5.0, h)
+    assert wm == pytest.approx(_O_KAPPA * ustar, rel=1e-12)
+    assert ws == pytest.approx(_O_KAPPA * ustar, rel=1e-12)
 
 
 # --- V_t^2 (LMD94 Eq. 23) ---------------------------------------------------

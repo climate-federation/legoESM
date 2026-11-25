@@ -210,6 +210,7 @@ class CoupledESMDriver:
     ):
         self.atm_config = atm_config
         self.coupled_cfg = coupled_config or CoupledConfig()
+        self.coupled_cfg.validate_strict()
         validate_air_sea_consistency(atm_config, coupler_config)
         # expected_resolved_physics: the atmosphere record a reproduce rerun
         # must resolve to (ModelDriver refuses before stepping otherwise).
@@ -245,6 +246,19 @@ class CoupledESMDriver:
         self._ocean_T_target = None
         self._ocean_S_target = None
         self._last_sfc_response = None
+        # Optional wave component (coupled_config.wave_mode == "active"):
+        # model/state/env plus the remap weights between the atmosphere/ocean
+        # grids and the wave grid.  All None when the component is off.
+        self._wave_model = None
+        self._wave_state = None
+        self._wave_config_hash = None
+        self._wave_weights_hash = None
+        self._wave_env = None
+        self._wave_stokes = None       # on the ocean grid, for KPP
+        self._wave_diag = None         # swh/mwd/mwp on the wave grid
+        self._wave_diag_logged = False
+        self._wave_atm_remap = None    # a2o: atm -> wave, o2a: wave -> atm
+        self._wave_ocean_remap = None  # a2o: ocean -> wave, o2a: wave -> ocean
         # F38: segment-mean (shflx, lhflx, E, tau_x, tau_y) handed back to the
         # atmosphere when couple_surface_fluxes (set by _segment_hook).
         self._sfc_flux_handback = None
@@ -335,6 +349,11 @@ class CoupledESMDriver:
         #     fluxes that land on dry ocean cells are moved, not discarded.
         self._build_dry_to_wet_map()
 
+        # 3d. Optional wave component.  AFTER the ocean and coupler exist:
+        #     depth/mask come from the ocean state and the remap weights from
+        #     the atmosphere/ocean grids.
+        self._init_wave()
+
         # 4. Carbon / CO2 tracer (if active)
         self._init_carbon()
 
@@ -411,6 +430,156 @@ class CoupledESMDriver:
             owet, np.asarray(g.grid_area), np.asarray(g.grid_lat),
             np.asarray(g.grid_lon),
             radius_m=np.pi * constants.R_earth, scheme="nearest")
+
+    def _init_wave(self):
+        """Build the optional spectral wave component and its remap weights.
+
+        Called from ``setup()`` after the ocean and coupler exist: the wave
+        grid's depth and land mask come from the dynamic ocean state, and
+        the wind comes from the coupler each coupling step.  Everything the
+        component needs is explicit — an unknown ``wave_mode``, a missing
+        config or required weights, a slab ocean, or a wave step size that disagrees
+        with ``coupling_dt`` is a hard error.
+        """
+        self.coupled_cfg.validate_strict()
+        if self.coupled_cfg.wave_mode == "off":
+            return
+        if self.coupled_cfg.wave_config is None:
+            raise ValueError(
+                "wave_mode='active' requires CoupledConfig.wave_config")
+        network = self.coupled_cfg.wave_config.network
+        needs_weights = network.parameterization != "none"
+        if needs_weights and not self.coupled_cfg.wave_weights_path:
+            raise ValueError(
+                "wave_mode='active' requires CoupledConfig.wave_weights_path "
+                "(the converted NeuralSWM .npz)")
+        if getattr(self, "_is_dynamic_ocean", False) is not True:
+            raise ValueError(
+                "wave_mode='active' requires ocean_mode='dynamic': the wave "
+                "model's depth and land mask are taken from the ocean's "
+                "H_bathy/land_mask, and the slab ocean has neither")
+
+        import jax
+        from legoesm.coupler.grid_remap import (
+            make_grid_remapper, masked_conservative_mean)
+        from legoesm.coupler.wave_coupling import remap_to_wave, wave_remap_grid
+        from legoesm.driver.restart import compute_config_hash, file_sha256
+        from legoesm.wave import (
+            WaveModel,
+            init_wave_state,
+            load_wave_weights,
+            prepare_env,
+        )
+
+        config = self.coupled_cfg.wave_config
+        config.validate()
+        self._wave_config_hash = compute_config_hash(config, kind="coupled")
+        # Empty string is the serializable identity of a weight-free run.
+        weights_path = self.coupled_cfg.wave_weights_path
+        self._wave_weights_hash = file_sha256(weights_path) if weights_path else ""
+        if self._wave_weights_hash is None:
+            raise ValueError(
+                "wave_mode='active': the weights file is not readable: "
+                f"{self.coupled_cfg.wave_weights_path!r}")
+        if (abs(float(config.time.dt_global_s)
+                - float(self.coupled_cfg.coupling_dt)) > 1e-6):
+            raise ValueError(
+                f"wave dt_global_s={config.time.dt_global_s} s must equal "
+                f"CoupledConfig.coupling_dt={self.coupled_cfg.coupling_dt} s; "
+                "the component is stepped once per coupling step")
+
+        wave_grid = wave_remap_grid(config)
+        self._wave_atm_remap = make_grid_remapper(self._atm.grid, wave_grid)
+        self._wave_ocean_remap = make_grid_remapper(self._ocean_grid, wave_grid)
+
+        bathymetry = getattr(self._ocean_state, "H_bathy", None)
+        if bathymetry is None:
+            raise ValueError(
+                "wave_mode='active': the ocean state carries no H_bathy")
+        depth_ocean = jnp.abs(jnp.asarray(bathymetry.data))
+        mask_ocean = jnp.asarray(
+            self._ocean_land_mask, dtype=depth_ocean.dtype)
+        # Ocean cards fill land bathy with H_max; a plain remap would put
+        # kilometres of dry fill into every coastal wave cell.
+        depth_latlon, wet_latlon = masked_conservative_mean(
+            depth_ocean, mask_ocean, self._wave_ocean_remap.a2o)
+        depth_wave = remap_to_wave(depth_latlon)
+        mask_wave = remap_to_wave(wet_latlon) > 0.5
+        depth_wave = jnp.where(mask_wave, depth_wave, 0.0)
+
+        self._wave_state = init_wave_state(
+            depth_wave,
+            n_dir=len(config.grid.theta_rad),
+            n_freq=len(config.grid.freq_hz),
+        )
+        self._wave_env = prepare_env(config, self._wave_state.depth)
+        from legoesm.wave.model import validate_wave_environment
+        validate_wave_environment(config, self._wave_env)
+        # Neural runs replace every initialized leaf; physics-only models
+        # have no network weights to load.
+        model = WaveModel(config, key=jax.random.key(0))
+        self._wave_model = load_wave_weights(model, weights_path) if weights_path else model
+        self._stage_wave_stokes()
+
+    def _stage_wave_stokes(self):
+        """Diagnose Stokes from the current spectrum and send it to the ocean grid."""
+        from legoesm.coupler.grid_remap import remap_field
+        from legoesm.coupler.wave_coupling import wave_to_remap
+        from legoesm.wave import stokes_drift
+
+        state = self._wave_state
+        magnitude = stokes_drift(
+            state.spectra, self._wave_env, state.depth)["stokes_magnitude"][0]
+        self._wave_stokes = remap_field(
+            wave_to_remap(magnitude), self._wave_ocean_remap.o2a)
+
+    def _step_wave(self, sfc_response, atm_forcing):
+        """Advance the wave spectrum one coupling step and stage the Stokes drift.
+
+        The 10 m wind is the neutral log-profile value derived from the
+        stress and blended roughness the coupler just applied, so the wave
+        forcing is consistent with the surface flux.  The resulting surface
+        Stokes-drift magnitude is remapped to the ocean grid and consumed by
+        the NEXT ocean sub-step (explicit one-step lag).
+        """
+        if self.coupled_cfg.wave_mode == "off":
+            return
+        if self._wave_model is None:
+            raise RuntimeError(
+                "wave_mode='active' but the wave model is not initialised; "
+                "_init_wave must run in setup()")
+
+        from legoesm.coupler.grid_remap import remap_field
+        from legoesm.coupler.wave_coupling import (
+            neutral_wind_10m,
+            remap_to_wave,
+        )
+        from legoesm.wave import wave_parameters
+
+        u10, v10 = neutral_wind_10m(
+            sfc_response.tau_x, sfc_response.tau_y,
+            atm_forcing.rho_lowest, sfc_response.z0)
+        # The remap returns (lat, lon); the wave model wants (batch, lon, lat).
+        u10_w = remap_to_wave(
+            remap_field(u10, self._wave_atm_remap.a2o))[None, ...]
+        v10_w = remap_to_wave(
+            remap_field(v10, self._wave_atm_remap.a2o))[None, ...]
+
+        state = self._wave_state
+        self._wave_state = self._wave_model.advance(
+            state, self._wave_env, u10_w, v10_w)
+        self._stage_wave_stokes()
+        self._wave_diag = wave_parameters(self._wave_state.spectra, self._wave_env)
+        if not self._wave_diag_logged:
+            # One-shot provenance line: proves the component actually ran and
+            # reports the Stokes field staged for the ocean, including calm seas.
+            logger.info(
+                "Wave: first coupling step SWH mean=%.3f m, surface Stokes "
+                "max=%.3e m/s",
+                float(jnp.mean(self._wave_diag["swh"])),
+                float(jnp.max(self._wave_stokes)),
+            )
+            self._wave_diag_logged = True
 
     def _init_ocean(self):
         """Initialize the slab/two-layer ocean (on the ocean grid)."""
@@ -675,6 +844,30 @@ class CoupledESMDriver:
             f"barotropic={ocfg.barotropic.barotropic_solver}, "
             f"momentum={ocfg.momentum_time_integrator}, pgf={ocfg.pgf_scheme}")
 
+    @staticmethod
+    def _attach_kpp_langmuir(oc):
+        """Enable Langmuir on the ocean card's EXISTING KPP pipeline.
+
+        No pipeline (the legacy constant-diffusion lat-lon default) or a
+        different vertical-mixing closure is a hard error: quietly building
+        a KPP stack here would invent ``K_conv`` values and switch someone's
+        closure.  Supply an ocean config that already selects KPP.
+        """
+        if oc.physics is None:
+            raise ValueError(
+                "CoupledConfig.kpp_langmuir requires an ocean config with an "
+                "existing KPP vertical-mixing stack; the supplied card has "
+                "physics=None (the legacy constant-diffusion stack)")
+        vmix = oc.physics.vertical_mixing
+        if vmix.scheme != "kpp":
+            raise ValueError(
+                "CoupledConfig.kpp_langmuir requires "
+                "vertical_mixing.scheme='kpp'; the supplied ocean config "
+                f"runs {vmix.scheme!r}")
+        return oc._replace(physics=oc.physics._replace(
+            vertical_mixing=vmix._replace(
+                kpp=vmix.kpp._replace(enable_langmuir=True))))
+
     def _build_latlon_ocean_config(self):
         """The lat-lon 3-D ocean card: ``coupled_cfg.ocean_config`` (default
         ``LatLonCGridOceanConfig``) with the OMIP-validated cold-start stack
@@ -686,6 +879,8 @@ class CoupledESMDriver:
         _oc = self.coupled_cfg.ocean_config
         if not isinstance(_oc, LatLonCGridOceanConfig):
             _oc = LatLonCGridOceanConfig.from_flat()
+        if self.coupled_cfg.kpp_langmuir:
+            _oc = CoupledESMDriver._attach_kpp_langmuir(_oc)
         # Force the OMIP-validated cold-start stack (the defaults
         # explicit_substep barotropic + euler momentum give O(30 m/s) day-1
         # transients on a WOA/strat cold start; see omip_latlon_75lev_solved /
@@ -724,17 +919,9 @@ class CoupledESMDriver:
             barotropic_slow_forcing_depth_evaluation="min_rule_live",
         )
 
-    def _build_tripole_ocean_config(self):
-        """The OMIP-validated tripole ``LatLonCGridOceanConfig`` — cloned VERBATIM
-        from the standalone forced-ocean recipe (``run_omip.py`` tripole branch,
-        the config validated by the 20-yr production run): adcroft PGF +
-        implicit_cn barotropic (30 substeps) + implicit vertical mixing + KPP +
-        enhanced-diffusion convection + GM/Redi 600 + C_smag_lap 0.33 + tvd
-        tracer advection + 1e-3 bottom drag + virtual-salt freshwater.  The
-        coupled run delivers atm fluxes as an ``OceanSurfaceForcing`` consumed by
-        the SAME dynamics-core external-tau block the OMIP run uses, so the
-        surface-forcing scheme is "none" (the coupler is the forcing source)."""
-        from legoesm.ocean.state import LatLonCGridOceanConfig
+    @staticmethod
+    def coupled_kpp_ocean_physics():
+        """KPP stack for the coupled C-grid ocean, with surface fluxes from the coupler."""
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
         from legoesm.ocean.physics.surface_forcing.config import (
             SurfaceForcingConfig,
@@ -746,10 +933,9 @@ class CoupledESMDriver:
             OceanConvectionConfig, EnhancedDiffusionConfig,
         )
         from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-        from legoesm.ocean.physics.lateral_mixing.config import (
-            LateralMixingConfig, GMRediConfig, VisbeckConfig,
-        )
-        physics = OceanPhysicsConfig(
+        from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+
+        return OceanPhysicsConfig(
             surface_forcing=SurfaceForcingConfig(scheme="none"),
             vertical_mixing=VerticalMixingConfig(
                 scheme="kpp", kpp=KPPConfig(K_conv=1.0),
@@ -762,12 +948,25 @@ class CoupledESMDriver:
             ),
             shortwave_penetration=None,
         )
+
+    def _build_tripole_ocean_config(self):
+        """The OMIP-validated tripole ``LatLonCGridOceanConfig`` — cloned VERBATIM
+        from the standalone forced-ocean recipe (``run_omip.py`` tripole branch,
+        the config validated by the 20-yr production run): adcroft PGF +
+        implicit_cn barotropic (30 substeps) + implicit vertical mixing + KPP +
+        enhanced-diffusion convection + GM/Redi 600 + C_smag_lap 0.33 + tvd
+        tracer advection + 1e-3 bottom drag + virtual-salt freshwater. The
+        surface fluxes are supplied by the coupler.
+        """
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
         # A_h=None = DERIVE from the mesh's narrowest wet cell, the same
         # rule the forced-ocean recipe uses (resolved below, once the mask is
         # read).  A fixed 1e5 m^2/s is a ~1 degree value: at 1/12 degree it is
         # 26x over the explicit Laplacian limit and a cold start diverges at
         # step 10, and this driver accepts an arbitrary tripole mesh.
-        return LatLonCGridOceanConfig.from_flat(
+        card = LatLonCGridOceanConfig.from_flat(
             A_h=None, A_v=1.0e-4, K_v=1.0e-5, B_h=0.0,
             C_smag_lap=0.33,
             n_barotropic_substeps=30,
@@ -786,8 +985,11 @@ class CoupledESMDriver:
                 visbeck=VisbeckConfig(enabled=False),
                 slope_scheme="centered",
             ),
-            physics=physics,
+            physics=CoupledESMDriver.coupled_kpp_ocean_physics(),
         )
+        if self.coupled_cfg.kpp_langmuir:
+            card = CoupledESMDriver._attach_kpp_langmuir(card)
+        return card
 
     def _init_tripole_dynamic_ocean(self):
         """Build the 3D ``LatLonCGridOceanModel`` on a tripole (eORCA) grid with
@@ -962,6 +1164,8 @@ class CoupledESMDriver:
                     scheme="none")),
             normalize_freshwater=True,
         )
+        if self.coupled_cfg.kpp_langmuir:
+            config = CoupledESMDriver._attach_kpp_langmuir(config)
         self._ocean_model = MPASOceanModel(mesh, z_coord, config)
         # Stratified rest cold start (zero velocity/SSH, exponential T, uniform
         # S).  land_lat_threshold=90 => all-ocean, matching a co-located
@@ -2471,6 +2675,9 @@ class CoupledESMDriver:
         sf = OceanSurfaceForcing(
             sw_down=sw_pen, q_net=q_net,
             tau_x=tau_x, tau_y=tau_y, salt_flux=salt_flux, freshwater=None,
+            # Surface Stokes-drift magnitude from the wave component (None
+            # when waves are off; KPP then keeps its uniform fallback).
+            u_stokes=self._wave_stokes,
         )
         return sf, fw
 
@@ -2715,6 +2922,12 @@ class CoupledESMDriver:
         coupling_dt = self.coupled_cfg.coupling_dt  # default 3600 s
         n_sub = max(1, int(round(dt_segment / coupling_dt)))
         sub_dt = dt_segment / n_sub
+        if (self._wave_model is not None
+                and abs(sub_dt - self.coupled_cfg.wave_config.time.dt_global_s)
+                > 1e-6):
+            raise ValueError(
+                "Actual coupling sub-step differs from configured wave dt; "
+                "align segment/coupling/wave clocks")
 
         from legoesm.coupler.grid_remap import remap_field, remap_surface_fields
 
@@ -2795,6 +3008,10 @@ class CoupledESMDriver:
                 year=cover_year,
             )
             self._last_sfc_response = sfc_response
+            # Wave component: one step per coupling step, driven by the
+            # neutral 10 m wind implied by this step's stress/roughness.  The
+            # Stokes result is used by the next ocean sub-step.
+            self._step_wave(sfc_response, atm_forcing)
             if _handback:
                 if sfc_response.surface_mass_flux is None:
                     raise ValueError(
@@ -3121,7 +3338,12 @@ class CoupledESMDriver:
     #       run start.  Additive: a v1/v2 checkpoint still restores; the lag
     #       buffer / drift reference then fall back to the pre-v3 resume
     #       behavior (explicit in load_coupled_checkpoint, not silent).
-    _CKPT_VERSION = 3
+    #   v4: + spectral wave state (wave_spectra + its shape, config/weights
+    #       hashes and the persistent spatial-order phase) when
+    #       wave_mode='active'.  Additive: v1-v3 checkpoints still restore;
+    #       a wave-active run refuses a checkpoint without the wave keys
+    #       rather than silently restarting from a calm sea.
+    _CKPT_VERSION = 4
 
     def resolved_component_configs(self) -> dict:
         """The component configs this driver resolved in ``setup()`` (the run
@@ -3129,7 +3351,7 @@ class CoupledESMDriver:
         from legoesm.coupler.lake.config import LakeConfig
         from legoesm.ice.config import SeaIceConfig
         ocean_model = getattr(self, "_ocean_model", None)
-        return {
+        resolved = {
             "ocean": (ocean_model.config if ocean_model is not None
                       else self.coupled_cfg.ocean_config),
             "land": getattr(self, "_land_cfg", None),
@@ -3138,6 +3360,12 @@ class CoupledESMDriver:
             "sea_ice": self._ice_config or SeaIceConfig(),
             "lake": self._lake_config or LakeConfig(),
         }
+        # Only a wave-active run records the key: adding ``"wave": None`` to
+        # every manifest would make a pre-wave run's record differ from its
+        # own reproduction (the continuation check compares resolved keys).
+        if self.coupled_cfg.wave_mode == "active":
+            resolved["wave"] = self.coupled_cfg.wave_config
+        return resolved
 
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save atmosphere + ocean + surface + CO2 state."""
@@ -3223,6 +3451,22 @@ class CoupledESMDriver:
         if self._sst_mean_init is not None:
             arrays["sst_mean_init"] = np.asarray(
                 self._sst_mean_init, dtype=np.float64)
+
+        # Wave spectrum (ckpt v4).  Depth and mask come from the ocean setup;
+        # only the prognostic spectrum, its persistent phase and provenance
+        # are saved. The shape pin catches a changed grid. Older v4 readers
+        # consult the readiness marker. The current reader always derives
+        # Stokes from the restored spectrum.
+        if self._wave_state is not None:
+            arrays["_ckpt_wave_shape"] = np.asarray(
+                self._wave_state.spectra.shape, dtype=np.int64)
+            arrays["wave_spectra"] = np.asarray(self._wave_state.spectra)
+            arrays["wave_spatial_phase"] = np.asarray(
+                self._wave_state.spatial_phase, dtype=np.int32)
+            arrays["wave_config_hash"] = np.asarray(self._wave_config_hash)
+            arrays["wave_weights_hash"] = np.asarray(self._wave_weights_hash)
+            arrays["_ckpt_wave_stokes_ready"] = np.asarray(
+                self._wave_stokes is not None, dtype=np.bool_)
         return arrays
 
     def load_coupled_checkpoint(self, step_day: float,
@@ -3287,6 +3531,53 @@ class CoupledESMDriver:
                 f"Coupled checkpoint {coupled_path.name} has no 'co2_mass' CO2 "
                 "box value but this run has co2_tracer=True; refusing to "
                 "restart CO2 from its initial value under a continued run.")
+
+        # Wave provenance (ckpt v4): validate BEFORE any state is restored, so
+        # a refused load mutates nothing.  A wave-active run must restore the
+        # spectrum or it silently restarts from a calm sea; a changed grid,
+        # config or weights file must not be mapped into the old state.  The
+        # reverse change (waves off resuming a wave run) is refused too:
+        # dropping the spectrum would make the restart incomparable.
+        if self._wave_state is None and "wave_spectra" in data.files:
+            raise ValueError(
+                f"Coupled checkpoint {coupled_path.name} was saved with "
+                "wave_mode='active' but this run has waves off; start a new "
+                "run or restore with the wave component enabled.")
+        if self._wave_state is not None:
+            required_wave_keys = (
+                "wave_spatial_phase", "wave_spectra", "_ckpt_wave_shape",
+                "wave_config_hash", "wave_weights_hash")
+            missing_wave = [
+                key for key in required_wave_keys if key not in data.files]
+            if missing_wave:
+                raise ValueError(
+                    f"Coupled checkpoint {coupled_path.name}: wave_mode="
+                    "'active' but the checkpoint carries no wave state "
+                    f"(missing {missing_wave}).  Start a new run.")
+            if (tuple(int(s) for s in data["_ckpt_wave_shape"])
+                    != tuple(self._wave_state.spectra.shape)):
+                raise ValueError(
+                    f"Coupled checkpoint {coupled_path.name}: saved wave "
+                    "spectrum shape differs from the current grid; refusing "
+                    "before any state is restored.")
+            if (tuple(data["wave_spectra"].shape)
+                    != tuple(self._wave_state.spectra.shape)):
+                raise ValueError(
+                    f"Coupled checkpoint {coupled_path.name}: wave_spectra "
+                    "array shape differs from the current grid.")
+            if (str(data["wave_config_hash"]) != self._wave_config_hash
+                    or str(data["wave_weights_hash"])
+                    != self._wave_weights_hash):
+                raise ValueError(
+                    f"Coupled checkpoint {coupled_path.name}: wave config/grid "
+                    "or pretrained weights differ; start a new run.")
+            phase = np.asarray(data["wave_spatial_phase"])
+            if (phase.shape != ()
+                    or not np.issubdtype(phase.dtype, np.integer)
+                    or not bool(np.isin(phase, (0, 1)))):
+                raise ValueError(
+                    f"Coupled checkpoint {coupled_path.name}: wave spatial "
+                    "phase must be the scalar 0 or 1.")
 
         # Dynamic 3D ocean (ckpt v2): restore the PROGNOSTIC LatLonCGridOceanState
         # leaves (T,S,u,v,eta,w + any active AB2/SOM/EKE/TKE history) from the
@@ -3386,6 +3677,18 @@ class CoupledESMDriver:
         if self._sfc_state is not None:
             self._sfc_state, _ = _restore_pytree_from_npz(
                 self._sfc_state, data, "sfc_", coupled_path.name)
+
+        # Wave spectrum (ckpt v4): restore the prognostic spectrum and phase,
+        # then rebuild Stokes from that spectrum for the next ocean sub-step.
+        # This also handles initial v4 files with an unset readiness marker.
+        if self._wave_state is not None:
+            self._wave_state = self._wave_state._replace(
+                spectra=jnp.asarray(
+                    data["wave_spectra"],
+                    dtype=self._wave_state.spectra.dtype),
+                spatial_phase=jnp.asarray(
+                    data["wave_spatial_phase"], dtype=jnp.int32))
+            self._stage_wave_stokes()
 
         # Coupling-lag surface response (ckpt v3): restore the one-sub-step lag
         # buffer so the first coupled sub-step after --resume delivers the SAME

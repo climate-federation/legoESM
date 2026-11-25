@@ -1375,6 +1375,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         _kpp_ice_fr = (getattr(surface_forcing, "ice_concentration", None)
                        if (_kpp_eice != 0 and surface_forcing is not None)
                        else None)
+        _u_stokes = (getattr(surface_forcing, "u_stokes", None)
+                     if surface_forcing is not None else None)
 
         # core-0030: pressure for KPP's local N^2 (KPPConfig.n2_mode = "adiabatic"), as the CATKE branch above.
         _kpp_p_cell = None
@@ -1392,6 +1394,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=False, eos_fn=eos_fn, ice_frac=_kpp_ice_fr,
+            u_stokes=_u_stokes,
             p_cell=_kpp_p_cell,
             h_k=(maybe_partial_h_actual(state, z_coord)
                  if _kpp_p_cell is not None else None),

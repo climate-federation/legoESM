@@ -67,6 +67,7 @@ _ROSTER_PREFIXES = (
     "packages/land/legoesm/land/",
     "packages/ice/legoesm/ice/",
     "packages/coupler/legoesm/coupler/",
+    "packages/wave/legoesm/wave/",
 )
 
 _VALID_TRANSFORMS = frozenset({"sigmoid", "softplus", "none"})

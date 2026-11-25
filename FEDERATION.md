@@ -36,7 +36,8 @@ root on `sys.path`.
 | **legoesm-ocean** | `ocean` | core |
 | **legoesm-land** | `land` | core |
 | **legoesm-ice** | `ice` | core |
-| **legoesm-coupler** | `coupler`, `driver` | core + the four components + ml, tools |
+| **legoesm-wave** | `wave` | core |
+| **legoesm-coupler** | `coupler`, `driver` | core + five components + ml, tools |
 | **legoesm-ml** | `ml`, `training`, `da` + loose module `tuning` | core, atmosphere, ocean, coupler, tools |
 | **legoesm-tools** | `forcing`, `diagnostics`, `experiments`, `visualization` | core, atmosphere, ocean, coupler |
 | **legoesm** (meta) | loose modules `cli`, `config`, `dycore_factory`, `experiment_registry`, `supported_matrix`; `legoesm[all]` | every member |
@@ -46,7 +47,7 @@ is *not* a clean DAG: the driver coordinates the components and pulls forcing
 (tools) + a deferred ERA5 path (ml); training (ml) drives the driver (coupler)
 and uses forcing (tools); tools' experiment configs go through the driver. These
 mutual edges (a uv-workspace cycle, which uv resolves) are why the three install
-*together* — unlike the four independent components. The exact member-level
+*together* — unlike the five independent components. The exact member-level
 edges are AST-verified (top-level + deferred) and pinned in each member's
 `pyproject.toml`. The loose top-level modules (not subpackages) are placed by the
 import DAG, not by where the file sits today: `surface_albedo` ships with the
@@ -56,8 +57,12 @@ only importer); the rest are the meta layer. `tests/test_federation_plan.py` pin
 **both** the subpackage map and the loose-module map, so a new top-level
 subpackage *or* module fails the test until it is assigned to a member.
 
-Contract #2 (the four Earth-system components are mutually independent) is what
-lets `legoesm-atmosphere` / `-ocean` / `-land` / `-ice` be **separate** members
+`legoesm-wave` is a substrate-only member and belongs to the same independence
+contract as atmosphere, ocean, land and ice. The coupler activates its runtime
+optionally; that runtime choice does not change the package dependency boundary.
+
+Contract #2 (the five Earth-system components are mutually independent) is what
+lets `legoesm-atmosphere` / `-ocean` / `-land` / `-ice` / `-wave` be **separate** members
 rather than one blob — each can be `pip install`ed and run standalone (a single
 column is its cheapest gradient-check harness; see `legoesm.components`).
 Contract #3 (components must not import coupler/driver/training) is what keeps the
@@ -79,7 +84,7 @@ component members *below* the coupler member, so the DAG stays acyclic.
 
 ## Status: DONE
 
-All eight members are carved (`packages/{core,atmosphere,ocean,land,ice,coupler,ml,tools}`)
+All nine members are carved (`packages/{core,atmosphere,ocean,land,ice,wave,coupler,ml,tools}`)
 plus the root `legoesm` meta. The four import-linter contracts are zero-/baseline-
 locked (`tests/test_import_boundaries.py`), and `scripts/validate_federation_packaging.py`
 builds every member wheel and proves namespace isolation, the dependency DAG,

@@ -742,6 +742,27 @@ def build_parser():
                              "off. Closes the air-sea budget only with the "
                              "prognostic 3D ocean; the slab/two-layer ocean "
                              "computes its own fluxes.")
+    # --- spectral wave component (optional) ----------------------------
+    parser.add_argument("--wave-mode", choices=["off", "active"], default="off",
+                        help="Coupled spectral wave component "
+                             "(CoupledConfig.wave_mode). Default off. 'active' "
+                             "requires --wave-config and a "
+                             "dynamic 3-D ocean (depth/mask come from it).")
+    parser.add_argument("--wave-config", default="",
+                        help="JSON run deck for the wave component (grid, time "
+                             "steps, physics switches, network shape). See "
+                             "legoesm.wave.WaveConfig.from_json.")
+    parser.add_argument("--wave-weights", default="",
+                        help="Converted NeuralSWM weights (.npz) from "
+                             "scripts/data/convert_neuralswm_checkpoint.py. Required "
+                             "when the wave configuration enables neural networks.")
+    parser.add_argument("--kpp-langmuir", action="store_true",
+                        help="Select the coupled KPP physics stack with "
+                             "Langmuir enhancement for --ocean dynamic. "
+                             "The regular lat-lon card uses the tripole "
+                             "recipe's enhanced-diffusion convection. Uses "
+                             "surface Stokes drift when Wave is active and "
+                             "a prescribed Langmuir number otherwise.")
     parser.add_argument("--atm-owns-surface",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="The atmosphere owns the land and open-water "
@@ -1035,6 +1056,10 @@ def main(argv=None, *, build_only=False):
             renamed_keys=_COUPLED_RENAMED_KEYS))
 
     args = parser.parse_args(argv)
+    if args.wave_mode == "active" and args.atm_owns_surface:
+        parser.error("--wave-mode active requires the coupler-owned surface exchange")
+    if args.wave_mode == "active" and args.grid_type == "voronoi":
+        parser.error("--wave-mode active does not support Voronoi-to-wave remapping")
     ignored = [d for d in main_only if getattr(args, d) != base_defaults[d]]
     if ignored:
         raise SystemExit(
@@ -1345,6 +1370,21 @@ def main(argv=None, *, build_only=False):
     if args.land_scheme is not None:
         overrides.update(land_scheme_overrides(args.land_scheme))
 
+    if args.kpp_langmuir and args.ocean != "dynamic":
+        parser.error("--kpp-langmuir requires --ocean dynamic")
+    overrides["kpp_langmuir"] = args.kpp_langmuir
+
+    if args.wave_mode != "off":
+        if not args.wave_config:
+            parser.error("--wave-mode active requires --wave-config")
+        from legoesm.wave import WaveConfig
+        wave_config = WaveConfig.from_json(args.wave_config)
+        if wave_config.network.parameterization != "none" and not args.wave_weights:
+            parser.error("--wave-weights is required when wave neural networks are enabled")
+        overrides["wave_mode"] = args.wave_mode
+        overrides["wave_config"] = wave_config
+        overrides["wave_weights_path"] = args.wave_weights
+
     coupled_cfg = PRESETS[args.preset](**overrides)
     # Runoff resolves against the EFFECTIVE land config (preset OR --land-scheme).
     coupled_cfg = apply_land_runoff_scheme(coupled_cfg, args.land_runoff_scheme)
@@ -1414,6 +1454,14 @@ def main(argv=None, *, build_only=False):
 
     # Create and run driver
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+
+    if (args.kpp_langmuir and not args.tripole_mesh and
+            args.grid_type != "voronoi"):
+        # This explicit CLI opt-in selects the same KPP physics stack used
+        # by the tripole builder. Python callers still provide their own card.
+        coupled_cfg = coupled_cfg._replace(
+            ocean_config=coupled_cfg.ocean_config._replace(
+                physics=CoupledESMDriver.coupled_kpp_ocean_physics()))
 
     coupler_config = build_coupler_config(args)
     if coupler_config is not None:

@@ -21,13 +21,14 @@ classifiers = [
 # init path reaches training (ml).  uv resolves the workspace cycle; these are
 # the real member-level import edges (verified by AST scan of the member source,
 # top-level + deferred):
-#   coupler/driver -> core, the four components, tools, ml
+#   coupler/driver -> core, the five components, tools, ml
 dependencies = [
     "legoesm-core~=1.0.0",
     "legoesm-atmosphere~=1.0.0",
     "legoesm-ocean~=1.0.0",
     "legoesm-land~=1.0.0",
     "legoesm-ice~=1.0.0",
+    "legoesm-wave~=1.0.0",
     "legoesm-ml~=1.0.0",
     "legoesm-tools~=1.0.0",
 ]
@@ -38,6 +39,7 @@ legoesm-atmosphere = { workspace = true }
 legoesm-ocean = { workspace = true }
 legoesm-land = { workspace = true }
 legoesm-ice = { workspace = true }
+legoesm-wave = { workspace = true }
 legoesm-ml = { workspace = true }
 legoesm-tools = { workspace = true }
 

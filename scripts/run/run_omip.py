@@ -220,7 +220,6 @@ def build_vertical_mixing_config_from_args(
             K_conv=args.kpp_k_conv,
             A_bg=args.kpp_a_bg,
             enable_langmuir=args.langmuir,
-            langmuir_coeff=args.langmuir_coeff,
             langmuir_number_default=args.langmuir_number_default,
             vt2_velocity_scale=args.kpp_vt2_velocity_scale,
             actual_buoyancy_flux=args.kpp_actual_buoyancy_flux,
@@ -827,10 +826,8 @@ def parse_args(argv: list[str] | None = None):
                    help="KPP critical bulk Richardson number")
     p.add_argument("--langmuir", action="store_true",
                    help="Enable KPP-Langmuir wave-enhanced surface mixing "
-                        "(eps_L = sqrt(1 + C_L/La_t^2) on the KPP velocity scales).")
-    p.add_argument("--langmuir-coeff", type=float,
-                   default=_DEFAULT_KPP_CONFIG.langmuir_coeff,
-                   help="KPP-Langmuir enhancement coefficient C_L")
+                        "(VR12-AL, Li et al. 2016 Table 2 / Eq. 12; "
+                        "fixed coefficients 3.1 and 5.4).")
     p.add_argument("--langmuir-number-default", type=float,
                    default=_DEFAULT_KPP_CONFIG.langmuir_number_default,
                    help="Fallback turbulent Langmuir number (no Stokes-drift input)")
@@ -839,9 +836,11 @@ def parse_args(argv: list[str] | None = None):
                    choices=["column", "candidate"],
                    help="KPP velocity scale inside the unresolved shear V_t^2: "
                         "'column' (default) or 'candidate' (CVMix/MOM6 form)")
-    p.add_argument("--kpp-actual-buoyancy-flux", action="store_true",
+    p.add_argument("--kpp-actual-buoyancy-flux",
+                   action=argparse.BooleanOptionalAction, default=True,
                    help="KPP velocity scales from the actual surface buoyancy "
-                        "flux (no float32-epsilon floor; CVMix form)")
+                        "flux (default on; no float32-epsilon floor; CVMix form). "
+                        "Use --no-kpp-actual-buoyancy-flux for the legacy floor.")
     p.add_argument("--kpp-gradient-surrogates", action="store_true",
                    help="KPP: logistic-blend backward pass through the "
                         "boundary-layer-base and convective switches (forward "

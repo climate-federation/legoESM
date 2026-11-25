@@ -1,0 +1,28 @@
+{
+  "reference_revision": "b80fdce679414345134a25275421db439c185349",
+  "case": "tp1.1",
+  "data_directory": "ww3_tp1.1",
+  "coordinate_type": "Spherical",
+  "grid_file": "ww3.200001.nc",
+  "spectrum_files": [
+    "ww3.Center_200001_spec.nc",
+    "ww3.Point_*_200001_spec.nc"
+  ],
+  "station_coordinate_scale": 1,
+  "x_stencil": "circular",
+  "bathymetry": {
+    "constant_m": 2500
+  },
+  "step_config": {
+    "dt_global": 3600,
+    "dt_x": 3600,
+    "dt_y": 0,
+    "dt_th": 0,
+    "dt_k": 0,
+    "dt_stot": 0,
+    "dt_gse": 0,
+    "yfirst": false,
+    "substeps": 1
+  },
+  "direction_min_swh_m": 0.01
+}

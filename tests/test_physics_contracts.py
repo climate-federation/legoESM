@@ -66,7 +66,9 @@ _REQUIRED_KEYS = frozenset(
 
 def _is_physics_py(rel: str) -> bool:
     return "/physics/" in rel and (
-        rel.startswith("packages/atmosphere/") or rel.startswith("packages/ocean/")
+        rel.startswith("packages/atmosphere/")
+        or rel.startswith("packages/ocean/")
+        or rel.startswith("packages/wave/")
     )
 
 
@@ -80,6 +82,7 @@ def _is_physics_py(rel: str) -> bool:
 EXCLUDED: frozenset[str] = frozenset(
     {
         "packages/atmosphere/legoesm/atmosphere/physics/__init__.py",
+        "packages/wave/legoesm/wave/physics/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/_shared.py",
         # Not a tendency scheme: the hard/smooth (RULE 5) switch forms shared by
         # the IFS CLOUDSC and CUMASTRN ports.

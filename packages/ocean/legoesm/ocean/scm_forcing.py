@@ -26,6 +26,10 @@ Channels
     Downwelling shortwave at the surface [W/m²].  Only consumed when the
     model enables the shortwave-penetration scheme; otherwise ``q_net``
     already carries the full heating.
+``u_stokes``
+    Nonnegative surface Stokes-drift magnitude [m/s], consumed by KPP's
+    opt-in VR12-AL enhancement. ``None`` retains KPP's prescribed-La fallback;
+    use ``enable_langmuir=False`` for a no-feedback control.
 
 Reuse
 -----
@@ -77,6 +81,7 @@ class OceanSCMForcing(NamedTuple):
     q_net: Optional[ScalarFn] = None       # [W/m^2], + into ocean
     e_minus_p: Optional[ScalarFn] = None   # [m/s], E - P (virtual salt)
     sw_down: Optional[ScalarFn] = None     # [W/m^2] downwelling shortwave
+    u_stokes: Optional[ScalarFn] = None    # [m/s] nonnegative surface magnitude
 
 
 def default_ocean_forcing() -> OceanSCMForcing:
@@ -114,7 +119,7 @@ def validate_ocean_forcing(forcing: OceanSCMForcing) -> None:
         raise ValueError(
             f"OceanSCMForcing.f_c must be finite, got {forcing.f_c!r}."
         )
-    for name in ("tau_x", "tau_y", "q_net", "e_minus_p", "sw_down"):
+    for name in ("tau_x", "tau_y", "q_net", "e_minus_p", "sw_down", "u_stokes"):
         fn = getattr(forcing, name)
         if fn is not None and not callable(fn):
             raise ValueError(
@@ -172,6 +177,10 @@ def build_ocean_surface_forcing_struct(
         tau_x=tau_x,
         tau_y=tau_y,
         freshwater=fw,
+        # Keep traced wave amplitude live: _eval_scalar deliberately returns
+        # Python floats for legacy prescribed fluxes, which would sever AD here.
+        u_stokes=(None if forcing.u_stokes is None
+                  else _arr(forcing.u_stokes(t))),
     )
 
 
