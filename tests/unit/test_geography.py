@@ -464,3 +464,44 @@ def test_coupled_mpas_ocean_on_its_own_mesh_refuses_a_geography(tmp_path):
         output_dir=str(tmp_path / "run"), ocean_grid=create_voronoi_mesh(3))
     with pytest.raises(ValueError, match="on its own mesh"):
         d.setup()
+
+
+# sha256[:16] of the float64 terrain from cf/main acd8798d83 (before this PR),
+# same fixture, so the no-geography production path and legacy mode stay
+# bitwise to the pre-geography loader (measured cross-worktree, then pinned)
+_MAIN_TERRAIN_SHA = {
+    ("mpas3", "phis"): "406f5c36c722acd9", ("mpas3", "fland"): "b8aea3c7274f5c12",
+    ("latlon", "phis"): "15b40b1c9560a04d", ("latlon", "fland"): "28472ccd0cbd7f13",
+}
+
+
+def test_terrain_is_bitwise_the_pre_geography_loader(mesh, tmp_path):
+    import hashlib
+
+    import xarray as xr
+    from legoesm.grids.latlon import create_latlon_grid
+    rng = np.random.default_rng(0)
+    lat_e, lon_e = np.arange(89.5, -90.0, -1.0), np.arange(-179.5, 180.0, 1.0)
+    z = rng.normal(0.0, 2000.0, (lat_e.size, lon_e.size))
+    lat_m, lon_m = np.arange(-89.0, 90.0, 2.0), np.arange(1.0, 360.0, 2.0)
+    f = (rng.uniform(0.0, 1.0, (lat_m.size, lon_m.size))
+         * (rng.uniform(size=(lat_m.size, lon_m.size)) > 0.5))
+    ep = _write(xr.Dataset({"z": (("latitude", "longitude"), z, {"units": "m"})},
+                           coords={"latitude": lat_e, "longitude": lon_e}), tmp_path, "e.nc")
+    mp = _write(xr.Dataset({"sftlf": (("lat", "lon"), f)},
+                           coords={"lat": lat_m, "lon": lon_m}), tmp_path, "m.nc")
+    g = xr.Dataset({"elevation": (("lat", "lon"), z, {"units": "m"}),
+                    "land_fraction": (("lat_lf", "lon_lf"), f)},
+                   coords={"lat": lat_e, "lon": lon_e, "lat_lf": lat_m, "lon_lf": lon_m})
+    g.attrs["legoesm_geography_version"] = 1
+    gp = _write(g, tmp_path, "g.nc")
+    cfg = TopographyConfig(source="file", path=ep, elev_var="z", lat_var="latitude",
+                           lon_var="longitude", smoothing_passes=4,
+                           land_mask_path=mp, land_mask_var="sftlf")
+    def sha(x):
+        return hashlib.sha256(np.ascontiguousarray(x, dtype=np.float64).tobytes()).hexdigest()[:16]
+    for name, grid in (("mpas3", mesh), ("latlon", create_latlon_grid(45, 90))):
+        for out in (load_real_topography(grid, config=cfg),
+                    geo.geography_terrain(grid, gp, "legacy", smoothing_passes=4)):
+            assert (sha(out[0]), sha(out[1])) == (_MAIN_TERRAIN_SHA[(name, "phis")],
+                                                  _MAIN_TERRAIN_SHA[(name, "fland")])
