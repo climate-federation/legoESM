@@ -1286,8 +1286,12 @@ def main(argv=None, *, build_only=False):
             overrides["woa_s_path"] = args.woa_s_path
             # Co-derive the atmosphere land fraction from the SAME ocean mask
             # and enable a land tile over the continents (f_land>0 with
-            # land_mode='none' would try to run an unused land model).
-            overrides["f_land_mode"] = "from_ocean"
+            # land_mode='none' would try to run an unused land model).  Under
+            # --atm-owns-surface the partition is the atmosphere's land mask
+            # with the ocean's dry cells as land (the driver's land-fraction
+            # hook), read by the coupler as f_land_mode='analytical'.
+            if not args.atm_owns_surface:
+                overrides["f_land_mode"] = "from_ocean"
             # Select the land surface model (coupler dispatches on the config
             # type: MultiLayerLandConfig -> Richards column tile, else slab).
             # woa defaults to slab when --land-scheme is unset.
