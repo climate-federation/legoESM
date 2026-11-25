@@ -684,10 +684,16 @@ def test_default_hydro_duo_row_still_cam6_l32():
     np.testing.assert_allclose(h.model.bk, np.asarray(CAM6_L32_HYBI),
                                rtol=0, atol=1e-15)
     assert np.asarray(h.state["state"]["delp"]).shape[-1] == 32
+    assert h.dt == 1920.0  # the deck step, not the generic CFL clamp
 
 
-def test_hydro_duo_refuses_unvalidated_resolution():
-    """The 1920 s deck step is validated at C36 only."""
+def test_hydro_duo_refuses_unvalidated_resolution(monkeypatch):
+    """The 1920 s deck step is validated at C36 only; refused before any setup."""
+    import legoesm.grids.factory as factory
     from scripts.matrix._cube_duo_adapters import build_duo_hydro
+
+    def _no_setup(*a, **k):
+        raise AssertionError("grid built before the resolution guard")
+    monkeypatch.setattr(factory, "create_fv3_duo_grid", _no_setup)
     with pytest.raises(ValueError, match="validated at C36 only"):
         build_duo_hydro(12, perturbed=False)

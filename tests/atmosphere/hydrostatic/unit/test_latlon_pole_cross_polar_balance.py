@@ -3,8 +3,8 @@
 The rotated (alpha = 45 deg) JW steady state is an exact balance of the
 continuous equations with the jet crossing both poles.  On the pole-adjacent
 rows the C-grid must not treat the zero-length polar v-face (wall v = 0) as a
-VALUE: v -> u-face for Coriolis and v -> cell for KE are face-length weighted,
-and the pole vertex vorticity is the Stokes polar-cap circulation, not the
+VALUE: the pole-row v used for Coriolis (v -> u-face) and KE (v -> cell) is
+extrapolated in latitude from the two nearest real faces, and the pole vertex vorticity is the Stokes polar-cap circulation, not the
 free-slip wall zero.  Each of those was a spurious O(f v) force on the pole
 row only (rotated_steady: 44 m/s after 2 d vs 27.9 analytic).  The initial
 momentum tendency on the pole rows must therefore be no larger than in the
