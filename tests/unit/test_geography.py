@@ -252,6 +252,17 @@ def test_coupled_refuses_geography_with_its_own_land_tile(tmp_path, monkeypatch,
         d.setup()
 
 
+def test_coupled_refuses_atm_owned_geography_land_without_a_land_model(tmp_path):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    cfg = _mpas_cfg(_gen(tmp_path, "ridge", barrier_lon=0.0))
+    d = CoupledESMDriver(cfg, CoupledConfig(f_land_mode="analytical", land_mode="none",
+                                            atm_owns_surface=True),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="runs no land model"):
+        d.setup()
+
+
 def test_present_day_refuses_non_metre_elevation(tmp_path):
     import xarray as xr
     lat, lon = np.arange(-89.5, 90.0, 1.0), np.arange(0.5, 360.0, 1.0)

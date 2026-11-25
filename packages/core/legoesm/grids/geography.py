@@ -8,9 +8,12 @@ A regular lat-lon NetCDF (global attribute ``legoesm_geography_version = 1``):
   absent -> the area fraction with ``elevation > 0``;
 - ``barrier_lat`` / ``barrier_lon`` ``(barrier, vertex)`` [deg, NaN padded]
   -- polylines (great-circle segments) closed on every model grid: every
-  cell they touch becomes land at elevation 0 (kept out of the terrain
-  smoothing), and a barrier that jumps between non-neighbour cells is
-  refused;
+  cell owning a densified point of the line (step <= min(0.05 deg, 1/4 of
+  the finest cell)) becomes land at elevation 0 (kept out of the terrain
+  smoothing), and a barrier whose consecutive points jump between
+  non-neighbour cells is refused, so the closed cells form a face-connected
+  wall.  An arc that clips a cell corner between two points need not close
+  that cell (the wall stays watertight, displaced by under one step);
 - CLM-surfdata variables (CLM names and dims) -- the land surface; absent ->
   uniform bare soil.
 

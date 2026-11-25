@@ -1135,6 +1135,16 @@ class CoupledESMDriver:
                 "land parameters without the geography's land map; use "
                 "land_mode='none' (with atm_owns_surface=True the atmosphere's "
                 "land reads the geography).")
+        if (self._atm.config.geography and cfg.atm_owns_surface
+                and not self._atm.config.use_multilayer_land
+                and float(jnp.max(self._atm._f_land)) > 0.0):
+            # coupled, the atmosphere's slab land is switched off (the coupler
+            # owns land) and atm_owns_surface steps no coupler land tile, so
+            # only the atmosphere's multilayer land can run on the land cells
+            raise ValueError(
+                "geography has land and atm_owns_surface=True, but the "
+                "atmosphere runs no land model on it (use_multilayer_land=False); "
+                "land cells would be passive.  Set use_multilayer_land=True.")
 
         coupler_cfg = self._coupler_config or CouplerConfig()
         self._coupler_cfg = coupler_cfg  # reused by the 3D-ocean flux assembly
