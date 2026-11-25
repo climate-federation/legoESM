@@ -47,9 +47,12 @@ def test_reshape_conserves_the_exchanged_flux_integral(grids):
     mesh, g = grids
     rem = make_grid_remapper(mesh, g)
     flux = jnp.asarray(np.random.default_rng(1).normal(size=mesh.nCells))
-    atm_int = jnp.sum(flux * mesh.areaCell)
-    ocn_int = jnp.sum(remap_field(flux, rem.a2o) * g.grid_area)
-    assert float(atm_int) == float(ocn_int)
+    # every cell's flux x area is the same number on both sides, so the area
+    # integral is equal in any one summation order
+    atm = flux * mesh.areaCell
+    ocn = remap_field(flux, rem.a2o) * g.grid_area
+    np.testing.assert_array_equal(ocn.reshape(-1), atm)
+    assert float(jnp.sum(atm)) == float(jnp.sum(ocn.reshape(-1)))
 
 
 def test_gradient_through_the_reshape(grids):
