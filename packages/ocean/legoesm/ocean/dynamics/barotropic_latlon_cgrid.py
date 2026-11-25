@@ -2900,6 +2900,10 @@ def _reconcile_targets(config, *, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
       so it is a fidelity gap in the divisor convention, not a path
       difference -- see the F1 note on
       ``BarotropicConfig.barotropic_reconcile_target``.
+      With the split-explicit eta damping on, ``Hu_avg`` includes the
+      damping's volume flux (booked so tracers see the transport that moved
+      eta), so this target puts that flux into the depth-mean velocity;
+      ``"velocity_avg"`` does not.
 
     Shared by BOTH barotropic entry points (standard-halo and wide-halo) so
     the dispatch — and the raise on an unknown value — exists once.

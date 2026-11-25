@@ -271,6 +271,16 @@ def test_advective_momentum_diss_is_nonzero_and_withheld():
 
 # --------------------------------------- steady-state fixed-point invariance
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="KNOWN OPEN: the channel is not motionless -- the thermal front "
+           "drives a flow (max|u| at step 500: 8.6 m/s before the eta "
+           "damping was booked into the barotropic transport, 74 after, 102 "
+           "with the damping off) and every arm is NaN by 1000 steps, so "
+           "there is no fixed point to compare.  The old pass (dT 9.8e-5) "
+           "relied on the unbooked damping diluting tracers; booked dT is "
+           "1.56e-3 > 1.3e-3.  Redesign around a truly resting state once "
+           "the AB2 channel instability is fixed.")
 def test_steady_state_invariance_linear_column():
     """Both scopes converge to the SAME fixed point of a linear dissipative
     system.
