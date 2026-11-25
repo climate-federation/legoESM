@@ -146,7 +146,13 @@ class TracerAirMassState(NamedTuple):
 def air_mass_state(state: TracerState, p_s, sigma_coord: SigmaCoordinate) -> TracerAirMassState:
     """Attach the layer air mass ``dp = p_s dsigma`` [Pa] of a sigma column,
     or ``dp = dA p_ref + dB p_s`` of a hybrid one (``p_s`` [Pa], scalar or
-    (nCells,)), to a :class:`TracerState`."""
+    (nCells,)), to a :class:`TracerState`.
+
+    Hybrid precondition: ``p_s`` must exceed the level set's minimum valid
+    surface pressure everywhere, so every layer mass is positive.  Concrete
+    (eager) input violating it raises ``ValueError``; traced input (under
+    ``jit``/``grad``) is not checked here and must be validated by the caller.
+    """
     from legoesm.grids.vertical import HybridSigmaPressureCoordinate, dp_from_hybrid
     q = state.tracers.data
     p_s = jnp.broadcast_to(jnp.asarray(p_s, q.dtype), q.shape[:1])
