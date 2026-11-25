@@ -3197,9 +3197,12 @@ def _resolve_land_model(args, parser=None, argv=None):
         # one is a contradiction: the run would have land while its own
         # selector said it did not.  Refuse rather than print a name that is
         # not what the run resolves to.
-        if args.land_model == "none" and getattr(args, "land_mask_file", ""):
-            msg = ("--land-model none conflicts with --land-mask-file "
-                   f"{args.land_mask_file!r}: a land-mask file activates the "
+        _mask_flag = next((f"--{n.replace('_', '-')} {getattr(args, n)!r}"
+                           for n in ("land_mask_file", "geography")
+                           if getattr(args, n, "")), "")
+        if args.land_model == "none" and _mask_flag:
+            msg = (f"--land-model none conflicts with {_mask_flag}: a land-mask "
+                   "or geography file activates the "
                    "land tile by itself, so the run would have a land surface "
                    "while asking for none. Drop one of the two.")
             if parser is not None:

@@ -29,6 +29,10 @@ import numpy as np
 GEOGRAPHY_VERSION = 1
 REGRID_MODES = ("legacy", "binned")
 _REFUSED_VARS = ("ice_sheet_thickness", "lake_fraction")
+# a land map is PCT_NAT_PFT plus these; any of them without PCT_NAT_PFT would
+# be silently replaced by the uniform default, so it is refused (VOTED VC)
+_CLM_MAP_VARS = ("PCT_NATVEG", "PCT_CROP", "PCT_CFT", "PCT_GLACIER", "PCT_SAND",
+                 "PCT_CLAY", "SOIL_COLOR", "MONTHLY_LAI")
 
 # --- barrier densification (VOTED V4: min(0.05 deg, 1/4 finest cell); leak
 # check = consecutive points in the same or neighbouring cells, VOTED V14) ---
@@ -78,6 +82,10 @@ def open_geography(path: str):
             d = np.diff(np.asarray(ds[c].values, dtype=np.float64))
             if not (np.all(d > 0) or np.all(d < 0)):
                 errs.append(f"coordinate {c!r} is not strictly monotone")
+    partial = [v for v in _CLM_MAP_VARS if v in ds.variables]
+    if partial and "PCT_NAT_PFT" not in ds.variables:
+        errs.append(f"land-map variables {partial} without PCT_NAT_PFT (a partial "
+                    "land map would be replaced by the uniform default)")
     has_bl, has_bo = "barrier_lat" in ds, "barrier_lon" in ds
     if has_bl != has_bo:
         errs.append("barrier_lat and barrier_lon come together")
@@ -184,6 +192,15 @@ def barrier_gaps(grid, owners) -> int:
     return gaps
 
 
+def _require_canonical_axes(lat, lon, what: str):
+    """Fields binned straight from the file (no reordering) need the terrain
+    loader's own axis convention, else the two would bin differently."""
+    if not (np.all(np.diff(lat) > 0) and np.all(np.diff(lon) > 0)
+            and lon[0] >= 0.0 and lon[-1] < 360.0):
+        raise ValueError(f"{what} needs ascending lat and lon ascending in [0, 360) "
+                         "(no reordering or periodic de-duplication is applied)")
+
+
 def geography_terrain(grid, path: str, mode: str, *, smoothing_passes: int,
                       barrier_width_cells: int = 1):
     """``(phis [m2 s-2], f_land)`` of ``grid`` from a geography file, shaped
@@ -202,11 +219,7 @@ def geography_terrain(grid, path: str, mode: str, *, smoothing_passes: int,
             if lf_dims != ("lat", "lon"):
                 raise ValueError("geography_regrid='binned' needs land_fraction on "
                                  f"(lat, lon), got {lf_dims}")
-            if not (np.all(np.diff(lat) > 0) and np.all(np.diff(lon) > 0)
-                    and lon[0] >= 0.0 and lon[-1] < 360.0):
-                raise ValueError("geography_regrid='binned' needs ascending lat and "
-                                 "lon ascending in [0, 360) (no reordering is applied "
-                                 "to land_fraction)")
+            _require_canonical_axes(lat, lon, "geography_regrid='binned' land_fraction")
             f_src = np.asarray(ds["land_fraction"].values, dtype=np.float64)
     finally:
         ds.close()
@@ -246,6 +259,7 @@ def geography_ocean_depth(grid, path: str, *, H_min: float, H_max: float):
         el = np.asarray(ds["elevation"].values, dtype=np.float64)
     finally:
         ds.close()
+    _require_canonical_axes(lat, lon, "geography ocean depth")  # VOTED VA
     sea = (el < 0.0).astype(np.float64)
     c_lat, c_lon, _, _ = _grid_cells(grid)
     sea_c, depth_sum = bin_latlon_to_cells(lat, lon, [sea, sea * -el], c_lat, c_lon,

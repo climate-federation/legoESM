@@ -188,6 +188,7 @@ def test_bare_soil_where_the_file_has_no_land_map(tmp_path):
     (lambda d: d.__setitem__("land_fraction", d["elevation"] * 0 + 50.0), r"not %"),
     (lambda d: d["elevation"].attrs.update(units="km"), "units"),
     (lambda d: d["elevation"].values.__setitem__((3, 4), np.nan), "finite"),
+    (lambda d: d.__setitem__("PCT_SAND", d["elevation"] * 0 + 40.0), "PCT_NAT_PFT"),
 ])
 def test_open_geography_refuses(tmp_path, edit, msg):
     ds = mg.idealized("aquaplanet")
@@ -313,6 +314,72 @@ def test_ocean_depth_is_the_binned_sea_depth_clipped(mesh, tmp_path):
     assert coast.any() and near(d[coast], 5200.0)  # mean over sea points only
     assert np.all(geo.geography_ocean_depth(mesh, p, H_min=10.0, H_max=4000.0)
                   == np.where(f == 1.0, 10.0, 4000.0))
+
+
+def _basin_of(nb, wet, seed):
+    seen = np.zeros(wet.size, dtype=bool)
+    seen[seed] = True
+    front = [seed]
+    while front:
+        c = np.asarray(front)
+        n = nb[:, c].ravel()
+        n = np.unique(n[n >= 0])
+        n = n[wet[n] & ~seen[n]]
+        seen[n] = True
+        front = list(n)
+    return seen
+
+
+@pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_two_wiggly_pole_to_pole_barriers_split_the_ocean(mesh, grid_kind, seed):
+    """No wet-to-wet face path crosses a closed barrier: two random wiggly
+    pole-to-pole barriers (vertices 2.5 deg apart, so arcs cut cell corners
+    between densified points) leave the two sides in different basins."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.topography import neighbour_table
+    g = create_latlon_grid(45, 90) if grid_kind == "latlon" else mesh
+    rng = np.random.default_rng(seed)
+    lat = np.linspace(-90.0, 90.0, 73)
+    lines = [(lat, c + np.cumsum(rng.normal(0.0, 1.5, lat.size))) for c in (0.0, 180.0)]
+    owners = geo.barrier_owners(g, lines)
+    assert geo.barrier_gaps(g, owners) == 0
+    wet = ~geo.closed_barrier_cells(g, owners, 1)
+    nb = neighbour_table(g)[0]
+    clat = np.asarray(g.grid_lat).ravel()
+    clon = np.mod(np.asarray(g.grid_lon).ravel(), 2.0 * np.pi)
+    def wet_cell(lon_deg):
+        d = np.where(wet, np.abs(clat) + np.abs(clon - np.deg2rad(lon_deg)), np.inf)
+        return int(np.argmin(d))
+    east = _basin_of(nb, wet, wet_cell(90.0))
+    assert not east[wet_cell(270.0)]
+
+
+def test_land_tile_stamps_the_geography_file(tmp_path):
+    """The soil-hydraulics stamp (land IC conversion) hashes the geography
+    FILE; the in-memory land map it builds has no path to hash."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import build_multilayer_land_tile
+    from legoesm.land.restart import HYDRAULICS_SOURCE_CLM_MAP, soil_hydraulics_stamp
+    p = _gen(tmp_path, "aquaplanet")
+    tile = build_multilayer_land_tile(ExperimentConfig(geography=p),
+                                      np.zeros(2), np.zeros(2), None)
+    assert tile["surfdata_file"] == p
+    st = soil_hydraulics_stamp(tile["cfg"].hydraulics.retention_curve,
+                               HYDRAULICS_SOURCE_CLM_MAP, tile["surfdata_file"])
+    assert st["parameter_file"] == "aquaplanet.nc"
+
+
+@pytest.mark.parametrize("axes", ["lon180", "lat_desc"])
+def test_ocean_depth_refuses_axes_the_terrain_would_reorder(mesh, tmp_path, axes):
+    ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))
+    if axes == "lon180":
+        ds = ds.assign_coords(lon=(ds["lon"] + 180.0) % 360.0 - 180.0).sortby("lon")
+    else:
+        ds = ds.isel(lat=slice(None, None, -1))
+    with pytest.raises(ValueError, match="ocean depth needs ascending"):
+        geo.geography_ocean_depth(mesh, _write(ds, tmp_path, "g.nc"),
+                                  H_min=10.0, H_max=5500.0)
 
 
 def test_snap_partial_cells_is_the_omip_inline_recipe():

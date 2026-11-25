@@ -2215,7 +2215,10 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     surfdata_path = config.clm_surfdata_path
     if getattr(config, "geography", ""):
         from legoesm.grids.geography import geography_clm_surface
-        surfdata_file = geography_clm_surface(config.geography)
+        # the map is built in memory; the hydraulics stamp hashes the
+        # geography FILE it came from
+        surfdata_file = config.geography
+        surfdata_src = geography_clm_surface(config.geography)
     elif surfdata_path:
         # A staged path is set: use it, and FAIL LOUDLY if absent rather than
         # attempting a (compute-node-blocked) network fetch to that exact path.
@@ -2228,8 +2231,8 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     else:
         surfdata_file = download_clm_surfdata()
     surface_map = load_clm_surface(
-        surfdata_file, lat_deg, lon_deg,
-        vg_air_entry_m=float(config.land_soil_vg_air_entry_m))
+        surfdata_src if getattr(config, "geography", "") else surfdata_file,
+        lat_deg, lon_deg, vg_air_entry_m=float(config.land_soil_vg_air_entry_m))
 
     # Non-spatial defaults from the config; clm_multilayer_setup overwrites only
     # hydraulics/thermal.  Thread the active snow-albedo + stomata features the
