@@ -142,17 +142,20 @@ def test_orbital_insolation_flag_and_yaml_roundtrip(tmp_path):
 
 
 def test_morrison_warm_rain_flag_and_cmip_configs_name_the_law():
-    """The coupled lane has no CLUBB relvar: the CMIP configs name kk2000
-    (an unset law resolves to kk2000_cam6 under mg); the flag is unset by
-    default and an explicit CLI law wins over the config."""
+    """The CMIP configs name the law (an unset law resolves to kk2000_cam6
+    under mg): the slab deck runs CLUBB on the column lane and takes
+    production's kk2000_cam6; the 3-D-ocean deck has no CLUBB relvar and
+    names kk2000.  The flag is unset by default and an explicit CLI law wins
+    over the config."""
     assert "morrison_warm_rain_scheme" in _dests()
     parser = mod.build_parser()
     assert parser.parse_args([]).morrison_warm_rain_scheme is None
-    for cfg in CMIP_CONFIGS:
+    expect = {CMIP_CONFIGS[0]: "kk2000_cam6", CMIP_CONFIGS[1]: "kk2000"}
+    for cfg, law in expect.items():
         loaded = load_yaml_config(str(cfg), mod.build_parser())
-        assert loaded["morrison_warm_rain_scheme"] == "kk2000", cfg.name
+        assert loaded["morrison_warm_rain_scheme"] == law, cfg.name
     parser.set_defaults(**load_yaml_config(str(CMIP_CONFIGS[0]), parser))
-    assert parser.parse_args([]).morrison_warm_rain_scheme == "kk2000"
+    assert parser.parse_args([]).morrison_warm_rain_scheme == "kk2000_cam6"
     assert parser.parse_args(
         ["--morrison-warm-rain-scheme", "seifert_beheng_sb2001"]
     ).morrison_warm_rain_scheme == "seifert_beheng_sb2001"
