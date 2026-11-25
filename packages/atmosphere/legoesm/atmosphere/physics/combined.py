@@ -236,6 +236,23 @@ def make_physics(
         ``PhysicsState`` carry can refuse loudly instead of silently
         reseeding every step (issue #405/#413).
     """
+    # CAM7 CLUBB-MF plume cloud: the producer (turbulence clubb_mf) and the
+    # consumer (cam6_clubb clubb_mf_cloud) must agree, else the plume cloud is
+    # silently dropped or read as zeros.  A run with no radiation cloud scheme
+    # (e.g. the SCM shallow-cumulus cases) runs the flux alone.
+    _cc = getattr(getattr(config, "radiation", None), "cloud_config", None)
+    _mf_on = bool(getattr(getattr(config, "turbulence", None), "clubb_mf", False))
+    _mf_cloud = bool(getattr(_cc, "clubb_mf_cloud", False))
+    _cam6 = (getattr(_cc, "scheme", None) if _cc is not None else
+             getattr(getattr(config, "radiation", None), "cloud_scheme", None)) == "cam6_clubb"
+    if _mf_cloud and not (_mf_on and _cam6):
+        raise ValueError(
+            "CloudConfig.clubb_mf_cloud needs TurbulenceConfig.clubb_mf and the "
+            "cam6_clubb cloud scheme.")
+    if _mf_on and _cam6 and not _mf_cloud:
+        raise ValueError(
+            "TurbulenceConfig.clubb_mf with the cam6_clubb cloud scheme must set "
+            "CloudConfig.clubb_mf_cloud (CAM7 hands the plume cloud to radiation).")
     # Build-time surface overrides (e.g. AIMIP's trained spatial sfc_albedo /
     # sfc_emissivity) are routed to the radiation solve as per-call overrides so
     # a trained value never touches RRTMGPConfig.sfc_* (RRTMGP's solver-cache
@@ -1242,7 +1259,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                         "sed_substeps_required", "evap_sfc",
                         "shflx_ow", "lhflx_ow", "evap_ow", "taux_ow",
                         "tauy_ow", "shflx_ice", "lhflx_ice",
-                        "taux_sfc", "tauy_sfc", "precip_conv_sfc")
+                        "taux_sfc", "tauy_sfc", "precip_conv_sfc",
+                        "rad_absorbed_above_top")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Per-process ledger: capture each module's row from its OWN complete
@@ -1394,7 +1412,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                   "evap_sfc", "shflx_ow", "lhflx_ow",
                                   "evap_ow", "taux_ow", "tauy_ow",
                                   "shflx_ice", "lhflx_ice", "taux_sfc",
-                                  "tauy_sfc", "precip_conv_sfc"}
+                                  "tauy_sfc", "precip_conv_sfc",
+                                  "rad_absorbed_above_top"}
 
     def _advance_state(state, du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends, dt_x):
         """``state + dt_x * tendency`` (CAM ``physics_update``); ``phis`` fixed."""

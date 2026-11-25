@@ -24,7 +24,6 @@ EXPECTED_INPUT_SHA256 = {
 }
 EXPECTED_UNMEASURED = {
     "staged_gm_eiv",
-    "linear_implicit_bottom_drag",
     "internal_wave_salt_heat_differential",
     "double_diffusive_salt_heat_split",
     "spatial_lateral_viscosity",

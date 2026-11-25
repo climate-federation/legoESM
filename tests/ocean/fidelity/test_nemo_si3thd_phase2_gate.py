@@ -13,11 +13,11 @@ from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ice.bitz_lipscomb import (
     SI3SurfaceForcing,
     # _si3_zdf_bl99_step moved to phase2 gate (DECISION 186)
-    ice_enthalpy_from_temperature,
-    ice_temperature_from_enthalpy,
-    option2_salinity_profile,
-    snow_enthalpy_from_temperature,
-    snow_temperature_from_enthalpy,
+    _si3_502_ice_enthalpy_from_temperature,
+    _si3_502_ice_temperature_from_enthalpy,
+    _si3_502_option2_salinity_profile,
+    _si3_502_snow_enthalpy_from_temperature,
+    _si3_502_snow_temperature_from_enthalpy,
 )
 from legoesm.ice.c1d_omip_l3 import (
     ORACLE_V1_ROOT,
@@ -71,12 +71,14 @@ def _forcing() -> SI3SurfaceForcing:
 def _zdf_inputs():
     c = NEMO_SI3_CONSTANTS_CONFIG
     bulk = jnp.asarray([6.3], dtype=jnp.float64)
-    sal = option2_salinity_profile(bulk, jnp.asarray([34.7], dtype=jnp.float64))
+    sal = _si3_502_option2_salinity_profile(
+        bulk, jnp.asarray([34.7], dtype=jnp.float64)
+    )
     ti = jnp.asarray([[257.0, 261.0, 266.0]], dtype=jnp.float64)
     ts = jnp.asarray([[255.0, 260.0, 266.0]], dtype=jnp.float64)
     return (
-        ice_enthalpy_from_temperature(ti, sal, c),
-        snow_enthalpy_from_temperature(ts, c),
+        _si3_502_ice_enthalpy_from_temperature(ti, sal, c),
+        _si3_502_snow_enthalpy_from_temperature(ts, c),
         sal,
         jnp.asarray([2.0], dtype=jnp.float64),
         jnp.asarray([0.2], dtype=jnp.float64),
@@ -88,8 +90,8 @@ def test_nemo_constants_and_enthalpy_roundtrip_are_fp64() -> None:
     c = NEMO_SI3_CONSTANTS_CONFIG
     sal = jnp.asarray([[3.15, 6.3, 9.45]], dtype=jnp.float64)
     temp = jnp.asarray([[258.0, 263.0, 269.0]], dtype=jnp.float64)
-    energy = ice_enthalpy_from_temperature(temp, sal, c)
-    recovered = ice_temperature_from_enthalpy(energy, sal, c)
+    energy = _si3_502_ice_enthalpy_from_temperature(temp, sal, c)
+    recovered = _si3_502_ice_temperature_from_enthalpy(energy, sal, c)
     assert energy.dtype == recovered.dtype == jnp.float64
     np.testing.assert_allclose(recovered, temp, rtol=0.0, atol=2.0e-13)
     assert (c.c_ice, c.latent_fusion, c.k_ice, c.k_snow, c.lead_albedo) == (
@@ -102,7 +104,7 @@ def test_snow_temperature_inverse_applies_nemo_bounds() -> None:
 
     c = NEMO_SI3_CONSTANTS_CONFIG
     energy = jnp.asarray([[0.0, 1.0e12, -1.0e12]], dtype=jnp.float64)
-    temperature = snow_temperature_from_enthalpy(energy, c)
+    temperature = _si3_502_snow_temperature_from_enthalpy(energy, c)
     assert temperature.dtype == jnp.float64
     np.testing.assert_array_equal(
         np.asarray(temperature),

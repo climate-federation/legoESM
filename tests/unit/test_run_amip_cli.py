@@ -2716,7 +2716,7 @@ _SMOOTH_BECHTOLD_LEAF_PRE2249 = {
     'enable_cmt': False, 'enable_downdraft': True, 'enable_stochastic': False,
     'epsilon_deep': 0.00175, 'epsilon_midlevel': 0.0001,
     'epsilon_shallow': 0.0035, 'ifs_hard_switches': False,
-    'ifs_shallow_nosupply': 'zero',
+    'ifs_openifs_cloud_top_fixer': False, 'ifs_shallow_nosupply': 'zero',
     'ifs_shallow_supply_width_w_m2': 1.0, 'lcl_membership_sharpness': 2.0,
     'mc_normalize_scale': 0.05, 'p_conv_top_pa': 15000.0, 'parcel_dT': 0.5,
     'parcel_dq': 0.001, 'precip_efficiency': 0.8,
@@ -4220,6 +4220,27 @@ def test_bechtold_ifs_hard_switches_round_trip():
                              bechtold_ifs_hard_switches=flag)
         back = ExperimentConfig.from_amip_config(e.to_amip_config())
         assert back.bechtold_ifs_hard_switches is flag
+
+
+def test_bechtold_ifs_openifs_cloud_top_fixer_round_trip():
+    """#2594: the faithful chain's cloud-top fixer selection (default the
+    corrected one) reaches BechtoldConfig from the CLI and survives the AMIP
+    config round trip."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--convection", "bechtold", "--bechtold-use-ifs-ascent"]
+    d = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert d.bechtold_ifs_openifs_cloud_top_fixer is False
+    assert _resolve_convection(d)[1].ifs_openifs_cloud_top_fixer is False
+    h = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--bechtold-ifs-openifs-cloud-top-fixer"]), parser))
+    assert _resolve_convection(h)[1].ifs_openifs_cloud_top_fixer is True
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold", bechtold_use_ifs_ascent=True,
+                             bechtold_ifs_openifs_cloud_top_fixer=flag)
+        back = ExperimentConfig.from_amip_config(e.to_amip_config())
+        assert back.bechtold_ifs_openifs_cloud_top_fixer is flag
 
 
 def test_bechtold_use_ifs_snow_melt_round_trip():
@@ -5946,6 +5967,52 @@ def test_land_canopy_snow_masking_round_trip_and_refusal():
         bad.validate_strict()
 
 
+def test_land_canopy_snow_round_trip_widths_and_refusal():
+    """Canopy snow (CLM5 ON_RAD): off by default and absent from the production
+    deck; the switch and both widths reach ExperimentConfig and the land
+    config; it is refused without the masking, and a width without the switch
+    or outside the RULE 5 range is refused."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land",
+            "--snow-albedo-feedback", "--land-surface-scheme", "two_leaf"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_canopy_snow is False
+    assert cfg0.land_canopy_snow_temperature_width_K is None
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-canopy-snow-masking", "--land-canopy-snow",
+                "--land-canopy-snow-temperature-width-K", "0",
+                "--land-canopy-snow-relative-width", "0.02"]), parser))
+    assert cfg1.land_canopy_snow is True
+    assert cfg1.land_canopy_snow_temperature_width_K == 0.0
+    assert cfg1.land_canopy_snow_relative_width == 0.02
+    p = build_arg_parser()
+    rows = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert "land_canopy_snow" not in rows
+    p.set_defaults(**rows)
+
+    def prod(*flags):
+        return build_config_from_args(_postprocess_args(
+            p.parse_args(_AMIP_DUMMY_PATHS + list(flags)), p))
+
+    prod("--land-canopy-snow-masking", "--land-canopy-snow").validate_strict()
+    with pytest.raises(ValueError, match="land_canopy_snow requires"):
+        prod("--land-canopy-snow").validate_strict()
+    with pytest.raises(ValueError, match="land_canopy_snow is off"):
+        prod("--land-canopy-snow-relative-width", "0.02").validate_strict()
+    with pytest.raises(ValueError, match="relative_width"):
+        prod("--land-canopy-snow-masking", "--land-canopy-snow",
+             "--land-canopy-snow-relative-width", "1e-30").validate_strict()
+    with pytest.raises(ValueError, match="relative_width must be <= 1"):
+        prod("--land-canopy-snow-masking", "--land-canopy-snow",
+             "--land-canopy-snow-relative-width", "3").validate_strict()
+    ramp = prod("--land-canopy-snow-masking", "--land-canopy-snow",
+                "--land-canopy-snow-fcansno-ramp", "0")
+    assert ramp.land_canopy_snow_fcansno_ramp == 0.0
+    ramp.validate_strict()
+
+
 def test_land_canopy_smoothing_widths_round_trip_and_validate():
     parser = build_arg_parser()
     cfg0 = build_config_from_args(_postprocess_args(
@@ -6762,3 +6829,64 @@ def test_clubb_mf_flag_reaches_the_turbulence_config():
         "--dataset", "analytical", "--turbulence", "clubb", "--clubb-mf"]), parser))
     with pytest.raises(ValueError, match="clubb_prognostic"):
         turbulence_config_for(diag)
+
+
+def test_clubb_mf_cldfrac_fac_flag_reaches_the_cloud_config():
+    """--cloud-clubb-mf-cldfrac-fac round-trips to CloudConfig.mf_cldfrac_fac
+    (unset = CAM7's 10); refused without clubb_mf + cam6_clubb and outside the
+    spec bounds 1..20 (vote 2026-11-24)."""
+    import pytest
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import _standalone_cloud_config
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--turbulence", "clubb", "--clubb-prognostic",
+            "--clubb-mf"]
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--cloud-clubb-mf-cldfrac-fac", "3.5"]), parser))
+    assert cfg.cloud_clubb_mf_cldfrac_fac == 3.5
+    assert build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser)).cloud_clubb_mf_cldfrac_fac is None
+    assert _standalone_cloud_config(cfg, "cam6_clubb").mf_cldfrac_fac == 3.5
+    assert _standalone_cloud_config(
+        cfg._replace(cloud_clubb_mf_cldfrac_fac=None), "cam6_clubb").mf_cldfrac_fac == 10.0
+    for bad in (dict(cloud_clubb_mf_cldfrac_fac=3.5),
+                dict(cloud_clubb_mf_cldfrac_fac=25.0, clubb_mf=True,
+                     cloud_scheme="cam6_clubb")):
+        with pytest.raises(ValueError, match="cloud_clubb_mf_cldfrac_fac"):
+            ExperimentConfig()._replace(**bad).validate_strict()
+    for edge in (1.0, 20.0):  # spec bounds are inclusive
+        try:
+            ExperimentConfig()._replace(
+                cloud_clubb_mf_cldfrac_fac=edge, clubb_mf=True,
+                cloud_scheme="cam6_clubb").validate_strict()
+        except ValueError as e:
+            assert "cloud_clubb_mf_cldfrac_fac" not in str(e)
+
+
+def test_clubb_mf_alphturb_flag_reaches_the_clubb_config():
+    """--clubb-mf-alphturb round-trips to CLUBBConfig.mf_alphturb (unset = 0,
+    off); refused without clubb_mf and outside 0..6 (vote 2026-11-24)."""
+    import pytest
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--turbulence", "clubb", "--clubb-prognostic",
+            "--clubb-mf"]
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--clubb-mf-alphturb", "3"]), parser))
+    assert cfg.clubb_mf_alphturb == 3.0
+    assert turbulence_config_for(cfg).clubb.mf_alphturb == 3.0
+    plain = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert plain.clubb_mf_alphturb is None
+    tc = turbulence_config_for(plain)
+    assert tc.clubb is None or tc.clubb.mf_alphturb == 0.0
+    for bad in (dict(clubb_mf_alphturb=3.0), dict(clubb_mf_alphturb=7.0, clubb_mf=True)):
+        with pytest.raises(ValueError, match="clubb_mf_alphturb"):
+            ExperimentConfig()._replace(**bad).validate_strict()
+    for edge in (0.0, 6.0):
+        try:
+            ExperimentConfig()._replace(clubb_mf_alphturb=edge, clubb_mf=True).validate_strict()
+        except ValueError as e:
+            assert "clubb_mf_alphturb" not in str(e)

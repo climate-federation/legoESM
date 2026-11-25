@@ -115,7 +115,7 @@ def section1(run_dir):
         print(f"    {lab:36s} n={int(m.sum()):7d} ({100*m.sum()/nwet:6.3f}%)"
               f"  XOR vs dump = {xor:7d} ({100*xor/nwet:7.4f}%)")
     # ---- row: NEMO SETs avm := rn_evd; legoESM takes MAX(closure, K_conv)
-    #      (k_profiles.py:338 under vmix_background_mode="nemo_max_floor").
+    #      (k_profiles.py:354 under vmix_background_mode="nemo_max_floor").
     #      The two differ only where the CLOSURE already exceeds rn_evd.
     #      tke_dump_avm_final.bin = zdftke's exit avm = NEMO's avm_k (PRE-EVD).
     clo = _load_interior(os.path.join(run_dir, "tke_dump_avm_final.bin"),

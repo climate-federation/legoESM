@@ -80,7 +80,7 @@ All line-number hunks were then re-anchored once against the final tree:
 
 - 47 map keys and 14 GYRE-receipt citations were moved to the lines the gate
   itself identifies.
-- One range (`ocean_model_latlon_cgrid.py:8805-9241`) went back to main's
+- One range (`ocean_model_latlon_cgrid.py:8824-9260`) went back to main's
   437-line extent. The seamount hook had widened it to 453.
 
 ## 3. Certification (standalone tree, commit `599265056b00`, clean)
@@ -100,7 +100,7 @@ relative floor). The given-entry rows stay separate from the independent ones
 
 | gate | result |
 |---|---|
-| citation gate, default (GYRE receipt from `## Round 25 —`) | `PASS`, 274 citations, 0 failing map entries; plant `ocean_model_latlon_cgrid.py:8190`: `FAIL`, exit 1 |
+| citation gate, default (GYRE receipt from `## Round 25 —`) | `PASS`, 274 citations, 0 failing map entries; plant `ocean_model_latlon_cgrid.py:8209`: `FAIL`, exit 1 |
 | citation gate, TSUNAMI receipts from `## Citations` | rounds 1, 2, 4, 5, 7, 8 `PASS` (29, 30, 11, 11, 2, 2 citations). Round 3 `FAIL` with 2 unmapped citations, same as on the lane (debt 7) |
 | push battery (citation gate, TKE terms, recipe, real freshwater closure; ws stage face mask, prognostic barotropic state) | `126 passed` + `10 passed` = 136, as on the lane |
 | TSUNAMI tests (card, check_records, geometry gate, ladder) + advection-off arms + barotropic inertial oscillation | `82 passed` |

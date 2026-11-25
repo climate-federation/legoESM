@@ -85,6 +85,26 @@ def water_bar_verdict(rel: dict, p_atm: float) -> list | None:
     return water_bar_failures(rel)
 
 
+def first_nonfinite(tree, where: str):
+    """First leaf of ``tree`` holding a non-finite value (path, shape, count,
+    first indices), or None.  The land's canopy warm-start cache is NaN by
+    design and is skipped, as the land's own check does."""
+    import jax
+    for pth, x in jax.tree_util.tree_flatten_with_path(tree)[0]:
+        if "canopy_x" in jax.tree_util.keystr(pth):
+            continue
+        try:
+            x = np.asarray(x)
+        except Exception:
+            continue
+        if x.dtype.kind in "fc" and not np.all(np.isfinite(x)):
+            bad = np.argwhere(~np.isfinite(x))
+            return dict(where=where, field=jax.tree_util.keystr(pth),
+                        shape=list(x.shape), n_bad=int(len(bad)),
+                        first_idx=bad[:8].tolist())
+    return None
+
+
 def budget_rows(s0: dict, s1: dict, f: dict) -> dict:
     """Residual rows from start/end storages ``s0``/``s1`` (keys ``STORES``)
     and run-integrated fluxes ``f`` (keys as the module docstring).  Pure."""
@@ -225,6 +245,24 @@ def main(argv=None) -> int:
                     help="save step N's per-column ledger water rows, "
                     "evaporation, precipitation and water species (npz next "
                     "to --json)")
+    ap.add_argument("--nan-trap", action="store_true",
+                    help="check every array for non-finite values every "
+                    "step (state entering the step, incl. land and slab; the "
+                    "step's output; its surface diagnostics); at the first "
+                    "hit print NANTRAP and save the ORIGIN state (entering "
+                    "that step) next to --json, then stop")
+    ap.add_argument("--nan-stages", action="store_true",
+                    help="--nan-trap on the lat-lon lane: also check every "
+                    "stage inside the atmosphere step (dynamics tendency, "
+                    "polar filters, energy fixer, physics, physics "
+                    "increment, safety rails) and name the first stage whose "
+                    "output is non-finite from finite inputs, with the "
+                    "non-finite count per latitude row")
+    ap.add_argument("--replay-copy-col", type=int, nargs=2, default=None,
+                    metavar=("SRC", "DST"),
+                    help="--nan-stages replay: overwrite column DST of every "
+                    "per-column physics input with column SRC first (to look "
+                    "past a known first NaN source)")
     ap.add_argument("--require-water-bar", action="store_true",
                     help="exit 1 when a water row misses the bar "
                     "(WATER_BAR_REL of the run's precipitation)")
@@ -234,6 +272,10 @@ def main(argv=None) -> int:
     args, deck_argv = ap.parse_known_args(argv)
     if args.windows and not args.deck:
         ap.error("--windows needs --deck")
+    if (args.nan_stages or args.replay_copy_col) and not args.nan_trap:
+        ap.error("--nan-stages / --replay-copy-col need --nan-trap")
+    if args.replay_copy_col and not args.nan_stages:
+        ap.error("--replay-copy-col needs --nan-stages")
     if deck_argv and not args.deck:
         ap.error(f"unrecognized arguments: {' '.join(deck_argv)}")
     if args.deck and args.energy_terms:
@@ -378,6 +420,9 @@ def main(argv=None) -> int:
     DT_req, DT = DT, float(atm.config.dycore.dt)
     tc = d._tile_config
     ocfg = cc.ocean_config
+    # the 3-D ocean (LatLonCGridOceanConfig) has no slab column: its heat row
+    # is N/A (NaN); the water rows book the fluxes it receives, as for a slab
+    slab_ocean = hasattr(ocfg, "mode")
     area = _np(atm.grid.grid_area).reshape(-1)
     n = area.size
     f_land = _np(tc.f_land).reshape(-1)
@@ -387,7 +432,7 @@ def main(argv=None) -> int:
              # one-layer slab only: the two-layer slab's deep layer and its
              # restoring are not booked, so its heat row is N/A (NaN)
              C_mix=(ocfg.rho_ocean * ocfg.c_ocean * ocfg.h_mix
-                    if ocfg.mode == "slab" else float("nan")),
+                    if slab_ocean and ocfg.mode == "slab" else float("nan")),
              g=constants.g, rho_water=constants.rho_water,
              rho_ice=constants.rho_ice)
     print("CONFIG", json.dumps(dict(grid=args.grid,
@@ -456,7 +501,10 @@ def main(argv=None) -> int:
             canopy=z if L.W_canopy is None else _np(L.W_canopy).reshape(-1),
             h_ice=_np(st.h_ice).reshape(-1),
             conc=_np(st.concentration).reshape(-1),
-            T_slab=_np(d._ocean_state.T_sfc).reshape(-1))
+            # zeros, not NaN, under the 3-D ocean: the NaN trap reads these
+            # arrays (C_mix is NaN there, so the heat row stays N/A)
+            T_slab=(_np(d._ocean_state.T_sfc).reshape(-1) if slab_ocean
+                    else np.zeros(n)))
 
     n0 = len(MPAS_SFC_DIAG_BASE_KEYS)
     SL = {key: i for i, key in enumerate(MPAS_SFC_DIAG_BASE_KEYS)}
@@ -619,6 +667,105 @@ def main(argv=None) -> int:
         mp.setattr(llm, "cgrid_latlon_pe_tendencies", tend_w)
         mp.setattr(llm, "fourier_filter_3d", ff3_w)
         mp.setattr(llm, "fourier_filter", ff2_w)
+    stage_log, nan_stage = [], {}
+    if args.nan_stages:
+        import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as llm
+
+        def _bad_profile(tree):
+            out = []
+            for x in jax.tree_util.tree_leaves(tree):
+                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype,
+                                                          jnp.inexact):
+                    b = ~jnp.isfinite(x)
+                    out.append(b if b.ndim < 2 else jnp.sum(
+                        b, axis=tuple(range(1, b.ndim))))
+            return out
+
+        def _stage_cb(name):
+            def cb(bin_, bout):
+                nin = int(sum(int(np.sum(np.asarray(b))) for b in bin_))
+                nout = [np.asarray(b) for b in bout]
+                tot = int(sum(int(np.sum(b)) for b in nout))
+                stage_log.append((n_steps[0] + 1, name, nin, tot))
+                if tot and not nin and "first_stage" not in nan_stage:
+                    rows = sorted({int(i) for b in nout if b.ndim == 1
+                                   for i in np.nonzero(b)[0]})
+                    nan_stage.update(first_stage=name, step=n_steps[0] + 1,
+                                     bad_index_axis0=rows[:48])
+            return cb
+
+        def _wrap_fn(fn, name, skip_self=False):
+            def w(*a, **kw):
+                ins = (a[1:] if skip_self else a, kw)
+                out = fn(*a, **kw)
+                jax.debug.callback(_stage_cb(name), _bad_profile(ins),
+                                   _bad_profile(out), ordered=True)
+                return out
+            return w
+        for nm in ("cgrid_latlon_pe_tendencies", "fourier_filter_3d",
+                   "fourier_filter", "gridded_energy_fixer_dT"):
+            mp.setattr(llm, nm, _wrap_fn(getattr(llm, nm), nm))
+        dcls = type(atm.model.dyn)
+        for nm in ("_call_physics_raw", "_apply_physics_increment",
+                   "_apply_safety_rails"):
+            mp.setattr(dcls, nm, _wrap_fn(getattr(dcls, nm), nm,
+                                          skip_self=True))
+    phys_in, pf_wrappers = {}, {}
+
+    def _replay_wrapper(pf0):
+        """``pf0`` with its inputs copied to the host every call (the last
+        call's inputs are replayed op-by-op at a NaN hit)."""
+        import functools
+        w = pf_wrappers.get(pf0)
+        if w is not None:
+            return w
+
+        @functools.wraps(pf0)
+        def w(cols, mesh, sigma, phys_state=None, forcing=None):
+            leaves, tdef = jax.tree_util.tree_flatten(
+                (cols, phys_state, forcing))
+            arr = [i for i, x in enumerate(leaves) if hasattr(x, "dtype")]
+            phys_in["treedef"], phys_in["arr"] = tdef, arr
+            phys_in["static"] = [None if i in arr else x
+                                 for i, x in enumerate(leaves)]
+
+            def cb(*xs):
+                phys_in["leaves"] = [np.asarray(x) for x in xs]
+            jax.debug.callback(cb, *[leaves[i] for i in arr], ordered=True)
+            return pf0(cols, mesh, sigma, phys_state=phys_state,
+                       forcing=forcing)
+        pf_wrappers[pf0] = w
+        w._orig = pf0
+        return w
+
+    def replay_physics():
+        """Re-run the last physics call op-by-op with NaN debugging: the
+        traceback names the first primitive that makes a NaN."""
+        import traceback
+        vals = list(phys_in["static"])
+        for i, x in zip(phys_in["arr"], phys_in["leaves"]):
+            vals[i] = jnp.asarray(x)
+        if args.replay_copy_col:
+            src, dst = args.replay_copy_col
+            vals = [v.at[dst].set(v[src]) if hasattr(v, "shape")
+                    and v.ndim >= 1 and v.shape[0] == n else v for v in vals]
+        cols, ps, fo = jax.tree_util.tree_unflatten(phys_in["treedef"], vals)
+        pf0 = next(iter(pf_wrappers.values()))._orig
+        jax.config.update("jax_debug_nans", True)
+        try:
+            with jax.disable_jit():
+                pf0(cols, model.mesh, model.sigma_coord, phys_state=ps,
+                    forcing=fo)
+            print("REPLAY no NaN raised")
+        except FloatingPointError:
+            print("REPLAY " + traceback.format_exc()[-6000:])
+        finally:
+            jax.config.update("jax_debug_nans", False)
+        if args.json:
+            np.savez(str(Path(args.json).with_suffix(".physics_input.npz")),
+                     **{f"leaf{i}": x for i, x in zip(phys_in["arr"],
+                                                       phys_in["leaves"])})
+
     model, orig = atm.model, atm.model.step
     n_steps = [0]
     dyn_dw = [np.zeros(2)]
@@ -682,10 +829,60 @@ def main(argv=None) -> int:
                      **{sp: _np(atm.current_tracer(sp)).reshape(n, -1)
                         for sp in carried})
 
+    def nan_hit(hit, origin):
+        if nan_stage:
+            hit["stages"] = nan_stage
+            hit["stage_log_this_step"] = [
+                r for r in stage_log if r[0] == n_steps[0] + 1][-60:]
+        hit.update(step=n_steps[0] + 1,
+                   last_land_call_step=land_seen.get("call_step"))
+        if hit["where"] == "entering":
+            col = hit["first_idx"][0][0] if hit["first_idx"][0] else None
+            if col is not None and col < n:
+                hit["first_col_lat_lon_deg"] = [
+                    float(np.rad2deg(_np(model.mesh.latCell).reshape(-1)[col])),
+                    float(np.rad2deg(_np(model.mesh.lonCell).reshape(-1)[col]))]
+        print("NANTRAP " + json.dumps(hit))
+        if nan_stage.get("first_stage") == "_call_physics_raw" and \
+                phys_in.get("leaves") is not None:
+            replay_physics()
+        if args.json:
+            leaves = jax.tree_util.tree_flatten_with_path(origin)[0]
+            keep = {}
+            for pth, x in leaves:
+                try:
+                    x = np.asarray(x)
+                except Exception:
+                    continue
+                if x.dtype.kind in "biufc":
+                    keep[jax.tree_util.keystr(pth)] = x
+            np.savez(str(Path(args.json).with_suffix(".nantrap_origin.npz")),
+                     **keep)
+        mp.undo()
+        raise SystemExit(2)
+
     def step(*a, **kw):
         finish_rec()
+        if args.nan_stages and kw.get("physics_fn") is not None:
+            kw = dict(kw, physics_fn=_replay_wrapper(kw["physics_fn"]))
+        if args.nan_trap:
+            entering = dict(arrays=arrays(), land=atm._land_ml_state,
+                            ocean=d._ocean_state, sfc=d._sfc_state,
+                            args=a, kw=kw)
+            hit = (first_nonfinite(entering["arrays"], "entering")
+                   or first_nonfinite(entering["land"], "entering_land_state")
+                   or first_nonfinite(entering["ocean"], "entering_ocean_state")
+                   or first_nonfinite(entering["sfc"], "entering_surface_state")
+                   or first_nonfinite((a, kw), "entering_step_args"))
+            if hit:
+                nan_hit(hit, entering)
         out = orig(*a, **kw)
         sd = model._sfc_diag
+        if args.nan_trap:
+            hit = first_nonfinite(out, "step_output") or first_nonfinite(
+                sd, "step_surface_diag")
+            if hit:
+                nan_hit(hit, entering)
         F["P_atm"] += I(sd[SL["precip"]]) * DT
         F["E_atm"] += I(sd[SL["evap_sfc"]]) * DT
         if n_steps[0] == 1:
@@ -738,10 +935,11 @@ def main(argv=None) -> int:
         H, O = d._surface_handback, d._owned_to_ocean
         F["H_debit"] += I(H.evap) * dt_seg
         F["fw_out"] += I(O.ice_lake_freshwater_flux) * dt_seg
-        F["q_flux"] += float(np.sum(ocfg.Q_flux * k["f_water"] * area)) * dt_seg
-        F["q_freeze"] += float(np.sum(
-            _np(d._ocean_state.Q_freeze).reshape(-1) * k["f_water"] * area)
-        ) * dt_seg
+        if slab_ocean:
+            F["q_flux"] += float(np.sum(ocfg.Q_flux * k["f_water"] * area)) * dt_seg
+            F["q_freeze"] += float(np.sum(
+                _np(d._ocean_state.Q_freeze).reshape(-1) * k["f_water"] * area)
+            ) * dt_seg
         prev["H"], prev["O"] = H, O
         n_ex[0] += 1
         if args.trace:   # per-window land row, to localise a land residual

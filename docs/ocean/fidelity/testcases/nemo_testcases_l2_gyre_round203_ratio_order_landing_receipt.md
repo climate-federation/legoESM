@@ -268,7 +268,7 @@ on its returned stretch factor, unlike its sibling `nemo_r3t_stretch`
 (`jnp.maximum(1.0 + r3t, 1.0e-6)`), and the reviewer confirmed this is live
 (not theoretical) by calling the function directly with eta driven
 pathologically negative and getting a negative stretch factor back, wired as
-a literal divisor (`_stage()`, `ocean_model_latlon_cgrid.py:2230-2233`) on the
+a literal divisor (`_stage()`, `ocean_model_latlon_cgrid.py:2244-2247`) on the
 certified GYRE path. The certified from-rest year never drives eta that
 negative, so nothing broke in this measurement — but the function has no
 guard against the exact "silently wrong, not NaN" sign-flip class this

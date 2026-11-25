@@ -537,12 +537,14 @@ def _amip_main_only_dests(parser):
     import re
     from legoesm.driver.config import (
         CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS,
+        ZM_WIDTH_FIELDS,
     )
     pat = r"(?:args|pre)\.(\w+)|getattr\((?:args|pre),\s*\"(\w+)\""
     read = {m[0] or m[1] for m in re.findall(
         pat, inspect.getsource(_run_amip().build_config_from_args)
         + Path(__file__).read_text())}
-    read |= set(ZM_SCALAR_FIELDS) | set(ZM_TRIGGER_FIELDS) | set(CLUBB_SCALAR_FIELDS)
+    read |= (set(ZM_SCALAR_FIELDS) | set(ZM_TRIGGER_FIELDS) | set(ZM_WIDTH_FIELDS)
+             | set(CLUBB_SCALAR_FIELDS))
     amip = {a.dest for a in _run_amip().build_arg_parser()._actions}
     return sorted((amip - read) - {"help"})
 
@@ -1284,8 +1286,12 @@ def main(argv=None, *, build_only=False):
             overrides["woa_s_path"] = args.woa_s_path
             # Co-derive the atmosphere land fraction from the SAME ocean mask
             # and enable a land tile over the continents (f_land>0 with
-            # land_mode='none' would try to run an unused land model).
-            overrides["f_land_mode"] = "from_ocean"
+            # land_mode='none' would try to run an unused land model).  Under
+            # --atm-owns-surface the partition is the atmosphere's land mask
+            # with the ocean's dry cells as land (the driver's land-fraction
+            # hook), read by the coupler as f_land_mode='analytical'.
+            if not args.atm_owns_surface:
+                overrides["f_land_mode"] = "from_ocean"
             # Select the land surface model (coupler dispatches on the config
             # type: MultiLayerLandConfig -> Richards column tile, else slab).
             # woa defaults to slab when --land-scheme is unset.

@@ -1456,6 +1456,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "increment only, no canopy snow). Default off. "
                              "Requires the two-leaf multilayer land with snow "
                              "albedo feedback.")
+    parser.add_argument("--land-canopy-snow",
+                        dest="land_canopy_snow",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow,
+                        help="Intercepted canopy snow (CLM5 snowveg_flag ON_RAD): "
+                             "canopy snow store, unloading, sublimation and "
+                             "snow-whitened canopy albedo. Default off. Requires "
+                             "--land-canopy-snow-masking and the bulk snowpack.")
+    parser.add_argument("--land-canopy-snow-temperature-width-K",
+                        dest="land_canopy_snow_temperature_width_K", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_temperature_width_K,
+                        help="RULE 5 width [K] of the canopy-snow temperature "
+                             "switches (0 = CLM5 hard). Default: CanopySnowConfig.")
+    parser.add_argument("--land-canopy-snow-relative-width",
+                        dest="land_canopy_snow_relative_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_relative_width,
+                        help="RULE 5 relative width of the canopy-snow caps "
+                             "(0 = CLM5 hard, <= 1). Default: CanopySnowConfig.")
+    parser.add_argument("--land-canopy-snow-fcansno-ramp",
+                        dest="land_canopy_snow_fcansno_ramp", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_fcansno_ramp,
+                        help="RULE 5 store fraction below which the canopy snow "
+                             "fraction's 0.15 power is a C1 quadratic (0 = CLM5 "
+                             "hard, <= 1). Default: CanopySnowConfig.")
     parser.add_argument("--land-canopy-rh-cap-smoothing-width",
                         dest="land_canopy_rh_cap_smoothing_width", type=float,
                         default=_EXPERIMENT_DEFAULTS.land_canopy_rh_cap_smoothing_width,
@@ -1550,6 +1574,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=None,
                         help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
                              "None = 0.01 (CAM6 namelist)")
+    parser.add_argument("--clubb-mf-alphturb", dest="clubb_mf_alphturb",
+                        type=float, default=None,
+                        help="CAM7 CLUBB-MF TKE-enhanced entrainment "
+                             "clubb_mf_alphturb (bounds 0..6); None = 0 (off), "
+                             "CAM7 uses 3. Needs --clubb-mf.")
+    parser.add_argument("--cloud-clubb-mf-cldfrac-fac",
+                        dest="cloud_clubb_mf_cldfrac_fac", type=float,
+                        default=None,
+                        help="CAM7 CLUBB-MF plume-area to deep-cloud-fraction "
+                             "factor (bounds 1..20); None = 10 (CAM7). Needs "
+                             "--clubb-mf and cloud_scheme cam6_clubb.")
     parser.add_argument("--cloud-cam6-do-subgrid-growth",
                         dest="cloud_cam6_do_subgrid_growth",
                         action=argparse.BooleanOptionalAction, default=False,
@@ -1889,6 +1924,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "RULE 5 smooth forms; the cloud "
                              "levels are exact either way. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_hard_switches}.")
+    parser.add_argument("--bechtold-ifs-openifs-cloud-top-fixer",
+                        dest="bechtold_ifs_openifs_cloud_top_fixer",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_ifs_openifs_cloud_top_fixer,
+                        help="Faithful IFS chain: OpenIFS's cloud-top "
+                             "negative-humidity fixer as written (adds the deficit "
+                             "to the detrained condensate, driving humidity more "
+                             "negative, #2594) instead of the corrected one. "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_openifs_cloud_top_fixer}.")
     parser.add_argument("--bechtold-use-ifs-land-rhebc",
                         dest="bechtold_use_ifs_land_rhebc",
                         action=argparse.BooleanOptionalAction,
@@ -3510,6 +3555,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_do_subgrid_growth=args.cloud_cam6_do_subgrid_growth,
         cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
         cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
+        cloud_clubb_mf_cldfrac_fac=args.cloud_clubb_mf_cldfrac_fac,
+        clubb_mf_alphturb=args.clubb_mf_alphturb,
         cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,
         cloud_cam6_snow_optics_file=args.cloud_cam6_snow_optics_file,
         cloud_cam6_rad_specified_nc=args.cloud_cam6_rad_specified_nc,
@@ -3529,6 +3576,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
         land_canopy_snow_masking=args.land_canopy_snow_masking,
+        land_canopy_snow=args.land_canopy_snow,
+        land_canopy_snow_temperature_width_K=args.land_canopy_snow_temperature_width_K,
+        land_canopy_snow_relative_width=args.land_canopy_snow_relative_width,
+        land_canopy_snow_fcansno_ramp=args.land_canopy_snow_fcansno_ramp,
         land_snow_insulation=args.land_snow_insulation,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
@@ -3758,6 +3809,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
         bechtold_ifs_hard_switches=args.bechtold_ifs_hard_switches,
+        bechtold_ifs_openifs_cloud_top_fixer=args.bechtold_ifs_openifs_cloud_top_fixer,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
         bechtold_snow_refill_width_kg_m2_s=args.bechtold_snow_refill_width_kg_m2_s,

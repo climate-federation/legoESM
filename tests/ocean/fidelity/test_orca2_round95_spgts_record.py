@@ -30,10 +30,11 @@ def write_group(payload: bytearray, name: str, rank: int) -> None:
     payload.extend(np.zeros(n1 * n2, dtype=np.float64).tobytes())
 
 
-def synthetic_record(path: Path, *, icycle: int = 2) -> None:
-    payload = bytearray(record.MAGIC.encode("ascii").ljust(16, b" "))
+def synthetic_record(path: Path, *, icycle: int = 2, kt: int = 1,
+                     magic: str = record.MAGIC) -> None:
+    payload = bytearray(magic.encode("ascii").ljust(16, b" "))
     payload.extend(struct.pack(
-        "=18i", 1, 1, 1, 1, 3, 3, 0, 4, 4, 31, icycle,
+        "=18i", 1, kt, 1, 1, 3, 3, 0, 4, 4, 31, icycle,
         1, 1, 2, 2, 3, 3, 64,
     ))
     for name in record.ENTRY:
@@ -53,6 +54,14 @@ def test_record_derives_frames_and_payloads_from_its_header(tmp_path: Path) -> N
     assert parsed["icycle"] == 2
     assert parsed["frames"] == 4
     assert parsed["groups"] == len(record.ENTRY) + 2 * len(record.SUBSTEP) + len(record.EXIT)
+
+
+def test_record_accepts_explicit_kt8_identity(tmp_path: Path) -> None:
+    path = tmp_path / "oracle_r166_spg_rank0000_kt00000008.bin"
+    synthetic_record(path, kt=8, magic="NEMO_L4_R166SPG")
+    parsed = record.read_record(
+        path, expected_kt=8, expected_magic="NEMO_L4_R166SPG")
+    assert parsed["kt"] == 8
 
 
 @pytest.mark.parametrize(
@@ -107,6 +116,15 @@ def test_round97_walk_extracts_validated_self_describing_payload(tmp_path: Path)
     assert set(values) == record.required_names(2)
     assert values["i000_ssh_frc"].shape == (3, 2)
     assert values["i000_wgtbtp1"].shape == (4,)
+
+
+def test_round97_walk_extracts_explicit_kt8_identity(tmp_path: Path) -> None:
+    path = tmp_path / "oracle_r166_spg_rank0000_kt00000008.bin"
+    synthetic_record(path, kt=8, magic="NEMO_L4_R166SPG")
+    metadata, values = walk._payload(
+        path, expected_kt=8, expected_magic="NEMO_L4_R166SPG")
+    assert metadata["kt"] == 8
+    assert set(values) == record.required_names(2)
 
 
 def test_round97_walk_first_nonbit_uses_compiled_order() -> None:

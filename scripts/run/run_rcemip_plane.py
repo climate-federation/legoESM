@@ -85,6 +85,7 @@ from legoesm.grids.vertical import (
     create_height_coordinate_from_z_half,
     create_stretched_height_coordinate,
 )
+from legoesm.parallel.staggered_init import staggered_first_call
 
 
 # JAX x64 toggle happens at IMPORT TIME (before argparse). Two paths:
@@ -494,6 +495,27 @@ def _make_land_radiation_refresh_fn(
     return refresh_fn
 
 
+def _with_fp64_tracers(fn):
+    """Mixed precision: feed ``fn`` the tracer stack in fp64. Morrison's
+    saturation adjustment forms q_v = (q_v + q_c) - q_c_new, which in fp32
+    rounds at the vapour scale and creates water (measured: total-water drift
+    5.9e-6/h -> 4e-8/h over 1 h of RCEMIP1 with fp64 inputs here)."""
+    def wrapped(state, *rest):
+        return fn(state._replace(tracers=state.tracers.replace(
+            data=state.tracers.data.astype(jnp.float64))), *rest)
+    return wrapped
+
+
+def _in_fp64(fn):
+    """Mixed precision: run ``fn`` on an fp64 copy of the state (radiation:
+    fp32 radiation is the dominant fp32 error, theta' 9e-3 vs 1e-6 at 1 h)."""
+    def wrapped(state, *rest):
+        return fn(jax.tree.map(lambda a: a.astype(jnp.float64)
+                               if jnp.issubdtype(a.dtype, jnp.floating) else a,
+                               state), *rest)
+    return wrapped
+
+
 def make_rcemip_physics(
     grid, height_coord, terrain_metric,
     radiation_config: RadiationConfig | None,
@@ -502,6 +524,7 @@ def make_rcemip_physics(
     surface_flux: bool = True,
     T_sfc: float = 300.0, p_sfc: float = 101480.0,
     ls_forcing_physics=None,
+    mixed_precision: bool = False,
 ):
     """Compose RCEMIP physics_fn — surface + radiation + microphysics.
 
@@ -524,13 +547,13 @@ def make_rcemip_physics(
             T_sfc=T_sfc, p_sfc=p_sfc,
         ))
     if radiation_config is not None:
-        physics_fns.append(_plane_radiation_physics_with_sst(
-            radiation_config, grid, T_sfc,
-        ))
+        rad = _plane_radiation_physics_with_sst(radiation_config, grid, T_sfc)
+        physics_fns.append(_in_fp64(rad) if mixed_precision else rad)
     if microphysics_config is not None:
-        physics_fns.append(make_microphysics_physics(
+        mic = make_microphysics_physics(
             microphysics_config, model_type="plane", dt=dt,
-        ))
+        )
+        physics_fns.append(_with_fp64_tracers(mic) if mixed_precision else mic)
     if ls_forcing_physics is not None:
         physics_fns.append(ls_forcing_physics)
 
@@ -551,6 +574,7 @@ def split_rad_from_other_physics(
     surface_flux: bool = True,
     T_sfc: float = 300.0, p_sfc: float = 101480.0,
     ls_forcing_physics=None,
+    mixed_precision: bool = False,
 ):
     """Build TWO separate physics callables for the gated-radiation pattern.
 
@@ -576,9 +600,10 @@ def split_rad_from_other_physics(
             T_sfc=T_sfc, p_sfc=p_sfc,
         ))
     if microphysics_config is not None:
-        non_rad_fns.append(make_microphysics_physics(
+        mic = make_microphysics_physics(
             microphysics_config, model_type="plane", dt=dt,
-        ))
+        )
+        non_rad_fns.append(_with_fp64_tracers(mic) if mixed_precision else mic)
     if ls_forcing_physics is not None:
         non_rad_fns.append(ls_forcing_physics)
 
@@ -595,6 +620,8 @@ def split_rad_from_other_physics(
         rad_physics_fn = _plane_radiation_physics_with_sst(
             radiation_config, grid, T_sfc,   # RAD-7: SST surface boundary
         )
+        if mixed_precision:
+            rad_physics_fn = _in_fp64(rad_physics_fn)
     return non_rad_physics_fn, rad_physics_fn
 
 
@@ -1024,7 +1051,12 @@ def _build_radiation_config(
     clouds: bool = True,
     insolation: str = "rcemip",
     t_sfc: float = 300.0,
+    column_chunk_size: int = 0,
 ) -> RadiationConfig | None:
+    if column_chunk_size > 0 and scheme != "rrtmgp":
+        raise ValueError(
+            f"--radiation-column-chunk {column_chunk_size} only applies to "
+            f"--radiation rrtmgp (got {scheme!r}); drop the flag.")
     if scheme == "none":
         return None
     if scheme not in ("gray", "rrtmgp"):
@@ -1052,7 +1084,8 @@ def _build_radiation_config(
     # RAD-1-ice): ice r_eff stays 30 µm; SAM uses T-dependent 6–250 µm.
     if scheme == "rrtmgp":
         from legoesm.atmosphere.physics.clouds.config import CloudConfig
-        rrtmgp_kwargs = {"include_clouds": clouds}
+        rrtmgp_kwargs = {"include_clouds": clouds,
+                         "column_chunk_size": column_chunk_size}
         if s0 is not None:
             rrtmgp_kwargs["S_0"] = s0
         # RAD-4: SAM RCEMIP trace-gas concentrations. gSAM (RCEMIP1/prm,
@@ -1547,6 +1580,11 @@ def build_rcemip_height_coord(args, p_sfc_rcemip, dtype):
             args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
             theta_ref_fn=theta_ref_fn,
         )
+    if args.precision == "mixed":
+        # Built in fp64 (x64 is on), stored in fp32 like the rest of the state.
+        hc = hc._replace(**{
+            k: v.astype(jnp.float32) for k, v in hc._asdict().items()
+            if isinstance(v, jax.Array) and jnp.issubdtype(v.dtype, jnp.floating)})
     return hc, snd, q_sfc_rce
 
 
@@ -1600,6 +1638,7 @@ def build_dycore_config(args):
         sgs_vertical_diffusion=args.sgs_vertical,
         turbulence_closure=args.turbulence_closure,
         molecular_viscosity=args.molecular_viscosity,
+        mixed_precision=(args.precision == "mixed"),
     )
 
 
@@ -1799,7 +1838,7 @@ def parse_args(argv=None):
                         "extrema ⇒ no cold drift. Decoupled from the implicit "
                         "w-solve. Recommended van_leer for long RCE; validate then "
                         "promote to default.")
-    p.add_argument("--precision", choices=["float32", "float64"],
+    p.add_argument("--precision", choices=["float32", "float64", "mixed"],
                    default="float64",
                    help="fp32 ~5-9x faster than fp64 on consumer GPU "
                         "(fp64 ALU 1:32 ratio); fp32 sufficient for RCE.")
@@ -1811,6 +1850,12 @@ def parse_args(argv=None):
                         "RRTMGP). Gated mode (interval>1) applies cached "
                         "radiation tendency as forward Euler increments "
                         "between recomputes — standard SAM/WRF/CM1 practice.")
+    p.add_argument("--radiation-column-chunk", type=int, default=0,
+                   help="RRTMGP column-chunk block size (0 = off). >0 maps the "
+                        "rrtmgp solve over fixed-size column blocks, bounding "
+                        "its XLA scratch memory and compile time. Numerically "
+                        "exact (columns are independent); must divide the "
+                        "rank's column count.")
     p.add_argument("--radiation", choices=["gray", "rrtmgp", "none"],
                    default="rrtmgp",
                    help="Radiation scheme. DEFAULT rrtmgp = RRTM (the faithful "
@@ -2115,7 +2160,12 @@ def main():
             "LEGOESM_RCEMIP_PLANE_FP32=1 .venv/bin/python "
             "scripts/run_rcemip_plane.py --precision float32 ..."
         )
-    dtype = jnp.float32 if args.precision == "float32" else jnp.float64
+    if args.precision == "mixed" and _os.environ.get("LEGOESM_RCEMIP_PLANE_FP32") == "1":
+        raise SystemExit(
+            "--precision mixed needs x64 ON: unset LEGOESM_RCEMIP_PLANE_FP32 "
+            "(its fp64 parts — radiation, microphysics inputs, mass-fixer sums — "
+            "would silently run in fp32).")
+    dtype = jnp.float64 if args.precision == "float64" else jnp.float32
     grid = create_plane_grid(
         nx=args.nx, ny=args.ny, nlev=args.nlev,
         dx=args.dx, dy=args.dx, dtype=dtype,
@@ -2174,6 +2224,7 @@ def main():
     radiation_config = _build_radiation_config(
         args.radiation, update_interval_steps=args.radiation_interval,
         clouds=args.clouds, insolation=args.insolation, t_sfc=args.T_sfc,
+        column_chunk_size=args.radiation_column_chunk,
     )
     if args.land:
         radiation_config = _with_land_radiation_surface(
@@ -2188,6 +2239,9 @@ def main():
     if args.no_physics:
         physics_fn = None
         rad_physics_fn = None
+    elif args.land and args.precision == "mixed":
+        raise SystemExit("--precision mixed is not wired for --land (its "
+                         "host-side radiation/surface path was not measured).")
     elif args.land:
         # LAND mode carries radiation and surface fluxes as host-side
         # forward-Euler slow increments with dynamic T_s.  Keep the dycore
@@ -2216,6 +2270,7 @@ def main():
             microphysics_config=microphysics_config,
             dt=args.dt, T_sfc=args.T_sfc, p_sfc=p_sfc_rcemip,
             surface_flux=not args.no_surface_flux,
+            mixed_precision=(args.precision == "mixed"),
         )
         sim_refresh_s = args.radiation_interval * args.dt
         print(f"  RADIATION GATED: refresh every {args.radiation_interval} "
@@ -2239,6 +2294,7 @@ def main():
             dt=args.dt,
             T_sfc=args.T_sfc, p_sfc=p_sfc_rcemip,
             surface_flux=not args.no_surface_flux,
+            mixed_precision=(args.precision == "mixed"),
         )
         rad_physics_fn = None
 
@@ -2433,14 +2489,28 @@ def main():
                     )
                 land_sfc_flux_jit = jax.jit(_land_sfc_flux_wrapper)
 
+    _state_dtypes = jax.tree.map(lambda a: a.dtype, state)
+
+    def _hold_dtypes(st):
+        # Mixed precision: host-side increments (gated radiation, clip, drain)
+        # may come back in fp64; keep each field's storage dtype.
+        if args.precision != "mixed":
+            return st
+        return jax.tree.map(lambda a, d: a.astype(d), st, _state_dtypes)
+
+    def _step_once(st):
+        return model.step(_hold_dtypes(st), dt=args.dt, physics_fn=physics_fn)
+
     for i in range(_start_step, args.steps):
+        state = _hold_dtypes(state)
         if args.land:
             if land_rad_refresh_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
             ):
-                cached_rad_tend, cached_land_rad_sfc = land_rad_refresh_jit(
-                    state, land_T_sfc,
-                )
+                cached_rad_tend, cached_land_rad_sfc = (
+                    staggered_first_call(land_rad_refresh_jit, state, land_T_sfc)
+                    if cached_rad_tend is None
+                    else land_rad_refresh_jit(state, land_T_sfc))
             if cached_rad_tend is not None:
                 state = apply_radiation_forward_euler(
                     state, cached_rad_tend, args.dt,
@@ -2463,17 +2533,26 @@ def main():
                 args.land_albedo,
                 land_emissivity,
             )
-            state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+            # First step compiles the step: block, then return the freed compile
+            # heap to the OS (the only trim when radiation runs inside the step).
+            state = (staggered_first_call(_step_once, state) if i == _start_step
+                     else _step_once(state))
         else:
             if rad_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
             ):
-                cached_rad_tend = rad_jit(state)
+                # First refresh: return the compile's freed heap to the OS.
+                cached_rad_tend = (staggered_first_call(rad_jit, state)
+                                   if cached_rad_tend is None
+                                   else rad_jit(state))
             if cached_rad_tend is not None:
                 state = apply_radiation_forward_euler(
                     state, cached_rad_tend, args.dt,
                 )
-            state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+            # First step compiles the step: block, then return the freed compile
+            # heap to the OS (the only trim when radiation runs inside the step).
+            state = (staggered_first_call(_step_once, state) if i == _start_step
+                     else _step_once(state))
         # POSITIVITY GUARD (CRM-dycore campaign, codex-reviewed): keep the water
         # tracers >=0 in the STATE after each step, matching run_rce_mpi_long.
         # The advective-form tracer advection under strong div(u) — e.g. a

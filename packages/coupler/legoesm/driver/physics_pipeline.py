@@ -2876,6 +2876,8 @@ class PhysicsPipeline:
                 self, "_cloud_saturation_scheme", None),
             cover_condensate_q_ref=getattr(
                 self, "_cloud_cover_condensate_q_ref", None),
+            clubb_mf_cloud=getattr(self, "_clubb_mf_cloud", None),
+            mf_cldfrac_fac=getattr(self, "_cloud_clubb_mf_cldfrac_fac", None),
         )
 
     def _sundqvist_kwargs(self, ad, q_i, cell_area=None):
@@ -4512,6 +4514,7 @@ def _resolve_convection(config):
                 config, 'bechtold_use_ifs_capdcycl', True),
             ifs_shallow_nosupply=config.bechtold_ifs_shallow_nosupply,
             ifs_hard_switches=config.bechtold_ifs_hard_switches,
+            ifs_openifs_cloud_top_fixer=config.bechtold_ifs_openifs_cloud_top_fixer,
             use_ifs_land_rhebc=getattr(
                 config, 'bechtold_use_ifs_land_rhebc', True),
             use_ifs_snow_melt=getattr(
@@ -5285,6 +5288,15 @@ def turbulence_config_for(config):
                     "clubb_mf=True requires clubb_prognostic=True: the plume "
                     "flux is the prognostic closure's thl/rt forcing.")
             tc = tc._replace(clubb_mf=True)
+        _alph = getattr(config, "clubb_mf_alphturb", None)
+        if _alph is not None:
+            if not getattr(config, "clubb_mf", False):
+                raise ValueError("clubb_mf_alphturb requires clubb_mf=True.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(mf_alphturb=float(_alph)))
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => the scheme's own default stands (CLUBBConfig, CAM6 100 Pa).
@@ -5961,6 +5973,10 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
         config, 'cloud_diagnostic_condensate_scheme', None)
     pipeline._cloud_adiabatic_lwc_rate = getattr(
         config, 'cloud_adiabatic_lwc_rate', None)
+    # CAM7 CLUBB-MF plume cloud into the cam6_clubb deep cloud (opt-in).
+    pipeline._clubb_mf_cloud = bool(getattr(config, 'clubb_mf', False)) or None
+    pipeline._cloud_clubb_mf_cldfrac_fac = getattr(
+        config, 'cloud_clubb_mf_cldfrac_fac', None)
     pipeline._cloud_saturation_scheme = getattr(
         config, 'cloud_saturation_scheme', None)
     pipeline._cloud_cover_condensate_q_ref = getattr(

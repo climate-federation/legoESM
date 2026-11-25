@@ -299,7 +299,7 @@ def _segment_stub(shape):
     d._tile_config = "tiles"
     d._sfc_state = "s0"
     order = []
-    d._build_atm_forcing = lambda day: types.SimpleNamespace(precip_total=z)
+    d._build_atm_forcing = lambda day, *, segment_seconds: types.SimpleNamespace(precip_total=z)
     d._step_ocean = lambda f, dt, q_flux=None: order.append(("ocean", dt))
     d._ocean_surface_KuvC = lambda: (z + 280.0, z, z)
     seen = {}

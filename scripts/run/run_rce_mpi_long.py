@@ -215,6 +215,15 @@ def parse_args():
                    help="Use per-column Thomas tridiagonal solve for "
                         "the acoustic substep (lifts vertical-CFL "
                         "limit; main benefit on stretched grids).")
+    p.add_argument("--substep-horizontal-acoustic",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="Integrate the horizontal pressure gradient + mass "
+                        "continuity inside the acoustic substeps (full "
+                        "Skamarock-Klemp split), as the serial production "
+                        "runner run_rcemip_plane.py does by default. "
+                        "Requires --semi-implicit-acoustic; pass "
+                        "--no-substep-horizontal-acoustic to integrate them "
+                        "at the outer dt instead.")
     p.add_argument("--hyperdiff", type=float, default=5.0e6,
                    help="Biharmonic horizontal diffusion on u, v, theta', "
                         "rho', w [m^4/s]. Production default 5e6 — the "
@@ -843,6 +852,13 @@ def main():
             "--semi-implicit-acoustic (the Klemp-Wilhelmson 1978 "
             "substitution lives inside the column tridiagonal solve)."
         )
+    if args.substep_horizontal_acoustic and not args.semi_implicit_acoustic:
+        raise SystemExit(
+            "error: --substep-horizontal-acoustic (default ON) requires "
+            "--semi-implicit-acoustic: only the semi-implicit substep "
+            "integrates the horizontal pressure gradient. Pass "
+            "--semi-implicit-acoustic, or --no-substep-horizontal-acoustic."
+        )
     if args.adaptive_dt:
         # iter-228: flag parses but isn't wired through the time loop
         # yet (~80 LOC restructure to switch the for-loop to a
@@ -1053,6 +1069,7 @@ def main():
         hyperdiff_w_coeff=args.hyperdiff,
         semi_implicit_acoustic=args.semi_implicit_acoustic,
         acoustic_off_centering=args.acoustic_off_centering,
+        substep_horizontal_acoustic=args.substep_horizontal_acoustic,
         use_coriolis=False,
         fix_mass=True, anchor_mass_to_initial=True,
         smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
@@ -1233,6 +1250,8 @@ def main():
             f"acoustic_off_centering={args.acoustic_off_centering} "
             f"mass_fixer={'off' if args.no_mass_fixer else 'on'} "
             f"si_acoustic={'on' if args.semi_implicit_acoustic else 'off'} "
+            f"substep_horizontal_acoustic="
+            f"{'on' if args.substep_horizontal_acoustic else 'off'} "
             f"n_acoustic_substeps={args.n_acoustic_substeps} "
             f"hyperdiff={args.hyperdiff} "
             f"n_outer_split={n_outer_split}\n"

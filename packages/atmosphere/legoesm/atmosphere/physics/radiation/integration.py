@@ -760,7 +760,8 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                  sw_up_toa=None, lw_up_toa=None,
                                  sw_down_toa=None,
                                  sw_down_sfc=None, lw_down_sfc=None,
-                                 sw_up_toa_clr=None, lw_up_toa_clr=None):
+                                 sw_up_toa_clr=None, lw_up_toa_clr=None,
+                                 rad_absorbed_above_top=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
@@ -843,6 +844,10 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
         # sw_up_toa/lw_up_toa above).  None (the default) => leaf absent.
         sw_up_toa_clr=_toa_field(sw_up_toa_clr, "sw_up_toa_clr_rad"),
         lw_up_toa_clr=_toa_field(lw_up_toa_clr, "lw_up_toa_clr_rad"),
+        # Net radiation absorbed above the model top [W/m^2] (energy-budget
+        # sink, CAM overhead layer); None when the backend does not compute it.
+        rad_absorbed_above_top=_toa_field(rad_absorbed_above_top,
+                                          "rad_absorbed_above_top"),
     )
 
 
@@ -985,6 +990,8 @@ def _call_radiation_backend(
     conv_precip: jnp.ndarray | None = None,
     conv_mass_flux_up: jnp.ndarray | None = None,
     conv_icwmr: jnp.ndarray | None = None,
+    mf_cloudfrac: jnp.ndarray | None = None,
+    mf_qc: jnp.ndarray | None = None,
     clear_sky_toa: bool = False,
     column_mesh=None,
     clubb_config=None,
@@ -1191,6 +1198,8 @@ def _call_radiation_backend(
             lat=lat,
             conv_mass_flux_up=conv_mass_flux_up,
             conv_icwmr=conv_icwmr,
+            mf_cloudfrac=mf_cloudfrac,
+            mf_qc=mf_qc,
             p_half=p_half,
             clubb_config=clubb_config,
             subcolumn_inhomogeneity=(getattr(cloud_config, "cloud_vertical_overlap_optics",
@@ -1380,6 +1389,9 @@ def _call_radiation_backend(
             lw_flux_up_toa_clr=result.lw_flux_up_toa_clr,
             sw_flux_up_toa_clr=(None if result.sw_flux_up_toa_clr is None
                                 else result.sw_flux_up_toa_clr * _sw_scale),
+            sw_absorbed_above_top=(None if result.sw_absorbed_above_top is None
+                                   else result.sw_absorbed_above_top * _sw_scale),
+            lw_absorbed_above_top=result.lw_absorbed_above_top,
         )
 
     # Carry the prescribed TOA insolation (this scope's per-column
@@ -2043,6 +2055,7 @@ def _make_hydrostatic_radiation(
         # CAM6 deepcu inputs (lagged carry, same convention as conv_precip).
         _conv_mf_col = None
         _conv_icwmr_col = None
+        _mf_cf_col = _mf_qc_col = None
         if _cam6_cf_active and phys_state is not None:
             _conv_mf_col = getattr(phys_state, "conv_mass_flux_up", None)
             _conv_icwmr_col = getattr(phys_state, "conv_icwmr", None)
@@ -2050,6 +2063,11 @@ def _make_hydrostatic_radiation(
                 _conv_mf_col = _conv_mf_col.reshape(ncol, nlev + 1)
             if _conv_icwmr_col is not None:
                 _conv_icwmr_col = _conv_icwmr_col.reshape(T_col.shape)
+            # CAM7 CLUBB-MF plume cloud (lagged carry, read only when the
+            # cloud config's hookup is on).
+            if getattr(radiation_config.cloud_config, "clubb_mf_cloud", False):
+                _mf_cf_col = phys_state.mf_cloudfrac.reshape(T_col.shape)
+                _mf_qc_col = phys_state.mf_qc.reshape(T_col.shape)
 
         # Issue #273 follow-up: optionally shard the per-column radiation
         # workload across ``column_mesh`` so a 4×A100 (or any device
@@ -2156,6 +2174,8 @@ def _make_hydrostatic_radiation(
             conv_precip=_conv_precip_col,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            mf_cloudfrac=_mf_cf_col,
+            mf_qc=_mf_qc_col,
             solar_spectral_fraction=_ssf_ext,
             tsi=_tsi_ext,
             clear_sky_toa=_clr_sky_fused,
@@ -2250,7 +2270,12 @@ def _make_hydrostatic_radiation(
             sw_down_sfc=rad_out.sw_flux_down[:, -1],
             lw_down_sfc=rad_out.lw_flux_down[:, -1],
             sw_up_toa_clr=sw_up_toa_clr,
-            lw_up_toa_clr=lw_up_toa_clr)
+            lw_up_toa_clr=lw_up_toa_clr,
+            rad_absorbed_above_top=(
+                None if (rad_out.sw_absorbed_above_top is None
+                         or rad_out.lw_absorbed_above_top is None)
+                else rad_out.sw_absorbed_above_top
+                + rad_out.lw_absorbed_above_top))
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override
@@ -3414,6 +3439,7 @@ def _make_spectral_pe_radiation(
                 _cf_ovr = _cf_ovr.reshape(T_col.shape)
         _conv_mf_col = None
         _conv_icwmr_col = None
+        _mf_cf_col = _mf_qc_col = None
         if _cam6_cf_active and phys_state is not None:
             _conv_mf_col = getattr(phys_state, "conv_mass_flux_up", None)
             _conv_icwmr_col = getattr(phys_state, "conv_icwmr", None)
@@ -3421,6 +3447,11 @@ def _make_spectral_pe_radiation(
                 _conv_mf_col = _conv_mf_col.reshape(ncol, nlev + 1)
             if _conv_icwmr_col is not None:
                 _conv_icwmr_col = _conv_icwmr_col.reshape(T_col.shape)
+            # CAM7 CLUBB-MF plume cloud (lagged carry, read only when the
+            # cloud config's hookup is on).
+            if getattr(radiation_config.cloud_config, "clubb_mf_cloud", False):
+                _mf_cf_col = phys_state.mf_cloudfrac.reshape(T_col.shape)
+                _mf_qc_col = phys_state.mf_qc.reshape(T_col.shape)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -3454,6 +3485,8 @@ def _make_spectral_pe_radiation(
             cloud_fraction_override=_cf_ovr,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            mf_cloudfrac=_mf_cf_col,
+            mf_qc=_mf_qc_col,
             column_mesh=column_mesh,
             clubb_config=clubb_config,
         )

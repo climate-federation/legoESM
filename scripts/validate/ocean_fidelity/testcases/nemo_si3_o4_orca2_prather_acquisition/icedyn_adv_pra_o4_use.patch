@@ -1,0 +1,8 @@
+--- icedyn_adv_pra.F90
++++ icedyn_adv_pra.F90
+@@ -27,2 +27,5 @@
+    USE lbclnk         ! lateral boundary conditions (or mpp links)
++   ! O4_OBSERVER_BEGIN
++   USE o4_prather_tap, ONLY : o4_capture_cfl
++   ! O4_OBSERVER_END
+ 

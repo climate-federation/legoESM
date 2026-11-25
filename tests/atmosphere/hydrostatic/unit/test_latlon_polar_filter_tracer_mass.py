@@ -78,6 +78,7 @@ def test_polar_filtered_transport_conserves_tracer_mass(coord, fp64):
     m1 = _tracer_mass(nat, s, area)
     assert nat.p_s.dtype == jnp.float64
     for k in m0:
-        # measured: 7.3e-8 with the mass-form filter (the RK step's q*dp
-        # product error), 1.06e-5 with the separate dq / dps filter
+        # measured: 3.3e-14 (hybrid) / 4.1e-10 (sigma) with the mass-form
+        # filter and the mass-weighted RK step (7.3e-8 before it: the RK
+        # step's q*dp product error), 1.06e-5 with the separate dq / dps filter
         assert abs(m1[k] - m0[k]) <= 1e-6 * m0[k], (k, m0[k], m1[k])

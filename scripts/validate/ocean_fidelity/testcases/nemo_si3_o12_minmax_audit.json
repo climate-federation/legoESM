@@ -1,0 +1,1682 @@
+{
+ "build": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_REF/BLD",
+ "flags": [
+  "-fdefault-real-8",
+  "-O3",
+  "-funroll-all-loops",
+  "-fcray-pointer",
+  "-ffree-line-length-none",
+  "-fallow-argument-mismatch",
+  "-fno-tree-vectorize"
+ ],
+ "objects": {
+  "icethd_pnd": {
+   "census": {
+    "ice_perm_eff": {
+     "ice_perm_eff": {
+      "1407": [
+       "w",
+       "ice_perm_eff = 3.e-8_wp * ztmp * ztmp * ztmp",
+       [
+        "IF( np_perm_eff == 1 )"
+       ]
+      ],
+      "1410": [
+       "w",
+       "ice_perm_eff = 0._wp",
+       [
+        "ELSEIF( np_perm_eff == 2 )"
+       ]
+      ],
+      "1419": [
+       "w",
+       "IF( ztmp > 0._wp ) ice_perm_eff = REAL( nlay_i, wp ) / ztmp",
+       [
+        "ELSEIF( np_perm_eff == 2 )",
+        "IF( ztmp > 0._wp )"
+       ]
+      ]
+     },
+     "zperm": {
+      "1416": [
+       "w",
+       "zperm = 3.e-8_wp * zv_br(jk)*zv_br(jk)*zv_br(jk)",
+       [
+        "ELSEIF( np_perm_eff == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1417": [
+       "r",
+       "ztmp = ztmp + 1._wp / zperm",
+       [
+        "ELSEIF( np_perm_eff == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ]
+     },
+     "zs_br": {
+      "1393": [
+       "w",
+       "zs_br = -18.7_wp * zt1 - 0.519_wp * zt2 - 0.00535_wp * zt3",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1398": [
+       "r",
+       "IF( (zti(jk)-rt0) < - epsi06 ) THEN ; zv_br(jk) = zsi(jk) / MAX( zs_br, epsi10 )",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ]
+     },
+     "zt1": {
+      "1390": [
+       "w",
+       "zt1 = zti(jk) - rt0",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1391": [
+       "r",
+       "zt2 = zt1 * zt1",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1392": [
+       "r",
+       "zt3 = zt2 * zt1",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1393": [
+       "r",
+       "zs_br = -18.7_wp * zt1 - 0.519_wp * zt2 - 0.00535_wp * zt3",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ]
+     },
+     "zt2": {
+      "1391": [
+       "w",
+       "zt2 = zt1 * zt1",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1392": [
+       "r",
+       "zt3 = zt2 * zt1",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1393": [
+       "r",
+       "zs_br = -18.7_wp * zt1 - 0.519_wp * zt2 - 0.00535_wp * zt3",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ]
+     },
+     "zt3": {
+      "1392": [
+       "w",
+       "zt3 = zt2 * zt1",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1393": [
+       "r",
+       "zs_br = -18.7_wp * zt1 - 0.519_wp * zt2 - 0.00535_wp * zt3",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ]
+     },
+     "ztmp": {
+      "1406": [
+       "w",
+       "ztmp = MINVAL( zv_br(1:nlay_i) )",
+       [
+        "IF( np_perm_eff == 1 )"
+       ]
+      ],
+      "1407": [
+       "r",
+       "ice_perm_eff = 3.e-8_wp * ztmp * ztmp * ztmp",
+       [
+        "IF( np_perm_eff == 1 )"
+       ]
+      ],
+      "1409": [
+       "w",
+       "ztmp = 0._wp",
+       [
+        "ELSEIF( np_perm_eff == 2 )"
+       ]
+      ],
+      "1413": [
+       "w",
+       "ztmp = 0._wp",
+       [
+        "ELSEIF( np_perm_eff == 2 )",
+        "DO jk = 1, nlay_i",
+        "IF( zv_br(jk) < epsi06 )"
+       ]
+      ],
+      "1417": [
+       "wr",
+       "ztmp = ztmp + 1._wp / zperm",
+       [
+        "ELSEIF( np_perm_eff == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1419": [
+       "r",
+       "IF( ztmp > 0._wp ) ice_perm_eff = REAL( nlay_i, wp ) / ztmp",
+       [
+        "ELSEIF( np_perm_eff == 2 )",
+        "IF( ztmp > 0._wp )"
+       ]
+      ]
+     },
+     "zv_br": {
+      "1398": [
+       "w",
+       "IF( (zti(jk)-rt0) < - epsi06 ) THEN ; zv_br(jk) = zsi(jk) / MAX( zs_br, epsi10 )",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1399": [
+       "w",
+       "ELSE ; zv_br(jk) = 0._wp",
+       [
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1406": [
+       "r",
+       "ztmp = MINVAL( zv_br(1:nlay_i) )",
+       [
+        "IF( np_perm_eff == 1 )"
+       ]
+      ],
+      "1412": [
+       "r",
+       "IF( zv_br(jk) < epsi06 ) THEN",
+       [
+        "ELSEIF( np_perm_eff == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "1416": [
+       "r",
+       "zperm = 3.e-8_wp * zv_br(jk)*zv_br(jk)*zv_br(jk)",
+       [
+        "ELSEIF( np_perm_eff == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ]
+     }
+    },
+    "ice_thd_pnd": {
+     "a_ip": {
+      "209": [
+       "w",
+       "a_ip (ji,jj,jl) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)",
+        "IF( v_i(ji,jj,jl) < epsi10 .OR. at_i(ji,jj) < epsi10 )"
+       ]
+      ]
+     },
+     "a_ip_frac": {
+      "214": [
+       "w",
+       "a_ip_frac(ji,jj,jl) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)",
+        "IF( v_i(ji,jj,jl) < epsi10 .OR. at_i(ji,jj) < epsi10 )"
+       ]
+      ]
+     },
+     "at_i": {
+      "203": [
+       "w",
+       "at_i(:,:) = SUM( a_i, dim=3 )",
+       []
+      ],
+      "207": [
+       "r",
+       "IF( v_i(ji,jj,jl) < epsi10 .OR. at_i(ji,jj) < epsi10 ) THEN",
+       [
+        "DO jl = 1, jpl",
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)"
+       ]
+      ],
+      "224": [
+       "r",
+       "IF( at_i(ji,jj) >= epsi10 ) THEN",
+       [
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)"
+       ]
+      ]
+     },
+     "h_il": {
+      "213": [
+       "w",
+       "h_il (ji,jj,jl) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)",
+        "IF( v_i(ji,jj,jl) < epsi10 .OR. at_i(ji,jj) < epsi10 )"
+       ]
+      ]
+     },
+     "h_ip": {
+      "212": [
+       "w",
+       "h_ip (ji,jj,jl) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)",
+        "IF( v_i(ji,jj,jl) < epsi10 .OR. at_i(ji,jj) < epsi10 )"
+       ]
+      ]
+     },
+     "v_il": {
+      "208": [
+       "r",
+       "wfx_pnd (ji,jj) = wfx_pnd(ji,jj) + ( v_ip(ji,jj,jl) + v_il(ji,jj,jl) ) * rhow * r1_Dt_ice",
+       [
+        "DO jl = 1, jpl",
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)",
+        "IF( v_i(ji,jj,jl) < epsi10 .OR. at_i(ji,jj) < epsi10 )"
+       ]
+      ],
+      "211": [
+       "w",
+       "v_il (ji,jj,jl) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)",
+        "IF( v_i(ji,jj,jl) < epsi10 .OR. at_i(ji,jj) < epsi10 )"
+       ]
+      ]
+     },
+     "v_ip": {
+      "208": [
+       "r",
+       "wfx_pnd (ji,jj) = wfx_pnd(ji,jj) + ( v_ip(ji,jj,jl) + v_il(ji,jj,jl) ) * rhow * r1_Dt_ice",
+       [
+        "DO jl = 1, jpl",
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)",
+        "IF( v_i(ji,jj,jl) < epsi10 .OR. at_i(ji,jj) < epsi10 )"
+       ]
+      ],
+      "210": [
+       "w",
+       "v_ip (ji,jj,jl) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)",
+        "IF( v_i(ji,jj,jl) < epsi10 .OR. at_i(ji,jj) < epsi10 )"
+       ]
+      ]
+     },
+     "wfx_pnd": {
+      "208": [
+       "wr",
+       "wfx_pnd (ji,jj) = wfx_pnd(ji,jj) + ( v_ip(ji,jj,jl) + v_il(ji,jj,jl) ) * rhow * r1_Dt_ice",
+       [
+        "DO jl = 1, jpl",
+        "DO jj = ntsj-( 0), ntej+( 0 )",
+        "DO ji = ntsi-( 0), ntei+( 0)",
+        "IF( v_i(ji,jj,jl) < epsi10 .OR. at_i(ji,jj) < epsi10 )"
+       ]
+      ]
+     }
+    },
+    "pnd_LEV": {
+     "a_ip_1d": {
+      "418": [
+       "r",
+       "CALL tab_2d_1d( npti, nptidx(1:npti), a_ip_1d (1:npti), a_ip(:,:,jl) )",
+       [
+        "DO jl = 1, jpl"
+       ]
+      ],
+      "435": [
+       "r",
+       "zdv_pnd = ( h_ip_1d(ii) + h_il_1d(ii) ) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "440": [
+       "w",
+       "a_ip_1d(ii) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "446": [
+       "r",
+       "v_ip_1d(ii) = h_ip_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "447": [
+       "r",
+       "v_il_1d(ii) = h_il_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "490": [
+       "r",
+       "zdv_frz = - 0.5_wp * MAX( 0._wp, -v_il_1d(ii) + SQRT( v_il_1d(ii)*v_il_1d(ii) + a_ip_1d(ii)*a_ip_1d(ii) * 4._wp * rcnd_i * zdT * rDt_ice / (rLfus * rhow) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "508": [
+       "w",
+       "a_ip_1d(ii) = MIN( a_i_1d(ii), SQRT( v_ip_1d(ii) * z1_aspect * a_i_1d(ii) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "509": [
+       "r",
+       "h_ip_1d(ii) = zaspect * a_ip_1d(ii) / a_i_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "516": [
+       "r",
+       "zhp = ( h_i_1d(ii) * ( rho0 - rhoi ) + h_ip_1d(ii) * ( rho0 - rhow * a_ip_1d(ii) / a_i_1d(ii) ) ) * r1_rho0",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "522": [
+       "r",
+       "zdv_flush = -zperm * rho0 * grav * zhp * rDt_ice / (zvisc * h_i_1d(ii)) * a_ip_1d(ii) * rn_pnd_flush",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "527": [
+       "w",
+       "a_ip_1d(ii) = MIN( a_i_1d(ii), SQRT( v_ip_1d(ii) * z1_aspect * a_i_1d(ii) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "528": [
+       "r",
+       "h_ip_1d(ii) = zaspect * a_ip_1d(ii) / a_i_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "533": [
+       "r",
+       "IF( a_ip_1d(ii) > 0.01_wp ) THEN ; h_il_1d(ii) = v_il_1d(ii) / a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "538": [
+       "w",
+       "a_ip_1d(ii) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )",
+        "IF( h_il_1d(ii) > h_ip_1d(ii) * 10._wp )"
+       ]
+      ],
+      "554": [
+       "r",
+       "v_ip_1d(ii) = h_ip_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "555": [
+       "r",
+       "v_il_1d(ii) = h_il_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "557": [
+       "r",
+       "zdv_pnd = ( h_ip_1d(ii) + h_il_1d(ii) ) * a_ip_1d(ii) - zdv_pnd",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "565": [
+       "r",
+       "CALL tab_1d_2d( npti, nptidx(1:npti), a_ip_1d(1:npti), a_ip(:,:,jl) )",
+       [
+        "DO jl = 1, jpl"
+       ]
+      ]
+     },
+     "h_il_1d": {
+      "420": [
+       "r",
+       "CALL tab_2d_1d( npti, nptidx(1:npti), h_il_1d (1:npti), h_il(:,:,jl) )",
+       [
+        "DO jl = 1, jpl"
+       ]
+      ],
+      "435": [
+       "r",
+       "zdv_pnd = ( h_ip_1d(ii) + h_il_1d(ii) ) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "442": [
+       "w",
+       "h_il_1d(ii) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "447": [
+       "r",
+       "v_il_1d(ii) = h_il_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "533": [
+       "w",
+       "IF( a_ip_1d(ii) > 0.01_wp ) THEN ; h_il_1d(ii) = v_il_1d(ii) / a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "534": [
+       "w",
+       "ELSE ; h_il_1d(ii) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "537": [
+       "r",
+       "IF ( h_il_1d(ii) > h_ip_1d(ii) * 10._wp ) THEN",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "540": [
+       "w",
+       "h_il_1d(ii) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )",
+        "IF( h_il_1d(ii) > h_ip_1d(ii) * 10._wp )"
+       ]
+      ],
+      "555": [
+       "r",
+       "v_il_1d(ii) = h_il_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "557": [
+       "r",
+       "zdv_pnd = ( h_ip_1d(ii) + h_il_1d(ii) ) * a_ip_1d(ii) - zdv_pnd",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "567": [
+       "r",
+       "CALL tab_1d_2d( npti, nptidx(1:npti), h_il_1d(1:npti), h_il(:,:,jl) )",
+       [
+        "DO jl = 1, jpl"
+       ]
+      ]
+     },
+     "h_ip_1d": {
+      "419": [
+       "r",
+       "CALL tab_2d_1d( npti, nptidx(1:npti), h_ip_1d (1:npti), h_ip(:,:,jl) )",
+       [
+        "DO jl = 1, jpl"
+       ]
+      ],
+      "435": [
+       "r",
+       "zdv_pnd = ( h_ip_1d(ii) + h_il_1d(ii) ) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "441": [
+       "w",
+       "h_ip_1d(ii) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "446": [
+       "r",
+       "v_ip_1d(ii) = h_ip_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "509": [
+       "w",
+       "h_ip_1d(ii) = zaspect * a_ip_1d(ii) / a_i_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "516": [
+       "r",
+       "zhp = ( h_i_1d(ii) * ( rho0 - rhoi ) + h_ip_1d(ii) * ( rho0 - rhow * a_ip_1d(ii) / a_i_1d(ii) ) ) * r1_rho0",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "528": [
+       "w",
+       "h_ip_1d(ii) = zaspect * a_ip_1d(ii) / a_i_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "537": [
+       "r",
+       "IF ( h_il_1d(ii) > h_ip_1d(ii) * 10._wp ) THEN",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "539": [
+       "w",
+       "h_ip_1d(ii) = 0._wp",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )",
+        "IF( h_il_1d(ii) > h_ip_1d(ii) * 10._wp )"
+       ]
+      ],
+      "554": [
+       "r",
+       "v_ip_1d(ii) = h_ip_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "557": [
+       "r",
+       "zdv_pnd = ( h_ip_1d(ii) + h_il_1d(ii) ) * a_ip_1d(ii) - zdv_pnd",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "566": [
+       "r",
+       "CALL tab_1d_2d( npti, nptidx(1:npti), h_ip_1d(1:npti), h_ip(:,:,jl) )",
+       [
+        "DO jl = 1, jpl"
+       ]
+      ]
+     },
+     "v_il_1d": {
+      "447": [
+       "w",
+       "v_il_1d(ii) = h_il_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "478": [
+       "wr",
+       "IF( ln_pnd_lids ) v_il_1d(ii) = MAX( 0._wp, v_il_1d(ii) - zdv_mlt )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "490": [
+       "r",
+       "zdv_frz = - 0.5_wp * MAX( 0._wp, -v_il_1d(ii) + SQRT( v_il_1d(ii)*v_il_1d(ii) + a_ip_1d(ii)*a_ip_1d(ii) * 4._wp * rcnd_i * zdT * rDt_ice / (rLfus * rhow) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "494": [
+       "wr",
+       "v_il_1d(ii) = MAX( 0._wp, v_il_1d(ii) - zdv_frz )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "533": [
+       "r",
+       "IF( a_ip_1d(ii) > 0.01_wp ) THEN ; h_il_1d(ii) = v_il_1d(ii) / a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "555": [
+       "w",
+       "v_il_1d(ii) = h_il_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "569": [
+       "r",
+       "CALL tab_1d_2d( npti, nptidx(1:npti), v_il_1d(1:npti), v_il(:,:,jl) )",
+       [
+        "DO jl = 1, jpl"
+       ]
+      ]
+     },
+     "v_ip_1d": {
+      "446": [
+       "w",
+       "v_ip_1d(ii) = h_ip_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "465": [
+       "r",
+       "zdv_mlt = MAX( 0._wp, MIN( zdv_mlt, zv_ip_max - v_ip_1d(ii) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "472": [
+       "r",
+       "zdv_mlt = MAX( 0._wp, MIN( zdv_mlt, zv_ip_max - v_ip_1d(ii) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "475": [
+       "wr",
+       "v_ip_1d(ii) = v_ip_1d(ii) + zdv_mlt",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "497": [
+       "wr",
+       "v_ip_1d(ii) = MAX( 0._wp, v_ip_1d(ii) + zdv_frz )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "500": [
+       "r",
+       "zdv_frz = v_ip_1d(ii) * ( EXP( 0.01_wp * zdT * z1_Tp ) - 1._wp )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "ELSE of IF( ln_pnd_lids )"
+       ]
+      ],
+      "502": [
+       "wr",
+       "v_ip_1d(ii) = MAX( 0._wp, v_ip_1d(ii) + zdv_frz )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "ELSE of IF( ln_pnd_lids )"
+       ]
+      ],
+      "508": [
+       "r",
+       "a_ip_1d(ii) = MIN( a_i_1d(ii), SQRT( v_ip_1d(ii) * z1_aspect * a_i_1d(ii) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "523": [
+       "r",
+       "zdv_flush = MAX( zdv_flush, -v_ip_1d(ii) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "524": [
+       "wr",
+       "v_ip_1d(ii) = v_ip_1d(ii) + zdv_flush",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "527": [
+       "r",
+       "a_ip_1d(ii) = MIN( a_i_1d(ii), SQRT( v_ip_1d(ii) * z1_aspect * a_i_1d(ii) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "554": [
+       "w",
+       "v_ip_1d(ii) = h_ip_1d(ii) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "568": [
+       "r",
+       "CALL tab_1d_2d( npti, nptidx(1:npti), v_ip_1d(1:npti), v_ip(:,:,jl) )",
+       [
+        "DO jl = 1, jpl"
+       ]
+      ]
+     },
+     "wfx_pnd_1d": {
+      "406": [
+       "r",
+       "CALL tab_2d_1d( npti, nptidx(1:npti), wfx_pnd_1d (1:npti), wfx_pnd )",
+       []
+      ],
+      "558": [
+       "wr",
+       "wfx_pnd_1d(ii) = wfx_pnd_1d(ii) - zdv_pnd * rhow * r1_Dt_ice",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "573": [
+       "r",
+       "CALL tab_1d_2d( npti, nptidx(1:npti), wfx_pnd_1d(1:npti), wfx_pnd )",
+       []
+      ]
+     },
+     "zdT": {
+      "484": [
+       "w",
+       "zdT = MAX( zTp+rt0 - t_su_1d(ii), 0._wp )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "490": [
+       "r",
+       "zdv_frz = - 0.5_wp * MAX( 0._wp, -v_il_1d(ii) + SQRT( v_il_1d(ii)*v_il_1d(ii) + a_ip_1d(ii)*a_ip_1d(ii) * 4._wp * rcnd_i * zdT * rDt_ice / (rLfus * rhow) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "500": [
+       "r",
+       "zdv_frz = v_ip_1d(ii) * ( EXP( 0.01_wp * zdT * z1_Tp ) - 1._wp )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "ELSE of IF( ln_pnd_lids )"
+       ]
+      ]
+     },
+     "zdv_avail": {
+      "454": [
+       "w",
+       "zdv_avail = -( dh_i_sum(ii)*rhoi + dh_s_sum(ii)*rhos ) * z1_rhow * a_i_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "456": [
+       "r",
+       "zdv_mlt = MAX( 0._wp, zfr_mlt * zdv_avail )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "546": [
+       "r",
+       "diag_dvpn_mlt_1d(ii) = diag_dvpn_mlt_1d(ii) + rhow * zdv_avail * r1_Dt_ice",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ll_diag_pnd )"
+       ]
+      ],
+      "547": [
+       "r",
+       "diag_dvpn_rnf_1d(ii) = diag_dvpn_rnf_1d(ii) + rhow * ( zdv_mlt - zdv_avail ) * r1_Dt_ice",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ll_diag_pnd )"
+       ]
+      ]
+     },
+     "zdv_flush": {
+      "522": [
+       "w",
+       "zdv_flush = -zperm * rho0 * grav * zhp * rDt_ice / (zvisc * h_i_1d(ii)) * a_ip_1d(ii) * rn_pnd_flush",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "523": [
+       "wr",
+       "zdv_flush = MAX( zdv_flush, -v_ip_1d(ii) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "524": [
+       "r",
+       "v_ip_1d(ii) = v_ip_1d(ii) + zdv_flush",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "549": [
+       "r",
+       "diag_dvpn_drn_1d(ii) = diag_dvpn_drn_1d(ii) + rhow * zdv_flush * r1_Dt_ice",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ll_diag_pnd )"
+       ]
+      ]
+     },
+     "zdv_frz": {
+      "490": [
+       "w",
+       "zdv_frz = - 0.5_wp * MAX( 0._wp, -v_il_1d(ii) + SQRT( v_il_1d(ii)*v_il_1d(ii) + a_ip_1d(ii)*a_ip_1d(ii) * 4._wp * rcnd_i * zdT * rDt_ice / (rLfus * rhow) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "494": [
+       "r",
+       "v_il_1d(ii) = MAX( 0._wp, v_il_1d(ii) - zdv_frz )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "497": [
+       "r",
+       "v_ip_1d(ii) = MAX( 0._wp, v_ip_1d(ii) + zdv_frz )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "500": [
+       "w",
+       "zdv_frz = v_ip_1d(ii) * ( EXP( 0.01_wp * zdT * z1_Tp ) - 1._wp )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "ELSE of IF( ln_pnd_lids )"
+       ]
+      ],
+      "502": [
+       "r",
+       "v_ip_1d(ii) = MAX( 0._wp, v_ip_1d(ii) + zdv_frz )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "ELSE of IF( ln_pnd_lids )"
+       ]
+      ],
+      "548": [
+       "r",
+       "diag_dvpn_lid_1d(ii) = diag_dvpn_lid_1d(ii) + rhow * zdv_frz * r1_Dt_ice",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ll_diag_pnd )"
+       ]
+      ]
+     },
+     "zdv_mlt": {
+      "456": [
+       "w",
+       "zdv_mlt = MAX( 0._wp, zfr_mlt * zdv_avail )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "465": [
+       "wr",
+       "zdv_mlt = MAX( 0._wp, MIN( zdv_mlt, zv_ip_max - v_ip_1d(ii) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "472": [
+       "wr",
+       "zdv_mlt = MAX( 0._wp, MIN( zdv_mlt, zv_ip_max - v_ip_1d(ii) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "475": [
+       "r",
+       "v_ip_1d(ii) = v_ip_1d(ii) + zdv_mlt",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "478": [
+       "r",
+       "IF( ln_pnd_lids ) v_il_1d(ii) = MAX( 0._wp, v_il_1d(ii) - zdv_mlt )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "547": [
+       "r",
+       "diag_dvpn_rnf_1d(ii) = diag_dvpn_rnf_1d(ii) + rhow * ( zdv_mlt - zdv_avail ) * r1_Dt_ice",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+        "IF( ll_diag_pnd )"
+       ]
+      ]
+     },
+     "zdv_pnd": {
+      "435": [
+       "w",
+       "zdv_pnd = ( h_ip_1d(ii) + h_il_1d(ii) ) * a_ip_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "557": [
+       "wr",
+       "zdv_pnd = ( h_ip_1d(ii) + h_il_1d(ii) ) * a_ip_1d(ii) - zdv_pnd",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "558": [
+       "r",
+       "wfx_pnd_1d(ii) = wfx_pnd_1d(ii) - zdv_pnd * rhow * r1_Dt_ice",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ]
+     },
+     "zfr_mlt": {
+      "455": [
+       "w",
+       "zfr_mlt = rn_apnd_min + ( rn_apnd_max - rn_apnd_min ) * at_i_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "456": [
+       "r",
+       "zdv_mlt = MAX( 0._wp, zfr_mlt * zdv_avail )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "464": [
+       "r",
+       "zv_ip_max = zfr_mlt * zfr_mlt * a_i_1d(ii) * zaspect",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ]
+     },
+     "zhp": {
+      "516": [
+       "w",
+       "zhp = ( h_i_1d(ii) * ( rho0 - rhoi ) + h_ip_1d(ii) * ( rho0 - rhow * a_ip_1d(ii) / a_i_1d(ii) ) ) * r1_rho0",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "522": [
+       "r",
+       "zdv_flush = -zperm * rho0 * grav * zhp * rDt_ice / (zvisc * h_i_1d(ii)) * a_ip_1d(ii) * rn_pnd_flush",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ]
+     },
+     "zperm": {
+      "519": [
+       "w",
+       "zperm = ice_perm_eff( t_i_1d(ii,:), sz_i_1d(ii,:) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "522": [
+       "r",
+       "zdv_flush = -zperm * rho0 * grav * zhp * rDt_ice / (zvisc * h_i_1d(ii)) * a_ip_1d(ii) * rn_pnd_flush",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ]
+     },
+     "zv_ip_max": {
+      "464": [
+       "w",
+       "zv_ip_max = zfr_mlt * zfr_mlt * a_i_1d(ii) * zaspect",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "465": [
+       "r",
+       "zdv_mlt = MAX( 0._wp, MIN( zdv_mlt, zv_ip_max - v_ip_1d(ii) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "471": [
+       "w",
+       "zv_ip_max = z1_aspect * a_i_1d(ii) * 0.25 * h_i_1d(ii) * h_i_1d(ii)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ],
+      "472": [
+       "r",
+       "zdv_mlt = MAX( 0._wp, MIN( zdv_mlt, zv_ip_max - v_ip_1d(ii) ) )",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+       ]
+      ]
+     }
+    }
+   },
+   "instructions_without_token": [
+    "522"
+   ],
+   "ppsrc_sha256": "11e5de4e7fdd2c3ef6cf6ef75247833c306b9cc75c79a0dc1684f3a4e7bb5c23",
+   "record_object_sha256": "d1a09537f9cb55c6da4cbf44c73729f1ddd3ee107ed3602ef628f9547fa8fec0",
+   "routines": {
+    "ice_perm_eff": [
+     1372,
+     1422
+    ],
+    "ice_thd_pnd": [
+     162,
+     264
+    ],
+    "pnd_LEV": [
+     329,
+     582
+    ]
+   },
+   "sign_tokens": [],
+   "sites": {
+    "1398": {
+     "enclosing": [
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "IF( (zti(jk)-rt0) <  - epsi06 ) THEN   ;   zv_br(jk) = zsi(jk) / MAX( zs_br, epsi10 )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "456": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zdv_mlt   = MAX( 0._wp, zfr_mlt * zdv_avail )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "465": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "subsd@465",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "maxsd@456"
+      }
+     ],
+     "statement": "zdv_mlt   = MAX( 0._wp, MIN( zdv_mlt, zv_ip_max - v_ip_1d(ii) ) )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "472": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "maxsd@465",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "subsd@472"
+      }
+     ],
+     "statement": "zdv_mlt   = MAX( 0._wp, MIN( zdv_mlt, zv_ip_max - v_ip_1d(ii) ) )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "478": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+      "IF( ln_pnd_lids )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "IF( ln_pnd_lids )   v_il_1d(ii) = MAX( 0._wp, v_il_1d(ii) - zdv_mlt )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "484": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zdT = MAX( zTp+rt0 - t_su_1d(ii), 0._wp )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "490": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+      "IF( ln_pnd_lids )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      },
+      {
+       "count": 1,
+       "dst": "-",
+       "op": "sqrtsd",
+       "src": "-"
+      }
+     ],
+     "statement": "zdv_frz = - 0.5_wp * MAX( 0._wp, -v_il_1d(ii) + SQRT( v_il_1d(ii)*v_il_1d(ii) + a_ip_1d(ii)*a_ip_1d(ii) * 4._wp * rcnd_i * zdT * rDt_ice / (rLfus * rhow) ) )",
+     "tokens": [
+      "MAX",
+      "SQRT"
+     ]
+    },
+    "494": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+      "IF( ln_pnd_lids )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "v_il_1d(ii) = MAX( 0._wp, v_il_1d(ii) - zdv_frz )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "497": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+      "IF( ln_pnd_lids )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "v_ip_1d(ii) = MAX( 0._wp, v_ip_1d(ii) + zdv_frz )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "502": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )",
+      "ELSE of IF( ln_pnd_lids )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "v_ip_1d(ii) = MAX( 0._wp, v_ip_1d(ii) + zdv_frz )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "508": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "sqrtsd@508",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "load@437|load@500"
+      },
+      {
+       "count": 1,
+       "dst": "-",
+       "op": "sqrtsd",
+       "src": "-"
+      }
+     ],
+     "statement": "a_ip_1d(ii) = MIN( a_i_1d(ii), SQRT( v_ip_1d(ii) * z1_aspect * a_i_1d(ii) ) )",
+     "tokens": [
+      "MIN",
+      "SQRT"
+     ]
+    },
+    "522": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "mulsd@522",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "load@519"
+      }
+     ],
+     "statement": "zdv_flush   = -zperm * rho0 * grav * zhp * rDt_ice / (zvisc * h_i_1d(ii)) * a_ip_1d(ii) * rn_pnd_flush",
+     "tokens": []
+    },
+    "527": {
+     "enclosing": [
+      "DO jl = 1, jpl",
+      "DO ii = 1, npti",
+      "ELSE of IF( h_i_1d(ii) < rn_himin .OR. a_i_1d(ii) < 0.01_wp )"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "sqrtsd@527",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "load@519"
+      },
+      {
+       "count": 1,
+       "dst": "-",
+       "op": "sqrtsd",
+       "src": "-"
+      }
+     ],
+     "statement": "a_ip_1d(ii) = MIN( a_i_1d(ii), SQRT( v_ip_1d(ii) * z1_aspect * a_i_1d(ii) ) )",
+     "tokens": [
+      "MIN",
+      "SQRT"
+     ]
+    }
+   },
+   "token_statements_without_instruction": {
+    "523": {
+     "statement": "zdv_flush   = MAX( zdv_flush, -v_ip_1d(ii) )",
+     "tokens": [
+      "MAX"
+     ]
+    }
+   }
+  }
+ },
+ "tie_lemmas": {
+  "L0": "MINSD/MAXSD returns its source operand on an equality or unordered comparison; equal finite nonzero operands have identical bits.",
+  "L1": "MAXSD/MINSD with ZERO (+0.0) as src returns +0.0 on a signed-zero tie and otherwise the strictly winning VAR or +0.0; the result of a ZERO-src MAX(0, .) is >= +0.0 and never -0.0.",
+  "L2": "Under IEEE-754 round-to-nearest-even, a + b is -0.0 only if a = -0.0 and b = -0.0; a - b is -0.0 only if a = -0.0 and b = +0.0; a square x * x is >= +0.0 and never -0.0; SQRT(x) on x >= +0.0 is >= +0.0.",
+  "L3": "Under the pnd_LEV thick-ice guard (ELSE of h_i_1d < rn_himin .OR. a_i_1d < 0.01 at line 437), h_i_1d >= 0.1 > 0 and a_i_1d >= 0.01 > 0, so zv_ip_max at lines 464 and 471 and zhp at line 516 are strictly positive."
+ },
+ "tie_verdicts": {
+  "pnd:1398": {
+   "proof": "Other operand is the nonzero constant epsi10 = 1e-10 (L0).",
+   "verdict": "NO_TIE"
+  },
+  "pnd:456": {
+   "proof": "When dh_i_sum = dh_s_sum = +0.0, zdv_avail = -0.0 and zfr_mlt * zdv_avail = -0.0 ties with ZERO (+0.0) at maxsd@456; any zero sign of zdv_mlt is overwritten at lines 465 and 472 whose outer maxsd has src = ZERO (L1).",
+   "verdict": "MASKED"
+  },
+  "pnd:465": {
+   "proof": "In 465.min (dst = zv_ip_max - v_ip_1d, src = zdv_mlt), zdv_mlt is the ZERO-src maxsd@456 output (never -0.0, L1) and zv_ip_max > 0 (L3), so zv_ip_max - v_ip_1d is never -0.0 (L2); 465.max then clamps with src = ZERO (L1).",
+   "verdict": "NO_TIE"
+  },
+  "pnd:472": {
+   "proof": "In 472.min (dst = zdv_mlt, src = zv_ip_max - v_ip_1d), zdv_mlt is the ZERO-src maxsd@465 output (never -0.0, L1) and zv_ip_max > 0 (L3), so zv_ip_max - v_ip_1d is never -0.0 (L2); 472.max then clamps with src = ZERO (L1).",
+   "verdict": "NO_TIE"
+  },
+  "pnd:478": {
+   "proof": "Even if v_il_1d = -0.0 from line 447 ties with ZERO when zdv_mlt = +0.0, v_il_1d is read next only at lines 490 (squared, L2) and 494 (added to pos_frz >= +0.0 and clamped by maxsd@494 with src = ZERO, L1).",
+   "verdict": "MASKED"
+  },
+  "pnd:484": {
+   "proof": "zTp + rt0 = 273.0 > 0, so (zTp + rt0) - t_su_1d is never -0.0 under round-to-nearest (L2).",
+   "verdict": "NO_TIE"
+  },
+  "pnd:490": {
+   "proof": "The SQRT radicand is v_il_1d**2 plus a product of nonnegative terms with zdT from maxsd@484 (never -0.0, L1), so SQRT(rad) >= +0.0 and SQRT(rad) - v_il_1d is never -0.0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "pnd:494": {
+   "proof": "v_il_1d from maxsd@478 (src = ZERO) and pos_frz = 0.5 * maxsd@490 (src = ZERO) are both >= +0.0 and never -0.0, so their sum at maxsd@494 is never -0.0 (L1, L2).",
+   "verdict": "NO_TIE"
+  },
+  "pnd:497": {
+   "proof": "v_ip_1d at line 475 adds zdv_mlt from maxsd@472 (src = ZERO, never -0.0, L1), so v_ip_1d entering line 497 is never -0.0 and v_ip_1d - pos_frz is never -0.0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "pnd:502": {
+   "proof": "Inside the ELSE arm of IF( ln_pnd_lids ); on the production ORCA2_SAS_ICE deck ln_pnd_lids = .true.",
+   "verdict": "NOT_ON_DECK"
+  },
+  "pnd:508": {
+   "proof": "In minsd(dst = sqrtsd@508, src = a_i_1d), a_i_1d >= 0.01 > 0 under line 437 (L0, L3).",
+   "verdict": "NO_TIE"
+  },
+  "pnd:522": {
+   "proof": "Emitted minsd(dst = pos_flush, src = v_ip_1d) for source lines 522-523: v_ip_1d from maxsd@497 is >= +0.0 (never -0.0, L1) and pos_flush >= +0.0 (never -0.0) because zperm >= +0.0, zhp > 0 (L3), h_i_1d >= 0.1 > 0, and a_ip_1d >= +0.0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "pnd:527": {
+   "proof": "In minsd(dst = sqrtsd@527, src = a_i_1d), a_i_1d >= 0.01 > 0 under line 437 (L0, L3).",
+   "verdict": "NO_TIE"
+  }
+ }
+}

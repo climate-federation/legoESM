@@ -84,7 +84,10 @@ SPINUP_MICRO=${SPINUP_MICRO:-kessler}
 # Pass --clouds explicitly only for the band model, where it means something.
 # run_rcemip_plane.py defaults --clouds ON regardless, so this controls the
 # command line, not the cloud setting (use --no-clouds to actually disable).
-if [ "$SPINUP_RAD" = "rrtmgp" ]; then SPINUP_RAD_EXTRA="--clouds"; else SPINUP_RAD_EXTRA=""; fi
+# RRTMGP is solved in blocks of RAD_CHUNK columns (numerically exact; bounds
+# the radiation scratch memory). Gray has no column solve, so it is not passed.
+RAD_CHUNK=${RAD_CHUNK:-128}
+if [ "$SPINUP_RAD" = "rrtmgp" ]; then SPINUP_RAD_EXTRA="--clouds --radiation-column-chunk $RAD_CHUNK"; else SPINUP_RAD_EXTRA=""; fi
 
 # Noise suppression: the RRTMGP loader and the CUDA probe are both very chatty.
 FILT='hwloc|mailing|topology|ignore this invalid|^\*|kernel mode|UserWarning|jnp\.|return lax|set_T_sfc|jax_enable_x64|See https|truncated|astype|array_dict'
@@ -94,7 +97,7 @@ day_steps() { $PY -c "print(int(round(86400.0/$DT)))"; }
 common_flags() {
     echo "--nx $NX --ny $NY --nlev $NLEV --dx $DX --dt $DT \
           --T-sfc 300.0 --insolation rcemip \
-          --precision float32 --semi-implicit \
+          --precision mixed --semi-implicit \
           --radiation-interval $RAD_INTERVAL --hyperdiff $HYPERDIFF"
 }
 
@@ -114,7 +117,7 @@ spinup)
 
     # --restart latest makes this idempotent: re-running resumes rather than
     # restarting from the IC, so a 60-day run can be done in sittings.
-    LEGOESM_RCEMIP_PLANE_FP32=1 JAX_PLATFORMS=$PLATFORM $PY \
+    JAX_PLATFORMS=$PLATFORM $PY \
         scripts/run/run_rcemip_plane.py $(common_flags) \
         --radiation "$SPINUP_RAD" $SPINUP_RAD_EXTRA \
         --microphysics "$SPINUP_MICRO" \
@@ -169,9 +172,10 @@ print(int(re.search(r'ckpt_0*(\d+)\.npz','$CKPT').group(1)))
     echo "RCEMIP1 production: micro=${MICRO}, RRTMGP + clouds, ${DAYS} d from ${CKPT}"
     echo "  output: ${OUT}"
 
-    LEGOESM_RCEMIP_PLANE_FP32=1 JAX_PLATFORMS=$PLATFORM $PY \
+    JAX_PLATFORMS=$PLATFORM $PY \
         scripts/run/run_rcemip_plane.py $(common_flags) \
-        --radiation rrtmgp --clouds --microphysics "$MICRO" \
+        --radiation rrtmgp --clouds --radiation-column-chunk "$RAD_CHUNK" \
+        --microphysics "$MICRO" \
         --steps "$STEPS" --print-every 2400 --snapshot-every "$SNAP_EVERY" \
         --restart "$CKPT" $EXTRA $DRIVER_FLAGS \
         --output "$OUT" 2>&1 | { grep --line-buffered -vE "$FILT" || true; } | tee "$OUT/run.log"

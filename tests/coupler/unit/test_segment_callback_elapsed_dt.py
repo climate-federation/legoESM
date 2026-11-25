@@ -35,8 +35,11 @@ def test_segment_callback_fires_every_segment_with_elapsed_dt(tmp_path):
     # -> segment_length = GCD(288, 144) = 144 = 1 day, a PROPER divisor of
     # the diag interval, so 2 full segments span the 2-day run.
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-        dycore=DycoreConfig(energy_fixer=False, dt=dt, model_type="hydrostatic"),
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+        dycore=DycoreConfig(
+            energy_fixer=False, dt=dt, model_type="hydrostatic",
+            discretization="latlon_cgrid",
+        ),
         output=OutputConfig(diag_days=2, checkpoint_days=1),
         radiation="gray",
         days=2,

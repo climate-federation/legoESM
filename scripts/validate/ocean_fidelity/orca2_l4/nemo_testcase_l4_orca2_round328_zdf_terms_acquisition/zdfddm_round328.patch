@@ -1,0 +1,8 @@
+--- zdfddm.F90
++++ zdfddm.F90
+@@ -24,0 +25,2 @@
++   USE zdfphy_round328_writer, ONLY : r328_zp_ddm_cell
++                     ! round-328 WRITE-only DDM operand recorder
+@@ -153,0 +156,2 @@
++            CALL r328_zp_ddm_cell(ji,jj,jk,zavft+zavdt,zavfs+zavds, &
++               & MAX(zavft+zavdt,zavfs+zavds))

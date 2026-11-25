@@ -1,0 +1,32 @@
+--- sbcmod.F90
++++ sbcmod.F90
+@@ -38,5 +38,6 @@
+    USE sbcabl         ! atmospheric boundary layer
+    USE sbcice_if      ! surface boundary condition: ice-if sea-ice model
++   USE round339_ice_cover_writer, ONLY : r339_write
+ #if defined key_si3
+    USE par_ice        ! SI3 parameters
+    USE icestp         ! surface boundary condition: SI3 sea-ice model
+@@ -71,6 +72,7 @@
+ 
+    PUBLIC   sbc        ! routine called by step.F90
+    PUBLIC   sbc_init   ! routine called by opa.F90
++   PUBLIC :: r339_fixture_write
+ 
+    INTEGER ::   nsbc   ! type of surface boundary condition (deduced from namsbc informations)
+    !! * Substitutions
+@@ -478,1 +480,2 @@
++                              CALL r339_write(kt,fr_i,nn_fsbc)          ! passive post-SI3 record
+ #endif
+@@ -658,4 +661,11 @@
+    END SUBROUTINE sbc_final
+ 
++   SUBROUTINE r339_fixture_write(kt,pfr_i,kn_fsbc)
++      INTEGER, INTENT(in) :: kt, kn_fsbc
++      REAL(wp), INTENT(in) :: pfr_i(:,:)
++      !! Test entry executes the observer call compiled into this actual unit.
++      CALL r339_write(kt,pfr_i,kn_fsbc)
++   END SUBROUTINE r339_fixture_write
++
+    !!======================================================================
+ END MODULE sbcmod

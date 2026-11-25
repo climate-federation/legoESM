@@ -118,6 +118,7 @@ KSPAN_MIN = 4
 LTS_INHIBIT_THRESH = 20.0  # [K]
 COND_MAX_ITER, COND_TOL = 50, 2.0e-5  # condensation_mf
 L0 = 200.0  # clubb_mf_L0 [m], Lopt 0 (user 2026-11-23)
+MAX_L0 = 1.0e3  # clubb_mf_max_L0 [m]: TKE entrainment off when dynamic_L0 >= this
 KSEED = 1  # clubb_mf_kseed: offset of the 2nd..4th seed winds
 ZTOPM1_COLD = 500.0  # plume-top memory [m] each call starts from (fixture call 1)
 CFLVAL = 1.0  # clubb.F90 compute_mf_plumes: Courant-number limit
@@ -197,10 +198,12 @@ def condensation_mf(qt, thl, p, iex, sm: MFSmoothing):
     return thv, qc, t * iex, excess, n_iter
 
 
-def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
+def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing(), alphturb: float = 0.0):
     """One column.  ``c``: CLUBB-grid inputs (keys as the fixture's ``c_*``
     arrays without the prefix, one column); ``enti`` (nzt, NUP) int draws;
-    ``ztopm1_in`` (NUP,) plume-top memory.  Returns the compared outputs."""
+    ``ztopm1_in`` (NUP,) plume-top memory.  ``alphturb`` = CAM's
+    clubb_mf_alphturb (TKE-enhanced entrainment, reads ``c["tke"]`` on zm);
+    0 skips it.  Returns the compared outputs."""
     g, zvir = constants.g, constants.R_v / constants.R_d - 1.0
     zm, dzt = c["zm"], c["dzt"]
     nzm = zm.shape[0]
@@ -236,11 +239,24 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
     u0 = jnp.full((NUP,), c["u"][0])
     v0 = jnp.full((NUP,), c["v"][0])
 
+    # TKE-enhanced entrainment (clubb_mf.F90:1113-1123): eturb = 1 +
+    # alphturb*sqrt(tke)/w, off when dynamic_L0 >= max_L0 (static: L0 fixed).
+    # CAM applies eturb to entn AND again in entexp and wp (eturb**2 there).
+    # A static 0 skips the branch; a traced alphturb (trainable leaf) always
+    # takes it (eturb is then exactly 1 at alphturb = 0).
+    turb = (not isinstance(alphturb, (int, float)) or alphturb != 0.0) and L0 < MAX_L0
+
     def step(carry, xk):
         w, thl, qt, thv, u, v = carry
-        dz, qt_e, thl_e, thv_e, u_e, v_e, p_n, iex_n, ent_k = xk
+        dz, qt_e, thl_e, thv_e, u_e, v_e, p_n, iex_n, tke_k, ent_k = xk
         entn = ent_k * ENT0 / dz
-        entexp = jnp.exp(-entn * dz)
+        eturb = 1.0
+        if turb:
+            # CAM integrates live plumes only; a dead plume (w = 0) is masked
+            w_ok = w > 0.0
+            eturb = jnp.where(w_ok, 1.0 + alphturb * jnp.sqrt(tke_k) / jnp.where(w_ok, w, 1.0), 1.0)
+            entn = entn * eturb
+        entexp = jnp.exp(-entn * eturb * dz)
         entexpu = jnp.exp(-entn * dz / ENT_MOM_REDUCTION)
         qtn = qt_e * (1.0 - entexp) + qt * entexp
         thln = thl_e * (1.0 - entexp) + thl * entexp
@@ -248,7 +264,7 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
         vn = v_e * (1.0 - entexpu) + v * entexpu
         thvn, qcn, _, exn, _ = condensation_mf(qtn, thln, p_n, iex_n, sm)
         b = g * (0.5 * (thvn + thv) / thv_e - 1.0)
-        wp = WB * entn
+        wp = WB * entn * eturb
         noent = ent_k == 0
         wp_safe = jnp.where(noent, 1.0, wp)
         entw = jnp.exp(-2.0 * wp_safe * dz)
@@ -262,7 +278,8 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
         return new, (gate, wn, thln, qtn, thvn, qcn, un, vn, exn)
 
     k = slice(0, nzm - 1)
-    xs = (dzt, c["qt"], c["thl"], c["thv"], c["u"], c["v"], c["p_zm"][1:], c["iex_zm"][1:])
+    tke = c["tke"] if turb else jnp.zeros_like(zm)
+    xs = (dzt, c["qt"], c["thl"], c["thv"], c["u"], c["v"], c["p_zm"][1:], c["iex_zm"][1:], tke)
     xs = tuple(jnp.broadcast_to(x[k][:, None], (nzm - 1, NUP)) for x in xs) + (
         enti[k].astype(zm.dtype),
     )
@@ -311,9 +328,19 @@ def integrate_mf(c, enti, ztopm1_in, sm: MFSmoothing = MFSmoothing()):
     cb = jnp.sum(first_cl * zm[:, None], axis=0) + (1.0 - jnp.sum(first_cl, axis=0)) * (
         jnp.sum(first_dead * zm[:, None], axis=0) + jnp.prod(on, axis=0) * zm[-1]
     )
+    # moist-plume aggregates (CAM "updraft properties for output"): plumes
+    # with upqc > 0 (the qc switch); in-cloud condensate = area-weighted mean
+    moist = up["upa"] * _strict_pos(ex, sm.qc)
+    moist_a = jnp.sum(moist, axis=1)
+    # double where: finite reverse-mode gradient at zero moist area (fp32 too)
+    _has = moist_a > 0.0
+    moist_qc = jnp.where(
+        _has, jnp.sum(moist * up["upqc"], axis=1) / jnp.where(_has, moist_a, 1.0), 0.0)
     out = dict(
         up,
         **flux,
+        moist_a=moist_a,
+        moist_qc=moist_qc,
         ztopm1=ztop,
         cbm1=(1.0 - early) * jnp.mean(cb) + early * zm[0],
         n_alive=jnp.sum(alive, axis=0),
@@ -419,7 +446,15 @@ def entrainment_draws(lam, u_seed):
     seeds = kiss_seeds(jax.lax.stop_gradient(u_seed))
 
     def one(sd, l_):
-        return jax.lax.cond(l_ < _KNUTH_MAX_LAMBDA, _knuth, _hormann, sd, l_)
+        # Under vmap the cond runs BOTH branches; Hormann's rejection loop does
+        # not terminate for small rates (seen at lam = 0.38), so each branch is
+        # fed a rate inside its own range.  The selected branch sees l_ itself.
+        # A NaN rate (already-NaN state) would hang either loop: draw at 0.
+        l_ = jnp.where(jnp.isnan(l_), 0.0, l_)
+        return jax.lax.cond(
+            l_ < _KNUTH_MAX_LAMBDA,
+            lambda s, x: _knuth(s, jnp.minimum(x, _KNUTH_MAX_LAMBDA)),
+            lambda s, x: _hormann(s, jnp.maximum(x, _KNUTH_MAX_LAMBDA)), sd, l_)
 
     _, draws = jax.lax.scan(one, seeds, lam.reshape(-1))
     return draws.reshape(lam.shape)
@@ -437,7 +472,8 @@ def mf_lts(T, q_liq, p_full, p_sfc):
 
 
 def clubb_mf_forcing(c, dt, rho_ds_zm, invrs_rho_ds_zt, invrs_dzt,
-                     sm: MFSmoothing = MFSmoothing(), cfl_sharpness: float = CFL_SHARPNESS):
+                     sm: MFSmoothing = MFSmoothing(), cfl_sharpness: float = CFL_SHARPNESS,
+                     alphturb: float = 0.0):
     """One column: the plumes, then CAM's explicit forcing on CLUBB's thermo
     levels, ``-(1/rho_ds_zt) d(rho_ds_zm F)/dz * cflfac`` for thl and qt.
     ``c`` as :func:`integrate_mf` (plus ``u`` for the seed); returns
@@ -448,7 +484,7 @@ def clubb_mf_forcing(c, dt, rho_ds_zm, invrs_rho_ds_zt, invrs_dzt,
     lam = (c["dzt"] / L0).at[nzt - 1].set(0.0)[:, None] * jnp.ones((1, NUP))
     u = c["u"]
     enti = entrainment_draws(lam, jnp.stack([u[0], u[KSEED], u[1 + KSEED], u[2 + KSEED]]))
-    out = integrate_mf(c, enti, jnp.full((NUP,), ZTOPM1_COLD), sm)
+    out = integrate_mf(c, enti, jnp.full((NUP,), ZTOPM1_COLD), sm, alphturb)
     aw = jnp.sum(out["upa"] * out["upw"], axis=1).at[0].set(0.0)
     max_cfl = jnp.max(dt * invrs_dzt * jnp.maximum(jnp.abs(aw[:-1]), jnp.abs(aw[1:])))
     cflfac = CFLVAL / smooth_max(jnp.asarray(CFLVAL), max_cfl, cfl_sharpness)
@@ -458,3 +494,38 @@ def clubb_mf_forcing(c, dt, rho_ds_zm, invrs_rho_ds_zt, invrs_dzt,
         return -invrs_rho_ds_zt * invrs_dzt * cflfac * (rf[1:] - rf[:-1])
 
     return conv(out["thlflx"]), conv(out["qtflx"]), dict(out, cflfac=cflfac)
+
+
+# ---------------------------------------------------------------------------
+# Deep-cloud hookup (atmos_phys clubb.F90 clubb3_run, do_clubb_mf_rad)
+# ---------------------------------------------------------------------------
+MF_CONCLD_MAX = 0.8  # clubb3_run: concld = min(deepcu, 0.80)
+
+
+def _select(a, b, sharpness):
+    """Weight of ``a`` in the larger-of-two choice: exactly ``a > b`` at inf;
+    a convex blend otherwise, so two zero clouds stay exactly zero."""
+    return _strict_pos(a - b, sharpness)
+
+
+def mf_deep_cloud(deepcu_zm, icwmr_zm, mf_cloudfrac, mf_qc, cfg):
+    """ZM's deep cloud combined with the plume cloud, top-down (ncol, nlev).
+
+    CAM7 sets ``deepcu = clubb_mf_cldfrac_fac * mf_cloudfrac``, ``dp_icwmr =
+    mf_qc``, zeroed where ``deepcu <= frac_limit`` or ``dp_icwmr < ic_limit``
+    (layers 1..pver-1); here that cloud and ZM's are combined as the larger
+    fraction per level, with that cloud's in-cloud water (user 2026-11-23).
+    Returns ``(deepcu, icwmr)``; the 0.8 cap is :func:`mf_concld`."""
+    dc = cfg.mf_cldfrac_fac * mf_cloudfrac
+    keep = (_strict_pos(dc - cfg.cam6_deepcu_frac_limit, cfg.mf_deepcu_frac_gate_sharpness)
+            * sigmoid_switch(mf_qc - cfg.cam6_deepcu_ic_limit,
+                             cfg.mf_deepcu_ic_gate_sharpness))  # kept iff qc >= ic_limit
+    dc = (dc * keep).at[:, -1].set(0.0)
+    w = _select(dc, deepcu_zm, cfg.mf_deepcu_select_sharpness)
+    return w * dc + (1.0 - w) * deepcu_zm, w * mf_qc + (1.0 - w) * icwmr_zm
+
+
+def mf_concld(deepcu, cfg):
+    """``min(deepcu, 0.8)`` (CAM concld, the cloud-fraction share), smooth."""
+    w = _select(deepcu, jnp.asarray(MF_CONCLD_MAX), cfg.mf_deepcu_cap_sharpness)
+    return w * MF_CONCLD_MAX + (1.0 - w) * deepcu

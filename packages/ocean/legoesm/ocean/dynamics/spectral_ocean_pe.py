@@ -54,7 +54,6 @@ from legoesm.ocean.vertical import (
     compute_layer_thickness,
     compute_ocean_jacobian,
     vertical_advection_ocean,
-    advective_vertical_momentum_ocean,
 )
 from legoesm.ocean.state import SpectralOceanState, SpectralOceanConfig
 from legoesm.ocean.physics.mixing import vertical_diffusion
@@ -385,8 +384,9 @@ def spectral_ocean_tendencies(
     A_vor = abs_vor * u_cos * mask_3d
     B_vor = abs_vor * v_cos * mask_3d
 
-    vert_adv_u = advective_vertical_momentum_ocean(u.real, w, z_coord, J.real)
-    vert_adv_v = advective_vertical_momentum_ocean(v.real, w, z_coord, J.real)
+    # Continuity-paired like the tracers: column h*u closes (#2662).
+    vert_adv_u = vertical_advection_ocean(u.real, w, z_coord, J.real)
+    vert_adv_v = vertical_advection_ocean(v.real, w, z_coord, J.real)
     vert_u_cos = vert_adv_u * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
     vert_v_cos = vert_adv_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
 

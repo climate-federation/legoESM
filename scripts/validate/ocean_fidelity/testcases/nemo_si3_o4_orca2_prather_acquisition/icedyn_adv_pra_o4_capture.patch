@@ -1,0 +1,7 @@
+--- icedyn_adv_pra.F90
++++ icedyn_adv_pra.F90
+@@ -513,1 +513,4 @@
++      ! O4_OBSERVER_BEGIN
++      CALL o4_capture_cfl( zcfl, icycle )
++      ! O4_OBSERVER_END
+    END SUBROUTINE ice_dyn_adv_pra

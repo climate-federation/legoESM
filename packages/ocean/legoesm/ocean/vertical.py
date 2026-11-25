@@ -2085,50 +2085,6 @@ def compute_ocean_jacobian(
     return water_col / z_coord.H_max
 
 
-def upwind_vertical_gradient(
-    field: jnp.ndarray,
-    dz_half: jnp.ndarray,
-    w: jnp.ndarray,
-    *,
-    eps: float = 1.0e-12,
-) -> jnp.ndarray:
-    """Compute first-order upwind d(field)/dz at full levels.
-
-    Assumes levels are indexed surface-to-bottom (k=0 at surface).
-    Caller must use consistent coordinates: both ``dz_half`` and ``w``
-    should be in the same vertical coordinate (physical z or z*).
-
-    Parameters
-    ----------
-    field : array
-        Field at full levels, shape (..., nlev).
-    dz_half : array
-        Full-level spacing [m], shape (..., nlev-1). Positive.
-    w : array
-        Vertical velocity [m/s], shape (..., nlev).
-        Only its sign is used (upwind direction). Positive = upward.
-    eps : float
-        Small denominator guard for spacing.
-
-    Returns
-    -------
-    array : Upwind vertical gradient d(field)/dz, shape (..., nlev).
-    """
-    inv_dz_half = 1.0 / jnp.maximum(dz_half, eps)
-    df = (field[..., :-1] - field[..., 1:]) * inv_dz_half
-
-    # Pad along trailing axis instead of allocating a fresh ``zeros``
-    # buffer + concatenate.  Single Pad HLO op each.  This helper
-    # is used by ``advective_vertical_momentum_ocean`` for u and v.
-    pad_axes = ((0, 0),) * (df.ndim - 1)
-    # Upward flow (w>0): donor is deeper cell -> (f[k] - f[k+1]) / dz.
-    grad_up = jnp.pad(df, (*pad_axes, (0, 1)))
-    # Downward flow (w<0): donor is shallower cell -> (f[k-1] - f[k]) / dz.
-    grad_down = jnp.pad(df, (*pad_axes, (1, 0)))
-
-    return jnp.where(w > 0.0, grad_up, grad_down)
-
-
 # ---------------------------------------------------------------------------
 # Vertical velocity diagnosis and advection (shared across ocean dycores)
 # ---------------------------------------------------------------------------
@@ -2237,34 +2193,6 @@ def vertical_advection_ocean(field, w_half, z_coord, jacobian):
     return (-tracer_div + field * volume_div) / jnp.maximum(h, 1.0e-10)
 
 
-def advective_vertical_momentum_ocean(field, w_half, z_coord, jacobian):
-    """Vertical advection ``-w * d(field)/dz`` with upwind scheme.
-
-    Parameters
-    ----------
-    field : array, shape (..., nlev)
-        Quantity being advected.
-    w_half : array, shape (..., nlev+1)
-        Vertical velocity on half levels.
-    z_coord : OceanZStarCoordinate
-        Vertical coordinate (provides ``dz_half_ref``).
-    jacobian : array, shape (...)
-        Dynamic z-star Jacobian.
-
-    Returns
-    -------
-    tendency : array, shape (..., nlev)
-    """
-    w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
-    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
-    dz_half = z_coord.dz_half_ref * jac_safe
-    grad = upwind_vertical_gradient(field, dz_half, w_full)
-
-    # Vertical advection calculation
-
-    return -w_full * grad
-
-
 def flux_form_vertical_momentum_advection(
     u: jnp.ndarray,
     w_half: jnp.ndarray,
@@ -2289,9 +2217,7 @@ def flux_form_vertical_momentum_advection(
     ----------
     1. Interior interface-upwind (consistent with the tracer path).
     2. Rigid-lid boundary by construction: ``F[0] = F[nlev] = 0``.
-       No artificial momentum injection from the boundary via the
-       "hard zero at k=0 and k=nlev-1" pathology that the old
-       ``advective_vertical_momentum_ocean`` cell-upwind gradient has.
+       No artificial momentum injection from the boundary.
     3. Column momentum flux identity: for any ``w_half`` with
        ``w_half[0] = w_half[nlev] = 0`` (closed column), the sum of
        ``(tendency * h_u)`` over the column is exactly zero.

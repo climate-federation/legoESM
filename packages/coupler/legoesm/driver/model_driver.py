@@ -303,7 +303,7 @@ def land_radiating_surface(T_sea, f_land, E_sea, T_rad_land, eps_land):
 
 # Per-cell fields of the MPAS land step tuple, after the state: T_sfc, albedo,
 # q_surface, shflx, lhflx, surface_mass_flux, stress, held, T_rad, emissivity.
-_LAND_STEP_N_CELL = 10
+_LAND_STEP_N_CELL = 11
 
 
 def gather_land_step(run, ncol, padded, proc, allgather):
@@ -655,6 +655,8 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
             cfg, "cloud_clubb_cf_override_floor", None),
         saturation_scheme=getattr(cfg, "cloud_saturation_scheme", None),
         cover_condensate_q_ref=getattr(cfg, "cloud_cover_condensate_q_ref", None),
+        clubb_mf_cloud=bool(getattr(cfg, "clubb_mf", False)) or None,
+        mf_cldfrac_fac=getattr(cfg, "cloud_clubb_mf_cldfrac_fac", None),
         cam6_rhmini=getattr(cfg, "cloud_cam6_rhmini", None),
         cam6_rhmaxi=getattr(cfg, "cloud_cam6_rhmaxi", None),
         cam6_rhminis=getattr(cfg, "cloud_cam6_rhminis", None),
@@ -1426,7 +1428,10 @@ class _MPASSfcFluxAccum:
     # windows are complete.
     # 22-24 = taux_sfc / tauy_sfc / precip_conv_sfc (CMOR tauu, tauv, prc),
     # with the same mid-window-restart behaviour as slot 14 above.
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 22, 23, 24)
+    # 25 = rad_absorbed_above_top (energy-budget sink), averaged like the
+    # TOA fluxes; NOT in ENERGY_SLOTS, so a backend that does not publish it
+    # leaves the energy sample's interval means intact (the term is NaN).
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 22, 23, 24, 25)
     #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
     #: sw_dn, hfss, hfls).  After the first radiation call every one of them
     #: is non-None on EVERY step (the MPAS model holds the last radiation
@@ -1789,8 +1794,11 @@ _LAND_STRESS_CKPT_KEYS = ("land_taumag", "land_taumag_valid", "land_taumag_fresh
 _LAND_ML_CACHE_FIELDS = ("canopy_x",)
 # Prognostic fields a checkpoint written WITHOUT them may lack: the restore
 # initialises them from the restored state instead of refusing.  ``T_snow``
-# (the opt-in snow thermal node) -> ``init_snow_temperature`` (user 2026-10-03).
-_LAND_ML_INIT_ON_RESTORE = ("T_snow",)
+# (the opt-in snow thermal node) -> ``init_snow_temperature`` (user 2026-10-03);
+# ``W_canopy_snow`` (opt-in canopy snow) -> the template's empty store (no mass;
+# vote 2026-11-22).  A checkpoint CARRYING either into a run without the
+# feature still refuses (unexpected field).
+_LAND_ML_INIT_ON_RESTORE = ("T_snow", "W_canopy_snow")
 # Restart-exactness payload of the column loop (R-ex), beyond the land
 # cadence window below (which carries the land boundary outputs the loop
 # holds between land steps).  The held RADIATION slots are NOT persisted
@@ -2303,6 +2311,20 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     cfg = cfg._replace(canopy_snow_masking=_csm)
     logger.info("  land canopy snow masking (trees hide snow): %s",
                 "ON" if _csm else "off")
+    if getattr(config, "land_canopy_snow", False):
+        from legoesm.land.canopy.interception import CanopySnowConfig
+        _cs = CanopySnowConfig()._replace(**{k: float(v) for k, v in (
+            ("temperature_width_K",
+             getattr(config, "land_canopy_snow_temperature_width_K", None)),
+            ("relative_width",
+             getattr(config, "land_canopy_snow_relative_width", None)),
+            ("fcansno_ramp",
+             getattr(config, "land_canopy_snow_fcansno_ramp", None)),
+        ) if v is not None})
+        cfg = cfg._replace(canopy_snow=_cs)
+        logger.info("  land canopy snow (CLM5 ON_RAD): ON, widths %g K / %g / "
+                    "fcansno ramp %g", _cs.temperature_width_K, _cs.relative_width,
+                    _cs.fcansno_ramp)
     # Snowpack scheme + snow emissivity, same placement (after the bake).
     cfg = cfg._replace(
         snow_scheme=str(config.land_snow_scheme),
@@ -2718,6 +2740,8 @@ class ModelDriver:
         self.diagnostics = None
         self._phis_data = None
         self._f_land = None
+        # (self, f_land) -> f_land, applied once where setup finalises f_land
+        self._land_fraction_hook = None
         # Voronoi MPI: does the GLOBAL mesh hold any land (None = not known,
         # use this rank's own cells).  Every rank holds the global product,
         # so the answer is rank-uniform with no collective.
@@ -3332,6 +3356,9 @@ class ModelDriver:
                 "min(top soil T, freezing), density %.0f kg/m3) -- a seeded, not "
                 "spun-up, pack", _land_cfg.snow_column.n_layers,
                 _land_cfg.snow_column.seed_density)
+        if "W_canopy_snow" in _init_missing:
+            logger.info("  land_ml restore: checkpoint has no canopy snow store; "
+                        "starting it empty (no mass)")
         if "T_snow" in _init_missing:
             from legoesm.land.multilayer_land import init_snow_temperature
             self._land_ml_state = init_snow_temperature(self._land_ml_state)
@@ -4011,6 +4038,11 @@ class ModelDriver:
                 f"  Land fraction source: {_lf_src} "
                 f"(mean={float(jnp.mean(self._f_land)):.3f})")
 
+        _hook = self._land_fraction_hook
+        if _hook is not None and self._f_land is not None:
+            # set by a coupled driver whose ocean dictates part of the
+            # land/sea partition (CoupledESMDriver._owned_land_fraction_hook)
+            self._f_land = _hook(self, self._f_land)
         if self._f_land is not None:
             # every land-fraction source above, once: roundoff below 1 left a
             # 1e-14 water fraction the slab divided by (SST to 4.7e9 K).  The
@@ -10607,9 +10639,16 @@ class ModelDriver:
     # MPAS execution path (uses unified physics pipeline)
     # ==================================================================
 
+    # Optional area-mean terms of the energy sample, in the order the serial
+    # and partitioned paths carry them.  The last two close the atmospheric
+    # budget: net radiation absorbed ABOVE the model top (the CAM overhead
+    # layer's discarded heating, a sink) and L_f x frozen surface precip (the
+    # tracker's column energy carries -L_f*q_frozen, which snowfall removes).
+    _ENERGY_OPT_KEYS = ("hfss", "hfls", "evspsbl",
+                        "energy_rad_above_top", "energy_snowfall_fusion")
     _ENERGY_SERIES_KEYS = ("energy_toa_net", "energy_dE_dt",
                            "energy_toa_minus_dE_dt", "sw_net_sfc", "lw_net_sfc",
-                           "hfss", "hfls", "evspsbl")
+                           ) + _ENERGY_OPT_KEYS
 
     def _mpas_energy_sample(self, p_s_data, elapsed_day: float) -> dict:
         """One energy-budget tracker sample on the MPAS lane (#1354/#1515).
@@ -10675,6 +10714,17 @@ class ModelDriver:
             _sw_ns, _lw_ns = _slot(0), _slot(1)
             _shf, _lhf = _slot(6), _slot(7)
             _evp = _slot(_evap_sfc_slot())
+            def _closure_slot(i):
+                # A closure term outside ENERGY_SLOTS must cover the SAME
+                # window on its own (a checkpoint written before slot 25
+                # existed resumes it with a post-restart-only count): an
+                # incomplete window gives NaN, never a short mean.
+                if _use_accum and not _facc_e.window_ready((i,)):
+                    return None
+                return _slot(i)
+            _atop = _closure_slot(_sfc_diag_slot("rad_absorbed_above_top"))
+            _pfz = _closure_slot(_sfc_diag_slot("precip_frozen"))
+            _lfs = None if _pfz is None else constants.L_f * _pfz
             _rad = (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)
         except Exception as exc:  # noqa: BLE001
             if not _partitioned:
@@ -10686,11 +10736,13 @@ class ModelDriver:
                          "rank.", getattr(self, "_mpi_rank", -1),
                          type(exc).__name__, exc)
             return self._mpas_energy_partitioned(
-                None, None, None, (None,) * 5, (None,) * 3, False,
+                None, None, None, (None,) * 5,
+                (None,) * len(self._ENERGY_OPT_KEYS), False,
                 p_s_data, elapsed_day)
+        _opt = (_shf, _lhf, _evp, _atop, _lfs)
         if _partitioned:
             return self._mpas_energy_partitioned(
-                _ebd, _qv_e, _qfrz_e, _rad, (_shf, _lhf, _evp), _use_accum,
+                _ebd, _qv_e, _qfrz_e, _rad, _opt, _use_accum,
                 p_s_data, elapsed_day)
         if _ebd is None or _qv_e is None or None in _rad:
             return {k: float("nan") for k in self._ENERGY_SERIES_KEYS}
@@ -10728,8 +10780,8 @@ class ModelDriver:
                      if _shf is not None else float("nan")),
             "hfls": (float(_awm(_lhf, _awt))
                      if _lhf is not None else float("nan")),
-            "evspsbl": (float(_awm(_evp, _awt))
-                        if _evp is not None else float("nan")),
+            **{k: (float(_awm(f, _awt)) if f is not None else float("nan"))
+               for k, f in zip(self._ENERGY_OPT_KEYS, _opt)},
         }
 
     def _mpas_energy_partitioned(self, tracker, q_v, q_frozen, rad, opt,
@@ -10790,9 +10842,10 @@ class ModelDriver:
             raise
 
         # --- C: local sums, no collectives.
-        # flags = [no_error, interval_mean, has_hfss, has_hfls, has_evspsbl]
-        flags = np.zeros(5)
-        sums = np.zeros(10)   # E, 5 radiation, 3 optional, sum(w)
+        # flags = [no_error, interval_mean, has_<each optional term>]
+        n_opt = len(self._ENERGY_OPT_KEYS)
+        flags = np.zeros(2 + n_opt)
+        sums = np.zeros(7 + n_opt)   # E, 5 radiation, optional terms, sum(w)
         try:
             owned = vl.owned_mask_cells
             n_loc = int(owned.shape[0])
@@ -10824,8 +10877,8 @@ class ModelDriver:
             logger.error("  energy tracker: local sums failed on rank %d "
                          "(%s: %s); this sample is NaN on every rank.",
                          comm.Get_rank(), type(exc).__name__, exc)
-            flags = np.zeros(5)
-            sums = np.zeros(10)
+            flags = np.zeros(2 + n_opt)
+            sums = np.zeros(7 + n_opt)
 
         # --- D: every rank, unconditionally.
         comm.Allreduce(_MPI.IN_PLACE, sums, op=_MPI.SUM)
@@ -10841,7 +10894,7 @@ class ModelDriver:
                     "(interval mean on some, snapshot on others); this "
                     "sample is NaN rather than a mixture.")
             return nan_out
-        means = sums[:9] / sums[9]
+        means = sums[:-1] / sums[-1]
         eb = tracker.record(*(float(m) for m in means[:6]),
                             elapsed_seconds=elapsed_day * 86400.0)
         out = {
@@ -10852,7 +10905,7 @@ class ModelDriver:
             "lw_net_sfc": float(eb.sfc_lw_net),
             "energy_flux_interval_mean": float(fmin[1]),
         }
-        for j, key in enumerate(("hfss", "hfls", "evspsbl")):
+        for j, key in enumerate(self._ENERGY_OPT_KEYS):
             out[key] = (float(means[6 + j]) if fmin[2 + j] > 0.5
                         else float("nan"))
         return out
@@ -11274,6 +11327,7 @@ class ModelDriver:
                 # published land tas is not the model's land at all.
                 _tas_land_T = getattr(self, "_land_T_skin_last", None)
                 _tas_land_q = getattr(self, "_land_qsfc_last", None)
+                _tas_land_T2m = getattr(self, "_land_T2m_last", None)
                 _tas_f_land = getattr(self, "_f_land", None)
                 _tas_kw = {}
                 if _tas_land_T is not None and _tas_f_land is not None:
@@ -11281,7 +11335,9 @@ class ModelDriver:
                         T_land=jnp.asarray(_tas_land_T).reshape(-1),
                         q_land=(None if _tas_land_q is None
                                 else jnp.asarray(_tas_land_q).reshape(-1)),
-                        land_fraction=jnp.asarray(_tas_f_land).reshape(-1))
+                        land_fraction=jnp.asarray(_tas_f_land).reshape(-1),
+                        T2m_land=(None if _tas_land_T2m is None
+                                  else jnp.asarray(_tas_land_T2m).reshape(-1)))
                 from legoesm.forcing.surface_utils import blend_surface_temperature
                 ts = blend_surface_temperature(_sst, _sic, _tas_ice)
                 if _tas_land_T is not None and _tas_f_land is not None:
@@ -15218,6 +15274,13 @@ class ModelDriver:
                 _emis = jnp.broadcast_to(
                     jnp.asarray(resp.emissivity, resp.T_rad.dtype),
                     resp.T_rad.shape)
+                # The scheme's own 2 m air temperature (CLM5 t_ref2m) for the
+                # CMOR ``tas`` land leg; NaN where the scheme solves none or the
+                # column was held (no solved surface layer this call).
+                _t2m = (jnp.full_like(resp.T_rad, jnp.nan)
+                        if getattr(_sfc, "T_2m", None) is None
+                        else jnp.asarray(_sfc.T_2m, resp.T_rad.dtype))
+                _t2m = jnp.where(_held_f > 0.5, jnp.nan, _t2m)
                 if _land_pack_on:
                     # Scatter the advanced columns back into the full-grid
                     # state (ocean columns keep their frozen init values,
@@ -15234,11 +15297,15 @@ class ModelDriver:
                                     resp.T_sfc, resp.albedo, resp.q_surface,
                                     resp.shflx, resp.lhflx, resp.surface_mass_flux,
                                     _taumag, _held_f, resp.T_rad, _emis))
+                            # 2 m T: NaN (= no land screen value) off the
+                            # land columns, never a valid-looking 0 K
+                            + (jnp.full((_land_ncol_full,), jnp.nan, _t2m.dtype)
+                               .at[_land_out_idx].set(_t2m.reshape(-1)),)
                             + (_n_held, _n_held_land, _n_fb_land,
                                _n_fb_rej, _n_unconv_land, _n_iter_max))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
                         resp.shflx, resp.lhflx, resp.surface_mass_flux,
-                        _taumag, _held_f, resp.T_rad, _emis,
+                        _taumag, _held_f, resp.T_rad, _emis, _t2m,
                         _n_held, _n_held_land, _n_fb_land, _n_fb_rej,
                         _n_unconv_land, _n_iter_max)
               if not _land_none:
@@ -15251,8 +15318,12 @@ class ModelDriver:
                   # the same message on every rank.
                   out = jax.eval_shape(
                       _land_step, land_state, a2s, doy, lai_doy, lai_year)
+                  # (the 2 m T, last per-cell field, is NaN = none solved)
                   return (land_state,) + tuple(
-                      jnp.zeros(o.shape, o.dtype) for o in out[1:])
+                      jnp.full(o.shape, jnp.nan, o.dtype)
+                      if i == _LAND_STEP_N_CELL - 1
+                      else jnp.zeros(o.shape, o.dtype)
+                      for i, o in enumerate(out[1:]))
               return _land_step_none
 
             _land_step_fn = _make_land_step(DT_LAND)
@@ -15511,7 +15582,8 @@ class ModelDriver:
             # EnergyBudgetTracker per diag step from self.model._sfc_diag.
             "energy_toa_net": [], "energy_dE_dt": [], "energy_toa_minus_dE_dt": [],
             "sw_net_sfc": [], "lw_net_sfc": [], "hfss": [], "hfls": [],
-            "evspsbl": [],
+            "evspsbl": [], "energy_rad_above_top": [],
+            "energy_snowfall_fusion": [],
             # 1.0 = the seven energy channels above (and evspsbl) are diagnostic-INTERVAL
             # MEANS; 0.0 = end-of-interval snapshots, which alias the diurnal
             # cycle of the land-dominated turbulent fluxes (#1354/#1353).
@@ -15746,6 +15818,11 @@ class ModelDriver:
                 "zc_T_prev",
                 "zc_q_v_prev",
                 "zc_p_s_prev",
+                # mf_cloudfrac / mf_qc (2026-11-23, vote): CAM7 CLUBB-MF
+                # plume cloud lag carry; zero = no plume cloud, the state of
+                # any run before the option (MF off writes nothing else).
+                "mf_cloudfrac",
+                "mf_qc",
             })
             if _any_physstate:
                 from legoesm.atmosphere.physics.physics_state import (
@@ -16977,7 +17054,7 @@ class ModelDriver:
                      _land_albedo_cells, _land_qsfc_step,
                      _land_shflx_step, _land_lhflx_step, _land_evap_step,
                      _land_taumag_step, _land_held_step,
-                     _land_Trad_cells, _land_emis_cells,
+                     _land_Trad_cells, _land_emis_cells, _land_T2m_step,
                      _land_n_held_step, _land_n_held_land_step,
                      _land_n_fb_step, _land_n_fb_rej_step,
                      _land_n_unconv_step, _land_n_iter_max) = _land_fn(
@@ -17016,6 +17093,7 @@ class ModelDriver:
                     # land and publishes a land temperature the model never had.
                     self._land_T_skin_last = _land_T_skin
                     self._land_qsfc_last = _land_qsfc_step
+                    self._land_T2m_last = _land_T2m_step
                     # Accumulate ON DEVICE and read at the same cadence the
                     # other post-step warnings use: reading it every step
                     # would stall the accelerator once per step for a number
@@ -18810,6 +18888,12 @@ class ModelDriver:
             hfss=_arr("hfss") if "hfss" in ts else nan,
             hfls=_arr("hfls") if "hfls" in ts else nan,
             evspsbl=_arr("evspsbl") if "evspsbl" in ts else nan,
+            # Closure terms: radiation absorbed above the model top (sink)
+            # and L_f x frozen precip (scripts/validate/mpas_energy_budget_leak.py).
+            energy_rad_above_top=(_arr("energy_rad_above_top")
+                                  if "energy_rad_above_top" in ts else nan),
+            energy_snowfall_fusion=(_arr("energy_snowfall_fusion")
+                                    if "energy_snowfall_fusion" in ts else nan),
             # Flux-timing provenance for the seven channels above and evspsbl. WITHOUT
             # this the closure probe refuses every real series as "timing
             # unknown" -- which is the correct refusal, and exactly what

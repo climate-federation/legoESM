@@ -191,6 +191,53 @@ def test_prognostic_clubb_takes_the_mass_flux_in_the_scm():
     assert np.max(np.abs(out[1] - out[0])) > 0.0
 
 
+
+def test_vmapped_draws_terminate_and_match_the_plain_draws():
+    """Under vmap the Knuth/Hormann cond runs both branches; at lam = 0.38 with
+    these seeds Hormann alone never terminates.  The vmapped draws must finish
+    and equal the plain (CAM-ordered) draws bitwise."""
+    from legoesm.atmosphere.physics.turbulence.clubb_mf import entrainment_draws
+
+    lam = jnp.asarray([[0.0] * 25, [0.38] * 25, [0.05] * 25, [12.0] * 25,
+                       [10.0] * 25, [150.0] * 25, [np.nan] * 25])
+    u = jnp.asarray([-9.84784107, -9.74319409, -9.63811106, -9.53258656])
+    plain = np.asarray(entrainment_draws(lam, u))
+    batched = np.asarray(jax.vmap(entrainment_draws)(lam[None], u[None]))[0]
+    np.testing.assert_array_equal(batched, plain)
+    assert plain[0].max() == -1 and plain[3].min() > 0
+    assert np.all(plain[6] == -1)  # NaN rate drawn at 0, no hang
+
+
+def test_alphturb_tke_is_held_over_the_clubb_subcycle(monkeypatch):
+    """CAM reads tke_pbuf once before its sub-cycle (clubb.F90:1524) and
+    writes it after (:2836): with sub-cycling every sub-step's plumes see the
+    same TKE, the moments the host step started from."""
+    import legoesm.atmosphere.physics.turbulence.clubb_mf as mfmod
+    from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from tests.atmosphere.hydrostatic.unit.test_scm import (
+        _RCE_DT, _RCE_NLEV, _baseline_cfg, _tropical_qv_profile, _tropical_T_profile)
+
+    seen = []
+    orig = mfmod.clubb_mf_forcing
+
+    def spy(c, *a, **kw):
+        jax.debug.callback(lambda t: seen.append(np.asarray(t)), c["tke"])
+        return orig(c, *a, **kw)
+    monkeypatch.setattr(mfmod, "clubb_mf_forcing", spy)
+    cfg = _baseline_cfg(turbulence=TurbulenceConfig(
+        scheme="clubb", clubb=CLUBBConfig(prognostic=True, clubb_dt=_RCE_DT / 3,
+                                          mf_alphturb=3.0), clubb_mf=True))
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=_RCE_NLEV, dt=_RCE_DT, T_profile=_tropical_T_profile(),
+        q_v_profile=_tropical_qv_profile(), latitude_deg=0.0)
+    scm.run(nsteps=2)
+    assert len(seen) >= 6
+    for step in (seen[0:3], seen[3:6]):
+        assert all(np.array_equal(step[0], x) for x in step[1:])
+    assert not np.array_equal(seen[0], seen[3])  # the moments did evolve between steps
+
 if __name__ == "__main__":
     d = dict(np.load(FIXTURE, allow_pickle=True))
     CFL_GAPS.write_text(json.dumps(_cfl_gaps(d), indent=1))

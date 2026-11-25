@@ -1320,6 +1320,16 @@ class RRTMGP:
       sw_hr = sw_hr_3d[:, 0, hw:-hw][:, ::-1]
 
       if overhead:
+          # Net radiation absorbed in the overhead layer (face 0 = lid, face 1 =
+          # model top, TOA-first after the flip): its heating is discarded
+          # below, so the energy budget books this as an explicit sink.
+          sw_above = (sw_down[:, 0] - sw_up[:, 0]) - (sw_down[:, 1] - sw_up[:, 1])
+          lw_above = (lw_down[:, 0] - lw_up[:, 0]) - (lw_down[:, 1] - lw_up[:, 1])
+      else:
+          sw_above = jnp.zeros_like(sw_down[:, 0])
+          lw_above = jnp.zeros_like(lw_down[:, 0])
+
+      if overhead:
           # Drop the overhead layer's heating and the model-top face: face 0
           # stays the TRUE top (lid), so TOA diagnostics see the full column.
           def _faces(a):
@@ -1342,6 +1352,8 @@ class RRTMGP:
                               if clear_sky else None),
           sw_flux_up_toa_clr=(sw_fluxes['flux_up_clr'][:, 0, -1]
                               if clear_sky else None),
+          sw_absorbed_above_top=sw_above,
+          lw_absorbed_above_top=lw_above,
       )
 
   def solve_columns_chunked(
