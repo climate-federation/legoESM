@@ -261,6 +261,20 @@ def test_geography_has_land(tmp_path):
     assert not geo.geography_has_land(_write(ds, tmp_path, "zero_lf.nc"))
 
 
+@pytest.mark.parametrize("cc_kw,msg", [
+    (dict(f_land_mode="zero", land_mode="none"), "f_land_mode='analytical'"),
+    (dict(f_land_mode="from_ocean", land_mode="none"), "f_land_mode='analytical'"),
+    (dict(f_land_mode="analytical", land_mode="none"), "no land model reads"),
+])
+def test_coupled_refuses_geography_land_the_coupler_would_misread(tmp_path, cc_kw, msg):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "ridge", barrier_lon=0.0)),
+                         CoupledConfig(**cc_kw), output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match=msg):
+        d.setup()
+
+
 def test_coupled_refuses_atm_owned_geography_land_without_a_land_model(tmp_path):
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
@@ -443,7 +457,8 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
     ds["elevation"] = ds["elevation"].where(ds["elevation"] >= 0.0, -D)
     d = CoupledESMDriver(_mpas_cfg(_write(ds, tmp_path, "box_snap.nc")), cc,
                          output_dir=str(tmp_path / "run"))
-    d.setup()
+    d._atm.setup()     # atmosphere + ocean only: this box has land and no land
+    d._init_ocean()    # model, which the coupler (rightly) refuses
     f = np.asarray(d._atm._f_land).ravel()
     wet = np.asarray(d._ocean_land_mask)
     assert np.array_equal(wet, (f < 1.0).astype(wet.dtype)) and 0 < wet.sum() < wet.size

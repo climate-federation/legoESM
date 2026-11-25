@@ -1145,6 +1145,20 @@ class CoupledESMDriver:
                 "land_mode='none' (with atm_owns_surface=True the atmosphere's "
                 "land reads the geography).")
         from legoesm.grids.geography import geography_has_land
+        if self._atm.config.geography and cfg.f_land_mode != "analytical":
+            # 'zero' would put ocean fluxes on dry cells, 'from_ocean' full
+            # ocean weight on fractional coasts (codex r7; #2618's guard)
+            raise ValueError(
+                f"geography needs f_land_mode='analytical' (the coupler's land "
+                f"fraction is the geography's, read from the atmosphere); got "
+                f"{cfg.f_land_mode!r}")
+        if (self._atm.config.geography and not cfg.atm_owns_surface
+                and geography_has_land(self._atm.config.geography)):
+            # land_mode='none' with analytical f_land still steps a generic
+            # slab over the geography's land, ignoring its land map
+            raise ValueError(
+                "geography has land but no land model reads its land map: use "
+                "atm_owns_surface=True (the atmosphere's land reads the geography)")
         if (self._atm.config.geography and cfg.atm_owns_surface
                 and not self._atm.config.use_multilayer_land
                 and geography_has_land(self._atm.config.geography)):
