@@ -1076,8 +1076,9 @@ def main(argv=None, *, build_only=False):
     # lapse-rate troposphere + cold stratosphere) is wired for BOTH --grid
     # latlon AND cubed_sphere (validated: CWV ~17/30 kg/m2, precip ~1.5/3.3
     # mm/day, stable; vs the uniform ic="default" scaffold's CWV ~84, precip
-    # ~0).  spectral/mpas have no grid-space T Field, so they keep the uniform
-    # default.  An explicit --ic standard on an unsupported grid still raises
+    # ~0).  spectral has no grid-space T Field; mpas supports ic="standard"
+    # (flat topography only) but its default stays the uniform start unless a
+    # deck selects it.  An explicit --ic standard on an unsupported grid still raises
     # loudly in ExperimentConfig.validate_strict (no silent degrade).
     if args.ic is None:
         args.ic = ("standard" if args.grid_type in ("latlon", "cubed_sphere")

@@ -17,7 +17,10 @@ mpas_qv_smooth_del4_m4s: 5.82736e15   # absolute m4/s: x16 keeps the 2-cell damp
 # ---- (b) idealized geography (per-case decks set the file) -----------------
 geography_regrid: binned
 geography_barrier_width_cells: 1
-ic: default                       # ERA5 is Earth's atmosphere over Earth terrain: uniform rest start
+ic: standard                      # ERA5 is Earth's atmosphere over Earth terrain; a uniform 300 K start is
+                                  # warmer than the SST and holds 85 kg/m2 of water (user 2026-11-25):
+                                  # lapse-rate troposphere, 216 K stratosphere, equator-pole gradient, rest
+t_init: 300.0                     # equator surface air temperature [K]; pole = T_init - 40 K (vote a/a/a)
 land_ic: null                     # res-6 real-land soil file does not apply; aridity seed from the start RH
 gravity_wave_drag: none           # production GWD is orographic only (mcfarlane); a geography has no
                                   # subgrid orography, so zero mountain drag = no GWD (user 2026-11-21)
