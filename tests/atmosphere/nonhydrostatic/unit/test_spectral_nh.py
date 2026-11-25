@@ -620,8 +620,9 @@ class TestT29SpectralMass:
 
     @pytest.mark.parametrize("semi_implicit", [False, True])
     @pytest.mark.parametrize("metric_kind", ["flat", "TC2a", "one_ulp"])
-    def test_static_geometry_dispatch(self, semi_implicit, metric_kind, monkeypatch):
-        """Select the actual integrator alias, eager and traced; plant misrouting."""
+    @pytest.mark.parametrize("empty", [False, True])
+    def test_static_geometry_dispatch(self, semi_implicit, metric_kind, empty, monkeypatch):
+        """Pin geometry flag and tracer-presence dispatch; plant alias misrouting."""
         from legoesm.atmosphere.dynamics.gcm import spectral_nh as sn
         from legoesm.timestepping.split_explicit import SplitExplicitConfig
 
@@ -636,9 +637,12 @@ class TestT29SpectralMass:
             # This metric tests selection only: no numerical integration.
             model = SpectralCompressibleEulerModel(
                 model.grid, model.height_coord, metric, model.config)
-        expected = metric_kind == "flat"
         assert type(model._flat_tracer_metric) is bool
-        assert model._flat_tracer_metric is expected
+        assert model._flat_tracer_metric is (metric_kind == "flat")
+        if empty:
+            state = state._replace(tracers_hat=state.tracers_hat.replace(
+                data=state.tracers_hat.data[..., :0]))
+        expected = not empty
         monkeypatch.setattr(sn, "split_explicit_step", lambda *a, **kw: jnp.asarray(0))
         monkeypatch.setattr(sn, "split_explicit_tracer_mass_step", lambda *a, **kw: jnp.asarray(1))
         cfg = SplitExplicitConfig(n_substeps=model.config.n_acoustic_substeps)
@@ -648,21 +652,23 @@ class TestT29SpectralMass:
                 step = lambda s: model._split_step(s, 1.0, cfg)
                 if compiled:
                     # Fresh closure for each check, including the planted
-                    # violation: changing a captured bool cannot retrace a cache.
+                    # violation: patching captured aliases cannot retrace a cache.
                     step = jax.jit(step)
                 assert int(step(state)) == int(expected)
 
             check_dispatch()
             with monkeypatch.context() as control:
-                control.setattr(model, "_flat_tracer_metric", not expected)
+                control.setattr(sn, "split_explicit_step", lambda *a, **kw: jnp.asarray(1))
+                control.setattr(sn, "split_explicit_tracer_mass_step", lambda *a, **kw: jnp.asarray(0))
                 with pytest.raises(AssertionError):
                     check_dispatch()
 
     @pytest.mark.parametrize("semi_implicit", [False, True])
-    def test_full_step_inventory_and_constant(self, semi_implicit):
+    @pytest.mark.parametrize("nonflat", [False, True])
+    def test_full_step_inventory_and_constant(self, semi_implicit, nonflat):
         # Reversion selects this node only: no new production-helper import.
         from scripts.validate.diag_hybrid_tracer_smoothing import global_inventory_budget
-        model, state = t29_spectral_fixture(semi_implicit)
+        model, state = t29_spectral_fixture(semi_implicit, nonflat=nonflat)
         grid, hc, metric = model.grid, model.height_coord, model.terrain_metric
         volume = np.asarray(grid.grid_area[..., None] * metric.jacobian[..., None] * hc.dz)
         rho0, q0 = t29_spectral_grid_state(model, state)
@@ -675,8 +681,17 @@ class TestT29SpectralMass:
             data=jnp.stack([q_const, q_const], axis=-1)))
         rc0, qc0 = t29_spectral_grid_state(model, constant)
         rc1, qc1 = t29_spectral_grid_state(model, model.step(constant, 1.0))
-        np.testing.assert_allclose(qc1, 0.01, rtol=0, atol=1e-12)
+        if nonflat:
+            # Per-case research measurements, NOT a blanket drift bound.
+            # Both packed tracers are the same constant, not independent cases.
+            expected = 9.553411842860848e-7 if semi_implicit else 9.59150033702505e-7
+            drift = np.max(np.abs(np.asarray(qc1) - 0.01), axis=(0, 1, 2)) / 0.01
+            print("T29 terrain constant drift", semi_implicit, drift.tolist(), "rough budget", row)
+            np.testing.assert_allclose(drift, [expected, expected], rtol=1e-6, atol=1e-12)
+        else:
+            np.testing.assert_allclose(qc1, 0.01, rtol=0, atol=1e-12)
         row = global_inventory_budget(volume, rc0, qc0, rc1, qc1, np.zeros(2))
+        print("T29 spectral constant budget", nonflat, semi_implicit, row)
         assert row["verdicts"] == ["CONSERVES", "CONSERVES"], row
 
     def test_native_projection_orthogonality_and_planted_violation(self):
@@ -801,8 +816,9 @@ class TestT29SpectralMass:
             print("T29 spectral", semi_implicit, kind, [(a.tolist(), b.tolist()) for a, b, *_ in rows])
 
     @pytest.mark.parametrize("semi_implicit", [False, True])
-    def test_jit_eager_and_cpu_entry_parity(self, semi_implicit):
-        model, state = t29_spectral_fixture(semi_implicit)
+    @pytest.mark.parametrize("nonflat", [False, True])
+    def test_jit_eager_and_cpu_entry_parity(self, semi_implicit, nonflat):
+        model, state = t29_spectral_fixture(semi_implicit, nonflat=nonflat)
         compiled = model.step(state, 1.0)
         cpu_entry = model._step_on_cpu(state, 1.0)
         with jax.disable_jit():
@@ -812,9 +828,10 @@ class TestT29SpectralMass:
                 np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12)
 
     @pytest.mark.parametrize("semi_implicit", [False, True])
-    def test_fp32_input_gradients_q_and_w(self, semi_implicit):
+    @pytest.mark.parametrize("nonflat", [False, True])
+    def test_fp32_input_gradients_q_and_w(self, semi_implicit, nonflat):
         """FP32 input gradients; spectral transforms retain native fp64."""
-        model, state = t29_spectral_fixture(semi_implicit)
+        model, state = t29_spectral_fixture(semi_implicit, nonflat=nonflat)
 
         def loss(q_scale, w_scale):
             initial = state._replace(
@@ -829,9 +846,10 @@ class TestT29SpectralMass:
             assert np.isfinite(grad).all() and np.any(np.asarray(grad) != 0)
 
     @pytest.mark.parametrize("semi_implicit", [False, True])
-    def test_fp64_check_grads_q_and_w(self, semi_implicit):
+    @pytest.mark.parametrize("nonflat", [False, True])
+    def test_fp64_check_grads_q_and_w(self, semi_implicit, nonflat):
         from jax.test_util import check_grads
-        model, state = t29_spectral_fixture(semi_implicit)
+        model, state = t29_spectral_fixture(semi_implicit, nonflat=nonflat)
 
         def loss(q_scale, w_scale):
             initial = state._replace(

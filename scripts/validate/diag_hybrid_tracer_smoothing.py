@@ -824,9 +824,9 @@ def height_vertical_paths(out, rows, provenance, record):
                        "bench_spectral_nh TC1 mountain (existing flat fallback on initialization error)",
                        "factory with supplied nonflat terrain metric"],
         inactive_lane="matrix spectral TC3 skipped before initialization",
-        dispatch="construction-time exact J == 1 everywhere: paired; otherwise legacy",
-        acceptance_scope="flat conservation required; nonflat legacy report only",
-        known_difference="RULE 0 debt: nonflat legacy inventory leak; option 2 deferred",
+        dispatch="nonempty tracers: paired; empty axes: legacy; exact J == 1 selects unchanged flat recovery, otherwise projected J*rho denominator",
+        acceptance_scope="flat and nonflat global inventory conservation required",
+        known_difference="uniform tracer not preserved over terrain: measured max relative drift 9.59e-7 explicit / 9.55e-7 semi-implicit per dt=1 s step; flat control ~1.7e-14; final min P(J*rho)=0.0464, intermediate positivity UNMEASURED",
     )
     for nonflat in (False, True):
         for semi_implicit in (False, True):
@@ -842,24 +842,22 @@ def height_vertical_paths(out, rows, provenance, record):
                 rows, label, supplemental_model.grid.grid_area, supplemental_model.height_coord,
                 supplemental_model.terrain_metric, old_rho, old_q, new_rho, new_q, datasets)
             rows[budget_index].update(
-                acceptance_scope=("report_only_nonflat_legacy" if nonflat
+                acceptance_scope=("required_nonflat_conservation" if nonflat
                                   else "required_flat_conservation"),
-                method="legacy" if nonflat else "paired",
+                method="paired_projected_density" if nonflat else "paired",
             )
             if nonflat:
-                rows[budget_index]["known_difference"] = "RULE 0 debt; option 2"
+                rows[budget_index]["known_difference"] = "uniform tracer not preserved over terrain; see recovery docstring and T29 preregistration"
             objects[label + "/initial"] = supplemental_state
             objects[label + "/final"] = supplemental_final
             objects[label + "/metric"] = supplemental_model.terrain_metric
             objects[label + "/grid"] = supplemental_model.grid
             objects[label + "/height"] = supplemental_model.height_coord
             configs[label] = supplemental_model.config
-            # Persist measured rows/arrays before flat acceptance. Nonflat
-            # legacy rows retain their measured verdicts and report-only debt.
+            # Persist measured rows/arrays before acceptance on either geometry.
             height_artifacts(out, provenance, datasets, objects, configs)
             (out / "vertical_paths.json").write_text(json.dumps(rows, indent=2))
-            if not nonflat:
-                assert_height_inventory_conserves(rows, (label,))
+            assert_height_inventory_conserves(rows, (label,))
 
     # Native LES local operators are also used on halo columns. Their scope
     # here is explicitly local, not an MPI horizontal conservation claim.

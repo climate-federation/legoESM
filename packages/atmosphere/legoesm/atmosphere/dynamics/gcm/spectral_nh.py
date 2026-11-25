@@ -959,28 +959,24 @@ class SpectralCompressibleEulerModel:
         return slow_tendency_fn, acoustic_update_fn
 
     def _split_step(self, state, dt, se_config):
-        """Pair spectral tracer mass with RK density only on exact flat terrain.
+        """Pair spectral tracer mass with RK density on flat and nonflat terrain.
 
-        The construction-time exact J==1 check selects the paired method;
-        nonflat J retains the legacy spectral tracer path. Paired mass
-        coefficients represent P(J*rho*q), with the SAME full native
-        projection P as acoustic density. Recover q_hat=A(PM/(J*rho)).
+        Nonempty tracers use paired transport; empty axes keep the legacy
+        integrator. The construction-time exact J==1 check selects recovery.
+        Paired mass coefficients represent P(J*rho*q), with the SAME full native
+        projection P as acoustic density. Flat recovery remains
+        q_hat=A(PM/(J*rho)); terrain uses q_hat=A(PM/P(J*rho)).
         KNOWN DIFFERENCE: the final projection of q generally loses local
         and pointwise mass equality. Flat-J global inventory instead relies
-        on native discrete orthogonality and represented rho. KNOWN DIFFERENCE /
-        RULE 0 debt: nonflat-J spectral NH tracers leak about 6.9e-7 per step
-        relative on the T29 supplemental TC2a-metric fixture (explicit and
-        semi-implicit; not a TC2a integration). This legacy debt is deferred
-        to option 2; see the 2026-11-23 preregistration disposition and
-        /glade/derecho/scratch/pg2328/t29_terrain_compare/comparison_receipt.json.
-        Flat source-free/fixer-free tests certify the global invariant;
+        on native discrete orthogonality and represented rho. Terrain
+        recovery has a measured uniform-tracer gap documented below.
+        Source-free/fixer-free tests require the global invariant;
         anchored fixer ordering is unchanged.
         Physics sources are re-projected, with the mask applied to the mass
         source: source-only q+dt*S holds only up to that projection. The
         (n=0,m=0) mode and global source inventory are unaffected.
         """
-        paired = (self._flat_tracer_metric
-                  and state.tracers_hat.data.ndim >= 3
+        paired = (state.tracers_hat.data.ndim >= 3
                   and state.tracers_hat.data.shape[-1] > 0)
         slow_fn, acoustic_fn = self._build_se_functions(paired=paired)
         if not paired:
@@ -1008,7 +1004,22 @@ class SpectralCompressibleEulerModel:
             return analysis(jac * rho[..., None] * synthesis(q_hat))
 
         def recover(mass_hat, rho):
-            return analysis(synthesis(mass_hat) / (jac * rho[..., None]))
+            """Recover q using the geometry's statically selected denominator.
+
+            KNOWN DIFFERENCE: uniform tracer is not preserved over terrain.
+            On the supplemental TC2a-metric fixture, one source/fixer-free
+            dt=1 s step measured max relative drift 9.59e-7 (explicit) /
+            9.55e-7 (semi-implicit); flat control ~1.7e-14, terrain global
+            inventory residual ~1e-15. This is not a TC2a integration.
+            Minimum P(J*rho) was 0.0464 at FINAL recovery only; intermediate
+            recovery positivity is UNMEASURED. PLAUSIBLE cause: density's
+            terrain update is not mass-consistent with this tracer recovery;
+            not isolated by that experiment. Follow-up: store J*rho as
+            spectral density (issue #2682).
+            """
+            if self._flat_tracer_metric:
+                return analysis(synthesis(mass_hat) / (jac * rho[..., None]))
+            return analysis(synthesis(mass_hat) / synthesis(analysis(jac * rho[..., None])))
 
         def reconstruct(q_hat):
             # No spectral vertical selector exists: keep native centred faces.

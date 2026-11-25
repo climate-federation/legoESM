@@ -4,10 +4,11 @@ Status: phase 0 completed at ccd817f21c (artifacts in
 `/glade/derecho/scratch/pg2328/t29_phase0/retry_import`); MPAS/LES phase 1
 completed locally at 52b658b634 after full-diff GLM/Claude SHIP and PBS checks
 (receipts in `/glade/derecho/scratch/pg2328/t29_phase1`). Spectral quadrature
-instrument committed at 3dfbd2623f and measured on PBS. The spectral fix draft
-passed flat checks, then stopped at the nonflat gate; the 2026-11-23 user
-option-1 disposition below restricts pairing to exact flat J. This revised
-snapshot awaits full-diff SHIP and PBS validation; prior passes are historical.
+instrument committed at 3dfbd2623f and measured on PBS. Option 1 completed
+locally at b80cb95d65, preserving nonflat legacy transport. The later
+2026-11-23 USER terrain-adoption decision at the end of this document
+supersedes the earlier flat-only disposition. The new snapshot awaits
+full-diff SHIP and PBS validation; prior passes are historical.
 No push, PR, issue edit or merge.
 
 ## Claims and distinct statistics
@@ -419,3 +420,85 @@ equality for the dummy q leaf. Current-snapshot shared-helper MPAS/LES byte and
 regression checks are still required. Prior passes do not discharge new checks.
 Any model failure/disagreement triggers the standing Claude gate; no local
 commit until the required review/runtime checks pass. No outward actions.
+
+
+## USER terrain adoption, 2026-11-23 (supersedes flat-only option 1 above)
+
+The user chose projected-denominator recovery for NONFLAT spectral NH tracers
+now. This replaces the earlier nonflat legacy/report-only instructions above;
+those remain historical, not the active acceptance protocol. Nonempty tracers
+use the paired RK mass path on both geometries. Exact flat J, detected once at
+construction, retains the committed b80cb95d65 recovery expression and operation
+order. Nonflat recovery is q_hat = A(P(M) / P(J*rho)), with the same full native
+unmasked P = synthesis(analysis). No force-flat override, floor, clip, new
+config/default, or changed source/fixer ordering. Empty tracer axes still need
+the legacy integrator, so its branch is retained.
+
+Historical research evidence (PBS8291236, native fp64, dt=1 s, source/fixer-free;
+rough Earth-grid state with TC2a metric, NOT a TC2a integration): each q/2q
+rough tracer inventory residual was 7.429348830111536e-15 explicit and
+3.714674415055768e-15 semi-implicit; constant inventory residual
+1.3999651841602016e-15 in both. Each constant tracer's max relative drift from
+q0=0.01 was 9.59150033702505e-7 explicit and 9.553411842860848e-7 semi-implicit.
+Committed flat controls were 1.6653345369377348e-14 and 1.7520707107365752e-14.
+Minimum P(J*rho) at FINAL recovery: 0.046434189131528796 explicit and
+0.04643384275006408 semi-implicit. Intermediate recovery positivity UNMEASURED.
+Provenance: /glade/derecho/scratch/pg2328/t29_option2_measurement/measurement_receipt.json
+and terrain/measurements.json, flat_control/measurements.json there. These are
+research-snapshot measurements, not a pass for this production draft. Packed
+q/2q and duplicated constant tracers are not independent fixtures.
+
+KNOWN DIFFERENCE: uniform tracer is not preserved over terrain. PLAUSIBLE,
+not isolated, cause: density's terrain update is not mass-consistent with the
+tracer recovery. Follow-up cure specified by the user: store J*rho as spectral
+density; Claude will file that issue. No long-time stability, general terrain,
+full TC2a, source/fixer, or intermediate positivity certification is claimed.
+
+Pre-registered current-snapshot checks (A1-A5, Codex YES + GLM YES each;
+Claude pending; exact detail vote in T29 scratch t29_terrain_adoption):
+
+- Both acoustics, both geometries: the existing rough and constant fixtures
+  must CONSERVE each tracer at the unchanged global inventory bar <=1e-12.
+  Nonflat census rows are required_nonflat_conservation with method
+  paired_projected_density; retain measured signed/relative residuals and
+  controls, save arrays and rows BEFORE acceptance. No hardcoded verdict.
+- Terrain constant drift: assert each case/tracer at its full measured value
+  above, rtol=1e-6, atol=1e-12 on the relative-drift statistic. Never a blanket
+  upper bound. Flat constant assertion remains unchanged.
+- Revert ONLY spectral production source to b80cb95d65 in a separate worktree
+  with the reviewed test overlay. BOTH nonflat inventory tests must fail at
+  the rough global-inventory assertion, not imports/config or a missing API.
+- Extend existing JIT/eager/CPU parity, finite/nonzero fp32-input q/w gradients,
+  and fp64 check_grads to both geometries, preserving all existing tolerances.
+- Pin construction-time exact geometry bool on flat, TC2a and one-ULP metrics;
+  nonempty tracers select paired, empty axes legacy, both acoustics. Swap
+  actual integrator-alias sentinels as a planted violation, eager/fresh JIT.
+- After full-diff GLM review and fresh Claude SHIP, run the option-1 PBS CPU
+  suites, census, reversion, MPI and ratchets. Keep only the two exact
+  main-reproduced deselections; model failure/disagreement triggers Claude STOP.
+- Then-current guarded spectral byte adapters reuse the existing 24-case
+  capture/pins/comparator, BASE b80cb95d65 plus the reviewed test overlay.
+  Identical inputs/configs/geometry; all seven flat output leaves byte-equal,
+  including positive and zero tracers; nonflat empty all seven byte-equal;
+  all nontracer outputs byte-equal; nonflat positive tracer output MUST change;
+  nonflat zero q numerical==0 only (no signed-zero byte claim there).
+  Wrong-root, same-source and nonzero one-ULP controls must fire. Generate AST
+  pins under PBS Python3.12 from frozen hash-checked source; baseline/candidate
+  fixture ASTs equal. Exact adapter source needs Codex+GLM review before run.
+- MPAS/LES shared helper source must remain byte-identical to b80cb95d65, with
+  its SHA recorded before the full-diff gate, and option-1 suites/ratchets rerun.
+  A5's omission of new MPAS/LES byte captures applies ONLY while shared sources
+  are unchanged; any shared-source change requires their full adapters again.
+
+RESULTS CHANGE: both acoustic variants for nonempty spectral tracers on
+nonflat terrain: matrix TC1 mountains and TC2a gap mountain; spectral NH
+benchmark TC1 mountain (existing initialization-error fallback is flat);
+component factory when supplied a nonflat metric. Matrix spectral TC3 remains
+skipped before initialization; spectral-vs-C-grid benchmark and factory default
+are flat. These are paths reached if tracers are populated; this is not a claim
+that each runner initializes tracers or has been integrated here. Flat recovery
+unchanged in source; empirical byte equality still required.
+
+Full-diff Claude SHIP is required BEFORE runtime, and commit only after the
+required checks pass. No push, PR, issue edit or merge. All current-snapshot
+runtime evidence remains UNVERIFIED until those checks actually run.
