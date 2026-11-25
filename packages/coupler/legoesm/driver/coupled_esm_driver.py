@@ -470,7 +470,10 @@ class CoupledESMDriver:
         native = getattr(atm, "_latlon_native_grid", None)
         grid = native if native is not None else atm.grid
         wet = np.asarray(self._woa_geometry(grid)[2]).reshape(np.shape(f_land)) > 0.5
-        n_bad = int(np.sum(wet & (np.asarray(f_land) >= 1.0)))
+        from legoesm.grids.topography import snap_land_fraction_roundoff
+        # the snapped value: the driver snaps roundoff-below-1 to land next
+        n_bad = int(np.sum(wet & (np.asarray(
+            snap_land_fraction_roundoff(f_land)) >= 1.0)))
         if n_bad:
             # vote 2026-11-25 (3-0): such a cell would get no atmospheric forcing
             raise ValueError(

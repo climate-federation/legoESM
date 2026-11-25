@@ -62,3 +62,11 @@ def test_explicit_ocean_grid_is_refused_before_the_atmosphere_sets_up():
     d._atm = SimpleNamespace(setup=lambda: pytest.fail("atmosphere set up"))
     with pytest.raises(ValueError, match="explicit ocean grid"):
         d.setup()
+
+
+def test_wet_cell_a_roundoff_below_full_land_is_refused():
+    wet = np.array([[1.0, 1.0]])
+    atm = SimpleNamespace(_latlon_native_grid=object(), grid=None)
+    with pytest.raises(ValueError, match="wet for the 3-D ocean but full land"):
+        _bare(wet)._owned_land_fraction_hook(
+            atm, jnp.array([0.2, 1.0 - 1e-14], dtype=jnp.float64))
