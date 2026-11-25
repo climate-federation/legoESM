@@ -935,7 +935,7 @@ class CoupledESMDriver:
         from legoesm.ocean.fidelity.nemo_match_recipe import (
             nemo_match_mpas_model_config,
         )
-        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        from legoesm.ocean.init_mpas import REST_T_DEEP_C, rest_state_mpas_ocean
         from legoesm.ocean.vertical import create_ocean_z_star
         from legoesm import constants
 
@@ -973,9 +973,20 @@ class CoupledESMDriver:
         # rationale as the lat-lon ocean_ic='rest' branch.  The surface layer
         # starts near the atmosphere's mean SST (T_sfc_mean [K] -> degC) so the
         # cold start is not shocked by a large air-sea temperature jump.
-        T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+        if cfg.ocean_ic == "qobs":
+            from legoesm.forcing.analytical import qobs_sst_C
+            T_surf_C = qobs_sst_C(np.degrees(np.asarray(mesh.latCell)))
+            # cold-over-warm is unstable at 35 psu: deep water no warmer than
+            # the surface (VOTED a/a/c), so polar columns start neutral
+            T_deep_C = np.minimum(REST_T_DEEP_C, T_surf_C)
+        elif cfg.ocean_ic == "rest":
+            T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+            T_deep_C = REST_T_DEEP_C
+        else:
+            raise ValueError(
+                f"MPAS ocean: ocean_ic must be 'rest' or 'qobs', got {cfg.ocean_ic!r}.")
         self._ocean_state = rest_state_mpas_ocean(
-            mesh, z_coord, T_water_init_C=T_surf_C, H_max=cfg.ocean_H_max_m,
+            mesh, z_coord, T_water_init_C=T_surf_C, T_deep=T_deep_C, H_max=cfg.ocean_H_max_m,
             land_lat_threshold=90.0,
         )
         geo = self._atm.config.geography
@@ -1028,7 +1039,7 @@ class CoupledESMDriver:
         self._ocean_S_target = None
         _ocean_frac = float(jnp.mean(self._ocean_land_mask))
         logger.info(
-            "  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic=rest, "
+            f"  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic={cfg.ocean_ic}, "
             f"ocean_frac={_ocean_frac:.2f}, nlev={cfg.ocean_nlev}, "
             f"ocean_dt={cfg.ocean_dt_s}s, surface_forcing=none(coupled), "
             "normalize_freshwater=True")

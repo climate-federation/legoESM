@@ -69,8 +69,7 @@ def _da(dims, data, name):
     )
 
 
-def write_surfdata(
-    path: str,
+def surfdata_dataset(
     *,
     lat: np.ndarray,
     lon: np.ndarray,
@@ -95,13 +94,12 @@ def write_surfdata(
     monthly_height_top: np.ndarray | None = None,
     monthly_height_bot: np.ndarray | None = None,
     source: str = "legoesm surface-data producer",
-) -> None:
-    """Write a harmonized ``legoesm_surfdata`` NetCDF from the provided fields.
-
-    ``lat``/``lon`` are 1-D cell centres [deg]; all data groups are optional so a
-    single source can contribute only its variables.  Soil/cover/PFT percentages
-    are written as-is (the loader applies ``pct_scale``).
-    """
+):
+    """The harmonized ``legoesm_surfdata`` dataset from the provided fields
+    (in memory; :func:`write_surfdata` writes it).  ``lat``/``lon`` are 1-D cell
+    centres [deg]; all data groups are optional so a single source can contribute
+    only its variables.  Soil/cover/PFT percentages are kept as-is (the loader
+    applies ``pct_scale``)."""
     import xarray as xr
 
     lat = np.asarray(lat, dtype=np.float64)
@@ -149,6 +147,12 @@ def write_surfdata(
     # float64 precision (sand is a 0-100 percent, LAI ~0-7), and the fields are
     # spatially smooth with large NaN ocean areas, so this roughly halves the
     # dtype and compresses well (~5-8x overall) with no meaningful accuracy loss.
+    return ds
+
+
+def write_surfdata(path: str, **fields) -> None:
+    """Write :func:`surfdata_dataset` (``**fields``) to a NetCDF at ``path``."""
+    ds = surfdata_dataset(**fields)
     comp = {"zlib": True, "complevel": 4, "shuffle": True}
     encoding = {}
     for name, da in ds.data_vars.items():

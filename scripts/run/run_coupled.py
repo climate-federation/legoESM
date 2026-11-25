@@ -536,13 +536,14 @@ def _amip_main_only_dests(parser):
     import inspect
     import re
     from legoesm.driver.config import (
-        CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS,
+        CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS, ZM_WIDTH_FIELDS,
     )
     pat = r"(?:args|pre)\.(\w+)|getattr\((?:args|pre),\s*\"(\w+)\""
     read = {m[0] or m[1] for m in re.findall(
         pat, inspect.getsource(_run_amip().build_config_from_args)
         + Path(__file__).read_text())}
-    read |= set(ZM_SCALAR_FIELDS) | set(ZM_TRIGGER_FIELDS) | set(CLUBB_SCALAR_FIELDS)
+    read |= (set(ZM_SCALAR_FIELDS) | set(ZM_TRIGGER_FIELDS) | set(ZM_WIDTH_FIELDS)
+             | set(CLUBB_SCALAR_FIELDS))
     amip = {a.dest for a in _run_amip().build_arg_parser()._actions}
     return sorted((amip - read) - {"help"})
 
@@ -588,8 +589,10 @@ def _coupled_atm_config(args):
         raise SystemExit("--max-wallclock-hours and --max-wallclock-seconds both "
                          "set; pass one.")
     from legoesm.driver.config import ExperimentConfig
+    # With atm_owns_surface the atmosphere's land runs, so it keeps them.
+    land_tile_only = () if args.atm_owns_surface else _LAND_TILE_ONLY
     return cfg._replace(
-        **{f: getattr(ExperimentConfig(), f) for f in _LAND_TILE_ONLY},
+        **{f: getattr(ExperimentConfig(), f) for f in land_tile_only},
         # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
         morrison_warm_rain_scheme=(
             args.morrison_warm_rain_scheme
@@ -887,9 +890,10 @@ def build_parser():
     parser.add_argument("--ocean-H-max", type=float, default=5500.0,
                         help="Max ocean depth [m] (--ocean dynamic)")
     parser.add_argument("--ocean-ic", default="rest",
-                        choices=["rest", "woa"],
+                        choices=["rest", "woa", "qobs"],
                         help="3D ocean initial condition (--ocean dynamic): "
-                             "'rest' = idealized aquaplanet rest state; 'woa' = "
+                             "'rest' = idealized aquaplanet rest state; 'qobs' = "
+                             "rest with the APE Qobs SST profile (MPAS ocean); 'woa' = "
                              "WOA18 reanalysis T/S + WOA-derived continents "
                              "(realistic cold start; f_land co-derived from the "
                              "same ocean mask, land tile enabled)")
@@ -1189,6 +1193,8 @@ def main(argv=None, *, build_only=False):
             f"latlon:48). The {args.grid_type} atmosphere couples to the lat-lon 3-D "
             "ocean via the conservative cross-grid remap; a co-located 3-D "
             f"ocean dycore for --grid {args.grid_type} does not exist.")
+    if args.ocean != "dynamic" and args.ocean_ic == "qobs":
+        raise SystemExit("--ocean-ic qobs starts the 3-D ocean; it needs --ocean dynamic.")
     if args.ocean == "dynamic":
         # Prognostic 3D LatLonCGridOceanModel.  Grid configurations:
         #   * SHARED lat-lon (default): the ocean lives on the atmosphere's
@@ -1237,11 +1243,14 @@ def main(argv=None, *, build_only=False):
             # cold start is wired (a WOA cold start on the unstructured mesh —
             # woa_ocean_mask/partial cells — is a follow-up).  ocean_config and
             # ocean_ic='woa' are lat-lon-only.
-            if args.ocean_ic != "rest":
+            if args.ocean_ic not in ("rest", "qobs"):
                 raise SystemExit(
                     "--ocean dynamic --grid voronoi is wired for the stratified "
-                    "rest cold start only (--ocean-ic rest); the WOA cold start "
-                    "on the MPAS Voronoi mesh is a follow-up.")
+                    "rest cold starts only (--ocean-ic rest|qobs); the WOA cold "
+                    "start on the MPAS Voronoi mesh is a follow-up.")
+        elif args.ocean_ic == "qobs":
+            raise SystemExit("--ocean-ic qobs is wired for the MPAS ocean "
+                             "(--grid voronoi) only.")
         else:
             from legoesm.ocean.state import LatLonCGridOceanConfig
             overrides["ocean_config"] = LatLonCGridOceanConfig()
