@@ -50,7 +50,7 @@ KNOWN DIFFERENCE, the cloud-top negative-humidity fixer (cumastrn.F90:
 1159-1180, #2594, owner decision 2026-11-24): OpenIFS adds the humidity
 deficit ZFAC to the detrained condensate PLUDE, which drives q MORE negative
 (the humidity tendency carries -PLUDE), and rescales PLUDELI by the updated
-PLUDE, so PLUDELI1+PLUDELI2 falls short of PLUDE by ZFAC**2/PLUDE (a column
+PLUDE, so PLUDELI1+PLUDELI2 falls short of PLUDE by ZFAC**2/PLUDE_new (a column
 energy leak, and a water leak where CLOUDSC reads PLUDELI).  The default
 removes ZFAC from PLUDE and PLUDELI in proportion (water and energy neutral);
 ``IfsTunables.openifs_cloud_top_fixer`` = True (BechtoldConfig.
@@ -1107,8 +1107,9 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
         # the column frozen moist static energy are unchanged by the fixer.
         plude_n = jnp.where(lim2, plude - zfacl, plude)
         pdiv = lim2 & (plude != 0.0)
-        pludeli1 = jnp.where(lim2, pludeli1 - zfacl * sdiv(pludeli1, plude, pdiv), pludeli1)
-        pludeli2 = jnp.where(lim2, pludeli2 - zfacl * sdiv(pludeli2, plude, pdiv), pludeli2)
+        frac = jnp.where(pdiv, sdiv(plude_n, plude, pdiv), 1.0)   # exactly 0 when emptied
+        pludeli1 = pludeli1 * frac
+        pludeli2 = pludeli2 * frac
     negl = near & (plude_n < 0.0)
     plude = jnp.where(negl, 0.0, plude_n)
     pludeli1 = jnp.where(negl, 0.0, pludeli1)

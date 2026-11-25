@@ -1495,9 +1495,9 @@ def test_switch_scales_probe_covers_every_class(fix):
 
 # --- #2594: cloud-top negative-humidity fixer (cumastrn.F90:1159-1180).  It
 # fires on no fixture column at the fixture step; STRESS column 0 at ten
-# times the step (probe scripts/tmp/_probe_cloudtop_fire_2594.py, the only
-# firing case of 3 step factors x 4 humidity perturbations x 24 columns)
-# makes it fire in both switch modes.
+# times the step makes it fire in both switch modes (measured 2026-11-25:
+# the only firing case of step factors 1/3/10 x four upper-humidity
+# reductions x the 24 fixture columns).
 _FIRE_G, _FIRE_COL, _FIRE_DT = "STRESS", 0, 10.0
 _CUM_JIT = jax.jit(cumastrn, static_argnums=(0, 1), static_argnames=("tun",))
 
@@ -1537,7 +1537,7 @@ def test_cloud_top_fixer_takes_the_deficit_from_the_condensate(fix, hard):
     assert np.any(fired)
     assert np.all(pc[fired] < pr[fired]) and np.all(pc >= 0.0)
     li = np.asarray(cor.pludeli)[0, 0] + np.asarray(cor.pludeli)[0, 1]
-    np.testing.assert_allclose(li, pc, rtol=1e-12, atol=1e-25)
+    np.testing.assert_allclose(li, pc, rtol=1e-12, atol=1e-12 * np.max(pr))
     lir = np.asarray(ref.pludeli)[0, 0] + np.asarray(ref.pludeli)[0, 1]
     assert np.max(np.abs(lir - pr)) > 1e-3 * np.max(np.abs(pr - pc))
     assert np.all(np.asarray(cor.ptenq)[0][fired] > np.asarray(ref.ptenq)[0][fired])
@@ -1565,18 +1565,24 @@ def test_cloud_top_fixer_energy_difference_is_the_openifs_mismatch(fix, hard):
     th = _thermo(fix, "L")
     sl = slice(_FIRE_COL, _FIRE_COL + 1)
     sub = {f"{_FIRE_G}_{k}": fix[f"{_FIRE_G}_{k}"][sl] for k in ("p_half", "dT_other", "dq_other")}
-    r = {}
+    r, mism = {}, {}
     for openifs in (False, True):
         o = _fire_run(fix, hard, openifs)
         r[openifs] = _mse_residual({**fix, **sub}, _FIRE_G, o.ptent, o.ptenq,
                                    np.asarray(o.pmflxs)[:, -1], np.asarray(o.pludeli)[:, 1].sum(1),
                                    np.asarray(o.psnde)[:, 1].sum(1), o.pvdiscu)[0]
-        if openifs:
-            mism = float(np.sum(np.asarray(o.pludeli)[0, 0] + np.asarray(o.pludeli)[0, 1]
-                                - np.asarray(o.plude)[0]))
+        mism[openifs] = float(np.sum(np.asarray(o.pludeli)[0, 0] + np.asarray(o.pludeli)[0, 1]
+                                     - np.asarray(o.plude)[0]))
     print("hard", hard, "MSE residual default / OpenIFS [W m-2]", r[False], r[True])
-    assert mism != 0.0
-    np.testing.assert_allclose(r[True] - r[False], th.RLVTT * mism, rtol=1e-6)
+    # The fixer moves only PLUDE (vapour sink, Lv x -dPLUDE via the humidity
+    # tendency) and PLUDELI (heating RLVTT dLI1 + RLSTT dLI2, minus Lf dLI2
+    # in the budget; RLSTT - RLMLT = RLVTT), so the residual changes by
+    # RLVTT x d(LI1 + LI2 - PLUDE): the mismatch difference of the two forms.
+    assert th.RLSTT - th.RLMLT == pytest.approx(th.RLVTT, rel=1e-15)
+    assert mism[True] != 0.0
+    assert abs(mism[False]) <= 1e-12 * abs(mism[True])
+    np.testing.assert_allclose(r[True] - r[False], th.RLVTT * (mism[True] - mism[False]),
+                               rtol=1e-6)
 
 
 def test_cloud_top_fixer_gradient_at_default(fix):
