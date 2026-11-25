@@ -252,6 +252,12 @@ def test_coupled_refuses_geography_with_its_own_land_tile(tmp_path, monkeypatch,
         d.setup()
 
 
+def test_geography_has_land(tmp_path):
+    assert not geo.geography_has_land(_gen(tmp_path, "aquaplanet"))
+    assert geo.geography_has_land(_gen(tmp_path, "ridge", barrier_lon=0.0))
+    assert geo.geography_has_land(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0)))
+
+
 def test_coupled_refuses_atm_owned_geography_land_without_a_land_model(tmp_path):
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
@@ -475,11 +481,22 @@ _MAIN_TERRAIN_SHA = {
 }
 
 
-def test_terrain_is_bitwise_the_pre_geography_loader(mesh, tmp_path):
+@pytest.fixture
+def x64():
+    import jax
+    orig = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", orig)
+
+
+def test_terrain_is_bitwise_the_pre_geography_loader(x64, tmp_path):
     import hashlib
 
     import xarray as xr
     from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    mesh = create_voronoi_mesh(3)   # built under x64, as the pinned run was
     rng = np.random.default_rng(0)
     lat_e, lon_e = np.arange(89.5, -90.0, -1.0), np.arange(-179.5, 180.0, 1.0)
     z = rng.normal(0.0, 2000.0, (lat_e.size, lon_e.size))

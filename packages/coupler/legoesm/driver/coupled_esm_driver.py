@@ -1135,9 +1135,10 @@ class CoupledESMDriver:
                 "land parameters without the geography's land map; use "
                 "land_mode='none' (with atm_owns_surface=True the atmosphere's "
                 "land reads the geography).")
+        from legoesm.grids.geography import geography_has_land
         if (self._atm.config.geography and cfg.atm_owns_surface
                 and not self._atm.config.use_multilayer_land
-                and float(jnp.max(self._atm._f_land)) > 0.0):
+                and geography_has_land(self._atm.config.geography)):
             # coupled, the atmosphere's slab land is switched off (the coupler
             # owns land) and atm_owns_surface steps no coupler land tile, so
             # only the atmosphere's multilayer land can run on the land cells

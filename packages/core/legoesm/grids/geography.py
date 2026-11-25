@@ -108,6 +108,18 @@ def open_geography(path: str):
     return ds
 
 
+def geography_has_land(path: str) -> bool:
+    """Any land in the file (elevation > 0, land_fraction > 0 or a barrier):
+    the same answer on every MPI rank, unlike a rank-local land fraction."""
+    ds = open_geography(path)
+    try:
+        return bool(np.any(ds["elevation"].values > 0.0)
+                    or ("land_fraction" in ds and np.any(ds["land_fraction"].values > 0.0))
+                    or "barrier_lat" in ds)
+    finally:
+        ds.close()
+
+
 def barrier_polylines(ds) -> list:
     """``[(lat_deg, lon_deg), ...]`` one pair of vertex arrays per barrier."""
     if "barrier_lat" not in ds:
