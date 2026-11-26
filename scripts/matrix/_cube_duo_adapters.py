@@ -320,6 +320,14 @@ DUO_HYDRO_ETA = "cam6_l32"
 #: spurious wind (C36 --quick matrix row, 1 d: 13.47 m/s clamped vs 7.25
 #: at the deck step).
 DUO_HYDRO_DT_ATMOS = 1920.0
+#: DCMIP 2012 test 3-1 (X = 125 small planet): the deck step divided by X
+#: (1920/125 = 15.36 s, the document's "divide the dynamics time step by
+#: X") rounded DOWN to 15 s so 240 steps land exactly on its 3600 s
+#: analysis time (vote 2026-11-26: author B, codex B).  Same n_split = 8;
+#: the per-substep Courant number is at most the validated deck's.
+DUO_GW31_DT_ATMOS = 15.0
+DUO_GW31_KM = 10
+DUO_GW31_ETA = "dcmip2012_gw31_l10"
 
 
 def _cam6_l32_coord(model, what: str):
@@ -336,6 +344,22 @@ def _cam6_l32_coord(model, what: str):
                             rtol=1e-6, atol=1e-12)):
         raise ValueError(f"{what}: the model's eta table is not the CAM6 "
                          f"L32 coordinate the IC is built on")
+    return coord
+
+
+def _gw31_coord(model, what: str):
+    """The DCMIP 2012 test 3-1 App. F.3 L10 ``HybridSigmaPressureCoordinate``
+    after checking it IS the model's eta table (same float64 source)."""
+    from legoesm.grids.vertical import (
+        DCMIP2012_GW31_PEQ, make_dcmip2012_gw31_levels)
+    coord = make_dcmip2012_gw31_levels()
+    if coord.n_levels != model.config.km or not (
+            np.allclose(np.asarray(coord.A_half) * DCMIP2012_GW31_PEQ,
+                        model.ak, rtol=1e-13, atol=1e-9)
+            and np.allclose(np.asarray(coord.B_half), model.bk,
+                            rtol=1e-13, atol=1e-15)):
+        raise ValueError(f"{what}: the model's eta table is not the DCMIP "
+                         f"2012 3-1 L10 coordinate the IC is built on")
     return coord
 
 
@@ -484,6 +508,7 @@ def duo_shared_ic_spec(case: str, ic_kwargs: dict | None = None):
             builder=lambda g, c: init(g, c, **kw),
             # DCMIP 2012 2-0-0: Omega = 0 (Table XII)
             phis_fn=_mountain_2_0_0_phis(h_0), wind_fn=None, omega=0.0,
+            radius=None, eta=None,
             label=f"DCMIP 2012 2-0-0 rest state: constant lapse rate 6.5 K/km on native L32 levels (reference 12 km top not reproduced), non-rotating, h_0={h_0:g} m")
     if case == "held_suarez_topo":
         from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -492,19 +517,27 @@ def duo_shared_ic_spec(case: str, ic_kwargs: dict | None = None):
         return SimpleNamespace(
             builder=lambda g, c: init(g, c, **kw),
             phis_fn=_mountain_2_0_0_phis(h_0), wind_fn=None, omega=None,
+            radius=None, eta=None,
             label=(f"held_suarez_topo_init (h_0={h_0:g} m, "
                    f"seed={kw.get('seed', 'default')})"))
-    if case in ("gravity_wave_3_1", "inertio_gravity_3_2",
-                "mountain_rossby_5_0"):
+    if case == "gravity_wave_3_1":
+        # DCMIP 2012 test 3-1: non-rotating X = 125 small planet, App. F.3
+        # L10 to a 10 km lid, u = u0 cos(lat)
+        from tests.test_cases.dcmip2012 import gravity_wave_3_1 as gw31
+        if kw:
+            raise ValueError(f"{case}: no IC kwargs, got {sorted(kw)}")
+        return SimpleNamespace(
+            builder=gw31.gravity_wave_init, phis_fn=None,
+            wind_fn=_solid_body_winds(gw31.U0), omega=gw31.OMEGA,
+            radius=gw31.small_planet_radius(), eta=DUO_GW31_ETA,
+            label=(f"DCMIP 2012 test 3-1 ({gw31.__name__}."
+                   f"gravity_wave_init), a = R_earth/{gw31.X_SCALE:g}"))
+    if case in ("inertio_gravity_3_2", "mountain_rossby_5_0"):
         from tests.test_cases.dcmip2008._shared import U0_DEFAULT
         if kw:
             raise ValueError(f"{case}: no IC kwargs, got {sorted(kw)}")
         wind_fn = _solid_body_winds(U0_DEFAULT)
-        if case == "gravity_wave_3_1":
-            from tests.test_cases.dcmip2008.gravity_wave_3_1 import (
-                gravity_wave_init as init)
-            phis_fn, omega = None, 0.0   # DCMIP 2008 3-1: non-rotating
-        elif case == "inertio_gravity_3_2":
+        if case == "inertio_gravity_3_2":
             # DCMIP 2008 [6-3-0]: at rest (u0 = 0) on the rotating Earth
             from tests.test_cases.dcmip2008.inertio_gravity_3_2 import (
                 inertio_gravity_init as init)
@@ -519,6 +552,7 @@ def duo_shared_ic_spec(case: str, ic_kwargs: dict | None = None):
             omega = None
         return SimpleNamespace(
             builder=init, phis_fn=phis_fn, wind_fn=wind_fn, omega=omega,
+            radius=None, eta=None,
             label=f"DCMIP 2008 {case} ({init.__name__})")
     if case == "rossby_haurwitz_6_0":
         from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
@@ -532,6 +566,7 @@ def duo_shared_ic_spec(case: str, ic_kwargs: dict | None = None):
             return np.asarray(u), np.asarray(v)
         return SimpleNamespace(
             builder=init, phis_fn=None, wind_fn=wind_fn, omega=None,
+            radius=None, eta=None,
             label=f"DCMIP 2008 {case} ({init.__name__})")
     raise NotImplementedError(
         f"{case} on cube: no fv3_duo shared-IC recipe for this case")
@@ -558,9 +593,11 @@ def shared_ic_bundle(model, spec) -> dict:
     import jax.numpy as jnp
     from legoesm.core.fv3_dynamics import p_var_hydrostatic
     from legoesm.grids.fv3_native_gridstruct import (
-        FV3_KAPPA, FV3_OMEGA, FV3_RADIUS_M, analytic_swcore_state)
+        FV3_KAPPA, FV3_OMEGA, analytic_swcore_state)
 
-    coord = _cam6_l32_coord(model, "duo shared IC")
+    coord = (_gw31_coord(model, "duo shared IC")
+             if spec.eta == DUO_GW31_ETA else
+             _cam6_l32_coord(model, "duo shared IC"))
     ctx = model.grid.ctx_np
     n, ng, km = ctx["n"], ctx["ng"], model.config.km
     sl = _compute_window(ctx)
@@ -569,8 +606,15 @@ def shared_ic_bundle(model, spec) -> dict:
     lat = np.stack([np.asarray(g["agrid_lat"])[sl, sl] for g in gs6])
     # omega: the duo's own rotation rate (the recipe's, else FV3_OMEGA) for
     # builders whose balance depends on it (mountain_rossby_5_0, Eq. 83)
+    if spec.omega == 0.0 and any(
+            np.any(np.asarray(g[k]) != 0.0) for g in gs6 for k in ("f0", "fC")):
+        # the IC's non-rotating balance needs a non-rotating grid
+        raise ValueError("duo shared IC: the recipe is non-rotating but the "
+                         "grid's Coriolis parameter is not zero")
+    # the grid's own radius (FV3_RADIUS_M unless a small planet was built)
     cells = SimpleNamespace(n=n, lon=jnp.asarray(lon), lat=jnp.asarray(lat),
-                            radius=FV3_RADIUS_M, angle=jnp.zeros_like(lat),
+                            radius=float(ctx["radius"]),
+                            angle=jnp.zeros_like(lat),
                             omega=FV3_OMEGA if spec.omega is None
                             else float(spec.omega))
     hst = spec.builder(cells, coord)
@@ -654,6 +698,18 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
         # unvalidated Courant number (vote: codex A, author A).
         raise ValueError(f"build_duo_hydro: deck dt {DUO_HYDRO_DT_ATMOS:.0f} s "
                          f"is validated at C36 only, got C{n}")
+    gw31 = shared_case == "gravity_wave_3_1"
+    if not gw31 and eta == DUO_GW31_ETA:
+        raise ValueError(f"eta={DUO_GW31_ETA!r} is the gravity_wave_3_1 "
+                         f"small-planet table; it goes with that case only")
+    if gw31 and (km, eta) != (DUO_HYDRO_KM, DUO_HYDRO_ETA):
+        raise ValueError("gravity_wave_3_1 runs its own DCMIP 2012 L10 "
+                         "table; do not pass km/eta")
+    if gw31:
+        # the one admitted small-planet configuration: C36, the 3-1 L10
+        # table, a = R_earth/125 and DUO_GW31_DT_ATMOS -- checked below
+        # against the validated deck Courant number
+        km, eta = DUO_GW31_KM, DUO_GW31_ETA
     import jax
     jax.config.update("jax_enable_x64", True)
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
@@ -673,6 +729,8 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
             grid_kw["phis_fn"] = spec.phis_fn
         if spec.omega is not None:
             grid_kw["omega"] = spec.omega
+        if spec.radius is not None:
+            grid_kw["radius"] = spec.radius
     elif ic_kwargs:
         raise ValueError("ic_kwargs needs shared_case")
     grid = create_fv3_duo_grid(
@@ -693,6 +751,22 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
         bundle = rotated_jw_bundle(model, perturbed=perturbed,
                                    alpha=rotated_alpha)
     dt = DUO_HYDRO_DT_ATMOS
+    if gw31:
+        from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+        dt = DUO_GW31_DT_ATMOS
+        from tests.test_cases.dcmip2012.gravity_wave_3_1 import check_step
+        # geometric time-step ceiling: the metrics are the deck's scaled by
+        # radius/FV3_RADIUS_M, so dt <= 1920 s * radius / FV3_RADIUS_M keeps
+        # the deck's dt/dx (the 3-1 wind and sound speeds, <= 20 m/s and
+        # ~340 m/s, are no larger than the deck rows'; the 240-step C36
+        # matrix run stays finite)
+        if not (np.isfinite(dt) and 0.0 < dt <= DUO_HYDRO_DT_ATMOS
+                * float(grid.ctx_np["radius"]) / FV3_RADIUS_M):
+            raise ValueError("build_duo_hydro: the 3-1 step exceeds the "
+                             "validated deck's geometric step ceiling")
+        # and the run must land exactly on the document's 3000 s / 3600 s
+        # analysis times (shared rule; the matrix cadence uses it too)
+        check_step(dt)
 
     hs_fn = None
     if held_suarez:
@@ -749,9 +823,14 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
 
     note = (f"fv3_duo FV3DuoDynamicsModel km={km} eta={eta} hydrostatic, "
             f"nord={cfg.nord} d4_bg={cfg.d4_bg} sponge={cfg.sponge_del2_top_layers}"
-            f"L, n_split={cfg.n_split}, dt={dt:g}s (deck dt_atmos, no "
-            f"driver CFL clamp); " + (
-                f"shared cube IC {spec.label} on the duo cells + CAM6 L32"
+            f"L, n_split={cfg.n_split}, dt={dt:g}s ("
+            + ("small-planet step: deck dt_atmos 1920 s / X = 125 rounded "
+               "down to divide 3600 s" if gw31 else "deck dt_atmos")
+            + ", no driver CFL clamp); " + (
+                f"shared cube IC {spec.label} on the duo cells + "
+                + ("DCMIP 2012 3-1 L10 (App. F.3), radius="
+                   f"{float(grid.ctx_np['radius']):.6g} m"
+                   if gw31 else "CAM6 L32")
                 + ("" if spec.phis_fn is None else
                    ", grid terrain = the IC's phis (unfiltered)")
                 + ("" if spec.omega is None else

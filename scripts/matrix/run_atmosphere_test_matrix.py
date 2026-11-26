@@ -238,6 +238,33 @@ def _latlon_dt(dx_pole: float, dt_cap: float, case: str | None = None) -> float:
     return base * _matrix_dt_scale()
 
 
+def _gw31_diag_every(dt: float) -> int:
+    """Diagnostic stride [steps] of the DCMIP 2012 3-1 row: the largest
+    ``k`` with ``k dt <= 100 s`` (the document's output interval, Sect. 3)
+    whose interval divides 600 s, so samples land exactly on the
+    document's 3000 s and 3600 s analysis times.  Raises if ``dt`` itself
+    does not divide 600 s (the run could not hit those times either) or
+    exceeds 100 s."""
+    from tests.test_cases.dcmip2012.gravity_wave_3_1 import check_step
+    if not (0.0 < dt <= 100.0):
+        raise ValueError(f"gravity_wave_3_1: dt={dt!r} s is not in (0, 100] s")
+    m = check_step(dt)    # the same rule as the cube adapter
+    # integer arithmetic from here: k | m and k dt <= 100 s
+    return max(k for k in range(1, m + 1)
+               if m % k == 0 and k * dt <= 100.0)
+
+
+def _gw31_n_steps(days: float, dt: float) -> int:
+    """Step count of the DCMIP 2012 3-1 row: the one that lands exactly on
+    the run's end (``int()`` of the quotient can fall one short for a
+    valid step, e.g. 600/673 s); raises if no integer count does."""
+    n = int(round(days * 86400 / dt))
+    if n < 1 or n * dt != days * 86400:
+        raise ValueError(f"gravity_wave_3_1: dt={dt!r} s does not divide "
+                         f"the {days * 86400:g} s run")
+    return n
+
+
 # ===========================================================================
 # TestCase dataclass
 # ===========================================================================
@@ -1422,6 +1449,9 @@ def _namelist_vertical_table(tc) -> str | None:
     if tc.grid_type == "cubed_sphere":
         if tc.case == "amip":
             return None   # skipped: no duo adapter
+        if tc.case == "gravity_wave_3_1":
+            return ("dcmip2012_gw31_l10 (fv3_duo eta table: DCMIP 2012 3-1 "
+                    "App. F.3 L10, 10 km lid)")
         return "cam6_l32 (fv3_duo eta table; probe env vars do not apply)"
     try:
         sig = _create_vertical(DEFAULT_NLEV, "hybrid")
@@ -4887,8 +4917,13 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             f"Baroclinic wave not implemented for grid '{tc.grid_type}'")
 
     # --- Time loop ---
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(6 * 3600 / dt))
+    n_steps = (_gw31_n_steps(days, dt) if tc.case == "gravity_wave_3_1"
+               else int(days * 86400 / dt))
+    # DCMIP 2012 3-1: scalar diagnostics at <= 100 s (the document's
+    # output interval) and exactly on its 3000 s / 3600 s analysis times
+    # (_gw31_diag_every); 6-hourly would leave the 3600 s run one sample.
+    diag_every = (_gw31_diag_every(dt) if tc.case == "gravity_wave_3_1"
+                  else max(1, int(6 * 3600 / dt)))
 
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,

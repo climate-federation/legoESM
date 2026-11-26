@@ -36,9 +36,12 @@ def _model(case, ic_kwargs=None):
         kw["phis_fn"] = spec.phis_fn
     if spec.omega is not None:
         kw["omega"] = spec.omega
+    if spec.radius is not None:
+        kw["radius"] = spec.radius
     grid = create_fv3_duo_grid(N, **kw)
-    model = FV3DuoDynamicsModel(
-        grid, FV3DuoConfig(km=A.DUO_HYDRO_KM, eta=A.DUO_HYDRO_ETA))
+    km, eta = ((A.DUO_GW31_KM, A.DUO_GW31_ETA) if spec.eta == A.DUO_GW31_ETA
+               else (A.DUO_HYDRO_KM, A.DUO_HYDRO_ETA))
+    model = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=km, eta=eta))
     return spec, model
 
 
@@ -111,22 +114,126 @@ def test_rest_states_over_the_2_0_0_mountain(case, kw):
     assert f.ps.min() < 0.85 * constants.p_ref
 
 
-def test_gravity_wave_3_1_non_rotating_with_theta_bubble():
+def test_gravity_wave_3_1_dcmip2012_small_planet():
+    """DCMIP 2012 test 3-1 on the duo: a = R_earth/125 in every metric,
+    Omega = 0, the App. F.3 L10 table, and the document's p_s / T written
+    out independently at the cells (Eqs. 89, 93, 92, 96, 105-109)."""
+    from legoesm.grids.vertical import dcmip2012_gw31_eta_table
     spec, model = _model("gravity_wave_3_1")
+    ctx = model.grid.ctx_np
+    a = float(constants.R_earth) / 125.0
+    assert ctx["radius"] == a
+    _, _, area = A.duo_cell_geometry(ctx)
+    # the radius reached the metrics: the cells tile the small sphere
+    np.testing.assert_allclose(np.sum(area), 4 * np.pi * a * a, rtol=1e-12)
+    ak, bk, ptop = dcmip2012_gw31_eta_table(10)
+    assert np.array_equal(model.ak, ak) and np.array_equal(model.bk, bk)
     f = _fields(model, A.shared_ic_bundle(model, spec))
     assert np.all(f.f0 == 0.0)                       # omega = 0 on the grid
     assert np.all(f.phis == 0.0)
-    np.testing.assert_allclose(f.ps, constants.p_ref, rtol=1e-14)
-    # the bubble: warm anomaly at the (0E, 0N) centre, ~0 at the antipode
-    d = np.abs(f.pt - 300.0).max(-1)
-    i_c = np.unravel_index(np.argmax(np.cos(f.lat) * np.cos(f.lon)), d.shape)
-    i_a = np.unravel_index(np.argmin(np.cos(f.lat) * np.cos(f.lon)), d.shape)
-    assert d[i_c] > 0.5 and d[i_a] < 0.2 * d[i_c]
+    g, cp, rd, kap = constants.g, constants.c_pd, constants.R_d, constants.kappa
+    N2, u0, teq, peq = 1e-4, 20.0, 300.0, 1e5
+    G = g * g / (N2 * cp)
+    c2 = np.cos(2 * f.lat) - 1.0
+    Ts = G + (teq - G) * np.exp(-u0 * u0 * N2 / (4 * g * g) * c2)
+    ps = peq * np.exp(u0 * u0 / (4 * G * rd) * c2) * (Ts / teq) ** (1 / kap)
+    np.testing.assert_allclose(f.ps, ps, rtol=1e-13)
+    p = (0.5 * (ak[:-1] + ak[1:]) + 0.5 * (bk[:-1] + bk[1:]) * ps[..., None])
+    q = Ts[..., None] / G * ((p / ps[..., None]) ** kap - 1.0) + 1.0
+    Tb = Ts[..., None] * (p / ps[..., None]) ** kap / q
+    z = -g / N2 * np.log(q)
+    r = a * np.arccos(np.clip(np.cos(f.lat) * np.cos(f.lon - 2 * np.pi / 3),
+                              -1.0, 1.0))
+    s = 25e6 / (25e6 + r * r)
+    T = Tb + s[..., None] * np.sin(2 * np.pi * z / 20000.0) * (p / peq) ** kap
+    np.testing.assert_allclose(f.pt, T, rtol=1e-12)
+    assert (f.pt - Tb).max() > 0.2   # the bubble is there (C8 cells ~30 km)
     # solid-body 20 cos(lat) through the D-grid projection and c2l lens
-    # (MEASURED rel RMS 0.0059 at C8)
+    # (MEASURED rel RMS 0.0059 at C8 on the Earth-radius grid)
     ref = 20.0 * np.cos(f.lat)[..., None] * np.ones_like(f.ue)
     assert _rel_rms(f.ue, ref) < 0.02
     assert np.sqrt(np.mean(f.vn ** 2)) < 0.02 * np.sqrt(np.mean(ref ** 2))
+
+
+def test_build_duo_hydro_admits_exactly_the_gw31_configuration(monkeypatch):
+    """The C36-only guard admits the 3-1 small planet with ITS table, radius
+    and step (the adapter run to completion, no stepping); a control row
+    keeps the Earth deck (FV3 radius, dt 1920 s, CAM6 L32)."""
+    from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+    a = float(constants.R_earth) / 125.0
+    duo = A.build_duo_hydro(36, shared_case="gravity_wave_3_1")
+    assert duo.dt == A.DUO_GW31_DT_ATMOS == 15.0
+    assert (duo.km, duo.eta) == (10, "dcmip2012_gw31_l10")
+    assert (duo.model.config.km, duo.model.config.eta) == (duo.km, duo.eta)
+    assert duo.grid.ctx_np["radius"] == a
+    np.testing.assert_allclose(np.sum(duo.area), 4 * np.pi * a * a,
+                               rtol=1e-12)
+    assert "radius=" in duo.note and "L10" in duo.note
+    for g in duo.grid.ctx_np["gs6"]:           # Omega = 0 reached the grid
+        assert np.all(np.asarray(g["f0"]) == 0.0)
+        assert np.all(np.asarray(g["fC"]) == 0.0)
+    ctl = A.build_duo_hydro(36, shared_case="inertio_gravity_3_2")
+    assert ctl.dt == A.DUO_HYDRO_DT_ATMOS == 1920.0
+    assert (ctl.km, ctl.eta) == (A.DUO_HYDRO_KM, A.DUO_HYDRO_ETA)
+    assert ctl.grid.ctx_np["radius"] == FV3_RADIUS_M
+    assert "small-planet step" in duo.note
+    assert "small-planet step" not in ctl.note
+    # the Courant check binds: a step above 1920 s * a / FV3_RADIUS_M
+    from tests.test_cases.dcmip2012.gravity_wave_3_1 import check_step
+    check_step(600.0 / 39)       # lands on 600 / 3600 s, but 15.38 > 15.36
+    monkeypatch.setattr(A, "DUO_GW31_DT_ATMOS", 600.0 / 39)
+    with pytest.raises(ValueError, match="geometric step ceiling"):
+        A.build_duo_hydro(36, shared_case="gravity_wave_3_1")
+    # ... and so does the end-time check: 15.3 s is under the ceiling but
+    # 3600 / 15.3 steps would stop at 3595.5 s
+    monkeypatch.setattr(A, "DUO_GW31_DT_ATMOS", 15.3)
+    with pytest.raises(ValueError, match="does not divide"):
+        A.build_duo_hydro(36, shared_case="gravity_wave_3_1")
+    # 14.4 s divides 3600 s (250 steps) but not 600 s (misses 3000 s)
+    monkeypatch.setattr(A, "DUO_GW31_DT_ATMOS", 14.4)
+    with pytest.raises(ValueError, match="does not divide"):
+        A.build_duo_hydro(36, shared_case="gravity_wave_3_1")
+    with pytest.raises(ValueError, match="goes with that case only"):
+        A.build_duo_hydro(36, km=10, eta="dcmip2012_gw31_l10")
+    with pytest.raises(ValueError, match="held_suarez forcing goes with"):
+        A.build_duo_hydro(36, shared_case="gravity_wave_3_1",
+                          held_suarez=True)
+    with pytest.raises(ValueError, match="C36 only"):
+        A.build_duo_hydro(24, shared_case="gravity_wave_3_1")
+    with pytest.raises(ValueError, match="do not pass km/eta"):
+        A.build_duo_hydro(36, shared_case="gravity_wave_3_1", km=32,
+                          eta="dcmip2012_gw31_l10")
+
+
+@pytest.mark.parametrize("oracle_conventions", [True, False])
+def test_duo_radius_scales_every_length_metric(oracle_conventions):
+    """Every length / area metric of the six gridstructs scales with the
+    radius (and inverse metrics inversely); angles do not -- on both
+    gridstruct builders (bounded = the duo grid factory's lane, and plain)."""
+    from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
+    from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+    a = float(constants.R_earth) / 125.0
+    r = a / FV3_RADIUS_M
+    kw = dict(use_ext_bundle=oracle_conventions,
+              oracle_conventions=oracle_conventions)
+    n = 12        # the plain kinked-corner lattice needs n >= 12 at ng 3
+    e6 = build_six_face_duo_context(n, 3, **kw)["gs6"]
+    s6 = build_six_face_duo_context(n, 3, radius=a, **kw)["gs6"]
+    assert len(e6) == len(s6) == 6
+    for ge, gs in zip(e6, s6):
+        for k, p in (("dx", 1), ("dy", 1), ("dxa", 1), ("dya", 1),
+                     ("dxc", 1), ("dyc", 1), ("area", 2), ("area_c", 2),
+                     ("rdx", -1), ("rdy", -1), ("rdxa", -1), ("rdya", -1),
+                     ("rdxc", -1), ("rdyc", -1), ("rarea", -2),
+                     ("rarea_c", -2)):
+            x, y = np.asarray(ge[k], float), np.asarray(gs[k], float)
+            m = np.isfinite(x) & (np.abs(x) > 0) & (np.abs(x) < 1e20)
+            ms = np.isfinite(y) & (np.abs(y) > 0) & (np.abs(y) < 1e20)
+            assert m.sum() > 0 and np.array_equal(m, ms), k
+            np.testing.assert_allclose(y[m], x[m] * r ** p, rtol=1e-11,
+                                       err_msg=k)
+        for k in ("cosa", "sina"):
+            np.testing.assert_array_equal(np.asarray(gs[k]), np.asarray(ge[k]))
 
 
 def test_inertio_gravity_keeps_the_rotating_planet():
@@ -289,6 +396,77 @@ def test_baroclinic_duo_uses_the_dcmip2016_truncated_perturbation(
     with pytest.raises(_Stop):
         A.build_duo_hydro(36, perturbed=perturbed)   # deck dt is C36-only
     assert seen == {"do_pert": perturbed, "use_dcmip2016_perturbation": True}
+
+
+#: radius exponent of every float field of the solver's gridstruct dicts
+#: (DuoStepperContext.gs6); 0 = radius-free (angles, ratios, Coriolis)
+_GS_RADIUS_POWER = {
+    **{k: 1 for k in ("dx", "dy", "dxa", "dya", "dxc", "dyc")},
+    **{k: -1 for k in ("rdx", "rdy", "rdxa", "rdya", "rdxc", "rdyc")},
+    "area": 2, "area_c": 2, "rarea": -2, "rarea_c": -2,
+    **{k: 0 for k in (
+        "agrid_lat", "agrid_lon", "grid_lat", "grid_lon", "cos_sg", "sin_sg",
+        "cosa", "cosa_s", "cosa_u", "cosa_v", "sina", "sina_u", "sina_v",
+        "rsin2", "rsin_u", "rsin_v", "rsina", "del6_u", "del6_v", "divg_u",
+        "divg_v", "edge_e", "edge_n", "edge_s", "edge_w", "f0", "fC")},
+}
+
+
+def _radius_powers(ge, gs, r):
+    """{field: p} with gs[field] == ge[field] * r**p on every finite,
+    non-sentinel entry (None if no integer p in [-2, 2] fits)."""
+    out = {}
+    for k in ge:
+        x, y = np.asarray(ge[k]), np.asarray(gs[k])
+        if x.dtype == object or not np.issubdtype(x.dtype, np.floating):
+            continue
+        # mask from the Earth array alone: a small-planet entry that went
+        # non-finite there is a mismatch, not an excluded point
+        m = np.isfinite(x) & (np.abs(x) > 1e-300) & (np.abs(x) < 1e20)
+        if not m.any():
+            continue
+        if not np.all(np.isfinite(y[m])):
+            out[k] = None
+            continue
+        q = y[m] / x[m]
+        out[k] = next((p for p in (0, 1, 2, -1, -2)
+                       if np.allclose(q, r ** p, rtol=1e-9)), None)
+    return out
+
+
+def test_duo_solver_context_metrics_scale_with_radius():
+    """The JAX stepper context the solver consumes (gridstruct arrays frozen
+    into DuoStepperContext): every float field carries exactly its expected
+    radius exponent on every face -- no Earth-radius length survives."""
+    from legoesm.grids.factory import create_fv3_duo_grid
+    from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+    a = float(constants.R_earth) / 125.0
+    r = a / FV3_RADIUS_M
+    E = create_fv3_duo_grid(N).ctx_jax
+    S = create_fv3_duo_grid(N, radius=a).ctx_jax
+    assert len(E.gs6) == len(S.gs6) == 6
+    for ge, gs in zip(E.gs6, S.gs6):
+        assert _radius_powers(ge, gs, r) == _GS_RADIUS_POWER
+    # negative control: one length field left at its Earth value is caught
+    frozen = {**S.gs6[0], "dx": E.gs6[0]["dx"]}
+    assert _radius_powers(E.gs6[0], frozen, r)["dx"] == 0
+    # ... and so is one corrupted (NaN) entry
+    dx = np.array(S.gs6[0]["dx"], dtype=float)
+    i = np.argwhere(np.isfinite(dx) & (np.abs(dx) > 0))[0]
+    dx[tuple(i)] = np.nan
+    assert _radius_powers(E.gs6[0], {**S.gs6[0], "dx": dx}, r)["dx"] is None
+
+
+def test_rotating_grid_is_refused_for_a_non_rotating_recipe():
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, FV3DuoDynamicsModel)
+    from legoesm.grids.factory import create_fv3_duo_grid
+    spec = A.duo_shared_ic_spec("gravity_wave_3_1")
+    grid = create_fv3_duo_grid(N, radius=spec.radius)       # Earth's omega
+    model = FV3DuoDynamicsModel(
+        grid, FV3DuoConfig(km=A.DUO_GW31_KM, eta=A.DUO_GW31_ETA))
+    with pytest.raises(ValueError, match="non-rotating"):
+        A.shared_ic_bundle(model, spec)
 
 
 def test_terrain_mismatch_is_refused():

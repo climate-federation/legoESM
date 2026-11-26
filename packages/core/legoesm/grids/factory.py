@@ -176,7 +176,8 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
                         phis_filter_iter: int = 0,
                         phis6=None,
                         rotation_alpha: float = 0.0,
-                        omega: float | None = None) -> FV3DuoGridBundle:
+                        omega: float | None = None,
+                        radius: float | None = None) -> FV3DuoGridBundle:
     """Build the certified six-face duo-cube context pair for C``resolution``.
 
     Wraps ``build_six_face_duo_context`` (ext-bundle + oracle
@@ -203,6 +204,11 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
     passed straight to ``build_six_face_duo_context``; ``None`` (default)
     is its FMS ``FV3_OMEGA``, byte-identical to omitting it.  ``0.0`` is
     the non-rotating planet of DCMIP 2008 test 3-1.
+
+    ``radius`` [m]: the sphere radius of every grid metric, passed
+    straight to ``build_six_face_duo_context``; ``None`` (default) is its
+    FMS ``FV3_RADIUS_M``, byte-identical to omitting it.  The DCMIP 2012
+    test 3-1 small planet passes ``a_ref / 125``.
     """
     if phis6 is not None and phis_fn is not None:
         raise ValueError("create_fv3_duo_grid: phis6 (a ready terrain "
@@ -225,7 +231,7 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
                                         oracle_conventions=True,
                                         topo_fn=phis_fn,
                                         rotation_alpha=float(rotation_alpha),
-                                        omega=omega)
+                                        omega=omega, radius=radius)
     ctx_jax = build_jax_duo_stepper_context(ctx_np)
     if phis_fn is not None and phis_filter_iter > 0:
         # orography (route A, M4): phis_fn(lon, lat) evaluated on the

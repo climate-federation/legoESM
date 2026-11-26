@@ -74,6 +74,27 @@ DURATION_S = 3600.0             # [s] simulation length (Sect. 3, "Grid
                                 # spacings, simulation time and output")
 
 
+#: the document's analysis times (Sect. 3 Diagnostics: 3000 s; the run
+#: length 3600 s); their common divisor 600 s is what a step must divide
+ANALYSIS_PERIOD_S = 600.0
+
+
+def check_step(dt: float) -> int:
+    """Steps per ``ANALYSIS_PERIOD_S`` for a model step ``dt`` [s]; raises
+    unless ``dt`` divides 600 s and 3600 s EXACTLY in floating point (the
+    reconstructed times ``n dt`` are 600 s / 3600 s to the last bit), so a
+    run of fixed steps lands on the document's 3000 s and 3600 s."""
+    dt = float(dt)
+    if not (math.isfinite(dt) and dt > 0.0):
+        raise ValueError(f"DCMIP 2012 3-1: step {dt!r} s is not positive")
+    m = round(ANALYSIS_PERIOD_S / dt)
+    n = round(DURATION_S / dt)
+    if not (m >= 1 and m * dt == ANALYSIS_PERIOD_S and n * dt == DURATION_S):
+        raise ValueError(f"DCMIP 2012 3-1: step {dt!r} s does not divide "
+                         f"{ANALYSIS_PERIOD_S:g} s and {DURATION_S:g} s exactly")
+    return int(m)
+
+
 def small_planet_radius() -> float:
     """``a = a_ref / X`` [m] with the shared ``constants.R_earth`` (vote
     2026-11-26: one radius on all four grids, author A / codex A)."""

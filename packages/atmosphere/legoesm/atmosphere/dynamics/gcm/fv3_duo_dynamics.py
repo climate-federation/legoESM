@@ -121,6 +121,8 @@ class FV3DuoConfig(NamedTuple):
     #: ptop=5000 Pa, standard var_hi/UKMO hybrid, km must be 40.
     #: "dcmip2012_l30": DCMIP 2012 transport grid (App. F.3), km must be
     #: 30; explicitly selected by the DCMIP transport rows only.
+    #: "dcmip2012_gw31_l10": DCMIP 2012 test 3-1 grid (App. F.3, constant-N
+    #: profile, 10 km lid), km must be 10; selected by that row only.
     eta: str = "analytic"
     #: fv_mapz.F90:336/:1840 ``fill``: FV3's column borrow (``fillz``) on
     #: every tracer after the vertical remap -- the dycore-internal
@@ -204,6 +206,9 @@ def duo_eta_table(eta: str, km: int):
     (:func:`legoesm.grids.vertical.dcmip2012_transport_eta_table`), km ==
     30, fixed lid at ~25.5 kPa; selected explicitly by the DCMIP 2012
     transport matrix rows only.
+    ``"dcmip2012_gw31_l10"``: the DCMIP 2012 test 3-1 grid
+    (:func:`legoesm.grids.vertical.dcmip2012_gw31_eta_table`), km == 10,
+    fixed lid at ~273.8 hPa; selected explicitly by that matrix row only.
     """
     if eta == "fv3_l40":
         from legoesm.core.fv3_native_eta import FV3_L40_AK, FV3_L40_BK
@@ -235,9 +240,17 @@ def duo_eta_table(eta: str, km: int):
                 f"got km={km}")
         ak, bk, ptop = dcmip2012_transport_eta_table(30)
         return ak, bk, ptop
+    if eta == "dcmip2012_gw31_l10":
+        # explicitly selected only (DCMIP 2012 test 3-1 row)
+        from legoesm.grids.vertical import dcmip2012_gw31_eta_table
+        if km != 10:
+            raise ValueError(
+                f"FV3DuoConfig(eta='dcmip2012_gw31_l10') is the 10-level "
+                f"table; got km={km}")
+        return dcmip2012_gw31_eta_table(10)
     raise ValueError(
         f"FV3DuoConfig.eta={eta!r}: expected 'analytic', 'cam6_l32', "
-        f"'fv3_l40' or 'dcmip2012_l30'")
+        f"'fv3_l40', 'dcmip2012_l30' or 'dcmip2012_gw31_l10'")
 
 
 def lon_modulated_tracer(sphum, agrid_lon, n: int, ng: int, iq: int):

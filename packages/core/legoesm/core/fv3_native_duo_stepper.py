@@ -64,8 +64,14 @@ def build_six_face_duo_context(n: int, ng: int = 3,
                                omega: float | None = None,
                                k2e_nord: int = 2,
                                topo_fn=None,
-                               rotation_alpha: float = 0.0) -> dict:
+                               rotation_alpha: float = 0.0,
+                               radius: float | None = None) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders).
+
+    ``radius`` [m]: the sphere radius of every metric (dx/dy/area/...);
+    ``None`` (default) is the FMS ``FV3_RADIUS_M``, byte-identical to
+    omitting it.  A reduced value is the small planet of DCMIP 2012 test
+    3-1 (a = a_ref / X).  Returned as ``ctx["radius"]``.
 
     ``rotation_alpha`` is the Zenodo ``test_case_nml`` ``alpha``, passed
     RAW to the gridstruct builders exactly as the pinned Fortran uses it
@@ -132,14 +138,19 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     # planet (FV3 case 8; omega=0); default = the FMS value
     if omega is None:
         omega = FV3_OMEGA
+    if radius is None:
+        radius = FV3_RADIUS_M
+    radius = float(radius)
+    if not (np.isfinite(radius) and radius > 0.0):
+        raise ValueError(f"radius must be finite and > 0, got {radius!r}")
     if oracle_conventions:
         gs6 = [build_fv3_native_gridstruct_bounded(
-                   n, ng, tile=t, omega=omega,
+                   n, ng, tile=t, radius=radius, omega=omega,
                    rotation_alpha=rotation_alpha)
                for t in range(1, 7)]
     else:
         gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
-                                           radius=FV3_RADIUS_M,
+                                           radius=radius,
                                            omega=omega,
                                            rotation_alpha=rotation_alpha)
                for t in range(1, 7)]
@@ -326,6 +337,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
             "ext_exclude": tuple(ext_exclude),
             "oracle_conventions": bool(oracle_conventions),
             "rotation_alpha": float(rotation_alpha),
+            "radius": radius,
             "kk6": kk6, "ee6": ee6, "hs6": hs6,
             "bd": Bounds.single_tile(n, ng)}
 
