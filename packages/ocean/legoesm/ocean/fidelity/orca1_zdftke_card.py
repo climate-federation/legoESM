@@ -32,8 +32,7 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
     of ``namelist_ref`` defaults (NEMO 5.0.1).  Structural conventions
-    (diagnostic Mode-B TKE, insitu N², gaspar amplitude, Veros mixing-length
-    construction) follow the validated DINO NEMO-faithful recipe
+    started from the validated DINO NEMO-faithful recipe
     (``ocean/experiments/dino.py::_dino_vertical_mixing_config``); ONLY the
     namelist values change for ORCA1.
 
@@ -77,14 +76,12 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                           2026-07-18; was a flagged no-ice_frac gap).
 
     NO TKEConfig counterpart (fidelity gaps, flagged not stubbed):
-      ln_mxl0=T / rn_mxl0=0.04  surface mixing length = F(wind stress);
       nn_mxlice=2               under-ice mixing-length scaling;
-      rn_bshear=1e-20           background-shear floor (legoESM uses 1e-12);
-      surface TKE BC            NEMO Dirichlet e_sfc=rn_ebb·|τ|/ρ0 vs legoESM
-                                flux (|τ|/ρ0)^{3/2} (Veros/Wallace form);
-      prognostic en carry       NEMO integrates en prognostically; this runs
-                                the DINO-validated quasi-steady diagnostic
-                                Mode-B (3 backward-Euler iterations).
+      rn_bshear=1e-20           background-shear floor (legoESM uses 1e-12).
+    The card body now sets the NEMO Dirichlet surface TKE (``surface_bc``), the
+    prognostic ``en`` carry (``prognostic=True``) and the ln_mxl0 wind-stress
+    surface anchor (``tke_mxl_choice=3``); all three were listed here as gaps
+    before those arms existed.
     """
     from legoesm import constants as _const
     from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
