@@ -63,3 +63,11 @@ def test_init_land_surface_data_per_scheme(tmp_path, land_cfg, param_type, is_mu
     if is_multilayer:
         assert cfg.hydraulics.retention_curve == "clapp_hornberger"
     assert gsd.pft_frac.shape[1] == grid.ncol             # regridded to the grid
+
+
+def test_init_land_surface_data_takes_a_pathlib_path(tmp_path):
+    """A pathlib.Path is a file, not an in-memory dataset."""
+    p = tmp_path / "sd.nc"; _write_surfdata(str(p))
+    a = init_land_surface_data(str(p), _ToyGrid(), LandConfig(), day_of_year=196.0)[1]
+    b = init_land_surface_data(p, _ToyGrid(), LandConfig(), day_of_year=196.0)[1]
+    assert np.array_equal(np.asarray(a.LAI), np.asarray(b.LAI))

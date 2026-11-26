@@ -104,6 +104,9 @@ def partial_periodic_seam_wall_mpas(
     return is_ocean.astype(jnp.float32)
 
 
+REST_T_DEEP_C = 2.0   # rest-state deep ocean temperature [degC]
+
+
 def idealized_bathymetry_mpas(
     mesh: VoronoiMesh,
     H_max: float = 5500.0,
@@ -148,7 +151,7 @@ def rest_state_mpas_ocean(
     mesh: VoronoiMesh,
     z_coord: OceanZStarCoordinate,
     T_water_init_C: float = 20.0,
-    T_deep: float = 2.0,
+    T_deep: float = REST_T_DEEP_C,
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
     land_lat_threshold: float = 80.0,
@@ -163,9 +166,9 @@ def rest_state_mpas_ocean(
     ----------
     mesh : VoronoiMesh
     z_coord : OceanZStarCoordinate
-    T_water_init_C : float
+    T_water_init_C : float or (nCells,) array
         Surface temperature [degC].
-    T_deep : float
+    T_deep : float or (nCells,) array
         Deep temperature [degC].
     S_uniform : float
         Uniform salinity [PSU].
@@ -207,8 +210,15 @@ def rest_state_mpas_ocean(
 
     # Temperature: exponential profile
     z_full = z_coord.z_full_ref  # (nlev,), negative values
-    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)
-    T_data = jnp.broadcast_to(T_profile[jnp.newaxis, :], (nCells, nlev)).astype(dtype)
+    if jnp.ndim(T_water_init_C) == 0 and jnp.ndim(T_deep) == 0:
+        # scalars: the original expression, so the default start stays bitwise
+        T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)
+        T_data = jnp.broadcast_to(T_profile[jnp.newaxis, :], (nCells, nlev)).astype(dtype)
+    else:   # per-cell (nCells,) surface and/or deep temperature
+        T_s = jnp.reshape(jnp.asarray(T_water_init_C), (-1, 1))
+        T_d = jnp.reshape(jnp.asarray(T_deep), (-1, 1))
+        T_profile = T_d + (T_s - T_d) * jnp.exp(z_full / _SCALE_DEPTH)[jnp.newaxis, :]
+        T_data = jnp.broadcast_to(T_profile, (nCells, nlev)).astype(dtype)
 
     # Salinity: uniform
     S_data = jnp.full((nCells, nlev), S_uniform, dtype=dtype)

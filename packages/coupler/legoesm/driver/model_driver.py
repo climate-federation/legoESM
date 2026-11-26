@@ -2448,7 +2448,11 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     # reads below dispatch on the actual struct.
     if isinstance(cfg.surface_scheme, (CanopyConfig, CLMMLCanopyConfig)):
         _sd_path = getattr(config, "surfdata_path", "")
-        if not _sd_path:
+        if not _sd_path and getattr(config, "geography", ""):
+            # a geography without its own land map: its uniform grass, in memory
+            from legoesm.grids.geography import geography_land_surfdata
+            _sd_path = geography_land_surfdata(config.geography)
+        if _sd_path is None or (isinstance(_sd_path, str) and not _sd_path):
             raise ValueError(
                 f"land_surface_scheme selects {type(cfg.surface_scheme).__name__}, "
                 "which needs per-PFT CANOPY parameters (canopy height, band "
@@ -2551,7 +2555,8 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
                 "computes its own radiation from soil colour + leaf optics, so "
                 "the tuned per-PFT emissivity and vegetation albedo do NOT apply "
                 "to it — those are re-fit items, not wiring.",
-                type(cfg.surface_scheme).__name__, _sd_path,
+                type(cfg.surface_scheme).__name__,
+                _sd_path.attrs["source"] if hasattr(_sd_path, "attrs") else _sd_path,
                 float(jnp.min(_hc)), float(jnp.max(_hc)),
                 float(jnp.min(params.rz0m)), float(jnp.max(params.rz0m)))
         else:
@@ -2559,7 +2564,8 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
                 "  Land tile: %s on per-PFT CLM-ML surface parameters from %s "
                 "(prescribed canopy-top height %.2f-%.2f m, LAI %.2f-%.2f) — "
                 "the accurate per-plant structure the multilayer canopy needs.",
-                type(cfg.surface_scheme).__name__, _sd_path,
+                type(cfg.surface_scheme).__name__,
+                _sd_path.attrs["source"] if hasattr(_sd_path, "attrs") else _sd_path,
                 float(jnp.min(params.htop)), float(jnp.max(params.htop)),
                 float(jnp.min(params.LAI)), float(jnp.max(params.LAI)))
 
@@ -4571,17 +4577,19 @@ class ModelDriver:
         # T / p_s overlay below is GRID-AGNOSTIC (standard_atmosphere_temperature
         # accepts any lat shape); only the balanced zonal jet (step 5) is
         # lat-lon-specific (the A-grid u is geographic-east) and is skipped on
-        # the cube.  spectral/MPAS are rejected in ExperimentConfig.validate_strict
+        # the cube and MPAS.  spectral is rejected in ExperimentConfig.validate_strict
         # (no grid-space T Field), so the else here is defensive.
         if gt == "latlon":
             lat_h = self.grid.lat2d                   # (n_lat, n_lon)
         elif gt == "cubed_sphere":
             lat_h = self.grid.lat                     # (6, n, n) geographic lat [rad]
+        elif gt == "mpas":
+            lat_h = self.grid.latCell                 # (nCells,) geographic lat [rad]
         else:
             raise NotImplementedError(
                 f"ic='standard' not yet wired for grid_type={gt!r} "
-                f"(discretization={cfg.dycore.discretization!r}); 'latlon' and "
-                "'cubed_sphere' are supported. Use ic='default' or 'era5'."
+                f"(discretization={cfg.dycore.discretization!r}); 'latlon', "
+                "'cubed_sphere' and 'mpas' are supported. Use ic='default' or 'era5'."
             )
 
         sa_cfg = StandardAtmosphereConfig(T_sfc_equator_K=cfg.T_init)
@@ -4599,6 +4607,15 @@ class ModelDriver:
         #     standard surface temperature, p_s = p0*exp(-phis/(R_d*T_sfc)),
         #     as a relative correction (exact no-op where phis == 0).
         phis = self.state.phis.data
+        if gt == "mpas" and bool(jnp.any(phis != 0)):
+            # The MPAS seed p_s is deliberately FLAT (see _init_state), so the
+            # relative correction below, which assumes a seed reduced against
+            # T_init, does not apply.
+            raise NotImplementedError(
+                "ic='standard' on grid_type='mpas' requires flat topography "
+                "(phis == 0 everywhere): the MPAS seed surface pressure is not "
+                "reduced over terrain. Use ic='default' or 'era5'."
+            )
         p_s_old = self.state.p_s.data
         p_s_new = p_s_old * jnp.exp(
             -phis / constants.R_d * (1.0 / T_sfc_std - 1.0 / cfg.T_init)
@@ -4650,7 +4667,7 @@ class ModelDriver:
         else:
             logger.info(
                 "  ic='standard' on %s: applied realistic T + p_s; balanced "
-                "zonal jet skipped (cube-local winds need grid-angle rotation) "
+                "zonal jet skipped (cube-local / edge-normal winds need rotation) "
                 "— circulation spins up from the T gradient.", gt,
             )
 

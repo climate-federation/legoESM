@@ -21,6 +21,19 @@ mg = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mg)
 
 
+@pytest.fixture(autouse=True)
+def _restore_precision():
+    """The drivers built here set the global precision policy; restore it so
+    later tests in the same worker do not inherit it."""
+    from legoesm.core import precision
+    pol, ovr = precision.get_policy(), precision.get_module_overrides()
+    yield
+    precision.set_policy(pol)
+    precision.clear_module_overrides()
+    for mod, roles in ovr.items():
+        precision.set_module_override(mod, **{r: d for r, d in roles.items() if d is not None})
+
+
 @pytest.fixture(scope="module")
 def mesh():
     from legoesm.grids.voronoi import create_voronoi_mesh
@@ -170,15 +183,16 @@ def test_binned_box_land_fraction_is_the_area_binned_source(mesh, tmp_path):
     assert np.array_equal(f, want) and f.max() == 1.0
 
 
-def test_bare_soil_where_the_file_has_no_land_map(tmp_path):
-    from legoesm.land.clm_surface_map import load_clm_surface
+def test_grassland_where_the_file_has_no_land_map(tmp_path):
+    from legoesm.land.clm_surface_map import load_clm_surface, soil_color_albedo
     src = geo.geography_clm_surface(_gen(tmp_path, "aquaplanet"))
     m = load_clm_surface(src, np.array([0.0, 45.0]), np.array([10.0, 200.0]),
                          vg_air_entry_m=0.0)
-    assert np.all(np.asarray(m["pft_fractions"])[:, 0] == 1.0)
-    assert np.all(np.asarray(m["pct_sand"]) == 43.0)     # VOTED V6: USDA loam centroid
+    pft = np.asarray(m["pft_fractions"])
+    assert np.all(pft[:, 13] == 1.0) and pft.sum() == 2.0   # VOTED G1: C3 grass
+    assert np.all(np.asarray(m["lai"]) == 2.0)              # VOTED G2
+    assert np.all(np.asarray(m["pct_sand"]) == 43.0)        # VOTED V6/G3: loam
     assert np.all(np.asarray(m["pct_clay"]) == 18.0)
-    from legoesm.land.clm_surface_map import soil_color_albedo
     assert np.all(np.asarray(m["soil_albedo"]) == soil_color_albedo(np.array([15]))[0])
 
 
@@ -231,6 +245,7 @@ def test_driver_terrain_is_the_geography_terrain(mesh, tmp_path):
     ("aquaplanet", dict(land_mode="slab")),
     ("ridge", dict(land_mode="multilayer", land_param_source="clm")),
     ("ridge", dict(land_mode="slab", atm_owns_surface=True)),
+    ("ridge", dict(land_mode="slab", use_pft=True, land_param_source="clm")),
 ])
 def test_coupled_refuses_geography_with_its_own_land_tile(tmp_path, monkeypatch,
                                                           shape, cc_kw):
@@ -261,17 +276,16 @@ def test_geography_has_land(tmp_path):
     assert not geo.geography_has_land(_write(ds, tmp_path, "zero_lf.nc"))
 
 
-@pytest.mark.parametrize("cc_kw,msg", [
-    (dict(f_land_mode="zero", land_mode="none"), "f_land_mode='analytical'"),
-    (dict(f_land_mode="from_ocean", land_mode="none"), "f_land_mode='analytical'"),
-    (dict(f_land_mode="analytical", land_mode="none"), "no land model reads"),
-])
-def test_coupled_refuses_geography_land_the_coupler_would_misread(tmp_path, cc_kw, msg):
+def test_coupled_refuses_an_all_ocean_geography_with_atm_owned_surface(tmp_path):
+    """The ice/lake handback rides the atmosphere land model's flux channel,
+    which an all-ocean mask never builds; refused at setup, not at step 1."""
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
-    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "ridge", barrier_lon=0.0)),
-                         CoupledConfig(**cc_kw), output_dir=str(tmp_path / "run"))
-    with pytest.raises(ValueError, match=msg):
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet"), use_multilayer_land=True),
+                         CoupledConfig(f_land_mode="analytical", land_mode="none",
+                                       atm_owns_surface=True),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="is all ocean"):
         d.setup()
 
 
@@ -492,8 +506,8 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
     ds["elevation"] = ds["elevation"].where(ds["elevation"] >= 0.0, -D)
     d = CoupledESMDriver(_mpas_cfg(_write(ds, tmp_path, "box_snap.nc")), cc,
                          output_dir=str(tmp_path / "run"))
-    d._atm.setup()     # atmosphere + ocean only: this box has land and no land
-    d._init_ocean()    # model, which the coupler (rightly) refuses
+    d._atm.setup()     # atmosphere + ocean only: this box has land and no
+    d._init_ocean()    # land model, which the coupler refuses
     f = np.asarray(d._atm._f_land).ravel()
     wet = np.asarray(d._ocean_land_mask)
     assert np.array_equal(wet, (f < 1.0).astype(wet.dtype)) and 0 < wet.sum() < wet.size
@@ -556,6 +570,116 @@ def test_coupled_mpas_ocean_on_its_own_mesh_refuses_a_geography(tmp_path):
         d.setup()
 
 
+def test_coupled_geography_land_without_a_land_model_is_refused(tmp_path):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))),
+                         CoupledConfig(f_land_mode="analytical", land_mode="none"),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="no land model runs on it"):
+        d.setup()
+
+
+@pytest.mark.parametrize("mode", ["zero", "from_ocean"])
+def test_coupled_geography_needs_the_atmosphere_land_fraction(tmp_path, mode):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0))),
+                         CoupledConfig(f_land_mode=mode, land_mode="none",
+                                       ocean_mode="dynamic"),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="needs f_land_mode='analytical'"):
+        d.setup()
+
+
+def test_land_surfdata_is_uniform_grass_or_none(mesh, tmp_path):
+    from legoesm.land.global_surface_data import (
+        get_surfdata_preset, load_global_surface_data)
+    sd = geo.geography_land_surfdata(_gen(tmp_path, "aquaplanet"))
+    g = load_global_surface_data(get_surfdata_preset("legoesm_surfdata"), mesh,
+                                 surf_ds=sd, landuse_ds=sd, veg_ds=sd)
+    pft = np.asarray(g.pft_frac)
+    assert np.allclose(pft[..., 13], 1.0) and np.allclose(pft.sum(-1), 1.0)
+    assert np.allclose(np.asarray(g.lai_monthly)[..., 13], 2.0)
+    assert np.allclose(np.asarray(g.htop_monthly)[..., 13], 0.5)
+    own = _write(mg.idealized("aquaplanet").assign(
+        PCT_NAT_PFT=(("natpft", "lsmlat", "lsmlon"), np.zeros((15, 1, 1)))),
+        tmp_path, "own.nc")
+    assert geo.geography_land_surfdata(own) is None
+
+
+def test_atmosphere_canopy_land_tile_on_a_geography(mesh, tmp_path):
+    from legoesm.driver.model_driver import build_multilayer_land_tile
+    cfg = _mpas_cfg(_gen(tmp_path, "box", box=(-30.0, 30.0, 60.0, 150.0)),
+                    use_multilayer_land=True, land_surface_scheme="two_leaf")
+    lat = np.asarray(mesh.latCell); lon = np.asarray(mesh.lonCell)
+    tile = build_multilayer_land_tile(cfg, lat, lon, mesh)
+    assert np.allclose(np.asarray(tile["params"].hc), 0.5)
+    assert tile["params_update_factory"] is not None
+
+
+def test_qobs_profile_is_the_ape_formula():
+    from legoesm.forcing.analytical import qobs_sst_C
+    lat = np.array([-90.0, -60.0, -59.0, -30.0, 0.0, 30.0, 59.0, 60.0, 90.0])
+    t = qobs_sst_C(lat)
+    assert t[4] == 27.0 and np.all(t[[0, 1, 7, 8]] == 0.0)
+    assert np.allclose(t, t[::-1], rtol=0, atol=1e-12)       # symmetric
+    s2 = np.sin(np.radians(45.0)) ** 2                          # 3*30/2 = 45 deg
+    assert np.isclose(t[3], 27.0 * (1.0 - 0.5 * (s2 + s2 * s2)), rtol=1e-14)
+    assert 0.0 < t[2] < 0.05                                     # continuous at 60 (0.028 at 59)
+
+
+def test_mpas_rest_state_takes_a_per_cell_surface_temperature(mesh):
+    import jax.numpy as jnp
+    from legoesm.ocean.init_mpas import _SCALE_DEPTH, rest_state_mpas_ocean
+    from legoesm.ocean.vertical import create_ocean_z_star
+    z = create_ocean_z_star(10, H_max=5500.0)
+    scalar = rest_state_mpas_ocean(mesh, z, T_water_init_C=8.85)   # not fp32-exact
+    want = 2.0 + (8.85 - 2.0) * jnp.exp(z.z_full_ref / _SCALE_DEPTH)  # the old formula
+    assert np.array_equal(np.asarray(scalar.T.data),
+                          np.broadcast_to(np.asarray(want), scalar.T.data.shape))
+    ts = np.linspace(0.0, 27.0, mesh.nCells)
+    col = rest_state_mpas_ocean(mesh, z, T_water_init_C=ts)
+    T = np.asarray(col.T.data)
+    assert np.allclose(T[:, 0], 2.0 + (ts - 2.0) * np.exp(float(z.z_full_ref[0]) / _SCALE_DEPTH),
+                       rtol=1e-6, atol=0.0)   # float32 ocean storage
+    assert T.shape == (mesh.nCells, 10)
+
+
+def test_coupled_mpas_ocean_starts_from_qobs(tmp_path):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    from legoesm.forcing.analytical import qobs_sst_C
+    from legoesm.ocean.init_mpas import _SCALE_DEPTH
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet")), CoupledConfig(
+        f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+        ocean_ic="qobs"), output_dir=str(tmp_path / "run"))
+    d.setup()
+    lat = np.degrees(np.asarray(d._ocean_grid.latCell))
+    z0 = float(d._ocean_z_coord.z_full_ref[0])
+    sst = qobs_sst_C(lat)
+    t_deep = np.minimum(2.0, sst)                 # polar columns start neutral
+    want = t_deep + (sst - t_deep) * np.exp(z0 / _SCALE_DEPTH)
+    T = np.asarray(d._ocean_state.T.data)
+    polar = np.abs(lat) > 55.0
+    assert polar.any() and np.all(np.diff(T[polar], axis=1) <= 1e-6)  # no warm water under cold
+    assert np.allclose(np.asarray(d._ocean_state.T.data)[:, 0], want, rtol=1e-6, atol=1e-5)  # float32
+    from legoesm import constants
+    sst_atm = np.asarray(d._atm.get_sst_sic(0.0)[0]).ravel()     # what the atmosphere reads
+    assert np.allclose(sst_atm, np.asarray(d._ocean_surface_KuvC()[0]).ravel(), rtol=0, atol=1e-5)
+    assert np.allclose(sst_atm - constants.T_freeze, want, rtol=1e-6, atol=1e-4)
+
+
+def test_coupled_mpas_ocean_refuses_an_unwired_start(tmp_path):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet")), CoupledConfig(
+        f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+        ocean_ic="woa"), output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="must be 'rest' or 'qobs'"):
+        d.setup()
+
+
 # sha256[:16] of the float64 terrain from cf/main acd8798d83 (before this PR),
 # same fixture, so the no-geography production path and legacy mode stay
 # bitwise to the pre-geography loader (measured cross-worktree, then pinned)
@@ -580,6 +704,11 @@ def test_terrain_is_bitwise_the_pre_geography_loader(x64, tmp_path):
     import xarray as xr
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.core import precision
+    # the pinned run's state: default fp32 policy, no module overrides (other
+    # test modules change both at import; the autouse fixture restores them)
+    precision.set_policy(precision.PrecisionPolicy.fp32())
+    precision.clear_module_overrides()
     mesh = create_voronoi_mesh(3)   # built under x64, as the pinned run was
     rng = np.random.default_rng(0)
     lat_e, lon_e = np.arange(89.5, -90.0, -1.0), np.arange(-179.5, 180.0, 1.0)

@@ -15,7 +15,7 @@ A regular lat-lon NetCDF (global attribute ``legoesm_geography_version = 1``):
   wall.  An arc that clips a cell corner between two points need not close
   that cell (the wall stays watertight, displaced by under one step);
 - CLM-surfdata variables (CLM names and dims) -- the land surface; absent ->
-  uniform bare soil.
+  uniform C3 grassland (LAI 2) on loam.
 
 Lakes (``lake_fraction``) and ice sheets (``ice_sheet_thickness``) are
 refused for now.
@@ -42,11 +42,34 @@ _CLM_MAP_VARS = ("PCT_NATVEG", "PCT_CROP", "PCT_CFT", "PCT_GLACIER", "PCT_SAND",
 _DENSIFY_MAX_DEG = 0.05
 _DENSIFY_CELL_FRACTION = 0.25
 
-# --- uniform bare soil (VOTED V6: PFT 0, USDA loam centroid, colour 15) ---
-_BARE_SAND_PCT = 43.0
-_BARE_CLAY_PCT = 18.0
-_BARE_SOIL_COLOR = 15
-_BARE_SOIL_LEVELS = 10   # CLM5 nlevsoi; the loader averages the top root-zone layers
+# --- uniform grassland where the file has no land map (user 2026-11-20: slab
+# land + two-leaf canopy, grass; VOTED G1 C3 grass PFT 13 a/a/?, G2 constant
+# MONTHLY_LAI 2.0 b/b/a, G3 soil = V6 loam centroid + colour 15 a/a/a) ---
+_GRASS_PFT = 13               # CLM5 c3_grass (natural-PFT index)
+_GRASS_LAI = 2.0              # [m2 m-2], every month
+_N_NAT_PFT, _N_CFT, _N_MONTHS = 15, 2, 12
+_SOIL_SAND_PCT = 43.0
+_SOIL_CLAY_PCT = 18.0
+_SOIL_COLOR = 15
+_SOIL_LEVELS = 10   # CLM5 nlevsoi; the loader averages the top root-zone layers
+# --- the same grass as a harmonized legoesm_surfdata dataset, for the
+# two-leaf canopy on the atmosphere lane (VOTED W4 a/a/a, W5 a/a/a).  Values
+# not set above come from the production harmonized file
+# data/legoesm_surfdata_c260716.nc: C3-grass canopy top/bottom (uniform there
+# = CLM constants), median annual-mean SAI over C3-grass-dominated cells, and
+# per-layer global land medians of organic matter and bulk density on its
+# 7-layer soil grid. ---
+_GRASS_HTOP_M, _GRASS_HBOT_M = 0.5, 0.01
+_GRASS_SAI = 0.2412291020154953
+_SURF_SOIL_DZ_M = (0.2, 0.2, 0.2, 0.2, 0.2, 0.5, 0.5)
+_SURF_ORGANIC_KG_M3 = (1.8839999437332153, 1.0223841667175293, 0.8671855330467224,
+                       0.7176077961921692, 0.6410700678825378, 0.594687283039093,
+                       0.4879292845726013)
+_SURF_BULK_DENSITY_KG_M3 = (1342.104248046875, 1408.5548095703125, 1438.8062744140625,
+                            1459.920654296875, 1471.047607421875, 1493.966796875,
+                            1539.11083984375)
+_SURF_GRID_DEG = 10.0
+_N_PFT = _N_NAT_PFT + _N_CFT
 
 
 def open_geography(path: str):
@@ -294,20 +317,61 @@ def geography_ocean_depth(grid, path: str, *, H_min: float, H_max: float):
 def geography_clm_surface(path: str):
     """The land-surface map of a geography file as a CLM-surfdata
     ``xarray.Dataset`` (for :func:`~legoesm.land.clm_surface_map.load_clm_surface`):
-    the file's own CLM variables, else uniform bare soil."""
+    the file's own CLM variables, else uniform C3 grassland."""
     import xarray as xr
     ds = open_geography(path)
     if "PCT_NAT_PFT" in ds:
         return ds
     ds.close()
     one = np.ones((1, 1))
-    lev = np.ones((_BARE_SOIL_LEVELS, 1, 1))
+    lev = np.ones((_SOIL_LEVELS, 1, 1))
+    nat = np.zeros((_N_NAT_PFT, 1, 1))
+    nat[_GRASS_PFT] = 100.0
+    lai = np.zeros((_N_MONTHS, _N_NAT_PFT + _N_CFT, 1, 1))
+    lai[:, _GRASS_PFT] = _GRASS_LAI
     return xr.Dataset(
-        {"PCT_NAT_PFT": (("natpft", "lsmlat", "lsmlon"), 100.0 * one[None]),
+        {"PCT_NAT_PFT": (("natpft", "lsmlat", "lsmlon"), nat),
          "PCT_NATVEG": (("lsmlat", "lsmlon"), 100.0 * one),
          "PCT_CROP": (("lsmlat", "lsmlon"), 0.0 * one),
+         "PCT_CFT": (("cft", "lsmlat", "lsmlon"), np.full((_N_CFT, 1, 1), 50.0)),
          "PCT_GLACIER": (("lsmlat", "lsmlon"), 0.0 * one),
-         "PCT_SAND": (("nlevsoi", "lsmlat", "lsmlon"), _BARE_SAND_PCT * lev),
-         "PCT_CLAY": (("nlevsoi", "lsmlat", "lsmlon"), _BARE_CLAY_PCT * lev),
-         "SOIL_COLOR": (("lsmlat", "lsmlon"), np.full((1, 1), _BARE_SOIL_COLOR))},
+         "MONTHLY_LAI": (("time", "lsmpft", "lsmlat", "lsmlon"), lai),
+         "PCT_SAND": (("nlevsoi", "lsmlat", "lsmlon"), _SOIL_SAND_PCT * lev),
+         "PCT_CLAY": (("nlevsoi", "lsmlat", "lsmlon"), _SOIL_CLAY_PCT * lev),
+         "SOIL_COLOR": (("lsmlat", "lsmlon"), np.full((1, 1), _SOIL_COLOR))},
         coords={"lsmlat": [0.0], "lsmlon": [0.0]})
+
+
+def geography_land_surfdata(path: str):
+    """The grass land surface of a geography file with no land map of its own,
+    as a harmonized ``legoesm_surfdata`` dataset (the two-leaf canopy's per-PFT
+    parameters); ``None`` when the file carries its own CLM land map."""
+    from legoesm.land.surface_data.schema import surfdata_dataset
+    ds = open_geography(path)
+    own = "PCT_NAT_PFT" in ds
+    ds.close()
+    if own:
+        return None
+    h = 0.5 * _SURF_GRID_DEG
+    lat = np.arange(-90.0 + h, 90.0, _SURF_GRID_DEG)
+    lon = np.arange(h, 360.0, _SURF_GRID_DEG)
+    plane = np.ones((lat.size, lon.size))
+    nl = len(_SURF_SOIL_DZ_M)
+    soil = lambda v: np.asarray(v, dtype=np.float64)[:, None, None] * plane
+
+    def veg(v):
+        a = np.zeros((_N_MONTHS, _N_PFT, lat.size, lon.size))
+        a[:, _GRASS_PFT] = v
+        return a
+
+    pft = np.zeros((1, _N_PFT, lat.size, lon.size))
+    pft[0, _GRASS_PFT] = 100.0
+    return surfdata_dataset(
+        lat=lat, lon=lon, soil_dz=np.asarray(_SURF_SOIL_DZ_M),
+        sand_pct=soil([_SOIL_SAND_PCT] * nl), clay_pct=soil([_SOIL_CLAY_PCT] * nl),
+        organic=soil(_SURF_ORGANIC_KG_M3), bulk_density=soil(_SURF_BULK_DENSITY_KG_M3),
+        soil_color=np.full(plane.shape, _SOIL_COLOR),
+        f_land=100.0 * plane[None], f_lake=0.0 * plane[None], f_glacier=0.0 * plane[None],
+        pft_frac=pft, monthly_lai=veg(_GRASS_LAI), monthly_sai=veg(_GRASS_SAI),
+        monthly_height_top=veg(_GRASS_HTOP_M), monthly_height_bot=veg(_GRASS_HBOT_M),
+        source=f"legoesm geography uniform C3 grass ({path})")

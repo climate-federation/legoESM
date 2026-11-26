@@ -1018,7 +1018,7 @@ class CoupledESMDriver:
         from legoesm.ocean.fidelity.nemo_match_recipe import (
             nemo_match_mpas_model_config,
         )
-        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        from legoesm.ocean.init_mpas import REST_T_DEEP_C, rest_state_mpas_ocean
         from legoesm.ocean.vertical import create_ocean_z_star
         from legoesm import constants
 
@@ -1056,9 +1056,20 @@ class CoupledESMDriver:
         # rationale as the lat-lon ocean_ic='rest' branch.  The surface layer
         # starts near the atmosphere's mean SST (T_sfc_mean [K] -> degC) so the
         # cold start is not shocked by a large air-sea temperature jump.
-        T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+        if cfg.ocean_ic == "qobs":
+            from legoesm.forcing.analytical import qobs_sst_C
+            T_surf_C = qobs_sst_C(np.degrees(np.asarray(mesh.latCell)))
+            # cold-over-warm is unstable at 35 psu: deep water no warmer than
+            # the surface (VOTED a/a/c), so polar columns start neutral
+            T_deep_C = np.minimum(REST_T_DEEP_C, T_surf_C)
+        elif cfg.ocean_ic == "rest":
+            T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+            T_deep_C = REST_T_DEEP_C
+        else:
+            raise ValueError(
+                f"MPAS ocean: ocean_ic must be 'rest' or 'qobs', got {cfg.ocean_ic!r}.")
         self._ocean_state = rest_state_mpas_ocean(
-            mesh, z_coord, T_water_init_C=T_surf_C, H_max=cfg.ocean_H_max_m,
+            mesh, z_coord, T_water_init_C=T_surf_C, T_deep=T_deep_C, H_max=cfg.ocean_H_max_m,
             land_lat_threshold=90.0,
         )
         geo = self._atm.config.geography
@@ -1120,7 +1131,7 @@ class CoupledESMDriver:
         self._ocean_S_target = None
         _ocean_frac = float(jnp.mean(self._ocean_land_mask))
         logger.info(
-            "  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic=rest, "
+            f"  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic={cfg.ocean_ic}, "
             f"ocean_frac={_ocean_frac:.2f}, nlev={cfg.ocean_nlev}, "
             f"ocean_dt={cfg.ocean_dt_s}s, surface_forcing=none(coupled), "
             "normalize_freshwater=True")
@@ -1138,27 +1149,43 @@ class CoupledESMDriver:
         cfg = self.coupled_cfg
         shape_2d = self._atm.grid.grid_shape_2d
         _sd = get_policy().storage
-        if self._atm.config.geography and cfg.land_mode != "none":
-            raise ValueError(
-                "geography with the coupler's own land tile: that tile builds its "
-                "land parameters without the geography's land map; use "
-                "land_mode='none' (with atm_owns_surface=True the atmosphere's "
-                "land reads the geography).")
         from legoesm.grids.geography import geography_has_land
         if self._atm.config.geography and cfg.f_land_mode != "analytical":
             # 'zero' would put ocean fluxes on dry cells, 'from_ocean' full
-            # ocean weight on fractional coasts (codex r7; #2618's guard)
+            # ocean weight on fractional coasts
             raise ValueError(
                 f"geography needs f_land_mode='analytical' (the coupler's land "
                 f"fraction is the geography's, read from the atmosphere); got "
                 f"{cfg.f_land_mode!r}")
+        if self._atm.config.geography and cfg.land_mode != "none":
+            # VOTED b/b/b: the coupler's land tile cannot close water/energy
+            # with the atmosphere on the MPAS column lane (no flux handback;
+            # each side computes its own land fluxes) and gives the slab's
+            # two-leaf canopy generic geometry; geography land is the
+            # atmosphere's own multilayer land
+            raise ValueError(
+                "geography with the coupler's own land tile is not supported: "
+                "use land_mode='none' with atm_owns_surface=True (the "
+                "atmosphere's multilayer land reads the geography)")
         if (self._atm.config.geography and not cfg.atm_owns_surface
                 and geography_has_land(self._atm.config.geography)):
-            # land_mode='none' with analytical f_land still steps a generic
-            # slab over the geography's land, ignoring its land map
+            # land_mode='none' with analytical f_land would still step a generic
+            # slab over the geography's land; has-land is read from the file so
+            # every MPI rank agrees
             raise ValueError(
-                "geography has land but no land model reads its land map: use "
+                "geography has land but no land model runs on it: use "
                 "atm_owns_surface=True (the atmosphere's land reads the geography)")
+        if (self._atm.config.geography and cfg.atm_owns_surface
+                and not geography_has_land(self._atm.config.geography)):
+            # the ice/lake handback rides the atmosphere land model's flux
+            # channel, which an all-ocean mask never builds (it would raise
+            # at the first step); refused at setup, on every rank
+            raise ValueError(
+                f"geography {self._atm.config.geography} is all ocean, and "
+                "atm_owns_surface needs the atmosphere's land model, which builds "
+                "no land columns there (the coupler's ice/lake handback rides its "
+                "flux channel); an all-ocean geography with atm_owns_surface is "
+                "not supported yet")
         if (self._atm.config.geography and cfg.atm_owns_surface
                 and not self._atm.config.use_multilayer_land
                 and geography_has_land(self._atm.config.geography)):
@@ -1371,8 +1398,11 @@ class CoupledESMDriver:
             f_land = jnp.zeros(shape_2d, dtype=_sd)
         elif cfg.f_land_mode == "analytical":
             # Use driver's land mask if non-trivial; otherwise generate one
-            # based on latitude (simple continents approximation).
-            if (self._atm._f_land is not None
+            # based on latitude (simple continents approximation).  A
+            # geography's mask is taken as-is, even all ocean.
+            if self._atm.config.geography:
+                f_land = self._atm._f_land   # no-land-model refusal: setup top
+            elif (self._atm._f_land is not None
                     and float(jnp.max(self._atm._f_land)) > 0):
                 f_land = self._atm._f_land
             elif cfg.land_mode != "none":
