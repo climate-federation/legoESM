@@ -222,7 +222,8 @@ def latlon_pole_cell_v(v_c, v, grid: LatLonGrid):
     v=0 is not a value -- the plain mean halves v there (spurious f*v and KE
     gradient under cross-polar flow).  Extrapolate v to the cell-centre
     latitude from the two nearest real faces instead (2nd order); other rows
-    unchanged.  Used for the KE and for v at u-faces (Coriolis).
+    unchanged.  Used for the KE (the Coriolis term's pole rows use the
+    face-1 transport instead, see ``absolute_vorticity_coriolis``).
     A one-row pole tile fetches its second real face (and its latitude) from
     the neighbouring tile through the lat halo, so the result does not depend
     on the decomposition.  Only a two-row GLOBAL grid, whose second face is
@@ -493,15 +494,7 @@ def absolute_vorticity_coriolis(
     ve = v_pad[:, 1:]    # cell j   bordering u-face j
     vw = v_pad[:, :-1]   # cell j-1 bordering u-face j
     v_at_u = jnp.asarray(0.25 * (ve[:-1] + ve[1:] + vw[:-1] + vw[1:]))  # (n_lat, n_lon+1)
-    # Pole-adjacent rows: the polar v-face has zero length, so its wall v=0
-    # is not a value -- averaging it in halves v (spurious f*v/2 under
-    # cross-polar flow).  Use v extrapolated from the real faces there;
-    # other rows unchanged.
-    pole_s, pole_n = latlon_pole_end_masks(grid)
-    v_ext = 0.5 * (latlon_pole_cell_v(0.5 * (ve[:-1] + ve[1:]), ve, grid)
-                   + latlon_pole_cell_v(0.5 * (vw[:-1] + vw[1:]), vw, grid))
-    v_at_u = v_at_u.at[0].set(jnp.where(pole_s, v_ext[0], v_at_u[0]))
-    v_at_u = v_at_u.at[-1].set(jnp.where(pole_n, v_ext[-1], v_at_u[-1]))
+    # (Pole rows are overwritten below by the energy-conserving form.)
 
     # --- Average η to v-faces ---
     # v-face[i, j] is flanked by vertex[i, j] (west) and vertex[i, j+1] (east)
@@ -551,6 +544,77 @@ def absolute_vorticity_coriolis(
     # --- Coriolis terms ---
     cor_u = eta_at_u * v_at_u
     cor_v = -eta_at_v * u_at_v
+
+    # --- Pole rows: energy-conserving vorticity term (Sadourny 1975) ---
+    # The product-of-averages form above is not antisymmetric: its work
+    # sum A_u u cor_u + sum A_v v cor_v does not cancel.  In the interior
+    # the residual is small (smooth eta, A_u ~ A_v), but on the pole rows the
+    # pole-vertex eta multiplies v with NO transpose partner (the polar
+    # v-face is a zero-length wall) and A_u(row 0) ~ A_v(face 1)/2, so the
+    # term itself feeds a pole-trapped zonal-wavenumber-1 mode (Held-Suarez,
+    # CAM6 L32, 72x144: this term alone grew the pole-row eddy KE at
+    # +1.9/day; max wind 31 m/s at 7 hPa on the 88.75 deg row).  There the
+    # term takes Sadourny's (1975) energy-conserving form -- averages of
+    # PRODUCTS of vertex eta with face TRANSPORTS V = v dx_v, U = u dy
+    # (Arakawa & Lamb 1981) -- so each (u, vertex, v) triple enters cor_u
+    # and cor_v with weights whose area-weighted work cancels, and the
+    # zero-length polar face carries zero transport rather than a wall value.
+    # The pole-vertex (Stokes cap) eta is kept, folded into the
+    # (pole-row u, first interior vertex, v_1) triples as eta_hat =
+    # (eta_pole + eta_1)/2 on BOTH sides (the cancellation is kept); without
+    # it cor_u would use eta half a cell off the pole row (tilted solid-body
+    # cross-polar test: pole-row error 2.9% vs 0.4% with eta_hat).  Scope of
+    # the guarantee: area-weighted (vector-invariant form, as in the
+    # interior).  Only the pole-row u triples change: cor_u on row 0 and
+    # the u_0 part of cor_v on face 1 (the u_1 part keeps the interior form;
+    # north mirrored).  Accuracy cost: v enters through the face-1 transport,
+    # so a zonally uniform (m = 0) meridional flow v ~ cos(lat) gets twice its
+    # pointwise f v on the pole row (an O(dlat) absolute error, as v itself
+    # is O(dlat) there); cross-polar (m = 1) flow is kept (above).
+    # Needs >= 2 rows per latitude tile (a one-row tile keeps the plain
+    # product-of-averages form above):
+    # on a one-row pole tile face 1 is a cut face.  (Before this change the
+    # operator already raised (2 x 1-row bands) or hung (2 + 1 rows) on
+    # one-row tiles under latitude-band MPI.)
+    if u.shape[0] < 2:      # static: a one-row tile has no interior v-face
+        return cor_u, cor_v
+    clv = grid.cos_lat_v
+    pole_s, pole_n = latlon_pole_end_masks(grid)
+    two_rows = u.shape[0] == 2      # static: row 1 may be the north pole row
+
+    def _hat(eta_p, eta_1):
+        return 0.5 * (eta_p + eta_1)
+
+    def _cor_u_pole(eta_hat, ve_1, vw_1, clv_1, cl_0):
+        """Pole-row cor_u: ``ve_1``/``vw_1`` are the face-1 v east/west of
+        each u-face (the lon-padded rows built above -- no extra exchange)."""
+        return 0.5 * eta_hat * (0.5 * (ve_1 + vw_1) * clv_1) / cl_0
+
+    def _cor_v_face1(eta_hat, u_0, eta_1, u_1, u_1_pole):
+        """cor_v on the first interior v-face.  Pole-row (u_0) triples: the
+        energy-conserving form with eta_hat.  Interior-row (u_1) triples: the
+        unchanged product-of-averages form, unless u_1 is itself a pole row
+        (two-row grid; ``u_1_pole`` is then its eta_hat, else None)."""
+        EU0 = 0.5 * eta_hat * u_0                            # vertex row 1
+        out = -0.5 * (EU0[:-1] + EU0[1:])
+        if u_1_pole is None:
+            return out - 0.5 * (eta_1[:-1] + eta_1[1:]) * 0.25 * (u_1[:-1] + u_1[1:])
+        EU1 = 0.5 * u_1_pole * u_1
+        return out - 0.5 * (EU1[:-1] + EU1[1:])
+
+    hat_s, hat_n = _hat(eta[0], eta[1]), _hat(eta[-1], eta[-2])
+    cu_s = _cor_u_pole(hat_s, ve[1], vw[1], clv[1], grid.cos_lat[0])
+    cu_n = _cor_u_pole(hat_n, ve[-2], vw[-2], clv[-2], grid.cos_lat[-1])
+    # rows 0..1 / -2..-1 are tile-local (>= 2 rows): no lat-halo dependence
+    cv_s = _cor_v_face1(hat_s, u[0], eta[1], u[1], None)
+    cv_n = _cor_v_face1(hat_n, u[-1], eta[-2], u[-2], None)
+    if two_rows:   # row 1 may be the north pole row (both rows pole rows)
+        cv_s = jnp.where(pole_n, _cor_v_face1(hat_s, u[0], eta[1], u[1], hat_n), cv_s)
+        cv_n = jnp.where(pole_s, _cor_v_face1(hat_n, u[-1], eta[-2], u[-2], hat_s), cv_n)
+    cor_u = cor_u.at[0].set(jnp.where(pole_s, cu_s, cor_u[0]))
+    cor_u = cor_u.at[-1].set(jnp.where(pole_n, cu_n, cor_u[-1]))
+    cor_v = cor_v.at[1].set(jnp.where(pole_s, cv_s, cor_v[1]))
+    cor_v = cor_v.at[-2].set(jnp.where(pole_n, cv_n, cor_v[-2]))
 
     return cor_u, cor_v
 

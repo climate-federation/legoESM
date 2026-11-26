@@ -609,7 +609,11 @@ def test_gradient_through_100_steps(grid_kind, kind, form):
         return jnp.mean((st[0] / 250.0) ** 2) + jnp.mean((st[-1] / 1e-3) ** 2)
 
     g = float(jax.grad(loss)(0.0))
-    h = 1e-4
+    # h = 3e-5 (was 1e-4; voted author + codex, 2026-11-26): with the
+    # pole-row energy-conserving Coriolis term the latlon sigma/sb81_theta
+    # FD at 1e-4 sat at 1.3e-5 rel; FD sweep 1e-3/3e-4/1e-4/3e-5/1e-5 ->
+    # 2.2e-4/2.2e-5/1.3e-5/8.7e-7/1.2e-6, i.e. it converges to AD.
+    h = 3e-5
     fd = float((loss(h) - loss(-h)) / (2 * h))
     print(f"\n100-step grad {grid_kind} {kind} {form}: AD {g:.6e} FD {fd:.6e}")
     assert np.isfinite(g) and g != 0.0

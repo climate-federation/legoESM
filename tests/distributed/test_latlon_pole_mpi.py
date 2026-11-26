@@ -179,3 +179,42 @@ def test_pole_cell_v_mixed_width_bands():
                                     rtol=1e-5)
     ok = _all_ranks_ok(comm, all(checks.values()))
     assert ok, f"rank {comm.Get_rank()} checks: {checks}"
+
+
+@pytest.mark.parametrize("n_lat", [4, 5])
+def test_coriolis_pole_rows_bands_match_serial(n_lat):
+    """Lat-band MPI (2 ranks; 2+2 and 2+3 rows): the pole-row
+    energy-conserving vorticity term rewrites global u rows 0 / n_lat-1 and
+    v-faces 1 / n_lat-1, selected by the physical-pole masks.  Each rank's
+    LOCAL cor_u and cor_v, including its copy of the cut face, must equal the
+    serial operator (interior cuts untouched, pole tiles rewritten).
+    One-row tiles are out of scope: the base operator already raises or
+    hangs on them."""
+    comm = MPI.COMM_WORLD
+    if comm.Get_size() != 2:
+        pytest.skip("needs exactly 2 ranks")
+    grid = create_latlon_grid(n_lat, N_LON, coriolis_alpha=np.pi / 4)
+    rng = np.random.default_rng(5)
+    u = rng.standard_normal((n_lat, N_LON + 1, NLEV))
+    u[:, N_LON] = u[:, 0]
+    v = rng.standard_normal((n_lat + 1, N_LON, NLEV))
+    v[0] = v[-1] = 0.0
+    st = CGridLatLonHydrostaticState(
+        u=jnp.asarray(u), v=jnp.asarray(v), T=jnp.full((n_lat, N_LON, NLEV), 300.0),
+        p_s=jnp.full((n_lat, N_LON), 1e5), phis=jnp.zeros((n_lat, N_LON)), tracers={})
+    set_halo_backend("local")
+    s_cu, s_cv = (np.asarray(a) for a in absolute_vorticity_coriolis(st.u, st.v, grid))
+    L = make_latlon_band_layout(comm.Get_rank(), 2, n_lat, N_LON)
+    g = slice_latlon_grid_to_band(grid, L)
+    loc = scatter_state_latlon(st, L)
+    set_halo_backend("mpi", L)
+    try:
+        cu, cv = jax.jit(lambda a, b: absolute_vorticity_coriolis(a, b, g))(loc.u, loc.v)
+    finally:
+        set_halo_backend("local")
+    j0, n = L.lat_start, L.n_lat_local
+    checks = {
+        "cu": np.allclose(np.asarray(cu), s_cu[j0:j0 + n], rtol=1e-12, atol=1e-12),
+        "cv": np.allclose(np.asarray(cv), s_cv[j0:j0 + n + 1], rtol=1e-12, atol=1e-12),
+    }
+    assert _all_ranks_ok(comm, all(checks.values())), (comm.Get_rank(), checks)

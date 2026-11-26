@@ -3,10 +3,11 @@
 The rotated (alpha = 45 deg) JW steady state is an exact balance of the
 continuous equations with the jet crossing both poles.  On the pole-adjacent
 rows the C-grid must not treat the zero-length polar v-face (wall v = 0) as a
-VALUE: the pole-row v used for Coriolis (v -> u-face) and KE (v -> cell) is
-extrapolated in latitude from the two nearest real faces, and the pole vertex
-vorticity is the Stokes circulation per unit polar-cap area, not the free-slip
-wall zero.  Each was a spurious force near the poles: the Coriolis
+VALUE: the pole-row v used for KE (v -> cell) is extrapolated in latitude from
+the two nearest real faces, the pole-row Coriolis term uses the face-1
+TRANSPORT in Sadourny's energy-conserving form (the polar face carries zero
+transport), and the pole vertex vorticity is the Stokes circulation per unit
+polar-cap area, not the free-slip wall zero.  Each was a spurious force near the poles: the Coriolis
 average through planetary and relative vorticity on the pole-row u, the KE
 average through the Bernoulli gradient (pole-row u and the first interior v
 face), the cap error through relative vorticity (rotated_steady: 44 m/s
@@ -148,11 +149,16 @@ def test_pole_treatment_needs_global_pole_grid():
     assert [bool(m) for m in latlon_pole_end_masks(rg)] == [False, False]
 
 
-def test_coriolis_pole_row_uses_extrapolated_v():
-    """Operator level: u = 0 and zonally uniform v linear in latitude on the
-    real faces (walls 0), so relative vorticity vanishes and cor_u on the pole
-    rows must equal eta_at_u * v(lat_cell) exactly -- the nearest-face value
-    (or the old wall-averaged one) would not."""
+@pytest.mark.parametrize("profile", ["linear", "cos"])
+def test_coriolis_pole_row_transport_form(profile):
+    """Operator level: u = 0 and zonally uniform v (linear in latitude, or
+    v = cos(lat)) on the real faces (walls 0), so relative vorticity (and
+    the cap vorticity) vanish and eta = f.  The pole-row cor_u is Sadourny's
+    energy-conserving form: eta_hat = (f_pole + f_1)/2 times half the face-1
+    TRANSPORT per unit pole-row width, v_1 cos(lat_v1) / (2 cos(lat_0)) --
+    the zero-length polar face carries no transport (not a wall value).
+    Recorded accuracy cost (KNOWN, see the operator comment): for the
+    zonally uniform v = cos(lat) this is ~2x the pointwise f v(lat_0)."""
     from legoesm import constants
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
@@ -160,17 +166,58 @@ def test_coriolis_pole_row_uses_extrapolated_v():
     g = create_latlon_grid(12, 24)
     a, b = 3.0, 2.0
     lat_v = np.asarray(g.lat_v, np.float64)
-    v = (a + b * lat_v)[:, None] * np.ones((1, 24))
+    prof = (a + b * lat_v) if profile == "linear" else np.cos(lat_v)
+    v = prof[:, None] * np.ones((1, 24))
     v[0] = v[-1] = 0.0
     cor_u, _ = absolute_vorticity_coriolis(
         jnp.zeros((12, 25)), jnp.asarray(v), g)
     cor_u = np.asarray(cor_u)
     lat = np.asarray(g.lat, np.float64)
+    clv = np.cos(lat_v)
     f_v = 2 * constants.Omega * np.sin(0.5 * (lat[:-1] + lat[1:]))
-    for row, f_pole, f_in in ((0, -2 * constants.Omega, f_v[0]),
-                              (-1, 2 * constants.Omega, f_v[-1])):
-        expect = 0.5 * (f_pole + f_in) * (a + b * lat[row])
+    for row, face, f_pole, f_in in ((0, 1, -2 * constants.Omega, f_v[0]),
+                                    (-1, -2, 2 * constants.Omega, f_v[-1])):
+        expect = (0.5 * (f_pole + f_in) * v[face, 0] * clv[face]
+                  / (2.0 * np.cos(lat[row])))
         np.testing.assert_allclose(cor_u[row], expect, rtol=1e-6)
+        if profile == "cos":   # the recorded m = 0 gap: ~2x pointwise
+            ratio = expect / (0.5 * (f_pole + f_in) * np.cos(lat[row]))
+            assert 1.9 < ratio < 2.0, ratio
+
+
+@_needs_x64
+@pytest.mark.parametrize("alpha", [0.0, math.pi / 4.0])
+@pytest.mark.parametrize("n_lat", [36, 2])
+def test_pole_row_vorticity_term_does_no_work(alpha, n_lat):
+    """The vorticity (Coriolis) term must do no work.  Random u on the two
+    pole rows and random v on the first interior faces (zero elsewhere): the
+    only work is between those rows, and the area-weighted sum
+    sum A_u u cor_u + sum A_v v cor_v must vanish to round-off.  The previous
+    pole-row form (pole-vertex eta with no transpose partner, v extrapolated
+    to the pole row) did O(1) work here and drove a pole-trapped wave-1 mode
+    to 31 m/s at 7 hPa in Held-Suarez on CAM6 L32 (72x144)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
+        absolute_vorticity_coriolis)
+    g = create_latlon_grid(n_lat, 72, coriolis_alpha=alpha)
+    rng = np.random.default_rng(3)
+    nlev = 3
+    u = np.zeros((n_lat, 73, nlev)); v = np.zeros((n_lat + 1, 72, nlev))
+    u[0, :72] = rng.standard_normal((72, nlev)); u[-1, :72] = rng.standard_normal((72, nlev))
+    u[:, 72] = u[:, 0]                                   # periodic wrap face
+    v[1] = rng.standard_normal((72, nlev))
+    if n_lat > 2:          # two-row grid: face 1 IS face -2 (both pole rows)
+        v[-2] = rng.standard_normal((72, nlev))
+    cu, cv = absolute_vorticity_coriolis(jnp.asarray(u), jnp.asarray(v), g)
+    cu = np.asarray(cu)[:, :72]; cv = np.asarray(cv)
+    # the model's own metric (grid.cos_lat*), common R^2 dlon dlat dropped
+    A_u = np.asarray(g.cos_lat, np.float64)[:, None, None]
+    A_v = np.asarray(g.cos_lat_v, np.float64)[:, None, None]
+    ax = (0, 1)                                          # per level
+    work = (A_u * u[:, :72] * cu).sum(ax) + (A_v * v * cv).sum(ax)
+    scale = (A_u * np.abs(u[:, :72] * cu)).sum(ax) + (A_v * np.abs(v * cv)).sum(ax)
+    assert np.all(scale > 0)
+    assert np.all(np.abs(work) < 1e-12 * scale), (work, scale)
 
 
 def test_cell_ke_pole_rows_value():
@@ -228,3 +275,30 @@ def test_every_latlon_ke_path_uses_shared_pole_ke(monkeypatch, path):
         cgrid_latlon_pe_tendencies(st, g, sig, CGridLatLonPrimitiveEquationConfig(),
                                    dt=60.0, vertical_form=form)
     assert calls, f"{path}: KE did not go through latlon_cell_ke"
+
+
+@_needs_x64
+def test_face1_interior_row_part_keeps_product_of_averages():
+    """Only the POLE-row (u_0) triples of cor_v on face 1 take the
+    energy-conserving form; the u_1 part keeps the interior product of
+    averages -0.5 (eta_L + eta_R) * 0.25 (u1_L + u1_R).  u_0 = 0, random
+    u_1 (so eta_L != eta_R and u1_L != u1_R): face 1 must equal that."""
+    from legoesm import constants
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.operator_adapters import latlon_cgrid_operators
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
+        absolute_vorticity_coriolis)
+    g = create_latlon_grid(12, 24)
+    rng = np.random.default_rng(9)
+    u = np.zeros((12, 25)); v = np.zeros((13, 24))
+    u[1, :24] = rng.standard_normal(24); u[-2, :24] = rng.standard_normal(24)
+    u[:, 24] = u[:, 0]
+    _, cv = absolute_vorticity_coriolis(jnp.asarray(u), jnp.asarray(v), g)
+    zeta = np.asarray(latlon_cgrid_operators(g).vorticity(jnp.asarray(u), jnp.asarray(v)))
+    lat = np.asarray(g.lat, np.float64)
+    f_v = 2 * constants.Omega * np.sin(0.5 * (lat[:-1] + lat[1:]))
+    for face, row in ((1, 1), (-2, -2)):
+        eta = zeta[face] + f_v[0 if face > 0 else -1]   # vertex rows 1, n_lat-1
+        expect = -0.5 * (eta[:-1] + eta[1:]) * 0.25 * (u[row, :-1] + u[row, 1:])
+        # rtol: fp32 grid latitudes in f; the average-of-products form is ~10% off
+        np.testing.assert_allclose(np.asarray(cv)[face], expect, rtol=1e-6, atol=1e-20)
