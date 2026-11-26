@@ -76,12 +76,13 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                           2026-07-18; was a flagged no-ice_frac gap).
 
     NO TKEConfig counterpart (fidelity gaps, flagged not stubbed):
+      ln_mxl0=T / rn_mxl0=0.04  surface mixing length = F(wind stress);
       nn_mxlice=2               under-ice mixing-length scaling;
       rn_bshear=1e-20           background-shear floor (legoESM uses 1e-12).
-    The card body now sets the NEMO Dirichlet surface TKE (``surface_bc``), the
-    prognostic ``en`` carry (``prognostic=True``) and the ln_mxl0 wind-stress
-    surface anchor (``tke_mxl_choice=3``); all three were listed here as gaps
-    before those arms existed.
+    The card body now defaults to the NEMO Dirichlet surface TKE
+    (``surface_bc="nemo_dirichlet"``) and the prognostic ``en`` carry
+    (``prognostic=True``); both were listed here as gaps before those arms
+    existed.
     """
     from legoesm import constants as _const
     from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
