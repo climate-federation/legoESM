@@ -13,15 +13,17 @@ depart, returning near their initial positions after ~100 days — a
 stringent test of nonlinear vorticity dynamics free of any analytic
 steady state to hide errors behind.
 
-Faithful port of the FV3 ``test_cases.F90`` case-8 initial condition.  The
-FV3 code projects a purely *eastward* velocity ``utmp = Umax*exp(-(r/r0)^2)``
-(``r`` = great-circle distance to the modon centre) onto the D-grid edge
-tangents, i.e. the physical IC velocity is a zonal Gaussian jet; the dipole
-structure is emergent, not prescribed.
-
-Parameters (FV3 ``soliton_*`` namelist defaults):
-    Umax = 50 m/s, size r0 = 750 km, Nsolitons = 2,
-    gh0 = 5e3 * g  ->  h0 = 5000 m, centres at the equator.
+Lin et al. (2017) Sect. 2.1: a single modon is the zonal wind burst
+M_i = U0 exp(-(r_i/r0)^2) (Eq. 1), r_i the great-circle distance to its
+centre; the initial flow is u = M1 - M2 (Eq. 2), v = 0, with centres
+(pi/2, 0) and (3pi/2, 0), no planetary rotation, and a uniform 10 km
+shallow-water depth.  Parameters (paper values):
+    U0 = 40 m/s, r0 = 500 km, h0 = 10 km.
+The physical IC velocity is a zonal Gaussian jet; the dipole structure is
+emergent, not prescribed.  The FV3 ``test_cases.F90`` case-8 port uses the
+same formulas with its ``soliton_*`` namelist DEFAULTS (Umax = 50 m/s,
+r0 = 750 km, gh0 = 5e3 g), which are not the paper's values; this module
+follows the paper.
 
 IMPORTANT: the planet must be non-rotating.  Build the grid with
 ``omega=0.0`` (e.g. ``create_cubed_sphere(n, omega=0.0)``); these IC
@@ -37,10 +39,10 @@ from legoesm.grids.cubed_sphere import great_circle_distance
 
 from legoesm import constants
 
-# --- FV3 case-8 soliton defaults (test_cases.F90) ---
-_MODON_UMAX = 50.0         # peak jet speed Umax [m/s]
-_MODON_SIZE = 750.0e3      # Gaussian size r0 [m]
-_MODON_H0 = 5000.0         # constant fluid depth h0 = gh0/g [m]  (gh0 = 5e3*g)
+# --- Lin et al. (2017), Sect. 2.1 ---
+_MODON_UMAX = 40.0         # U0 [m/s], below Eq. (2)
+_MODON_SIZE = 500.0e3      # r0 [m], below Eq. (2)
+_MODON_H0 = 10000.0        # uniform shallow-water depth [m], Sect. 2.1
 _MODON_LON1 = 0.5 * jnp.pi   # westerly burst centre longitude [rad]
 _MODON_LON2 = 1.5 * jnp.pi   # easterly burst centre longitude [rad]
 _MODON_LAT0 = 0.0            # both centres on the equator [rad]

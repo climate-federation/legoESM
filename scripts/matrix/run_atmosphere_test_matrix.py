@@ -2996,9 +2996,11 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
         # Gravity-wave speed from the case's actual depth: the modons run
-        # on h0 = 5000 m (sqrt(g*5000) ~ 221 m/s), the Williamson cases
-        # on ~3000 m equivalent.
-        _c_grav = _m.sqrt(_consts_grav.g * (5000.0 if test_num == 8
+        # on the colliding_modons depth (Lin et al. 2017: 10 km,
+        # sqrt(g*1e4) ~ 313 m/s), the Williamson cases on ~3000 m
+        # equivalent.
+        from tests.test_cases.colliding_modons import _MODON_H0
+        _c_grav = _m.sqrt(_consts_grav.g * (_MODON_H0 if test_num == 8
                                             else 3000.0))
         dt = min(300.0, 0.5 * _dx_pole / _c_grav)
         # Biharmonic (del-4) viscosity, NOT Laplacian.  The previous
@@ -3222,7 +3224,11 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 else create_gaussian_grid(n_max))
         # CFL-safe dt for explicit SSP-RK3: gravity wave CFL ≈ 0.5
         import math
-        _c_gw = math.sqrt(constants.g * 5960.0)  # shallow-water wave speed
+        # shallow-water wave speed; the modons use their own (deeper,
+        # Lin et al. 2017: 10 km) depth so the CFL law still holds
+        from tests.test_cases.colliding_modons import _MODON_H0
+        _c_gw = math.sqrt(constants.g * (_MODON_H0 if test_num == 8
+                                         else 5960.0))
         dt = min(600.0, 0.5 * grid.radius / (n_max * _c_gw))
         # Laplacian eigenvalue at truncation, n_max(n_max+1)/a^2.
         _lap_tr = n_max * (n_max + 1) / float(constants.R_earth) ** 2
