@@ -607,11 +607,12 @@ class TestKPP:
         assert diff > 1e-15, "Q_sfc_T had no effect on KPP output"
 
     def test_h_bl_prev_changes_bl_depth(self):
-        """h_bl_prev breaks the V_t-h_bl coupling (issue #168 bug 3)."""
+        """h_bl_prev breaks the V_t-h_bl coupling (issue #168 bug 3); only the
+        "column" V_t^2 scale reads it ("candidate", the default, needs no h)."""
         from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
         from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
         u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
-        cfg = KPPConfig()
+        cfg = KPPConfig(vt2_velocity_scale="column")
         B_f = 1e-7 * jnp.ones((6, 4, 4))
 
         # Without h_bl_prev (uses max_depth estimate)

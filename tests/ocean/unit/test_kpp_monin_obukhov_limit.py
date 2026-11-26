@@ -11,7 +11,9 @@ B_f > 0 is destabilising, so CVMix surf_buoy = -B_f.  The reference below is
 written from those lines, with legoESM's own top-layer floor (one top-layer
 thickness).
 
-RULE 5 tests: (1) both widths 0 reproduce the reference to round-off; (2) the
+RULE 5 tests: (1) both widths 0 reproduce the reference to round-off, with
+legoESM's final floor of one top layer kept (CVMix caps after its top-cell-
+centre floor; see the kernel docstring); (2) the
 smooth default's gap from the hard limit, measured per case and stored; (3)
 finite, correct derivatives through the limit at the default.
 """
@@ -65,7 +67,7 @@ def test_default_is_on():
 
 
 @pytest.mark.parametrize("ustar,Bf", CASES)
-def test_hard_limit_matches_cvmix(ustar, Bf):
+def test_hard_limit_matches_cvmix_with_legoesm_floor(ustar, Bf):
     _, dz, *_ = _column()
     h_free = float(_h(KPPConfig(monin_obukhov_limit=False), ustar, Bf))
     got = float(_h(KPPConfig(**HARD), ustar, Bf))
@@ -147,3 +149,14 @@ def test_dry_column_gradients_finite():
         val = f(jnp.asarray(0.007), jnp.asarray(b))
         gu, gb = jax.grad(f, argnums=(0, 1))(jnp.asarray(0.007), jnp.asarray(b))
         assert np.isfinite([float(val), float(gu), float(gb)]).all(), (b, val, gu, gb)
+
+
+def test_narrow_width_fp32_non_binding_exact():
+    """fp32, width below the ulp of H: H + w rounds to H; a non-binding layer at
+    the bottom must still come back as h with derivative 1."""
+    cfg = KPPConfig(mo_limit_width_m=1e-5)
+    H = jnp.asarray(490.0, dtype=jnp.float32)
+    f = lambda h: kpp_mod._monin_obukhov_limit(h, jnp.asarray(0.05, jnp.float32),
+                                               jnp.asarray(0.0, jnp.float32), H, cfg)
+    assert float(f(H)) == float(H)
+    assert float(jax.grad(f)(H)) == 1.0
