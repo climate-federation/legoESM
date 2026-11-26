@@ -413,13 +413,17 @@ def _mom6_surface_layer_deltas(T, S, u, v, dz, z_depth, cfg, eos_fn, g):
     sl_safe = jnp.where(wet, sl, 1.0)
 
     def sl_mean(q):
-        cum_top = jnp.cumsum(q * dz, axis=-1) - q * dz
+        # mean of departures from the top cell, added back: a homogeneous column gives the
+        # top-cell value exactly (no fp32 round-off contrast)
+        q0 = q[..., :1]
+        dq = q - q0
+        cum_top = jnp.cumsum(dq * dz, axis=-1) - dq * dz
         part = (jnp.take_along_axis(cum_top, j, axis=-1)
-                + jnp.take_along_axis(q, j, axis=-1)
+                + jnp.take_along_axis(dq, j, axis=-1)
                 * (sl - jnp.take_along_axis(z_top, j, axis=-1)))
         # Dry column (zero thickness): reference = top cell, so delta = 0 and no
         # zero salinity reaches a sqrt(S) EOS.
-        return jnp.where(wet, part / sl_safe, q[..., :1])
+        return q0 + jnp.where(wet, part / sl_safe, 0.0)
 
     S_eos = eos_salinity(S, eos_fn)
     p_top = rho_0_ref * g * z_top
@@ -536,6 +540,17 @@ def _cvmix_first_crossing_depth(Ri_b, z_depth, cfg):
             + w_none * z_depth[..., -1])
 
 
+def _cvmix_depth_floor(h, dz0, cfg):
+    """MOM6 max(OBLdepth, top-cell thickness), C1-smoothed over ``cfg.bl_min_depth_width_frac`` of that
+    thickness (0 = MOM6's hard max).  KNOWN DIFFERENCE at the default 0.01: exact outside
+    |h/dz0 - 1| >= 0.005, at most dz0 * 0.01/8 above the hard max inside."""
+    validate_smoothing_width("KPPConfig.bl_min_depth_width_frac", cfg.bl_min_depth_width_frac)
+    if cfg.bl_min_depth_width_frac == 0:
+        return jnp.maximum(h, dz0)
+    dz0_safe = jnp.where(dz0 > 0.0, dz0, 1.0)
+    return jnp.where(dz0 > 0.0, dz0_safe * smooth_max_c1(h / dz0_safe, 1.0, cfg.bl_min_depth_width_frac), h)
+
+
 def _boundary_layer_depth(
     rho: jnp.ndarray,
     T: jnp.ndarray,
@@ -638,7 +653,7 @@ def _boundary_layer_depth(
         V_t2 = _cvmix_min_vt2(V_t2, cfg)
         Ri_b = _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g)
         h = _cvmix_first_crossing_depth(Ri_b, z_depth, cfg)
-        return jnp.maximum(h, dz_actual[..., 0])
+        return _cvmix_depth_floor(h, dz_actual[..., 0], cfg)
 
     if N2 is None:
         N2 = _kpp_interface_n2(rho, T, S, jnp.zeros_like(rho[..., 0]), z_coord, jacobian, cfg, g, eos_fn=eos_fn)

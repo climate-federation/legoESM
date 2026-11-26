@@ -27,7 +27,7 @@ from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
 from legoesm.ocean.vertical import create_z_star_from_thicknesses
 
 CFG = KPPConfig(bld_structure="cvmix", vt2_velocity_scale="candidate")
-HARD = CFG._replace(crossing_sharpness=1e12)
+HARD = CFG._replace(crossing_sharpness=1e12, bl_min_depth_width_frac=0.0)
 
 
 @pytest.fixture(autouse=True)
@@ -508,13 +508,13 @@ def test_nonlocal_shape_at_true_interfaces(monkeypatch):
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-15)
 
 
-# Legacy structure pinned at the stack base 7818b0e18d (PR #2560 head):
+# Legacy structure pinned at main 63fdab21bd (bitwise identical on this branch):
 # 2 columns, stretched grid, apply_diffusion=True, dt=600 s.
-_LEGACY_K_V = [[0.0028613390168094653, 0.004455298478307277, 0.003432405391351673, 0.0010864835042452773, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05], [0.0005128825621043311, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05]]
-_LEGACY_A_V = [[0.002591620563793403, 0.003929723781049334, 0.0030484785733987225, 0.0010274145473546054, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001], [0.0006028825621043311, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001]]
-_LEGACY_DT_DT = [[-4.371291449051502e-05, -3.33158948160732e-05, -3.1705760647775854e-05, 3.4093446170271146e-05, 1.2070653222080686e-05, -5.646886315028669e-22, 3.5734202462290796e-22, -1.4823076576950255e-22, 2.2940475654803966e-22, 3.3333333333333195e-08], [-3.94117477205255e-05, 2.587969485358914e-05, 7.986360435284163e-08, 4.129244142456893e-08, 1.6024165992988293e-08, 4.694099954881841e-09, 8.886105206707923e-10, 1.1087110016905693e-10, 8.671289543722097e-12, 1.3333727321538709e-08]]
-_LEGACY_DS_DT = [[1.37129144905082e-06, 8.315894816084423e-07, 5.455760647757201e-07, -8.579892893535707e-07, -2.501910962120453e-07, -1.6915843526709416e-21, 4.2310288332087366e-22, 2.152323953862978e-22, -1.793603294885815e-22, -6.666666666666921e-10], [2.0515302484154584e-06, -1.3410201656102868e-06, -1.8270765370071275e-20, 3.16093284743597e-21, 0.0, -5.635857240194629e-22, 4.2268929301459714e-22, -4.314574075076593e-22, 3.5954783958971605e-22, -2.6666666666667683e-09]]
-_LEGACY_DU_DT = [[-2.4017919398069545e-05, -1.0744126210987942e-05, -3.379876668229163e-06, 1.2728587545212194e-05, 1.856837327675612e-06, 4.086013134606541e-08, 1.0549690131577407e-08, 1.949210750009046e-09, 2.4752300459740787e-10, 2.071654324533266e-11], [-2.9581651571874514e-06, 1.695000890657672e-06, 4.343945162761329e-08, 3.183866423708344e-08, 2.017831729672153e-08, 1.1589502737532698e-08, 5.307029730153358e-09, 2.023736618579618e-09, 6.275161612187131e-10, 1.8037886749171123e-10]]
+_LEGACY_K_V = [[0.002861361552813633, 0.004455371051805306, 0.00343252696290823, 0.0010865537623785104, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05], [0.0005128825627785697, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05, 1e-05]]
+_LEGACY_A_V = [[0.002591637220022447, 0.003929780336390887, 0.0030485787149287513, 0.001027473630924571, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001], [0.0006028825627785697, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001]]
+_LEGACY_DT_DT = [[-4.371285393794461e-05, -3.3315923728311536e-05, -3.1705839057455435e-05, 3.409227933284732e-05, 1.2071462143729071e-05, -5.646886315028669e-22, 3.5734202462290796e-22, -1.4823076576950255e-22, 2.2940475654803966e-22, 3.3333333333333195e-08], [-3.9411747772336435e-05, 2.5879694888129762e-05, 7.986360435284163e-08, 4.129244142456893e-08, 1.6024165992988293e-08, 4.694099954881841e-09, 8.886105206707923e-10, 1.1087110016905693e-10, 8.671289543722097e-12, 1.3333727321538709e-08]]
+_LEGACY_DS_DT = [[1.3712853937937785e-06, 8.315923728322757e-07, 5.455839057436784e-07, -8.579662831221658e-07, -2.502095367028988e-07, -1.6915843526709416e-21, 4.2310288332087366e-22, 2.152323953862978e-22, -1.793603294885815e-22, -6.666666666666921e-10], [2.051530251112413e-06, -1.3410201674082565e-06, -1.8270765370071275e-20, 3.16093284743597e-21, 0.0, -5.635857240194629e-22, 4.2268929301459714e-22, -4.314574075076593e-22, 3.5954783958971605e-22, -2.6666666666667683e-09]]
+_LEGACY_DU_DT = [[-2.4017919398069545e-05, -1.0744126210987942e-05, -3.379876668229163e-06, 1.2728420619536996e-05, 1.8569486114590775e-06, 4.086013134606541e-08, 1.0549690131577407e-08, 1.949210750009046e-09, 2.4752300459740787e-10, 2.071654324533266e-11], [-2.9581651604957397e-06, 1.6950008928631976e-06, 4.343945162761329e-08, 3.183866423708344e-08, 2.017831729672153e-08, 1.1589502737532698e-08, 5.307029730153358e-09, 2.023736618579618e-09, 6.275161612187131e-10, 1.8037886749171123e-10]]
 
 
 def test_legacy_structure_unchanged():
@@ -544,3 +544,53 @@ def test_cvmix_structure_refuses_column_vt2_velocity_scale():
         T = jnp.full((1, n), 15.0)
         K._boundary_layer_depth(T, T, T, T, T, zc, jnp.ones(1), jnp.array([0.01]),
                                 jnp.zeros(1), CFG._replace(vt2_velocity_scale="column"))
+
+
+@pytest.mark.parametrize("dz", [np.full(30, 1.0), np.linspace(1.0, 50.0, 40), np.geomspace(0.7, 200.0, 50),
+                                np.array([10.0, 10.0, 25.0, 60.0, 150.0])])
+def test_homogeneous_fp32_surface_reference_has_no_contrast(dz):
+    """200 homogeneous float32 columns per grid: exactly zero density / shear contrast against the MOM6
+    surface-layer reference (the mean is formed from departures from the top cell; the absolute-value
+    form gave up to 2.4e-4 in 470 of 25000 cells)."""
+    rng = np.random.default_rng(0)
+    m, n = 200, dz.size
+    dz32 = jnp.broadcast_to(jnp.asarray(dz, jnp.float32), (m, n))
+    zc = jnp.cumsum(dz32, axis=-1) - 0.5 * dz32
+    col = lambda lo, hi: jnp.broadcast_to(jnp.asarray(rng.uniform(lo, hi, m).astype(np.float32))[:, None], (m, n))
+    T, S, u = col(-1.8, 31.0), col(5.0, 40.0), col(-1.0, 1.0)
+    drho, dv2 = K._mom6_surface_layer_deltas(T, S, u, u, dz32, zc, CFG, wright_eos, jnp.float32(constants.g))
+    assert drho.dtype == jnp.float32
+    assert float(jnp.max(jnp.abs(drho))) == 0.0 and float(jnp.max(jnp.abs(dv2))) == 0.0
+
+_FLOOR_RATIOS = [0.5, 0.996, 1.0, 1.003, 1.5]
+
+
+def test_depth_floor_hard_limit_is_mom6_max():
+    """bl_min_depth_width_frac = 0 is MOM6's max(OBLdepth, top-cell thickness), exactly."""
+    hard = CFG._replace(bl_min_depth_width_frac=0.0)
+    dz0 = jnp.asarray([2.0] * len(_FLOOR_RATIOS))
+    h = dz0 * jnp.asarray(_FLOOR_RATIOS)
+    np.testing.assert_array_equal(np.asarray(K._cvmix_depth_floor(h, dz0, hard)), np.maximum(h, dz0))
+
+
+# Measured default-width gaps (soft - hard) / dz0 per ratio h/dz0 (KNOWN DIFFERENCE; dz0 = 2 m).
+_FLOOR_GAPS = [0.0, 5.0000000000105516e-05, 0.0012499999999999734, 0.00019999999999997797, 0.0]
+
+
+def test_depth_floor_default_gap_per_case():
+    dz0 = jnp.asarray([2.0] * len(_FLOOR_RATIOS))
+    h = dz0 * jnp.asarray(_FLOOR_RATIOS)
+    gap = np.asarray((K._cvmix_depth_floor(h, dz0, CFG) - jnp.maximum(h, dz0)) / dz0)
+    np.testing.assert_allclose(gap, _FLOOR_GAPS, rtol=1e-6, atol=1e-12)
+
+
+def test_depth_floor_gradient_at_default():
+    """Finite, nonzero derivative through the floor at the default width (inside the band and above it),
+    zero well below it; check_grads inside the band."""
+    dz0 = jnp.asarray(2.0)
+    f = lambda h: K._cvmix_depth_floor(h, dz0, CFG)
+    for r in (0.998, 1.002, 1.5):
+        g = float(jax.grad(f)(2.0 * r))
+        assert np.isfinite(g) and g > 0.0
+    assert float(jax.grad(f)(1.0)) == 0.0
+    check_grads(f, (jnp.asarray(1.998),), order=2, modes=["rev"], eps=1e-6)
