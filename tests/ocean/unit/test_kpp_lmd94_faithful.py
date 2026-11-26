@@ -64,12 +64,14 @@ _O_C5 = 5.0
 _O_EPS_LMD = 0.1
 
 
-def _wm_ws_oracle(ustar, Bf, d, h, eps):
-    """Independent LMD94 App. B similarity velocity scales (plain Python)."""
+def _wm_ws_oracle(ustar, Bf, d, h, eps=0.0):
+    """Independent LMD94 App. B similarity velocity scales (plain Python).
+
+    ``eps = 0`` (production default, KPPConfig.actual_buoyancy_flux) uses B_f as it is; ``eps > 0``
+    reproduces the legacy copysign(eps, B_f) floor."""
     d_eff = min(d, _O_EPS_LMD * h)
     Bf_safe = Bf if abs(Bf) > eps else math.copysign(eps, Bf)
-    L_MO = ustar ** 3 / (_O_KAPPA * Bf_safe)
-    zeta = d_eff / L_MO
+    zeta = d_eff * _O_KAPPA * Bf_safe / ustar ** 3
     abs_zeta = abs(zeta)
     Bf_pos = max(Bf, 0.0)
     base16 = max(1.0 + _O_C16 * abs_zeta, 1.0)
@@ -104,10 +106,10 @@ _DEPTHS = [0.5, 2.0, 5.0, 8.0, 12.0, 30.0, 60.0, 100.0]   # incl. d > 0.1*h (cap
 _CFG = KPPConfig()
 
 
-def _prod_wm_ws(ustar, Bf, d, h):
+def _prod_wm_ws(ustar, Bf, d, h, cfg=_CFG):
     wm, ws = _kpp_velocity_scales(
         jnp.array([ustar]), jnp.array([Bf]),
-        jnp.array([[d]]), jnp.array([[h]]), _CFG, _EPS)
+        jnp.array([[d]]), jnp.array([[h]]), cfg, _EPS)
     return float(wm[0, 0]), float(ws[0, 0])
 
 
@@ -117,7 +119,7 @@ def _prod_wm_ws(ustar, Bf, d, h):
 @pytest.mark.parametrize("d", _DEPTHS)
 def test_velocity_scales_match_lmd94(ustar, Bf, h, d):
     wm, ws = _prod_wm_ws(ustar, Bf, d, h)
-    wm_o, ws_o = _wm_ws_oracle(ustar, Bf, d, h, _EPS)
+    wm_o, ws_o = _wm_ws_oracle(ustar, Bf, d, h)
     assert wm == pytest.approx(wm_o, rel=1e-12, abs=0.0)
     assert ws == pytest.approx(ws_o, rel=1e-12, abs=0.0)
 
@@ -183,7 +185,7 @@ def test_regime_joins_constructed_and_pinned():
     for zeta in (0.15, 0.2, 0.5, 0.9, 1.0, 1.1):
         Bf = bf_for(zeta)
         wm, ws = _prod_wm_ws(ustar, Bf, d, h)
-        wm_o, ws_o = _wm_ws_oracle(ustar, Bf, d, h, _EPS)
+        wm_o, ws_o = _wm_ws_oracle(ustar, Bf, d, h)
         assert wm == pytest.approx(wm_o, rel=1e-12), f"w_m at zeta={zeta}"
         assert ws == pytest.approx(ws_o, rel=1e-12), f"w_s at zeta={zeta}"
 
@@ -220,11 +222,16 @@ def test_scalar_exceeds_momentum_weakly_unstable():
 
 
 def test_near_zero_buoyancy_copysign_branch():
-    """|B_f| <= eps takes the copysign(eps, B_f) guard (issue #168); production
-    must match the oracle there too (finite, positive scales)."""
+    """|B_f| <= eps: the default uses B_f as it is; the legacy switch takes the
+    copysign(eps, B_f) guard (issue #168).  Both match the oracle."""
     ustar, h = 0.01, 100.0
+    legacy = KPPConfig(actual_buoyancy_flux=False)
     for Bf in (0.5 * _EPS, -0.5 * _EPS):
         wm, ws = _prod_wm_ws(ustar, Bf, 5.0, h)
+        wm_o, ws_o = _wm_ws_oracle(ustar, Bf, 5.0, h)
+        assert wm == pytest.approx(wm_o, rel=1e-12)
+        assert ws == pytest.approx(ws_o, rel=1e-12)
+        wm, ws = _prod_wm_ws(ustar, Bf, 5.0, h, legacy)
         wm_o, ws_o = _wm_ws_oracle(ustar, Bf, 5.0, h, _EPS)
         assert wm == pytest.approx(wm_o, rel=1e-12)
         assert ws == pytest.approx(ws_o, rel=1e-12)

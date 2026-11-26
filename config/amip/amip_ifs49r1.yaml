@@ -16,6 +16,7 @@ bechtold_use_ifs_ascent: true      # ... as CUMASTRN runs it (_ifs_faithful.py)
 # recorded departure from OpenIFS (first_guess); kept (VC28).
 bechtold_ifs_hard_switches: false  # RULE 5 smooth elementwise switches (#2281); true = OpenIFS exact
 bechtold_ifs_openifs_cloud_top_fixer: false  # corrected cloud-top q fixer (#2594); true = OpenIFS sign
+bechtold_ifs_enthalpy_conservation: false  # LMFENTHCONS off, as OpenIFS (#2571); on: amip_ifs49r1_enthcons.yaml
 
 # IFS order (VC23): convection, then CLOUDSC once per physics step at the full
 # step; no macro/micro sub-cycle.

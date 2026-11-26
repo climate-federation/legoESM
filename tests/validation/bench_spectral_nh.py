@@ -67,11 +67,12 @@ def proper_hyperdiff(grid):
     return 1.0 / (4.0 * 3600.0 * eig_max**2)
 
 
-def nh_state_to_grid(state, grid):
+def nh_state_to_grid(state, grid, terrain):
     """Extract grid-point fields from spectral NH state."""
     w = np.array(sh_synthesis_3d(grid, state.w_hat.data))
     theta_p = np.array(sh_synthesis_3d(grid, state.theta_prime_hat.data))
-    rho_p = np.array(sh_synthesis_3d(grid, state.rho_prime_hat.data))
+    rho_p = np.array(sh_synthesis_3d(grid, state.jrho_prime_hat.data)
+                     / terrain.jacobian[..., None])
     vor = np.array(sh_synthesis_3d(grid, state.vor_hat.data))
     div = np.array(sh_synthesis_3d(grid, state.div_hat.data))
     return {
@@ -131,7 +132,7 @@ def main():
 
         if (step + 1) % diag_interval_rest == 0:
             t_min = (step + 1) * dt_rest / 60.0
-            fields = nh_state_to_grid(state, grid21)
+            fields = nh_state_to_grid(state, grid21, terrain_flat)
             max_w = float(np.max(np.abs(fields["w"])))
             max_theta = float(np.max(np.abs(fields["theta_prime"])))
             max_rho = float(np.max(np.abs(fields["rho_prime"])))
@@ -207,7 +208,7 @@ def main():
     print(f"  T{n_max_tc1}/L{nlev_tc1}, dt={dt_tc1}s, {n_steps_tc1} steps")
 
     # Initial diagnostics
-    fields0 = nh_state_to_grid(state0, grid_tc1)
+    fields0 = nh_state_to_grid(state0, grid_tc1, terrain_tc1)
     tc1_times = [0.0]
     tc1_max_w = [float(np.max(np.abs(fields0["w"])))]
     tc1_max_theta = [float(np.max(np.abs(fields0["theta_prime"])))]
@@ -227,7 +228,7 @@ def main():
 
         if (step + 1) % diag_interval_tc1 == 0:
             t_min = (step + 1) * dt_tc1 / 60.0
-            fields = nh_state_to_grid(state, grid_tc1)
+            fields = nh_state_to_grid(state, grid_tc1, terrain_tc1)
             tc1_times.append(t_min)
             tc1_max_w.append(float(np.max(np.abs(fields["w"]))))
             tc1_max_theta.append(float(np.max(np.abs(fields["theta_prime"]))))
@@ -247,7 +248,7 @@ def main():
 
     # Ensure final snapshot
     if 60 not in tc1_snapshots:
-        tc1_snapshots[60] = nh_state_to_grid(state, grid_tc1)
+        tc1_snapshots[60] = nh_state_to_grid(state, grid_tc1, terrain_tc1)
 
     tc1_times = np.array(tc1_times)
     tc1_max_w = np.array(tc1_max_w)

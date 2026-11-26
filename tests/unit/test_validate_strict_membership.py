@@ -28,7 +28,7 @@ import pytest
 
 from legoesm.atmosphere.dynamics import DISCRETIZATION_OPTIONS, DYNAMICS_OPTIONS
 from legoesm.config import Config
-from legoesm.driver.config import DycoreConfig, ExperimentConfig
+from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -38,18 +38,52 @@ def test_default_config_passes() -> None:
 
 
 # ---- parity: accept exactly the canonical dynamical-core axis members ----
+# The cubed sphere admits only fv3_duo (cdgrid retired), so each member is
+# validated on a (grid, model_type) its lane runs on; spectral/gaussian
+# carries all three model types.
+_LANE_FOR_DISCRETIZATION = {
+    "spectral": ("gaussian", "hydrostatic"),
+    "sfno": ("gaussian", "hydrostatic"),
+    "u_cast": ("gaussian", "hydrostatic"),
+    "mpas": ("mpas", "hydrostatic"),
+    "latlon_cgrid": ("latlon", "hydrostatic"),
+    "finite_volume": ("latlon", "hydrostatic"),
+    "centered": ("latlon", "hydrostatic"),
+    "plane": ("plane", "nonhydrostatic"),
+    "fv3_duo": ("cubed_sphere", "hydrostatic"),
+}
+
+
+def test_lane_table_covers_every_discretization() -> None:
+    assert set(_LANE_FOR_DISCRETIZATION) == set(DISCRETIZATION_OPTIONS)
+
+
 @pytest.mark.parametrize("model_type", DYNAMICS_OPTIONS)
 def test_every_canonical_model_type_accepted(model_type: str) -> None:
     ExperimentConfig(
-        dycore=DycoreConfig(model_type=model_type, discretization="cdgrid")
+        grid=GridConfig(grid_type="gaussian"),
+        dycore=DycoreConfig(model_type=model_type, discretization="spectral"),
     ).validate_strict()
 
 
 @pytest.mark.parametrize("discretization", DISCRETIZATION_OPTIONS)
 def test_every_canonical_discretization_accepted(discretization: str) -> None:
+    grid_type, model_type = _LANE_FOR_DISCRETIZATION[discretization]
     ExperimentConfig(
-        dycore=DycoreConfig(model_type="hydrostatic", discretization=discretization)
+        grid=GridConfig(grid_type=grid_type),
+        dycore=DycoreConfig(model_type=model_type, discretization=discretization),
     ).validate_strict()
+
+
+@pytest.mark.parametrize(
+    "discretization", [d for d in DISCRETIZATION_OPTIONS if d != "fv3_duo"] + ["cdgrid"])
+def test_cubed_sphere_refuses_every_lane_but_fv3_duo(discretization: str) -> None:
+    with pytest.raises(ValueError, match="Cubed-sphere atmosphere requires "
+                       "dycore.discretization='fv3_duo'"):
+        ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere"),
+            dycore=DycoreConfig(model_type="hydrostatic", discretization=discretization),
+        ).validate_strict()
 
 
 # ---- corpus guard: no shipped config that translates is newly rejected ----
@@ -82,9 +116,11 @@ def test_bad_model_type_raises() -> None:
 
 
 def test_bad_discretization_raises() -> None:
-    with pytest.raises(ValueError, match="discretization"):
+    # Off the cube: there the fv3_duo-only guard also names "discretization".
+    with pytest.raises(ValueError, match=r"dycore\.discretization must be one of"):
         ExperimentConfig(
-            dycore=DycoreConfig(discretization="bogus")
+            grid=GridConfig(grid_type="gaussian"),
+            dycore=DycoreConfig(discretization="bogus"),
         ).validate_strict()
 
 

@@ -1945,6 +1945,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   momentum_time_integrator=None, barotropic_solver=None,
                   barotropic_pcg_variant=None,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
+                  barotropic_diffusion_book_transport=None,
                   barotropic_time_filter=None, bottom_drag_r=None,
                   barotropic_slow_forcing_depth_evaluation=None,
                   nemo_carried_external_mode=None,
@@ -2075,6 +2076,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("barotropic_implicit_pcg_variant",
                                barotropic_pcg_variant),
                               ("barotropic_diffusion_alpha", barotropic_diffusion_alpha),
+                              ("barotropic_diffusion_book_transport",
+                               barotropic_diffusion_book_transport),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_time_filter", barotropic_time_filter),
                               ("barotropic_slow_forcing_depth_evaluation",
@@ -2520,6 +2523,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   momentum_time_integrator=None, barotropic_solver=None,
                   barotropic_pcg_variant=None,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
+                  barotropic_diffusion_book_transport=None,
                   barotropic_time_filter=None, bottom_drag_r=None,
                   barotropic_slow_forcing_depth_evaluation=None,
                   nemo_carried_external_mode=None,
@@ -2579,6 +2583,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("barotropic_implicit_pcg_variant",
                                barotropic_pcg_variant),
                               ("barotropic_diffusion_alpha", barotropic_diffusion_alpha),
+                              ("barotropic_diffusion_book_transport",
+                               barotropic_diffusion_book_transport),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_time_filter", barotropic_time_filter),
                               ("barotropic_slow_forcing_depth_evaluation",
@@ -2864,7 +2870,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        bathy_smoothing_passes=0,
                        smc03_bottom_2nd_order=None,
                        barotropic_sw_div_damp_factor=None,
-                       barotropic_sw_damp_v=None):
+                       barotropic_sw_damp_v=None,
+                       tracer_advection_constant_preserving=None):
     """Build a cubed-sphere ocean (FV3 C-D grid baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -2931,6 +2938,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                               ("div_damp_4", div_damp_4),
                               ("baroclinic_rk3", baroclinic_rk3),
                               ("velocity_ceiling", velocity_ceiling),
+                              ("tracer_advection_constant_preserving",
+                               tracer_advection_constant_preserving),
                               ("pgf_scheme", pgf_scheme),
                               ("bottom_drag_r", bottom_drag_r),
                               ("bottom_drag_bbl_thickness",
@@ -3851,6 +3860,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      partial_cell=False, dz_ref_override=None,
                      n_barotropic_substeps=None,
                      barotropic_solver=None, barotropic_pcg_variant=None,
+                     barotropic_diffusion_book_transport=None,
                      freeze_floor=None, freezing=None,
                      runoff_depth_spread_m=None, mle=None,
                      bottom_drag_scheme=None, bottom_drag_cd0=None,
@@ -3974,6 +3984,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                               ("barotropic_solver", barotropic_solver),
                               ("barotropic_implicit_pcg_variant",
                                barotropic_pcg_variant),
+                              ("barotropic_diffusion_book_transport",
+                               barotropic_diffusion_book_transport),
                               ("freeze_floor", freeze_floor),
                               ("freezing", freezing),
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
@@ -7402,6 +7414,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--cube-velocity-ceiling", type=float, default=None,
                    help="cube: clip |u|,|v| to this [m/s] each step -- bounds the sub-grid "
                         "marginal-sea jet spikes (caveated open-ocean run).")
+    p.add_argument("--cube-tracer-constant-preserving",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="cube: add q*div_h(u) to the FCT tracer tendency so a uniform "
+                        "tracer stays uniform (config default True). --no-... selects the "
+                        "pre-2026-11-26 operator, where uniform salinity drifts wherever "
+                        "the flow is divergent.")
     p.add_argument("--cube-mask-marginal-seas", action="store_true",
                    help="cube: mask poorly-resolved semi-enclosed marginal seas "
                         "(Med/Black/Red/Gulf/Baltic/Hudson) to land — their sub-grid "
@@ -7657,6 +7675,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "default is implicit_cn (Crank-Nicolson, NEUTRAL -- no fast-gravity-wave damping).")
     p.add_argument("--barotropic-diffusion-alpha", type=float, default=None,
                    help="Barotropic 2D Laplacian damping coefficient (explicit_substep).")
+    p.add_argument("--barotropic-diffusion-book-transport",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="Tripole, lat-lon and MPAS grids: book the explicit_substep eta "
+                        "damping's volume flux into the tracer transport (config default True). --no-... selects the "
+                        "pre-2026-11-25 unbooked behaviour, where tracers never see "
+                        "the water the damping moves.")
     p.add_argument("--n-barotropic-substeps", type=int, default=None,
                    help="Number of barotropic substeps (explicit_substep).")
     p.add_argument("--barotropic-time-filter", default=None, choices=[None,"box","cosine"],
@@ -9525,6 +9549,7 @@ def main() -> int:
             barotropic_solver=args.barotropic_solver,
             barotropic_pcg_variant=args.barotropic_pcg_variant,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
+            barotropic_diffusion_book_transport=args.barotropic_diffusion_book_transport,
             n_barotropic_substeps=args.n_barotropic_substeps,
             barotropic_time_filter=args.barotropic_time_filter,
             barotropic_slow_forcing_depth_evaluation=args.barotropic_slow_forcing_depth_evaluation,
@@ -9602,6 +9627,7 @@ def main() -> int:
             mask_marginal_seas=args.cube_mask_marginal_seas,
             dt=args.dt,
             velocity_ceiling=args.cube_velocity_ceiling,
+            tracer_advection_constant_preserving=args.cube_tracer_constant_preserving,
             partial_cell=args.partial_cell,
             pgf_scheme=args.cube_pgf_scheme,
             bottom_drag_r=args.cube_bottom_drag_r,
@@ -9634,6 +9660,7 @@ def main() -> int:
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             barotropic_solver=args.barotropic_solver,
             barotropic_pcg_variant=args.barotropic_pcg_variant,
+            barotropic_diffusion_book_transport=args.barotropic_diffusion_book_transport,
             gm_treguier=args.gm_treguier, gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
             convection_cfg=build_enhanced_diffusion_config(args),
@@ -9777,6 +9804,7 @@ def main() -> int:
             barotropic_solver=args.barotropic_solver,
             barotropic_pcg_variant=args.barotropic_pcg_variant,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
+            barotropic_diffusion_book_transport=args.barotropic_diffusion_book_transport,
             n_barotropic_substeps=args.n_barotropic_substeps,
             barotropic_time_filter=args.barotropic_time_filter,
             barotropic_slow_forcing_depth_evaluation=args.barotropic_slow_forcing_depth_evaluation,

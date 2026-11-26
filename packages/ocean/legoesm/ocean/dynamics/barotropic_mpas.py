@@ -410,6 +410,13 @@ def barotropic_substeps_mpas(
             eta_next = (
                 eta_next + divergence_cell(diff_flux, mesh)
             ) * mask
+            # The damping moves volume: book it as the transport
+            # G = -diff_flux/dt_baro with this substep's transport weight so
+            # div(Hu_avg) == (eta_old - eta_avg)/dt holds and the tracer
+            # step sees the water (the floor clamp below books none).
+            if config.barotropic_diffusion_book_transport:
+                Hu_sum_new = Hu_sum_new - w_tr_i * (
+                    diff_flux / dt_baro).astype(_eta_dtype)
             eta_next = _clamp_redistribute(
             eta_next, eta_floor, mask, _area_cell,
             n_iter=config.eta_floor_clamp_iters,

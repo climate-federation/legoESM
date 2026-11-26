@@ -64,3 +64,23 @@ def test_runoff_depth_nemo_levels_flag_default_off() -> None:
     assert parser.parse_args([]).runoff_depth_nemo_levels is False
     args = parser.parse_args(["--runoff-depth-nemo-ini", "--runoff-depth-nemo-levels"])
     assert args.runoff_depth_nemo_levels is True and args.runoff_depth_nemo_ini is True
+
+
+def test_barotropic_diffusion_book_transport_flag() -> None:
+    """None keeps the config default (booked); --no-... selects the old behaviour."""
+    parser = _parser()
+    assert parser.parse_args([]).barotropic_diffusion_book_transport is None
+    assert parser.parse_args(
+        ["--barotropic-diffusion-book-transport"]).barotropic_diffusion_book_transport is True
+    assert parser.parse_args(
+        ["--no-barotropic-diffusion-book-transport"]).barotropic_diffusion_book_transport is False
+
+
+def test_cube_tracer_constant_preserving_flag() -> None:
+    """None keeps the config default (constant-preserving); --no-... selects the old operator."""
+    parser = _parser()
+    assert parser.parse_args([]).cube_tracer_constant_preserving is None
+    assert parser.parse_args(
+        ["--cube-tracer-constant-preserving"]).cube_tracer_constant_preserving is True
+    assert parser.parse_args(
+        ["--no-cube-tracer-constant-preserving"]).cube_tracer_constant_preserving is False

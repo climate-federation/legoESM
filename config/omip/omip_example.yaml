@@ -18,3 +18,4 @@ surface_stability_scheme: beljaars_holtslag1991   # stable MOST branch (#2574)
 vertical_mixing_scheme: kpp
 kpp_ri_crit: 0.3
 kpp_k_bg: 1.0e-5
+kpp_actual_buoyancy_flux: true   # actual B_f in velocity scales (no float32-eps floor)
