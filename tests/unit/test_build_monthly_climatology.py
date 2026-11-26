@@ -119,3 +119,7 @@ def test_bounds_name_the_month_a_record_covers():
     out = bmc.climatology(ds, 2005, 2006)
     want = 0.5 * (ds["aod"].values[12] + ds["aod"].values[24])     # Jan 2005, Jan 2006
     np.testing.assert_allclose(out["aod"].values[0], want, rtol=1e-12)
+    assert out["time"].values[0] == 12.5                            # mid-January 2005
+    del ds["time_bnds"]                                             # named but absent
+    with pytest.raises(ValueError, match="does not carry"):
+        bmc.climatology(ds, 2005, 2006)

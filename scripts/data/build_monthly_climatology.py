@@ -42,6 +42,8 @@ def climatology(ds, first: int, last: int, optics: bool = False):
     import xarray as xr
     tv = ds["time"]
     bounds = tv.attrs.get("bounds")
+    if bounds and bounds not in ds.variables:
+        raise ValueError(f"time:bounds names {bounds!r}, which the file does not carry")
     # the month a record covers: its bounds' midpoint when it has bounds (a
     # stamp at a month's end or the next month's start would mislabel it)
     t_month = (ds[bounds].values.astype(np.float64).mean(-1) if bounds in ds.variables
@@ -73,7 +75,11 @@ def climatology(ds, first: int, last: int, optics: bool = False):
                 means[v].append(mv.where(w.sum("time") > 0, sub[v].mean("time")))
             else:
                 means[v].append(sub[v].mean("time"))
-    time = xr.DataArray(tv.values[first_idx], dims="time", attrs=tv.attrs)
+    # stamped at the covered month's middle when bounds say which month (the
+    # forcing readers interpolate on the stamp and ignore bounds)
+    stamp = t_month if bounds else tv.values
+    time = xr.DataArray(np.asarray(stamp)[first_idx].astype(tv.dtype), dims="time",
+                        attrs=tv.attrs)
     for v in timed:
         da = xr.concat(means[v], dim="time")
         if np.issubdtype(ds[v].dtype, np.floating):   # an integer field keeps its float mean
