@@ -839,9 +839,11 @@ def parse_args(argv: list[str] | None = None):
                    choices=["column", "candidate"],
                    help="KPP velocity scale inside the unresolved shear V_t^2: "
                         "'column' (default) or 'candidate' (CVMix/MOM6 form)")
-    p.add_argument("--kpp-actual-buoyancy-flux", action="store_true",
+    p.add_argument("--kpp-actual-buoyancy-flux", action=argparse.BooleanOptionalAction,
+                   default=_DEFAULT_KPP_CONFIG.actual_buoyancy_flux,
                    help="KPP velocity scales from the actual surface buoyancy "
-                        "flux (no float32-epsilon floor; CVMix form)")
+                        "flux (default; CVMix form). --no-kpp-actual-buoyancy-flux "
+                        "restores the legacy float32-epsilon floor")
     p.add_argument("--kpp-gradient-surrogates", action="store_true",
                    help="KPP: logistic-blend backward pass through the "
                         "boundary-layer-base and convective switches (forward "

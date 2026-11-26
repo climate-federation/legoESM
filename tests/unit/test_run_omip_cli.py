@@ -46,7 +46,10 @@ def test_kpp_cvmix_option_flags_flow_to_config():
         "candidate", True, True)
     kpp = build_config_from_args(parse_args(["--grid", "latlon"])).vertical_mixing.kpp
     assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates) == (
-        "column", False, False)
+        "column", True, False)
+    kpp = build_config_from_args(parse_args(
+        ["--grid", "latlon", "--no-kpp-actual-buoyancy-flux"])).vertical_mixing.kpp
+    assert kpp.actual_buoyancy_flux is False
 
 
 def test_shortwave_ohlmann_and_skin_fraction_flags_parse():
