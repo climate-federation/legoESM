@@ -50,23 +50,24 @@ def _igw(land=False):
     return grid, z, s
 
 
-def _model(grid, z, constant_preserving, staggering="a_grid", rk3=False):
+def _model(grid, z, constant_preserving, staggering="a_grid", rk3=False, K_h=0.0):
     from legoesm.ocean.state import OceanConfig
     from legoesm.ocean.dynamics.ocean_model import OceanModel
 
-    cfg = OceanConfig(A_h=1e2, K_h=0.0, A_v=1e-4, K_v=1e-5,
+    cfg = OceanConfig(A_h=1e2, K_h=K_h, A_v=1e-4, K_v=1e-5,
                       n_barotropic_substeps=10, barotropic_staggering=staggering,
                       baroclinic_rk3=rk3,
                       tracer_advection_constant_preserving=constant_preserving)
     return OceanModel(grid, z, cfg)
 
 
-def _uniform_drift(constant_preserving, staggering="a_grid", rk3=False, land=False):
+def _uniform_drift(constant_preserving, staggering="a_grid", rk3=False, land=False,
+                   K_h=0.0):
     """Max |S - 35| over wet cells after 10 steps; land cells hold S = 0."""
     grid, z, s = _igw(land)
     wet = s.land_mask.data[..., None]
     s = s._replace(S=s.S.replace(data=jnp.full_like(s.S.data, S0) * wet))
-    m = _model(grid, z, constant_preserving, staggering, rk3)
+    m = _model(grid, z, constant_preserving, staggering, rk3, K_h)
     for _ in range(N_STEPS):
         s = m.step(s, DT)
     return float(jnp.max(jnp.abs(jnp.where(wet > 0.5, s.S.data - S0, 0.0))))
@@ -90,6 +91,10 @@ def test_uniform_salinity_stays_uniform_next_to_land():
     assert _uniform_drift(True, land=True) < 1e-12
 
 
+def test_uniform_salinity_stays_uniform_next_to_land_with_diffusion():
+    assert _uniform_drift(True, land=True, K_h=1e3) < 1e-12
+
+
 def test_old_operator_still_drifts():
     assert _uniform_drift(False) > 1e-2
     assert _uniform_drift(False, land=True) > 1e-2
@@ -111,7 +116,8 @@ def test_dye_front_overshoot_bounded():
 
 
 def test_partial_cells_uniform_tendency_vanishes():
-    """Sloped partial-cell bathymetry: 6.3e-13 psu/s measured (2.8e-6 old)."""
+    """Sloped partial-cell bathymetry, below-seafloor cells at 0 psu: 6.3e-13 psu/s
+    measured over active cells (2.8e-6 old)."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     from legoesm.ocean.vertical import create_ocean_z_star, create_partial_cell_coordinate
@@ -131,9 +137,10 @@ def test_partial_cells_uniform_tendency_vanishes():
     st = st._replace(
         land_mask=st.land_mask.replace(data=jnp.ones((6, n, n), st.land_mask.data.dtype)),
         H_bathy=st.H_bathy.replace(data=jnp.asarray(H)),
-        S=st.S.replace(data=jnp.full_like(st.S.data, S0)),
+        S=st.S.replace(data=jnp.where(pc.is_active, S0, 0.0) * jnp.ones_like(st.S.data)),
         u=st.u.replace(data=0.1 * jnp.sin(jnp.asarray(grid.lon))[..., None] * ones),
         v=st.v.replace(data=-0.05 * jnp.cos(jnp.asarray(grid.lat))[..., None] * ones))
     cfg = OceanConfig(A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0)
     t = ocean_baroclinic_tendencies_cdgrid(st, grid, pc, cd, cfg)
-    assert float(jnp.max(jnp.abs(t.dS_dt.data))) < 1e-10
+    active = jnp.asarray(pc.is_active)
+    assert float(jnp.max(jnp.abs(jnp.where(active, t.dS_dt.data, 0.0)))) < 1e-10

@@ -665,8 +665,11 @@ def ocean_baroclinic_tendencies_cdgrid(
                      if config.tracer_advection_constant_preserving else tracer_flat)
     horiz_flat = cgrid_tracer_advection_fct(tracer_adv_in, u_c_b, v_c_b, cdgrid)
     if config.K_h > 0:
+        # Same filled input: the Laplacian otherwise read raw land values too
+        # (3.8e-5 psu drift next to S=0 land at K_h=1e3 on C8); filled land is
+        # a zero-gradient coastal BC, exact for uniform tracers only.
         horiz_flat = horiz_flat + laplacian_viscosity_3d(
-            tracer_flat, grid, config.K_h,
+            tracer_adv_in, grid, config.K_h,
         )
     horiz_stack = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
     # The FCT operator is the flux form -div_h(u q) on velocity alone, while the
