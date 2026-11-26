@@ -66,7 +66,7 @@ def test_cli_values_reach_the_mpas_scheme_configs():
         argv += ["--" + f.replace("_", "-"), str(v)]
     cfg = _parse(argv)
     # The MPAS column loop (the pipeline refuses ZM CMT + prognostic CLUBB).
-    cfg = cfg._replace(dycore=cfg.dycore._replace(discretization="mpas"))
+    cfg = _mpas(cfg)
     cfg.validate_strict()
     zm, cp = _leaves(cfg)
     assert zm == _ZM

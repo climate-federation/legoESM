@@ -364,10 +364,11 @@ def test_in_cloud_paths_match_the_subcolumn_paths():
 
 
 def test_validate_strict_accepts_mcica():
-    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
 
     # Column-loop lane: the compiled pipeline refuses McICA (composable P1).
     ExperimentConfig(cloud_vertical_overlap_optics="mcica",
+                     grid=GridConfig(grid_type="mpas"),
                      dycore=DycoreConfig(discretization="mpas")).validate_strict()
 
 

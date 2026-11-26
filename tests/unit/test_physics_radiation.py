@@ -436,7 +436,7 @@ class TestPerColumnAlbedo:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=nlev),
             dycore=DycoreConfig(
-                model_type="hydrostatic", discretization="cdgrid"),
+                model_type="hydrostatic", discretization="fv3_duo"),
             convection="none", radiation="gray", microphysics="none",
         )
         config.validate_strict()
@@ -495,7 +495,7 @@ class TestSfcEmissivityOverrideThreading:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=nlev),
             dycore=DycoreConfig(
-                model_type="hydrostatic", discretization="cdgrid"),
+                model_type="hydrostatic", discretization="fv3_duo"),
             convection="none", radiation="gray", microphysics="none",
         )
         config.validate_strict()

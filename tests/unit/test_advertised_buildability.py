@@ -59,12 +59,17 @@ EXPECTED_UNSUPPORTED_MICROPHYSICS = frozenset({"p3", "ml_emulator"})
 
 
 def _cfg(**physics) -> ExperimentConfig:
-    """Minimal strict-valid ExperimentConfig with physics overrides."""
+    """Minimal strict-valid ExperimentConfig with physics overrides.
+
+    Cube fv3_duo is a compiled-PhysicsPipeline lane for validate_strict and
+    the resolvers below; its ModelDriver runs dry (component_factory refuses
+    active physics there), so section 1 certifies validate + resolve only.
+    """
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
         dycore=DycoreConfig(
             energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
-            model_type="hydrostatic", discretization="cdgrid",
+            model_type="hydrostatic", discretization="fv3_duo",
         ),
         **physics,
     )
