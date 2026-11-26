@@ -36,10 +36,10 @@ from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 set_policy(PrecisionPolicy(storage=jnp.float64, compute=jnp.float64))
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(scope="module", autouse=True)
 def _fp64_policy():
-    """Re-assert fp64 per test: an import-time policy is overwritten by any
-    test that runs earlier in the same worker."""
+    """Re-assert fp64 for this module (setup depends on it): an import-time
+    policy is overwritten by any test that runs earlier in the same worker."""
     orig = get_policy()
     set_policy(PrecisionPolicy(storage=jnp.float64, compute=jnp.float64))
     yield
@@ -63,7 +63,7 @@ from legoesm.ocean.vertical import (
 
 
 @pytest.fixture(scope="module")
-def setup():
+def setup(_fp64_policy):
     """Small ico-2 mesh + 10-level partial-cell coordinate + rest state."""
     mesh = create_voronoi_mesh(subdivision_level=2)
     z_coord = create_ocean_z_star(n_levels=10, H_max=5500.0)
