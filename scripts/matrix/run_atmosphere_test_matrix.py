@@ -254,6 +254,10 @@ def _gw31_diag_every(dt: float) -> int:
                if m % k == 0 and k * dt <= 100.0)
 
 
+#: grids whose gravity_wave_3_1 lane runs the DCMIP 2012 3-1 setup
+_GW31_GRIDS = frozenset({"cubed_sphere", "latlon"})
+
+
 def _gw31_n_steps(days: float, dt: float) -> int:
     """Step count of the DCMIP 2012 3-1 row: the one that lands exactly on
     the run's end (``int()`` of the quotient can fall one short for a
@@ -1406,12 +1410,29 @@ def _vertical_table_label(vertical_coord: str, sigma) -> str:
     n = len(np.asarray(sigma.sigma_full))
     if vertical_coord != "hybrid":
         return f"vertical table: {vertical_coord}_L{n}"
+    if _is_gw31_table(sigma):
+        return ("vertical table: dcmip2012_gw31_l10 (make_dcmip2012_gw31_levels,"
+                " DCMIP 2012 3-1 App. F.3 L10, 10 km lid)")
     if _hybrid_table_is_analytic():
         exp = _analytic_hybrid_exponent(n, sigma)
         return (f"vertical table: analytic_hybrid_L{n}_exp{exp} "
                 f"(analytic (nlev={n}, exp={exp}): standard_hybrid_levels, "
                 f"#1029 probe override)")
     return f"vertical table: cam6_l32 (make_cam6_l32_levels, L{n})"
+
+
+def _is_gw31_table(sigma) -> bool:
+    """True when ``sigma`` IS the DCMIP 2012 3-1 L10 hybrid table."""
+    from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+    b = getattr(sigma, "B_half", None)
+    if b is None:
+        return False
+    ref = make_dcmip2012_gw31_levels()
+    return (np.asarray(b).shape == np.asarray(ref.B_half).shape
+            and np.array_equal(np.asarray(b, np.float64),
+                               np.asarray(ref.B_half, np.float64))
+            and np.array_equal(np.asarray(sigma.A_half, np.float64),
+                               np.asarray(ref.A_half, np.float64)))
 
 
 def _analytic_hybrid_exponent(n: int, sigma) -> str:
@@ -1446,12 +1467,14 @@ def _namelist_vertical_table(tc) -> str | None:
         # every grid's hybrid 1-3 row (run_dcmip_transport builds it)
         return ("dcmip13_kent2014_L30 (Kent et al. 2014 App. B hybrid = DCMIP "
                 "2012 L30 fixed-lid table; create_dcmip13_hybrid)")
+    if tc.case == "gravity_wave_3_1" and tc.grid_type in _GW31_GRIDS:
+        # its own table (probe env vars do not apply)
+        return ("dcmip2012_gw31_l10 (DCMIP 2012 3-1 App. F.3 L10, 10 km lid"
+                + ("; fv3_duo eta table)" if tc.grid_type == "cubed_sphere"
+                   else "; make_dcmip2012_gw31_levels)"))
     if tc.grid_type == "cubed_sphere":
         if tc.case == "amip":
             return None   # skipped: no duo adapter
-        if tc.case == "gravity_wave_3_1":
-            return ("dcmip2012_gw31_l10 (fv3_duo eta table: DCMIP 2012 3-1 "
-                    "App. F.3 L10, 10 km lid)")
         return "cam6_l32 (fv3_duo eta table; probe env vars do not apply)"
     try:
         sig = _create_vertical(DEFAULT_NLEV, "hybrid")
@@ -4592,6 +4615,14 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     # grid-construction time (the four grid factories all accept
     # ``omega``); ``None`` leaves the factory's default (Earth) Omega.
     _omega_override = dcmip_omega_override(tc.case)
+    # DCMIP 2012 test 3-1: the X = 125 small planet (radius a_ref / X), its
+    # App. F.3 L10 table and IC, and the document's small-planet rules for
+    # the lane's step (dt / X) and explicit diffusion (K_2k / X^(2k-1));
+    # None on every other row.  (The cube takes all of it from its duo
+    # recipe, see _cube_duo_adapters.)
+    _gw31 = None
+    if tc.case == "gravity_wave_3_1":
+        from tests.test_cases.dcmip2012 import gravity_wave_3_1 as _gw31
 
     if tc.grid_type == "cubed_sphere":
         if tc.case not in ("baroclinic", "baroclinic_steady",
@@ -4668,13 +4699,22 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
             # with the flow, else the rotated baroclinic state is not steady.
             _ll_kwargs["coriolis_alpha"] = _rot_alpha
+        if _gw31 is not None:
+            _ll_kwargs["radius"] = _gw31.small_planet_radius()
         grid = create_latlon_grid(n_lat, n_lon, **_ll_kwargs)
-        sigma = _create_vertical(nlev, tc.vertical_coord)
+        if _gw31 is not None:
+            from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+            sigma = make_dcmip2012_gw31_levels()
+        else:
+            sigma = _create_vertical(nlev, tc.vertical_coord)
         ah = _laplacian_visc_latlon(n_lat)
+        if _gw31 is not None:
+            ah = ah / _gw31.X_SCALE        # del-2 (k = 1): K_2 / X
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        dt = _latlon_dt(_dx_pole, 200.0, tc.case)
+        dt = _latlon_dt(_dx_pole, 200.0 if _gw31 is None
+                        else 200.0 / _gw31.X_SCALE, tc.case)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
@@ -4695,6 +4735,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 lapse_rate_state_topography_init_latlon)
             state_cc = lapse_rate_state_topography_init_latlon(
                 grid, sigma, h_0=_rest_h0)
+        elif _gw31 is not None:
+            state_cc = _gw31.gravity_wave_init_latlon(grid, sigma)
         elif _dcmip2008_dry:
             state_cc = _build_dcmip2008_state(
                 tc.case, "latlon", grid, sigma)
