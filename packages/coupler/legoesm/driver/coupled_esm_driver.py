@@ -2142,6 +2142,12 @@ class CoupledESMDriver:
         # timescales are 0 or no WOA target was loaded (byte-identical).
         self._apply_ocean_restoring(dt)
 
+    def _ocean_ice_concentration(self, like):
+        """Sea-ice concentration [0-1] on the ocean grid, shaped like ``like``
+        (0 with no ice state).  Read only by closures with an under-ice option
+        switched on (the TKE card's eice=3); every other consumer gates on it."""
+        return jnp.zeros_like(like) + (1.0 - self._slab_open_water_frac())
+
     def _slab_open_water_frac(self):
         """Ice-free fraction of the slab's water area, on the ocean grid.
 
@@ -2588,6 +2594,7 @@ class CoupledESMDriver:
         sf = OceanSurfaceForcing(
             sw_down=sw_pen, q_net=q_net,
             tau_x=tau_x, tau_y=tau_y, salt_flux=salt_flux, freshwater=None,
+            ice_concentration=self._ocean_ice_concentration(q_net),
         )
         return sf, fw
 
@@ -2748,7 +2755,8 @@ class CoupledESMDriver:
             ice_fw=to_o(prev.ice_lake_freshwater_flux))
         sf = OceanSurfaceForcing(
             sw_down=to_o(sw_cell), q_net=q_net, tau_x=tau_x, tau_y=tau_y,
-            salt_flux=to_o(prev.salt_flux), freshwater=None)
+            salt_flux=to_o(prev.salt_flux), freshwater=None,
+            ice_concentration=self._ocean_ice_concentration(q_net))
         self._owned_exchange_tripwire(
             {"heat": (q_cell, to_o(q_cell)), "sw": (sw_cell, sf.sw_down),
              "evap": (aux["seg_evap_ow"], fw.evap),

@@ -550,6 +550,11 @@ def test_coupled_mpas_ocean_tke_is_the_omip_production_card(tmp_path):
         "tke", tke_surface_bc="nemo_dirichlet", tke_mxl_choice=3,
         tke_prognostic=True, tke_kappa_convention="veros_sqrte")
     assert d._ocean_model.config.physics.vertical_mixing == want
+    # nothing else of the recipe's vertical-mixing block is lost (the KPP block
+    # it replaces carries only defaults)
+    from legoesm.ocean.fidelity.nemo_match_recipe import nemo_match_mpas_model_config
+    base = nemo_match_mpas_model_config().physics.vertical_mixing
+    assert want._replace(scheme=base.scheme, tke=base.tke) == base
     tke = d._ocean_state.tke
     assert tke is not None and tke.data.shape == (d._ocean_grid.nCells, 19)
     assert float(np.max(np.asarray(tke.data))) > 0.0
@@ -593,3 +598,48 @@ def test_coupled_ocean_vertical_mixing_refusals(tmp_path, cc, match):
                          output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match=match):
         d.setup()
+
+
+def test_coupled_mpas_ocean_tke_steps_and_feels_the_wind(tmp_path):
+    """The seeded carry is advanced by the step, the coupled stress reaches
+    the TKE surface condition, and the forcing carries the ice field the
+    card's eice=3 needs (the step fails fast without it)."""
+    import jax.numpy as jnp
+    from legoesm.ocean.state import OceanSurfaceForcing
+    d = _mpas_ocean_driver(tmp_path, ocean_vertical_mixing="tke")
+    d.setup()
+    z = jnp.zeros(d._ocean_grid.nCells)
+    ice = d._ocean_ice_concentration(z)
+    assert ice.shape == z.shape and float(jnp.max(ice)) <= 1.0
+
+    def top_tke(tau):
+        sf = OceanSurfaceForcing(sw_down=z, q_net=z, tau_x=z + tau, tau_y=z,
+                                 ice_concentration=ice)
+        s = d._ocean_step(d._ocean_state, 300.0, surface_forcing=sf)
+        return np.asarray(s.tke.data)[:, 0]
+
+    seed = np.asarray(d._ocean_state.tke.data)[:, 0]
+    calm, windy = top_tke(0.0), top_tke(0.1)
+    assert not np.allclose(calm, seed)
+    assert np.mean(windy) > np.mean(calm)
+    with pytest.raises(ValueError, match="ice_concentration"):
+        d._ocean_step(d._ocean_state, 300.0, surface_forcing=OceanSurfaceForcing(
+            sw_down=z, q_net=z, tau_x=z + 0.1, tau_y=z))
+
+
+def test_coupled_ocean_forcing_carries_the_ice_concentration(tmp_path):
+    """Both coupled forcing assemblies hand the ocean the sea-ice fraction
+    (the TKE card's eice=3 refuses to step without it)."""
+    import jax.numpy as jnp
+    from legoesm.coupler.coupler import OwnedOceanExchange
+    d = _mpas_ocean_driver(tmp_path, ocean_vertical_mixing="tke")
+    d.setup()
+    z = jnp.zeros(d._ocean_grid.nCells)
+    d._owned_to_ocean = OwnedOceanExchange(*([z] * 5))
+    d._atm._carry_aux = {k: z for k in (
+        "seg_evap_ow", "seg_lhflx_ow", "seg_ow_lw_net", "seg_ow_sw_net",
+        "seg_precip_ice", "seg_precip_ow", "seg_runoff_land", "seg_shflx_ow",
+        "seg_taux_ow", "seg_tauy_ow")}
+    sf, _ = d._assemble_owned_ocean_forcing()
+    assert sf.ice_concentration is not None
+    assert sf.ice_concentration.shape == sf.q_net.shape
