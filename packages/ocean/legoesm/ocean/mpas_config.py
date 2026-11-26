@@ -185,6 +185,10 @@ class MPASOceanConfig(NamedTuple):
     barotropic_damping: float = 0.0
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
+    # True: the eta damping's volume flux is booked into the time-averaged
+    # transport the tracers are advected with (explicit_substep only).
+    # False: the pre-2026-11-25 behaviour, tracers never see that water.
+    barotropic_diffusion_book_transport: bool = True
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
     barotropic_u_viscosity: float = 0.0  # Lateral viscosity on u_bar [m²/s].
                                          # Damps the TRiSK rotational null branch

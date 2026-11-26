@@ -314,6 +314,17 @@ def load_state_checkpoint(
     loaded_arrays: dict[str, np.ndarray] = {}
 
     with np.load(path) as npz:
+        # A state class may declare renamed-and-redefined fields; a file that
+        # still holds one cannot be loaded (its value would be dropped and the
+        # template's substituted).
+        legacy = getattr(type(state_template), "checkpoint_legacy_fields", {})
+        stale = sorted(set(legacy) & set(npz.files))
+        if stale:
+            raise ValueError(
+                f"Checkpoint {path} holds legacy field(s) of "
+                f"{type(state_template).__name__}: "
+                + "; ".join(f"{k}: {legacy[k]}" for k in stale)
+            )
         for name in state_template._fields:
             template_val = getattr(state_template, name)
 
@@ -443,6 +454,9 @@ def _validate_metadata(
     saved_fields = set(metadata.get("saved_fields", []))
     template_fields = set(state_template._fields)
     missing = saved_fields - template_fields
+    legacy = getattr(type(state_template), "checkpoint_legacy_fields", {})
+    for name in sorted(saved_fields & set(legacy)):
+        issues.append(f"ERROR: legacy field '{name}': {legacy[name]}")
     if missing:
         issues.append(
             f"WARNING: checkpoint has fields not in template: {sorted(missing)}"

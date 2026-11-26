@@ -220,12 +220,125 @@ def test_turbulence_bulk_covers_open_water_only_and_adds_the_handback():
                          - np.asarray(C.du_dt.data))) > 0.0
 
 
-def test_turbulence_refuses_a_handback_without_land_fluxes():
+def _hb_keys(ncol, f_ow):
+    return {"f_ow": f_ow, "shflx_hb": jnp.full((ncol,), 7.0),
+            "lhflx_hb": jnp.full((ncol,), 11.0),
+            "evap_hb": jnp.full((ncol,), 2.0 ** -18),
+            "taux_hb": jnp.full((ncol,), 0.05),
+            "tauy_hb": jnp.full((ncol,), -0.02)}
+
+
+def test_handback_without_land_is_the_land_channel_with_zero_land():
+    """All-ocean run (no land model): the handback alone enters the injected
+    flux branch.  It must equal, bit for bit, the land channel carrying zero
+    land fluxes on a zero land fraction -- the path it replaces."""
     case = _mpas_case()
     ncol = case[3]
-    with pytest.raises(ValueError, match="shflx_hb"):
-        _turb(np.zeros(ncol), {"T_sfc": jnp.full((ncol,), 300.0),
-                               "shflx_hb": jnp.zeros((ncol,))}, case)
+    f_land = np.zeros(ncol)
+    sst = jnp.full((ncol,), 301.0)
+    hb = _hb_keys(ncol, jnp.full((ncol,), 0.6))   # 0.4 of the sea is ice/lake
+    alone = _turb(f_land, {"T_sfc": sst, "T_sfc_ocean": sst, **hb}, case)
+    z = jnp.zeros((ncol,))
+    via_land = _turb(f_land, {"T_sfc": sst, "T_sfc_ocean": sst,
+                              "shflx_land": z, "lhflx_land": z,
+                              "evap_land": z, **hb}, case)
+    for name in ("shflx_sfc", "lhflx_sfc", "evap_sfc"):
+        np.testing.assert_array_equal(np.asarray(getattr(alone, name).data),
+                                      np.asarray(getattr(via_land, name).data),
+                                      err_msg=name)
+    for name in ("dT_dt", "du_dt"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(alone, name).data),
+            np.asarray(getattr(via_land, name).data), err_msg=name)
+
+
+def test_handback_without_land_closes_and_keeps_its_sign():
+    """Closure: atmosphere flux = f_ow x open-water bulk + handback, so the
+    handback moves the total by exactly itself (positive UP, surface -> air,
+    at both ends: the coupler debits the ice/lake what it hands back).  Sign:
+    a 301 K sea under cooler air is a sensible SOURCE."""
+    case = _mpas_case()
+    ncol = case[3]
+    f_land = np.zeros(ncol)
+    sst = jnp.full((ncol,), 301.0)
+    f_ow = jnp.full((ncol,), 0.5)
+    base = {"T_sfc": sst, "T_sfc_ocean": sst}
+    A = _turb(f_land, {**base, **_hb_keys(ncol, f_ow)}, case)
+    zero = {k: (v if k == "f_ow" else jnp.zeros_like(v))
+            for k, v in _hb_keys(ncol, f_ow).items()}
+    B = _turb(f_land, {**base, **zero}, case)
+    for name, h in (("shflx_sfc", 7.0), ("lhflx_sfc", 11.0),
+                    ("evap_sfc", 2.0 ** -18)):
+        a = np.asarray(getattr(A, name).data)
+        b = np.asarray(getattr(B, name).data)
+        np.testing.assert_allclose(a - b, h, rtol=1e-9, err_msg=name)
+    assert (np.asarray(B.shflx_sfc.data) > 0.0).all()
+    # the open-water bulk share is f_ow x the full-sea bulk flux
+    full = _turb(f_land, {**base, **{k: (jnp.ones((ncol,)) if k == "f_ow"
+                                         else v) for k, v in zero.items()}},
+                 case)
+    np.testing.assert_allclose(np.asarray(B.shflx_sfc.data),
+                               0.5 * np.asarray(full.shflx_sfc.data),
+                               rtol=1e-12)
+
+
+def test_handback_without_land_runs_under_jit():
+    """The zero-land guard reads the factory's concrete mask on the host, so
+    the kernel traces under jit (a staged reduction there would raise)."""
+    from legoesm.atmosphere.physics.turbulence import integration as ti
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    mesh, sigma, state, ncol = _mpas_case()
+    tc = ti.materialize_sub_config(TurbulenceConfig(scheme="louis"))
+    fn = ti.make_turbulence_physics(tc, model_type="mpas", dt=600.0,
+                                    f_land=jnp.zeros((ncol,)))
+    sst = jnp.full((ncol,), 301.0)
+    forcing = {"T_sfc": sst, "T_sfc_ocean": sst,
+               **_hb_keys(ncol, jnp.full((ncol,), 0.5))}
+    eager = fn(state, mesh, sigma, forcing=forcing)
+    jitted = jax.jit(lambda st, f: fn(st, mesh, sigma, forcing=f))(
+        state, forcing)
+    eager = eager[0] if isinstance(eager, tuple) else eager
+    jitted = jitted[0] if isinstance(jitted, tuple) else jitted
+    np.testing.assert_allclose(np.asarray(jitted.shflx_sfc.data),
+                               np.asarray(eager.shflx_sfc.data), rtol=1e-12)
+
+
+def test_handback_without_land_over_a_traced_land_mask_is_nan_not_zero():
+    """A land mask traced through jit skips the host guard; the land share
+    then surfaces as NaN on the land cells (never a silently dropped flux),
+    and the sea cells keep their finite flux."""
+    from legoesm.atmosphere.physics.turbulence import integration as ti
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    mesh, sigma, state, ncol = _mpas_case()
+    tc = ti.materialize_sub_config(TurbulenceConfig(scheme="louis"))
+    sst = jnp.full((ncol,), 301.0)
+    forcing = {"T_sfc": sst, "T_sfc_ocean": sst,
+               **_hb_keys(ncol, jnp.full((ncol,), 0.5))}
+    f_land = np.zeros(ncol)
+    f_land[:3] = 0.25
+
+    def run(fl):
+        fn = ti.make_turbulence_physics(tc, model_type="mpas", dt=600.0,
+                                        f_land=fl)
+        out = fn(state, mesh, sigma, forcing=forcing)
+        return (out[0] if isinstance(out, tuple) else out).shflx_sfc.data
+
+    sh = np.asarray(jax.jit(run)(jnp.asarray(f_land)))
+    assert np.isnan(sh[:3]).all()
+    assert np.isfinite(sh[3:]).all()
+
+
+def test_turbulence_refuses_a_handback_without_land_fluxes_over_land():
+    """Without land fluxes the land fraction's share would be dropped: a
+    handback with no land fluxes is refused wherever f_land > 0."""
+    case = _mpas_case()
+    ncol = case[3]
+    f_land = np.zeros(ncol)
+    f_land[0] = 0.25
+    sst = jnp.full((ncol,), 300.0)
+    with pytest.raises(ValueError, match="zero land fraction"):
+        _turb(f_land, {"T_sfc": sst, "T_sfc_ocean": sst,
+                       **_hb_keys(ncol, jnp.full((ncol,), 0.5))}, case)
 
 
 class _Stop(Exception):
@@ -348,6 +461,50 @@ def test_driver_feeds_the_handback_from_the_first_step(tmp_path, monkeypatch):
                         for s in seen)
     assert np.max(np.abs(np.asarray(on.state.T.data)
                          - np.asarray(off.state.T.data))) > 0.0
+
+
+def _ocean_driver(tmp_path, monkeypatch, **extra):
+    """An all-ocean MPAS column loop with no land model, as the aquaplanet
+    geography runs: the land-fraction loader returns zeros."""
+    import legoesm.grids.topography as topo
+    from tests.unit import test_mpas_multilayer_land_port as lp
+    from legoesm.driver.config import (
+        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig,
+    )
+    from legoesm.driver.model_driver import ModelDriver
+    lp._patch_land_loaders(monkeypatch)
+    monkeypatch.setattr(
+        topo, "load_land_fraction",
+        lambda grid, path, *a, **k: jnp.zeros(
+            jnp.asarray(grid.grid_lat).shape))
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=lp.MPAS_RES,
+                        nlev=lp.MPAS_NLEV, vertical_coord="hybrid"),
+        dycore=DycoreConfig(discretization="mpas", dt=lp.DT),
+        output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=1),
+        days=extra.pop("days", lp.TWO_STEPS_DAYS), dataset="analytical",
+        radiation="rrtmgp", convection="none", turbulence="louis",
+        precision="fp64", land_mask_path="synthetic.nc",
+        use_multilayer_land=False, **extra)
+    d = ModelDriver(cfg, output_dir=str(tmp_path))
+    d._requires_surface_flux_export = True
+    d.setup()
+    return d
+
+
+def test_driver_feeds_the_handback_on_an_all_ocean_run(tmp_path, monkeypatch):
+    """No land model, no land: the handback still reaches the flux kernel
+    (no land keys), and the open-water exports plus the handback are the
+    atmosphere's whole surface flux (nothing dropped, nothing double)."""
+    from tests.unit import test_mpas_multilayer_land_port as lp
+    seen, _ = lp._record_turbulence_forcing_keys(monkeypatch)
+    d = _ocean_driver(tmp_path / "on", monkeypatch)
+    assert d._land_ml_state is None
+    ncol = int(np.asarray(d.state.p_s.data).size)
+    cb = _couple(d, _H(ncol, f_ice=0.3, f_lake=0.1))
+    assert d.run(segment_callback=cb) == "COMPLETED"
+    assert seen and all({"shflx_hb", "f_ow", "T_sfc_ocean"} <= s
+                        and "shflx_land" not in s for s in seen)
 
 
 def test_driver_refuses_mismatched_partitions(tmp_path, monkeypatch):
@@ -698,6 +855,38 @@ def _changing(d, ncol, H0):
         k = int(round(day * 86400.0 / 1800.0)) % 5 + 1
         cur[0] = _H(ncol, f_ice=0.2 + 0.01 * k, sh=5.0 + k)
     return cb
+
+
+def test_all_ocean_window_exports_close_over_the_sea(tmp_path, monkeypatch):
+    """One full window (6 steps) on an all-ocean run with no land model.
+    No open water (ice + lake cover the sea): every open-water turbulent
+    export is exactly zero.  Open water: they are not.  Either way the tile
+    precip sums to the window precip with nothing booked on land, and no
+    land runoff is exported."""
+    probe = _ocean_driver(tmp_path / "p", monkeypatch)
+    ncol = int(np.asarray(probe.state.p_s.data).size)
+    out = {}
+    for tag, f_ice in (("closed", 0.9), ("open", 0.3)):
+        d = _ocean_driver(tmp_path / tag, monkeypatch,
+                          days=(6 * 300.0 + 1.0) / 86400.0)
+        cb = _couple(d, _H(ncol, f_ice=f_ice, f_lake=0.1))
+        _rain(d, ncol)
+        assert d.run(segment_callback=cb) == "COMPLETED"
+        out[tag] = _exports(d)
+    c, o = out["closed"], out["open"]
+    for k in ("seg_shflx_ow", "seg_lhflx_ow", "seg_evap_ow", "seg_taux_ow",
+              "seg_tauy_ow", "seg_precip_ow"):
+        assert np.max(np.abs(c[k])) < 1e-12, k
+        assert np.max(np.abs(o[k])) > 0.0, k
+    for e in (c, o):
+        tot = sum(e[f"seg_precip_{t}"] for t in ("ow", "ice", "lake", "land"))
+        np.testing.assert_allclose(tot, e["seg_precip"], rtol=1e-12, atol=0)
+        assert np.min(e["seg_precip"]) > 0.0
+        assert np.max(np.abs(e["seg_precip_land"])) == 0.0
+        assert np.max(np.abs(e["seg_runoff_land"])) == 0.0
+    # open water takes f_ow = 1 - 0.3 - 0.1 of the precip
+    np.testing.assert_allclose(o["seg_precip_ow"], 0.6 * o["seg_precip"],
+                               rtol=1e-12)
 
 
 @pytest.mark.usefixtures("allow_version_drift")

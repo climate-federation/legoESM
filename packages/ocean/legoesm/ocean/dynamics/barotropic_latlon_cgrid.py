@@ -2408,8 +2408,9 @@ def _run_substep_loop(
             # the eta floor or an open-boundary ring rewrites eta, which book
             # no transport).  Unbooked, the tracer step saw transports that
             # disagreed with the new layer thicknesses and uniform tracers drift.
-            Hu_sum_new = Hu_sum_new - w_tr_i * (flux_x / dt_s).astype(dtype)
-            Hv_sum_new = Hv_sum_new - w_tr_i * (flux_y / dt_s).astype(dtype)
+            if config.barotropic.barotropic_diffusion_book_transport:
+                Hu_sum_new = Hu_sum_new - w_tr_i * (flux_x / dt_s).astype(dtype)
+                Hv_sum_new = Hv_sum_new - w_tr_i * (flux_y / dt_s).astype(dtype)
             if local_subcycle_clamp:
                 eta_new = jnp.maximum(eta_new, eta_floor) * mask
             else:
@@ -2900,7 +2901,8 @@ def _reconcile_targets(config, *, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
       so it is a fidelity gap in the divisor convention, not a path
       difference -- see the F1 note on
       ``BarotropicConfig.barotropic_reconcile_target``.
-      With the split-explicit eta damping on, ``Hu_avg`` includes the
+      With the split-explicit eta damping on and
+      ``barotropic_diffusion_book_transport`` True, ``Hu_avg`` includes the
       damping's volume flux (booked so tracers see the transport that moved
       eta), so this target puts that flux into the depth-mean velocity;
       ``"velocity_avg"`` does not.

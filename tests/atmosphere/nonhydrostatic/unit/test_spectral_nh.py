@@ -106,7 +106,7 @@ class TestSpectralNHState:
         assert rest_state.div_hat.data.shape == (n_sh, nlev)
         assert rest_state.w_hat.data.shape == (n_sh, nlev + 1)
         assert rest_state.theta_prime_hat.data.shape == (n_sh, nlev)
-        assert rest_state.rho_prime_hat.data.shape == (n_sh, nlev)
+        assert rest_state.jrho_prime_hat.data.shape == (n_sh, nlev)
         assert rest_state.phis_hat.data.shape == (n_sh,)
         assert rest_state.tracers_hat.data.ndim >= 2
 
@@ -128,7 +128,7 @@ class TestSpectralNHState:
         assert float(jnp.max(jnp.abs(rest_state.div_hat.data))) == 0.0
         assert float(jnp.max(jnp.abs(rest_state.w_hat.data))) == 0.0
         assert float(jnp.max(jnp.abs(rest_state.theta_prime_hat.data))) == 0.0
-        assert float(jnp.max(jnp.abs(rest_state.rho_prime_hat.data))) == 0.0
+        assert float(jnp.max(jnp.abs(rest_state.jrho_prime_hat.data))) == 0.0
 
 
 # =============================================================================
@@ -149,7 +149,7 @@ class TestSpectralNHTendencies:
         vor_max = float(jnp.max(jnp.abs(tend.vor_hat.data)))
         div_max = float(jnp.max(jnp.abs(tend.div_hat.data)))
         theta_max = float(jnp.max(jnp.abs(tend.theta_prime_hat.data)))
-        rho_max = float(jnp.max(jnp.abs(tend.rho_prime_hat.data)))
+        rho_max = float(jnp.max(jnp.abs(tend.jrho_prime_hat.data)))
 
         assert vor_max < 1e-10, f"Rest state vor tendency too large: {vor_max}"
         assert div_max < 1e-10, f"Rest state div tendency too large: {div_max}"
@@ -168,7 +168,7 @@ class TestSpectralNHTendencies:
         assert tend.div_hat.data.shape == rest_state.div_hat.data.shape
         assert tend.w_hat.data.shape == rest_state.w_hat.data.shape
         assert tend.theta_prime_hat.data.shape == rest_state.theta_prime_hat.data.shape
-        assert tend.rho_prime_hat.data.shape == rest_state.rho_prime_hat.data.shape
+        assert tend.jrho_prime_hat.data.shape == rest_state.jrho_prime_hat.data.shape
         assert tend.tracers_hat.data.shape == rest_state.tracers_hat.data.shape
 
     def test_tendencies_finite(
@@ -181,7 +181,7 @@ class TestSpectralNHTendencies:
 
         for field_name in [
             'vor_hat', 'div_hat', 'w_hat',
-            'theta_prime_hat', 'rho_prime_hat', 'tracers_hat',
+            'theta_prime_hat', 'jrho_prime_hat', 'tracers_hat',
         ]:
             data = getattr(tend, field_name).data
             assert jnp.all(jnp.isfinite(data)), \
@@ -345,7 +345,7 @@ class TestSpectralNHModel:
 
         for field_name in [
             'vor_hat', 'div_hat', 'w_hat',
-            'theta_prime_hat', 'rho_prime_hat',
+            'theta_prime_hat', 'jrho_prime_hat',
         ]:
             data = getattr(new_state, field_name).data
             assert jnp.all(jnp.isfinite(data)), \
@@ -365,7 +365,7 @@ class TestSpectralNHModel:
 
         for field_name in [
             'vor_hat', 'div_hat', 'w_hat',
-            'theta_prime_hat', 'rho_prime_hat',
+            'theta_prime_hat', 'jrho_prime_hat',
         ]:
             data = getattr(state, field_name).data
             assert jnp.all(jnp.isfinite(data)), \
@@ -555,3 +555,362 @@ def test_semi_implicit_acoustic_matches_shared_kernel_on_stretched_grid():
     np.testing.assert_allclose(np.asarray(rho_s), np.asarray(rho_k), rtol=1e-12, atol=1e-16)
     np.testing.assert_allclose(np.asarray(th_s[..., 1:-1]), np.asarray(th_k[..., 1:-1]),
                                rtol=1e-12, atol=1e-14)
+
+
+# T29: native spectral projection of continuity-paired tracer mass.
+def t29_spectral_fixture(semi_implicit, *, nonflat=False):
+    """Existing rough seed1 state on the census grid, with positive packed q."""
+    from tests.unit.test_spectral_dealiasing import TestAliasingStabilityNH
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import dcmip25_tc2_init_spectral
+
+    grid = create_gaussian_grid(10)
+    hc = create_height_coordinate(10, 30000.0)
+    state = TestAliasingStabilityNH()._rough_nh_state(grid, hc, n_tracers=1, seed=1)
+    q = sh_synthesis_3d(grid, state.tracers_hat.data[..., 0]) + 0.01
+    assert np.all(np.asarray(q) > 0)
+    q_hat = sh_analysis_3d(grid, q)
+    w = jnp.broadcast_to(
+        jnp.sin(jnp.linspace(0, jnp.pi, 11)).at[-1].set(0.0),
+        (grid.n_lat, grid.n_lon, 11),
+    )
+    state = state._replace(
+        tracers_hat=state.tracers_hat.replace(data=jnp.stack([q_hat, 2 * q_hat], axis=-1)),
+        w_hat=state.w_hat.replace(data=sh_analysis_3d(grid, w)),
+    )
+    metric = (dcmip25_tc2_init_spectral(grid, n_levels=10, subcase="a")[2]
+              if nonflat else compute_terrain_metric(jnp.zeros_like(grid.grid_area), hc))
+    jac = np.asarray(metric.jacobian)
+    assert np.isfinite(jac).all() and np.all(jac > 0)
+    if nonflat:
+        assert np.max(np.abs(jac - 1)) > 1e-12 and np.ptp(jac) > 1e-12
+    cfg = SpectralNHConfig(
+        g=constants.g, hyperdiff_coeff=0.0, hyperdiff_order=2,
+        sponge_coeff=0.0, sponge_width=10000.0, n_acoustic_substeps=6,
+        small_earth_factor=1.0, semi_implicit_acoustic=semi_implicit,
+        dealiasing_fraction=0.667, fix_mass=False, anchor_mass_to_initial=False,
+        rotating=True,
+    )
+    model = SpectralCompressibleEulerModel(grid, hc, metric, cfg)
+    rho, _ = t29_spectral_grid_state(model, state)
+    assert np.all(np.asarray(rho) > 0) and np.ptp(np.asarray(rho), axis=(0, 1)).max() > 0
+    assert np.any(np.asarray(state.vor_hat.data) != 0)
+    assert np.any(np.asarray(state.div_hat.data) != 0) and np.any(np.asarray(w) != 0)
+    return model, state
+
+
+def t29_spectral_grid_state(model, state):
+    """Actual represented density and packed mixing ratios, also used by census."""
+    nsh, nz, nt = state.tracers_hat.data.shape
+    q = sh_synthesis_3d(model.grid, state.tracers_hat.data.reshape(nsh, nz * nt))
+    q = q.reshape(model.grid.n_lat, model.grid.n_lon, nz, nt)
+    rho = model.height_coord.rho_ref + sh_synthesis_3d(
+        model.grid, state.jrho_prime_hat.data) / model.terrain_metric.jacobian[..., None]
+    return rho, q
+
+
+class TestT29SpectralMass:
+    @pytest.fixture(autouse=True)
+    def fp64_policy(self):
+        from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+        previous = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            yield
+        finally:
+            set_policy(previous)
+
+    @pytest.mark.parametrize("semi_implicit", [False, True])
+    @pytest.mark.parametrize("metric_kind", ["flat", "TC2a", "one_ulp"])
+    @pytest.mark.parametrize("empty", [False, True])
+    def test_static_geometry_dispatch(self, semi_implicit, metric_kind, empty, monkeypatch):
+        """Pin geometry flag and tracer-presence dispatch; plant alias misrouting."""
+        from legoesm.atmosphere.dynamics.gcm import spectral_nh as sn
+        from legoesm.timestepping.split_explicit import SplitExplicitConfig
+
+        model, state = t29_spectral_fixture(semi_implicit, nonflat=metric_kind == "TC2a")
+        if metric_kind == "one_ulp":
+            jac = np.array(model.terrain_metric.jacobian, copy=True)
+            assert jac.dtype == np.dtype("float64")
+            assert np.all(jac == 1.0)
+            jac.flat[0] = np.nextafter(jac.flat[0], np.float64(2.0))
+            assert jac.flat[0] != 1.0
+            metric = model.terrain_metric._replace(jacobian=jnp.asarray(jac))
+            # This metric tests selection only: no numerical integration.
+            model = SpectralCompressibleEulerModel(
+                model.grid, model.height_coord, metric, model.config)
+        assert type(model._flat_tracer_metric) is bool
+        assert model._flat_tracer_metric is (metric_kind == "flat")
+        if empty:
+            state = state._replace(tracers_hat=state.tracers_hat.replace(
+                data=state.tracers_hat.data[..., :0]))
+        expected = not empty
+        calls = []
+
+        def observe(*args, **kwargs):
+            calls.append(kwargs.get("tracer_mass") is not None)
+            return args[0]
+
+        monkeypatch.setattr(sn, "split_explicit_step", observe)
+        cfg = SplitExplicitConfig(n_substeps=model.config.n_acoustic_substeps)
+
+        for compiled in (False, True):
+            def check_dispatch():
+                calls.clear()
+                step = lambda s: model._split_step(s, 1.0, cfg)
+                if compiled:
+                    # Fresh trace for each check, including the planted spy.
+                    step = jax.jit(step)
+                step(state)
+                assert calls == [expected]
+
+            check_dispatch()
+            with monkeypatch.context() as control:
+                def inverted(*args, **kwargs):
+                    calls.append(kwargs.get("tracer_mass") is None)
+                    return args[0]
+
+                control.setattr(sn, "split_explicit_step", inverted)
+                with pytest.raises(AssertionError):
+                    check_dispatch()
+
+    @pytest.mark.parametrize("semi_implicit", [False, True])
+    @pytest.mark.parametrize("nonflat", [False, True])
+    def test_full_step_inventory_and_constant(self, semi_implicit, nonflat):
+        # Reversion selects this node only: no new production-helper import.
+        from scripts.validate.diag_hybrid_tracer_smoothing import global_inventory_budget
+        model, state = t29_spectral_fixture(semi_implicit, nonflat=nonflat)
+        grid, hc, metric = model.grid, model.height_coord, model.terrain_metric
+        volume = np.asarray(grid.grid_area[..., None] * metric.jacobian[..., None] * hc.dz)
+        rho0, q0 = t29_spectral_grid_state(model, state)
+        final = model.step(state, 1.0)
+        rho1, q1 = t29_spectral_grid_state(model, final)
+        row = global_inventory_budget(volume, rho0, q0, rho1, q1, np.zeros(2))
+        assert row["verdicts"] == ["CONSERVES", "CONSERVES"], row
+        q_const = sh_analysis_3d(grid, jnp.full(q0.shape[:-1], 0.01))
+        constant = state._replace(tracers_hat=state.tracers_hat.replace(
+            data=jnp.stack([q_const, q_const], axis=-1)))
+        rc0, qc0 = t29_spectral_grid_state(model, constant)
+        constant1 = model.step(constant, 1.0)
+        rc1, qc1 = t29_spectral_grid_state(model, constant1)
+        # J*rho' prognostic (#2682): a uniform tracer stays uniform on
+        # terrain too (was 9.6e-7 per step with rho' prognostic).
+        drift = np.max(np.abs(np.asarray(qc1) - 0.01), axis=(0, 1, 2)) / 0.01
+        print("spectral constant drift", nonflat, semi_implicit, drift.tolist())
+        np.testing.assert_allclose(qc1, 0.01, rtol=0, atol=1e-12)
+        # Dry mass closes without the (opt-in, here off) fixer.
+        m0 = float(model.compute_dry_mass(constant))
+        m1 = float(model.compute_dry_mass(constant1))
+        print("spectral dry mass drift", nonflat, semi_implicit, m1 / m0 - 1.0)
+        assert abs(m1 / m0 - 1.0) < 1e-13
+        row = global_inventory_budget(volume, rc0, qc0, rc1, qc1, np.zeros(2))
+        print("T29 spectral constant budget", nonflat, semi_implicit, row)
+        assert row["verdicts"] == ["CONSERVES", "CONSERVES"], row
+
+    def test_native_projection_orthogonality_and_planted_violation(self):
+        model, state = t29_spectral_fixture(False)
+        grid = model.grid
+        rho, q = t29_spectral_grid_state(model, state)
+        mass = model.terrain_metric.jacobian[..., None, None] * rho[..., None] * q
+        area = np.asarray(grid.grid_area)[..., None]
+
+        def project(a):
+            return np.asarray(sh_synthesis_3d(grid, sh_analysis_3d(grid, a)))
+
+        for f, outside_span in ((np.asarray(rho), False), (np.asarray(mass[..., 0]), True)):
+            pf = project(f)
+            if outside_span:
+                assert np.max(np.abs(f - pf)) > 1e-12
+            for tracer in range(2):
+                pg = project(mass[..., tracer])
+                lhs = np.sum(area * f * pg, axis=(0, 1))
+                rhs = np.sum(area * pf * pg, axis=(0, 1))
+                norm = np.sum(area * np.abs(f * pg), axis=(0, 1))
+                assert np.all(np.isfinite(norm)) and np.all(norm > 0)
+                assert np.all(np.abs(lhs - rhs) / norm <= 1e-12)
+                offset = 0.01 * np.max(np.abs(pg), axis=(0, 1))
+                assert np.all(offset > 0)
+                planted_lhs = np.sum(area * f * (pg + offset), axis=(0, 1))
+                # SAME norm and predicate, changed only the left operand.
+                assert np.all(np.abs(planted_lhs - rhs) / norm > 1e-12)
+
+    @pytest.mark.parametrize("semi_implicit", [False, True])
+    def test_acoustic_export_pairs_density(self, semi_implicit):
+        from legoesm.atmosphere.dynamics.gcm import spectral_nh as sn
+        model, state = t29_spectral_fixture(semi_implicit)
+        grid, hc, metric = model.grid, model.height_coord, model.terrain_metric
+        w = sh_synthesis_3d(grid, state.w_hat.data)
+        theta = sh_synthesis_3d(grid, state.theta_prime_hat.data)
+        rho = sh_synthesis_3d(grid, state.jrho_prime_hat.data) / metric.jacobian[..., None]
+        acoustic = (sn._acoustic_substeps_grid_semi_implicit if semi_implicit
+                    else sn._acoustic_substeps_grid)
+        (_, _, final_rho), flux = acoustic(
+            w, theta, rho, 1.0 / 6, 6, hc, metric, model.config, return_mass_flux=True)
+        rhs = (flux[..., 1:] - flux[..., :-1]) / (hc.dz * metric.jacobian[..., None])
+        np.testing.assert_allclose(final_rho - rho, rhs, rtol=1e-12, atol=1e-12)
+        np.testing.assert_array_equal(flux[..., (0, -1)], 0.0)
+        assert np.max(np.abs(np.asarray(flux[..., 1:-1]))) > 0
+
+    @pytest.mark.parametrize("semi_implicit", [False, True])
+    def test_stage_blend_and_recovery_budgets(self, semi_implicit, monkeypatch):
+        from legoesm.atmosphere.dynamics.gcm import spectral_nh as sn
+        from legoesm.timestepping import split_explicit as se
+        model, state = t29_spectral_fixture(semi_implicit)
+        weight = np.asarray(model.grid.grid_area[..., None, None] * model.height_coord.dz[:, None])
+        jac = np.asarray(model.terrain_metric.jacobian)[..., None, None]
+        observations = {"stage": [], "blend": [], "recovery": []}
+
+        def mass_grid(mhat):
+            nsh, nz, nt = mhat.shape
+            return np.asarray(sh_synthesis_3d(model.grid, mhat.reshape(nsh, nz * nt))).reshape(
+                model.grid.n_lat, model.grid.n_lon, nz, nt)
+
+        def integral(mhat):
+            return np.sum(weight * mass_grid(mhat), axis=(0, 1, 2))
+
+        rho, q = t29_spectral_grid_state(model, state)
+        norm = np.sum(weight * np.abs(jac * np.asarray(rho)[..., None] * np.asarray(q)), axis=(0, 1, 2))
+        assert np.all(norm > 0)
+
+        def close(a, b):
+            assert np.all(np.abs(a - b) / norm <= 1e-12), (a - b) / norm
+
+        def rho_grid(s):
+            return model.height_coord.rho_ref + sh_synthesis_3d(
+                model.grid, s.jrho_prime_hat.data) / model.terrain_metric.jacobian[..., None]
+
+        def reset(carry):
+            np.testing.assert_array_equal(carry[0].tracers_hat.data, 0.0)
+
+        context = {}
+
+        def recovery(q_grid):
+            before = integral(context["mass"])
+            after = np.sum(weight * jac * np.asarray(context["rho"])[..., None]
+                           * np.asarray(q_grid), axis=(0, 1, 2))
+            close(before, after)
+            observations["recovery"].append((before, after))
+
+        original_step = se.split_explicit_step
+        original_blend = se._blend
+        original_build = model._build_se_functions
+        original_faces = sn.tracer_vertical_face_value
+
+        def build(*, paired=False):
+            slow, acoustic = original_build(paired=paired)
+
+            def observed_slow(s):
+                recovery(mass_grid(s.tracers_hat.data))
+                return slow(s)
+
+            def observed_acoustic(s, *args):
+                recovery(mass_grid(s.tracers_hat.data))
+                return acoustic(s, *args)
+
+            return observed_slow, observed_acoustic
+
+        def faces(q, *args):
+            recovery(q)
+            return original_faces(q, *args)
+
+        def step(carry, slow, acoustic, dt, cfg, tracer_mass=None):
+            assert cfg.outer_integrator == "ssp_rk3"
+            assert tracer_mass.mass is not None and tracer_mass.with_mass is not None
+
+            def observed_slow(current):
+                context.update(mass=current[1], rho=rho_grid(current[0]))
+                return slow(current)
+
+            def observed_acoustic(current, tendency, dt_s, n_sub, config):
+                rho_base = rho_grid(current[0]) - dt_s * n_sub * sh_synthesis_3d(
+                    model.grid, tendency[0].jrho_prime_hat.data
+                ) / model.terrain_metric.jacobian[..., None]
+                context.update(mass=current[1], rho=rho_base)
+                return acoustic(current, tendency, dt_s, n_sub, config)
+
+            def finish(base, eval_state, state_slow, acoustic_out, slow_tend, dt_eff):
+                context.update(mass=eval_state[1], rho=rho_grid(eval_state[0]))
+                out = tracer_mass.finish_stage(
+                    base, eval_state, state_slow, acoustic_out, slow_tend, dt_eff)
+                before, after = integral(base[1]), integral(out[1])
+                close(before, after)
+                reset(out)
+                observations["stage"].append((before, after, np.asarray(out[1])))
+                return out
+
+            out = original_step(carry, observed_slow, observed_acoustic, dt, cfg,
+                                tracer_mass=tracer_mass._replace(finish_stage=finish))
+            context.update(mass=out[1], rho=rho_grid(out[0]))
+            return out
+
+        def blend(a, b, wa, wb, tracer_mass, increment=False):
+            out = original_blend(a, b, wa, wb, tracer_mass, increment)
+            before, after = wa * integral(a[1]) + wb * integral(b[1]), integral(out[1])
+            close(before, after)
+            # Pin independent coefficients, not only their cancelling integral.
+            np.testing.assert_array_equal(out[1], wa * a[1] + wb * b[1])
+            reset(out)
+            observations["blend"].append((before, after, np.asarray(out[1])))
+            return out
+
+        monkeypatch.setattr(sn, "split_explicit_step", step)
+        monkeypatch.setattr(se, "_blend", blend)
+        monkeypatch.setattr(model, "_build_se_functions", build)
+        monkeypatch.setattr(sn, "tracer_vertical_face_value", faces)
+        with jax.disable_jit():
+            final = model.step(state, 1.0)
+        recovery(t29_spectral_grid_state(model, final)[1])
+        assert len(observations["stage"]) == 3
+        assert len(observations["blend"]) == 2
+        # Three slow, three acoustic-base, three evaluation-face recoveries,
+        # and one final recovery. T29's old helper captured faces in slow.
+        assert len(observations["recovery"]) == 10
+        for kind, rows in observations.items():
+            print("T30 spectral", semi_implicit, kind, [(a.tolist(), b.tolist()) for a, b, *_ in rows])
+
+    @pytest.mark.parametrize("semi_implicit", [False, True])
+    @pytest.mark.parametrize("nonflat", [False, True])
+    def test_jit_eager_and_cpu_entry_parity(self, semi_implicit, nonflat):
+        model, state = t29_spectral_fixture(semi_implicit, nonflat=nonflat)
+        compiled = model.step(state, 1.0)
+        cpu_entry = model._step_on_cpu(state, 1.0)
+        with jax.disable_jit():
+            eager = model.step(state, 1.0)
+        for other in (cpu_entry, eager):
+            for a, b in zip(t29_spectral_grid_state(model, compiled), t29_spectral_grid_state(model, other)):
+                np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12)
+
+    @pytest.mark.parametrize("semi_implicit", [False, True])
+    @pytest.mark.parametrize("nonflat", [False, True])
+    def test_fp32_input_gradients_q_and_w(self, semi_implicit, nonflat):
+        """FP32 input gradients; spectral transforms retain native fp64."""
+        model, state = t29_spectral_fixture(semi_implicit, nonflat=nonflat)
+
+        def loss(q_scale, w_scale):
+            initial = state._replace(
+                tracers_hat=state.tracers_hat.replace(data=q_scale * state.tracers_hat.data),
+                w_hat=state.w_hat.replace(data=w_scale * state.w_hat.data))
+            _, q = t29_spectral_grid_state(model, model.step(initial, 1.0))
+            return jnp.sum(q ** 2)
+
+        one = jnp.asarray(1.0, dtype=jnp.float32)
+        for grad in jax.grad(loss, argnums=(0, 1))(one, one):
+            assert grad.dtype == jnp.float32
+            assert np.isfinite(grad).all() and np.any(np.asarray(grad) != 0)
+
+    @pytest.mark.parametrize("semi_implicit", [False, True])
+    @pytest.mark.parametrize("nonflat", [False, True])
+    def test_fp64_check_grads_q_w_and_jrho(self, semi_implicit, nonflat):
+        from jax.test_util import check_grads
+        model, state = t29_spectral_fixture(semi_implicit, nonflat=nonflat)
+
+        def loss(q_scale, w_scale, jrho_scale):
+            initial = state._replace(
+                tracers_hat=state.tracers_hat.replace(data=q_scale * state.tracers_hat.data),
+                w_hat=state.w_hat.replace(data=w_scale * state.w_hat.data),
+                jrho_prime_hat=state.jrho_prime_hat.replace(
+                    data=jrho_scale * state.jrho_prime_hat.data))
+            rho, q = t29_spectral_grid_state(model, model.step(initial, 1.0))
+            return jnp.sum(q ** 2) + jnp.sum((rho - model.height_coord.rho_ref) ** 2)
+
+        one = jnp.asarray(1.0, dtype=jnp.float64)
+        check_grads(loss, (one, one, one), order=1, modes=["rev"], rtol=1e-3, atol=1e-6)

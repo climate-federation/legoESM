@@ -19,7 +19,9 @@ import functools
 import inspect
 from typing import Callable, NamedTuple
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
@@ -1350,11 +1352,27 @@ def _make_mpas_turbulence(
         # the land solved; a flux is what crosses the boundary.  Momentum and
         # the ocean/ice fraction keep the scheme's own bulk computation.
         _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
+        # The coupler's ice/lake handback alone (an all-ocean run: no land
+        # model, no land fluxes) enters the same injected-flux branch with
+        # zero land terms; the land fraction must then be zero everywhere.
+        _hb_only = (_shf_land is None and forcing is not None
+                    and forcing.get("shflx_hb") is not None)
         _surface_flux = None
         _ow_flux = None
         _ice_flux = None
-        if _shf_land is not None:
-            if f_land is None:
+        # Host-side check on the factory's concrete mask (a jnp reduction
+        # here would be staged under jit); a traced mask is the driver's to
+        # guard (it requires the land model wherever the run has land).
+        if (_hb_only and f_land is not None
+                and not isinstance(f_land, jax.core.Tracer)
+                and bool(np.any(np.asarray(f_land) > 0.0))):
+            raise ValueError(
+                "forcing['shflx_hb'] (coupler ice/lake flux handback) without "
+                "the land's own heat fluxes (forcing['shflx_land']) needs a "
+                "zero land fraction everywhere; this run has land, whose "
+                "share of the surface flux would be dropped.")
+        if _shf_land is not None or _hb_only:
+            if f_land is None and not _hb_only:
                 raise ValueError(
                     "forcing['shflx_land'] requires f_land in the turbulence "
                     "factory (make_physics f_land=...).")
@@ -1370,7 +1388,8 @@ def _make_mpas_turbulence(
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
                 surface_fluxes_at_lowest_level,
             )
-            _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+            _fl = (jnp.zeros((nCells,), dtype=q_sfc.dtype) if f_land is None
+                   else jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells))
             # ``forcing["T_sfc_ocean"]`` (ocean_flux_on_ocean_surface,
             # #1320): the non-land fraction's bulk call sees the ocean/ice
             # surface instead of the land-blended T_sfc/q_sfc, whose land skin
@@ -1463,9 +1482,15 @@ def _make_mpas_turbulence(
                 _ev_bulk = _mix(_evap_of(_lh_ice, _T_ice_t),
                                 _evap_of(_lh_w, _T_wat_t))
                 _ice_flux = (_sh_ice, _lh_ice)
-            _lh_land = jnp.asarray(
-                forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
-            if forcing.get("evap_land") is None:
+            if _hb_only:
+                # No land fluxes: zero where there is no land; NaN where a
+                # (traced, unguarded) mask has land, so a dropped land share
+                # surfaces instead of passing as a plausible flux (VOTED).
+                _zero_land = jnp.where(_fl > 0.0, jnp.nan, 0.0).astype(
+                    q_sfc.dtype)
+            _lh_land = (_zero_land if _hb_only else jnp.asarray(
+                forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells))
+            if not _hb_only and forcing.get("evap_land") is None:
                 raise ValueError(
                     "MPAS land coupling: forcing['lhflx_land'] must come with "
                     "forcing['evap_land'] (the land's own water flux); inverting "
@@ -1476,8 +1501,8 @@ def _make_mpas_turbulence(
             # of the bulk charge,
             # taken BEFORE the heat blend), handed to the kernel as mass.  Land
             # values over pure-ocean cells may be NaN/undefined: masked out.
-            _ev_land = jnp.asarray(
-                forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
+            _ev_land = (_zero_land if _hb_only else jnp.asarray(
+                forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells))
             _ev_land = jnp.where(_fl > 0.0, _ev_land, 0.0)
             _lh_land = jnp.where(_fl > 0.0, _lh_land, 0.0)   # 0 * NaN would poison the blend
             # Coupled column lane with the atmosphere owning land and open
@@ -1499,8 +1524,8 @@ def _make_mpas_turbulence(
             _ev_blend = _w_bulk * _ev_bulk + _fl * _ev_land + _hb_ev
             step_config = step_config._replace(surface=step_config.surface._replace(
                 prescribed_evap_kg_m2_s=_ev_blend))
-            _sh_land = jnp.where(
-                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0)
+            _sh_land = (_zero_land if _hb_only else jnp.where(
+                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0))
             _surface_flux = (
                 _tx, _ty,
                 _w_bulk * _sh + _fl * _sh_land + _hb_sh,
@@ -1545,11 +1570,6 @@ def _make_mpas_turbulence(
                 _ow_flux = (
                     _w_bulk * _sh, _w_bulk * _lh, _w_bulk * _ev_bulk,
                     _w_bulk * _tx, _w_bulk * _ty)
-        elif forcing is not None and forcing.get("shflx_hb") is not None:
-            raise ValueError(
-                "forcing['shflx_hb'] (coupler ice/lake flux handback) is only "
-                "consumed together with the land's own heat fluxes "
-                "(forcing['shflx_land']); without them it would be ignored.")
         elif forcing is not None and forcing.get("T_sfc_ocean") is not None:
             raise ValueError(
                 "forcing['T_sfc_ocean'] (non-land surface anchor) is only "

@@ -87,7 +87,7 @@ def _make_setup(nlev):
 def _pipeline_step(grid, sigma, f, scheme, conv_prog=None, **step_kw):
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
-        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="fv3_duo"),
         convection=scheme, radiation="none", microphysics="none",
     )
     config.validate_strict()
@@ -162,7 +162,7 @@ def test_kf_wrf_variant_pipeline_matches_bridge(setup):
     def step(scheme):
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
-            dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+            dycore=DycoreConfig(model_type="hydrostatic", discretization="fv3_duo"),
             convection=scheme, radiation="none", microphysics="none",
             kain_fritsch_variant="wrf_kfeta",
         )
@@ -224,7 +224,7 @@ class TestCarryAndFiring:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
             dycore=DycoreConfig(
-                model_type="hydrostatic", discretization="cdgrid"),
+                model_type="hydrostatic", discretization="fv3_duo"),
             convection="bechtold", radiation="none",
         )
         # Deterministic default resolves fine.
@@ -247,7 +247,7 @@ class TestMicrophysicsWiring:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
             dycore=DycoreConfig(
-                model_type="hydrostatic", discretization="cdgrid"),
+                model_type="hydrostatic", discretization="fv3_duo"),
             convection="none", radiation="none", microphysics=scheme,
         )
         config.validate_strict()
@@ -290,7 +290,7 @@ def test_tiedtke_pipeline_matches_bridge():
     def step(scheme):
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
-            dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+            dycore=DycoreConfig(model_type="hydrostatic", discretization="fv3_duo"),
             convection=scheme, radiation="none", microphysics="none",
             turbulence="louis",   # tiedtke reads its lagged qvpblten / qfx
         )
@@ -327,7 +327,7 @@ def _bechtold_step_pe(grid, sigma, f, precip_efficiency):
     keeps its OWN 0.7 default (#929)."""
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
-        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="fv3_duo"),
         convection="bechtold", radiation="none", microphysics="none",
         convective_precip_efficiency=precip_efficiency,
         # PE-split ISOLATION (the 2026-07-17 default flips turned on the
@@ -360,7 +360,7 @@ def test_bechtold_precip_efficiency_threads_from_experiment_config_929(setup):
         cfg = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
             dycore=DycoreConfig(
-                model_type="hydrostatic", discretization="cdgrid"),
+                model_type="hydrostatic", discretization="fv3_duo"),
             convection="bechtold", radiation="none",
             convective_precip_efficiency=knob,
         )
@@ -422,7 +422,7 @@ def test_pipeline_stateless_gwd_composite_runs_and_sums(setup):
     def _gwd_step(scheme):
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
-            dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+            dycore=DycoreConfig(model_type="hydrostatic", discretization="fv3_duo"),
             convection="none", radiation="none", microphysics="none",
             gravity_wave_drag=scheme,
         )
@@ -492,7 +492,7 @@ def test_pipeline_numbers_match_bridge(scheme, ccn):
     n_c = jnp.broadcast_to(jnp.where(low, 1.0e8, 0.0), z3.shape)   # per kg
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
-        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="fv3_duo"),
         convection="none", radiation="none", microphysics=scheme,
         # morrison's default warm rain needs CLUBB's relvar (not on this lane)
         **({"morrison_warm_rain_scheme": "kk2000"} if scheme == "morrison" else {}),

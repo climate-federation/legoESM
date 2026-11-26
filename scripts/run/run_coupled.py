@@ -536,8 +536,7 @@ def _amip_main_only_dests(parser):
     import inspect
     import re
     from legoesm.driver.config import (
-        CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS,
-        ZM_WIDTH_FIELDS,
+        CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS, ZM_WIDTH_FIELDS,
     )
     pat = r"(?:args|pre)\.(\w+)|getattr\((?:args|pre),\s*\"(\w+)\""
     read = {m[0] or m[1] for m in re.findall(
@@ -894,9 +893,10 @@ def build_parser():
     parser.add_argument("--ocean-H-max", type=float, default=5500.0,
                         help="Max ocean depth [m] (--ocean dynamic)")
     parser.add_argument("--ocean-ic", default="rest",
-                        choices=["rest", "woa"],
+                        choices=["rest", "woa", "qobs"],
                         help="3D ocean initial condition (--ocean dynamic): "
-                             "'rest' = idealized aquaplanet rest state; 'woa' = "
+                             "'rest' = idealized aquaplanet rest state; 'qobs' = "
+                             "rest with the APE Qobs SST profile (MPAS ocean); 'woa' = "
                              "WOA18 reanalysis T/S + WOA-derived continents "
                              "(realistic cold start; f_land co-derived from the "
                              "same ocean mask, land tile enabled)")
@@ -1079,8 +1079,9 @@ def main(argv=None, *, build_only=False):
     # lapse-rate troposphere + cold stratosphere) is wired for BOTH --grid
     # latlon AND cubed_sphere (validated: CWV ~17/30 kg/m2, precip ~1.5/3.3
     # mm/day, stable; vs the uniform ic="default" scaffold's CWV ~84, precip
-    # ~0).  spectral/mpas have no grid-space T Field, so they keep the uniform
-    # default.  An explicit --ic standard on an unsupported grid still raises
+    # ~0).  spectral has no grid-space T Field; mpas supports ic="standard"
+    # (flat topography only) but its default stays the uniform start unless a
+    # deck selects it.  An explicit --ic standard on an unsupported grid still raises
     # loudly in ExperimentConfig.validate_strict (no silent degrade).
     if args.ic is None:
         args.ic = ("standard" if args.grid_type in ("latlon", "cubed_sphere")
@@ -1196,6 +1197,8 @@ def main(argv=None, *, build_only=False):
             f"latlon:48). The {args.grid_type} atmosphere couples to the lat-lon 3-D "
             "ocean via the conservative cross-grid remap; a co-located 3-D "
             f"ocean dycore for --grid {args.grid_type} does not exist.")
+    if args.ocean != "dynamic" and args.ocean_ic == "qobs":
+        raise SystemExit("--ocean-ic qobs starts the 3-D ocean; it needs --ocean dynamic.")
     if args.ocean == "dynamic":
         # Prognostic 3D LatLonCGridOceanModel.  Grid configurations:
         #   * SHARED lat-lon (default): the ocean lives on the atmosphere's
@@ -1244,11 +1247,14 @@ def main(argv=None, *, build_only=False):
             # cold start is wired (a WOA cold start on the unstructured mesh —
             # woa_ocean_mask/partial cells — is a follow-up).  ocean_config and
             # ocean_ic='woa' are lat-lon-only.
-            if args.ocean_ic != "rest":
+            if args.ocean_ic not in ("rest", "qobs"):
                 raise SystemExit(
                     "--ocean dynamic --grid voronoi is wired for the stratified "
-                    "rest cold start only (--ocean-ic rest); the WOA cold start "
-                    "on the MPAS Voronoi mesh is a follow-up.")
+                    "rest cold starts only (--ocean-ic rest|qobs); the WOA cold "
+                    "start on the MPAS Voronoi mesh is a follow-up.")
+        elif args.ocean_ic == "qobs":
+            raise SystemExit("--ocean-ic qobs is wired for the MPAS ocean "
+                             "(--grid voronoi) only.")
         else:
             from legoesm.ocean.state import LatLonCGridOceanConfig
             overrides["ocean_config"] = LatLonCGridOceanConfig()
@@ -1342,6 +1348,9 @@ def main(argv=None, *, build_only=False):
         overrides["carbon_ic_path"] = args.carbon_ic
     overrides["transient_land_cover"] = args.transient_land_cover
     overrides["land_cover_surfdata"] = args.land_cover_surfdata
+    if getattr(args, "geography", ""):
+        # the geography is the one land mask: the coupler reads the atmosphere's
+        overrides["f_land_mode"] = "analytical"
 
     # Explicit --land-scheme overrides the preset's land model for ANY ocean mode
     # (the woa branch already applied its own default above; re-applying the same

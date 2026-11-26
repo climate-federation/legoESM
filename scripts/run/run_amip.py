@@ -2108,6 +2108,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm). "
                              "When set, activates the slab-land surface tile "
                              "with the land fraction from this file.")
+    parser.add_argument("--geography", type=str, default="",
+                        help="One geography NetCDF (legoesm.grids.geography): "
+                             "terrain, land fraction, barriers, land surface map. "
+                             "Replaces --topography/--land-mask-file/--surfdata/"
+                             "--clm-surfdata-path; needs --geography-regrid.")
+    parser.add_argument("--geography-regrid", type=str, default="",
+                        choices=("", "legacy", "binned"),
+                        help="legacy = the --topography + --land-mask-file path "
+                             "(bitwise); binned = land fraction area-binned.")
+    parser.add_argument("--geography-barrier-width-cells", type=int, default=1,
+                        help="Closed barrier width in model cells (odd).")
     parser.add_argument("--land-fraction-source", type=str,
                         default="topography",
                         choices=("topography", "era5", "zero"),
@@ -3186,9 +3197,12 @@ def _resolve_land_model(args, parser=None, argv=None):
         # one is a contradiction: the run would have land while its own
         # selector said it did not.  Refuse rather than print a name that is
         # not what the run resolves to.
-        if args.land_model == "none" and getattr(args, "land_mask_file", ""):
-            msg = ("--land-model none conflicts with --land-mask-file "
-                   f"{args.land_mask_file!r}: a land-mask file activates the "
+        _mask_flag = next((f"--{n.replace('_', '-')} {getattr(args, n)!r}"
+                           for n in ("land_mask_file", "geography")
+                           if getattr(args, n, "")), "")
+        if args.land_model == "none" and _mask_flag:
+            msg = (f"--land-model none conflicts with {_mask_flag}: a land-mask "
+                   "or geography file activates the "
                    "land tile by itself, so the run would have a land surface "
                    "while asking for none. Drop one of the two.")
             if parser is not None:
@@ -3207,14 +3221,15 @@ def _resolve_land_model(args, parser=None, argv=None):
     return describe_land_model(
         slab_land_active=args.slab_land_active,
         use_multilayer_land=args.use_multilayer_land,
-        has_land_mask=bool(getattr(args, "land_mask_file", "")))
+        has_land_mask=bool(getattr(args, "land_mask_file", "")
+                           or getattr(args, "geography", "")))
 
 
 DRY_RUN_CONFIG_INPUTS = (
     "ic_path", "forcing_path", "sic_path", "ozone_file", "ghg_file",
     "ecrad_ifs_aerosol_file",
     "solar_file", "aerosol_file", "aerosol_ccn_file", "volcanic_aerosol_file",
-    "topography", "land_mask_path", "albedo_land_path",
+    "topography", "land_mask_path", "geography", "albedo_land_path",
     "subgrid_orography_path", "land_ic_path", "clm_surfdata_path",
     "land_cover_surfdata", "surfdata_path", "e3sm_cam_mfcc_table_path",
     "physics_parameterization_checkpoint", "physics_parameterization_stats",
@@ -3576,6 +3591,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         land_mask_path=args.land_mask_file,
+        geography=args.geography,
+        geography_regrid=args.geography_regrid,
+        geography_barrier_width_cells=args.geography_barrier_width_cells,
         land_fraction_source=args.land_fraction_source,
         land_fraction_era5_zarr=args.land_fraction_era5_zarr,
         use_multilayer_land=args.use_multilayer_land,
