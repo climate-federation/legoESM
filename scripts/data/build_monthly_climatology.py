@@ -66,6 +66,8 @@ def climatology(ds, first: int, last: int, optics: bool = False):
         raise ValueError(f"time-dependent coordinates {aux} are not supported")
     out = ds.drop_vars([v for v in ds.data_vars if "time" in ds[v].dims] + ["time"])
     timed = [v for v in ds.data_vars if "time" in ds[v].dims]
+    if optics and not {"aod", "ssa", "asy"} <= set(timed):
+        raise ValueError("--optics needs time-varying aod, ssa and asy")
     means = {v: [] for v in timed}
     for m in range(1, 13):
         idx = np.flatnonzero(sel & (months == m))
@@ -74,8 +76,8 @@ def climatology(ds, first: int, last: int, optics: bool = False):
             if optics and v in ("ssa", "asy"):
                 # aod/ssa/asy must describe the same records: a missing value in
                 # any of them would weight the others on a different subset
-                if any(bool(sub[o].isnull().any()) for o in ("aod", "ssa", "asy")):
-                    raise ValueError(f"--optics: month {m} has missing aod/ssa/asy "
+                if not all(bool(np.isfinite(sub[o].values).all()) for o in ("aod", "ssa", "asy")):
+                    raise ValueError(f"--optics: month {m} has missing or non-finite aod/ssa/asy "
                                      "values in the span; incomplete optical records "
                                      "are refused")
                 w = sub["aod"] * (sub["ssa"] if v == "asy" else 1.0)

@@ -86,6 +86,11 @@ def test_optics_refuses_incomplete_optical_records():
     with pytest.raises(ValueError, match="incomplete optical records"):
         bmc.climatology(ds, 2005, 2006, optics=True)
     bmc.climatology(ds, 2005, 2006)                      # plain means still allowed
+    ds["ssa"].values[12, 0, 0] = np.inf
+    with pytest.raises(ValueError, match="incomplete optical records"):
+        bmc.climatology(ds, 2005, 2006, optics=True)
+    with pytest.raises(ValueError, match="needs time-varying aod, ssa and asy"):
+        bmc.climatology(_ds("days since 2004-01-01").drop_vars("ssa"), 2005, 2006, optics=True)
 
 
 def test_months_since_needs_a_day_one_reference():
