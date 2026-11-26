@@ -106,7 +106,7 @@ class TestSpectralNHState:
         assert rest_state.div_hat.data.shape == (n_sh, nlev)
         assert rest_state.w_hat.data.shape == (n_sh, nlev + 1)
         assert rest_state.theta_prime_hat.data.shape == (n_sh, nlev)
-        assert rest_state.rho_prime_hat.data.shape == (n_sh, nlev)
+        assert rest_state.jrho_prime_hat.data.shape == (n_sh, nlev)
         assert rest_state.phis_hat.data.shape == (n_sh,)
         assert rest_state.tracers_hat.data.ndim >= 2
 
@@ -128,7 +128,7 @@ class TestSpectralNHState:
         assert float(jnp.max(jnp.abs(rest_state.div_hat.data))) == 0.0
         assert float(jnp.max(jnp.abs(rest_state.w_hat.data))) == 0.0
         assert float(jnp.max(jnp.abs(rest_state.theta_prime_hat.data))) == 0.0
-        assert float(jnp.max(jnp.abs(rest_state.rho_prime_hat.data))) == 0.0
+        assert float(jnp.max(jnp.abs(rest_state.jrho_prime_hat.data))) == 0.0
 
 
 # =============================================================================
@@ -149,7 +149,7 @@ class TestSpectralNHTendencies:
         vor_max = float(jnp.max(jnp.abs(tend.vor_hat.data)))
         div_max = float(jnp.max(jnp.abs(tend.div_hat.data)))
         theta_max = float(jnp.max(jnp.abs(tend.theta_prime_hat.data)))
-        rho_max = float(jnp.max(jnp.abs(tend.rho_prime_hat.data)))
+        rho_max = float(jnp.max(jnp.abs(tend.jrho_prime_hat.data)))
 
         assert vor_max < 1e-10, f"Rest state vor tendency too large: {vor_max}"
         assert div_max < 1e-10, f"Rest state div tendency too large: {div_max}"
@@ -168,7 +168,7 @@ class TestSpectralNHTendencies:
         assert tend.div_hat.data.shape == rest_state.div_hat.data.shape
         assert tend.w_hat.data.shape == rest_state.w_hat.data.shape
         assert tend.theta_prime_hat.data.shape == rest_state.theta_prime_hat.data.shape
-        assert tend.rho_prime_hat.data.shape == rest_state.rho_prime_hat.data.shape
+        assert tend.jrho_prime_hat.data.shape == rest_state.jrho_prime_hat.data.shape
         assert tend.tracers_hat.data.shape == rest_state.tracers_hat.data.shape
 
     def test_tendencies_finite(
@@ -181,7 +181,7 @@ class TestSpectralNHTendencies:
 
         for field_name in [
             'vor_hat', 'div_hat', 'w_hat',
-            'theta_prime_hat', 'rho_prime_hat', 'tracers_hat',
+            'theta_prime_hat', 'jrho_prime_hat', 'tracers_hat',
         ]:
             data = getattr(tend, field_name).data
             assert jnp.all(jnp.isfinite(data)), \
@@ -345,7 +345,7 @@ class TestSpectralNHModel:
 
         for field_name in [
             'vor_hat', 'div_hat', 'w_hat',
-            'theta_prime_hat', 'rho_prime_hat',
+            'theta_prime_hat', 'jrho_prime_hat',
         ]:
             data = getattr(new_state, field_name).data
             assert jnp.all(jnp.isfinite(data)), \
@@ -365,7 +365,7 @@ class TestSpectralNHModel:
 
         for field_name in [
             'vor_hat', 'div_hat', 'w_hat',
-            'theta_prime_hat', 'rho_prime_hat',
+            'theta_prime_hat', 'jrho_prime_hat',
         ]:
             data = getattr(state, field_name).data
             assert jnp.all(jnp.isfinite(data)), \
@@ -603,7 +603,8 @@ def t29_spectral_grid_state(model, state):
     nsh, nz, nt = state.tracers_hat.data.shape
     q = sh_synthesis_3d(model.grid, state.tracers_hat.data.reshape(nsh, nz * nt))
     q = q.reshape(model.grid.n_lat, model.grid.n_lon, nz, nt)
-    rho = model.height_coord.rho_ref + sh_synthesis_3d(model.grid, state.rho_prime_hat.data)
+    rho = model.height_coord.rho_ref + sh_synthesis_3d(
+        model.grid, state.jrho_prime_hat.data) / model.terrain_metric.jacobian[..., None]
     return rho, q
 
 
@@ -689,16 +690,18 @@ class TestT29SpectralMass:
         constant = state._replace(tracers_hat=state.tracers_hat.replace(
             data=jnp.stack([q_const, q_const], axis=-1)))
         rc0, qc0 = t29_spectral_grid_state(model, constant)
-        rc1, qc1 = t29_spectral_grid_state(model, model.step(constant, 1.0))
-        if nonflat:
-            # Per-case research measurements, NOT a blanket drift bound.
-            # Both packed tracers are the same constant, not independent cases.
-            expected = 9.553411842860848e-7 if semi_implicit else 9.59150033702505e-7
-            drift = np.max(np.abs(np.asarray(qc1) - 0.01), axis=(0, 1, 2)) / 0.01
-            print("T29 terrain constant drift", semi_implicit, drift.tolist(), "rough budget", row)
-            np.testing.assert_allclose(drift, [expected, expected], rtol=1e-6, atol=1e-12)
-        else:
-            np.testing.assert_allclose(qc1, 0.01, rtol=0, atol=1e-12)
+        constant1 = model.step(constant, 1.0)
+        rc1, qc1 = t29_spectral_grid_state(model, constant1)
+        # J*rho' prognostic (#2682): a uniform tracer stays uniform on
+        # terrain too (was 9.6e-7 per step with rho' prognostic).
+        drift = np.max(np.abs(np.asarray(qc1) - 0.01), axis=(0, 1, 2)) / 0.01
+        print("spectral constant drift", nonflat, semi_implicit, drift.tolist())
+        np.testing.assert_allclose(qc1, 0.01, rtol=0, atol=1e-12)
+        # Dry mass closes without the (opt-in, here off) fixer.
+        m0 = float(model.compute_dry_mass(constant))
+        m1 = float(model.compute_dry_mass(constant1))
+        print("spectral dry mass drift", nonflat, semi_implicit, m1 / m0 - 1.0)
+        assert abs(m1 / m0 - 1.0) < 1e-13
         row = global_inventory_budget(volume, rc0, qc0, rc1, qc1, np.zeros(2))
         print("T29 spectral constant budget", nonflat, semi_implicit, row)
         assert row["verdicts"] == ["CONSERVES", "CONSERVES"], row
@@ -737,7 +740,7 @@ class TestT29SpectralMass:
         grid, hc, metric = model.grid, model.height_coord, model.terrain_metric
         w = sh_synthesis_3d(grid, state.w_hat.data)
         theta = sh_synthesis_3d(grid, state.theta_prime_hat.data)
-        rho = sh_synthesis_3d(grid, state.rho_prime_hat.data)
+        rho = sh_synthesis_3d(grid, state.jrho_prime_hat.data) / metric.jacobian[..., None]
         acoustic = (sn._acoustic_substeps_grid_semi_implicit if semi_implicit
                     else sn._acoustic_substeps_grid)
         (_, _, final_rho), flux = acoustic(
@@ -772,7 +775,8 @@ class TestT29SpectralMass:
             assert np.all(np.abs(a - b) / norm <= 1e-12), (a - b) / norm
 
         def rho_grid(s):
-            return model.height_coord.rho_ref + sh_synthesis_3d(model.grid, s.rho_prime_hat.data)
+            return model.height_coord.rho_ref + sh_synthesis_3d(
+                model.grid, s.jrho_prime_hat.data) / model.terrain_metric.jacobian[..., None]
 
         def reset(carry):
             np.testing.assert_array_equal(carry[0].tracers_hat.data, 0.0)
@@ -818,7 +822,8 @@ class TestT29SpectralMass:
 
             def observed_acoustic(current, tendency, dt_s, n_sub, config):
                 rho_base = rho_grid(current[0]) - dt_s * n_sub * sh_synthesis_3d(
-                    model.grid, tendency[0].rho_prime_hat.data)
+                    model.grid, tendency[0].jrho_prime_hat.data
+                ) / model.terrain_metric.jacobian[..., None]
                 context.update(mass=current[1], rho=rho_base)
                 return acoustic(current, tendency, dt_s, n_sub, config)
 
@@ -894,16 +899,18 @@ class TestT29SpectralMass:
 
     @pytest.mark.parametrize("semi_implicit", [False, True])
     @pytest.mark.parametrize("nonflat", [False, True])
-    def test_fp64_check_grads_q_and_w(self, semi_implicit, nonflat):
+    def test_fp64_check_grads_q_w_and_jrho(self, semi_implicit, nonflat):
         from jax.test_util import check_grads
         model, state = t29_spectral_fixture(semi_implicit, nonflat=nonflat)
 
-        def loss(q_scale, w_scale):
+        def loss(q_scale, w_scale, jrho_scale):
             initial = state._replace(
                 tracers_hat=state.tracers_hat.replace(data=q_scale * state.tracers_hat.data),
-                w_hat=state.w_hat.replace(data=w_scale * state.w_hat.data))
-            _, q = t29_spectral_grid_state(model, model.step(initial, 1.0))
-            return jnp.sum(q ** 2)
+                w_hat=state.w_hat.replace(data=w_scale * state.w_hat.data),
+                jrho_prime_hat=state.jrho_prime_hat.replace(
+                    data=jrho_scale * state.jrho_prime_hat.data))
+            rho, q = t29_spectral_grid_state(model, model.step(initial, 1.0))
+            return jnp.sum(q ** 2) + jnp.sum((rho - model.height_coord.rho_ref) ** 2)
 
         one = jnp.asarray(1.0, dtype=jnp.float64)
-        check_grads(loss, (one, one), order=1, modes=["rev"], rtol=1e-3, atol=1e-6)
+        check_grads(loss, (one, one, one), order=1, modes=["rev"], rtol=1e-3, atol=1e-6)

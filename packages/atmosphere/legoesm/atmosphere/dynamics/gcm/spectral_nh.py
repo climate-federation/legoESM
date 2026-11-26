@@ -9,8 +9,14 @@ Prognostic variables (spectral):
     div_hat         : Spectral divergence, (n_sh, nlev)
     w_hat           : Spectral vertical velocity, (n_sh, nlev+1)
     theta_prime_hat : Spectral pot. temp. perturbation, (n_sh, nlev)
-    rho_prime_hat   : Spectral density perturbation, (n_sh, nlev)
+    jrho_prime_hat  : Spectral J*rho' (Jacobian-weighted density
+                      perturbation), (n_sh, nlev)
     tracers_hat     : Spectral tracers, (n_sh, nlev, n_tracers)
+
+J*rho' (not rho') is the prognostic density (#2682): continuity and the
+paired tracer mass P(J*rho*q) are advanced by the same operators on the
+same variable, so dry mass and tracer inventory close to round-off and a
+uniform tracer stays uniform over terrain.
 
 Time integration: split-explicit RK3.
     Slow mode  : spectral horizontal operators (SSP-RK3 outer)
@@ -89,12 +95,14 @@ class SpectralNHState(NamedTuple):
     3D spectral half-level: (n_sh, nlev+1) complex128  (for w)
     2D spectral:            (n_sh,) complex128
     Tracers:                (n_sh, nlev, n_tracers) complex128
+
+    ``jrho_prime_hat`` holds J*rho' (#2682): grid rho' = synth / J.
     """
     vor_hat: Field
     div_hat: Field
     w_hat: Field
     theta_prime_hat: Field
-    rho_prime_hat: Field
+    jrho_prime_hat: Field
     phis_hat: Field
     tracers_hat: Field
 
@@ -197,7 +205,7 @@ def spectral_nh_slow_tendencies(
             state.vor_hat.data,
             state.div_hat.data,
             state.theta_prime_hat.data,
-            state.rho_prime_hat.data,
+            state.jrho_prime_hat.data,
         ],
         axis=-1,
     )  # (n_sh, nlev, 4)
@@ -211,7 +219,7 @@ def spectral_nh_slow_tendencies(
     vor = _vdtr_grid[..., 0]
     div = _vdtr_grid[..., 1]
     theta_p = _vdtr_grid[..., 2]
-    rho_p = _vdtr_grid[..., 3]
+    rho_p = _vdtr_grid[..., 3] / J[..., None]   # prognostic is J*rho'
     w = _vdtrw_grid_flat[..., nlev_t * 4:]              # (n_lat, n_lon, nlev+1)
 
     n_tracers = state.tracers_hat.data.shape[-1] if state.tracers_hat.data.ndim >= 3 else 0
@@ -347,25 +355,15 @@ def spectral_nh_slow_tendencies(
     # acoustic substeps (forward-backward scheme) to avoid double counting
     # in the split-explicit time integration (Skamarock & Klemp 2008).
     flux_theta_div = im_over_a[:, None] * theta_u_oc2 - one_over_a * theta_v_dmu
-    # Continuity equation (rho'): horizontal only — vertical mass flux
-    # divergence handled by acoustic step.
+    # Continuity for the prognostic J*rho': minus the spectral divergence
+    # of the J*rho*v flux, kept in spectral space (no /J round trip, #2682).
+    # Vertical mass-flux divergence is handled by the acoustic step.
     flux_rho_div = im_over_a[:, None] * rho_u_oc2 - one_over_a * rho_v_dmu
+    drho_p_hat = -flux_rho_div
 
-    # Sum theta_total*div in grid first, transform once: ``theta_div_hat``
-    # and ``rho_horiz_tend_grid`` both feed into a single sh_analysis_3d
-    # but rho_horiz needs a sh_synthesis_3d on flux_rho_div first; batch
-    # the two analyses into one stacked call.
-    #
-    # Loop 187 — when ``n_tracers > 0`` the tracer block (section 15)
-    # also runs an ``sh_analysis_3d(dq_grid_sum_flat)`` whose trailing
-    # axis is ``nlev*n_tracers``.  Defer the (theta_div, rho_horiz)
-    # analysis past the tracer block and ``jnp.concatenate`` all three
-    # grid inputs along the trailing axis, then run a single
-    # ``sh_analysis_3d`` — different trailing-axis sizes
-    # (``nlev*2 + nlev*n_tracers``) all flow through the same
-    # ``segment_sum + projection`` machinery.  2 SH analyses → 1 when
-    # tracers are active.  Same exploit as Loops 184/185.
-    rho_horiz_tend_grid = -sh_synthesis_3d(grid, flux_rho_div) / J[..., None]
+    # Loop 187 — when ``n_tracers > 0`` the theta_div analysis is merged
+    # with the tracer block's ``sh_analysis_3d(dq_grid_sum_flat)`` along
+    # the trailing axis (one SH analysis instead of two).
     _theta_div_grid = theta_total * div
     n_lat_p2, n_lon_p2, nlev_p2 = _theta_div_grid.shape
 
@@ -446,32 +444,20 @@ def spectral_nh_slow_tendencies(
                 (grid.n_lat, grid.n_lon, nlev_tr * n_tracers),
                 dtype=_theta_div_grid.dtype,
             )
-        # Loop 187 — merge the (theta_div, rho_horiz) analysis batch
-        # (section 13) into the tracer analysis: concatenate the three
-        # grid inputs along the trailing axis and run a single
-        # ``sh_analysis_3d``.  Trailing axis = ``nlev*2 + nlev*n_tracers``.
+        # Loop 187 — merge the theta_div analysis (section 13) into the
+        # tracer analysis.  Trailing axis = ``nlev + nlev*n_tracers``.
         _all_an_input = jnp.concatenate(
-            [_theta_div_grid, rho_horiz_tend_grid, dq_grid_sum_flat],
-            axis=-1,
-        )  # (n_lat, n_lon, nlev*(2 + n_tracers))
+            [_theta_div_grid, dq_grid_sum_flat], axis=-1,
+        )  # (n_lat, n_lon, nlev*(1 + n_tracers))
         _all_an_hat = sh_analysis_3d(grid, _all_an_input)
         theta_div_hat = _all_an_hat[:, :nlev_p2]
-        drho_p_hat = _all_an_hat[:, nlev_p2:nlev_p2 * 2]
-        dq_hat_flat = -flux_q_div_flat + _all_an_hat[:, nlev_p2 * 2:]
+        dq_hat_flat = -flux_q_div_flat + _all_an_hat[:, nlev_p2:]
 
         # Restore the (n_sh, nlev, n_tracers) layout that matches
         # ``state.tracers_hat.data``.
         dtracers_hat = dq_hat_flat.reshape(n_sh_t, nlev_tr, n_tracers)
     else:
-        # No tracers — keep the (theta_div, rho_horiz) 2-batch analysis.
-        _theta_rho_pair = jnp.stack(
-            [_theta_div_grid, rho_horiz_tend_grid], axis=-1,
-        )
-        _theta_rho_hat = sh_analysis_3d(
-            grid, _theta_rho_pair.reshape(n_lat_p2, n_lon_p2, nlev_p2 * 2),
-        ).reshape(-1, nlev_p2, 2)
-        theta_div_hat = _theta_rho_hat[..., 0]
-        drho_p_hat = _theta_rho_hat[..., 1]
+        theta_div_hat = sh_analysis_3d(grid, _theta_div_grid)
         dtracers_hat = jnp.zeros_like(state.tracers_hat.data)
 
     dtheta_p_hat = -flux_theta_div + theta_div_hat
@@ -521,7 +507,8 @@ def spectral_nh_slow_tendencies(
         dvor_hat = dvor_hat + physics_tendency.vor_hat.data
         ddiv_hat = ddiv_hat + physics_tendency.div_hat.data
         dtheta_p_hat = dtheta_p_hat + physics_tendency.theta_prime_hat.data
-        drho_p_hat = drho_p_hat + physics_tendency.rho_prime_hat.data
+        # Physics density tendency is in the prognostic's units, d(J*rho')/dt.
+        drho_p_hat = drho_p_hat + physics_tendency.jrho_prime_hat.data
         dtracers_hat = dtracers_hat + physics_tendency.tracers_hat.data
 
     # --- 19. Orszag 2/3-rule de-aliasing of the nonlinear slow tendencies ---
@@ -557,7 +544,7 @@ def spectral_nh_slow_tendencies(
         div_hat=state.div_hat.replace(data=ddiv_hat),
         w_hat=state.w_hat.replace(data=dw_hat),
         theta_prime_hat=state.theta_prime_hat.replace(data=dtheta_p_hat),
-        rho_prime_hat=state.rho_prime_hat.replace(data=drho_p_hat),
+        jrho_prime_hat=state.jrho_prime_hat.replace(data=drho_p_hat),
         phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         tracers_hat=state.tracers_hat.replace(data=dtracers_hat),
     )
@@ -833,13 +820,13 @@ class SpectralCompressibleEulerModel:
         self._target_mass = target_mass
 
     def compute_dry_mass(self, state) -> jax.Array:
-        """Global dry mass ``∫ J · (rho_ref + rho') · dz · dA`` (fp64)."""
-        rho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)
-        rho_total = self.height_coord.rho_ref + rho_p_grid  # (n_lat, n_lon, nlev)
+        """Global dry mass ``∫ (J · rho_ref + J·rho') · dz · dA`` (fp64)."""
+        jrho_p_grid = sh_synthesis_3d(self.grid, state.jrho_prime_hat.data)
         J = self.terrain_metric.jacobian                    # (n_lat, n_lon)
+        jrho_total = J[..., None] * self.height_coord.rho_ref + jrho_p_grid
         dz = self.height_coord.dz                           # (nlev,)
         col_mass = jnp.sum(
-            J[..., None] * rho_total * dz[None, None, :], axis=-1,
+            jrho_total * dz[None, None, :], axis=-1,
         )                                                   # (n_lat, n_lon)
         acc = jnp.float64
         return jnp.sum(
@@ -853,31 +840,26 @@ class SpectralCompressibleEulerModel:
         Uniform additive correction in physical space (matches the
         cubed-sphere / MPAS ``fix_mass_nonhydrostatic`` convention):
         ``Δρ = (target − current) / (∫ J · dz · dA)``.  Adding ``Δρ`` to
-        ``rho'`` in physical space is equivalent to adding
-        ``Δρ · sqrt(4π)`` to ``rho_prime_hat[0, :]`` (the (n=0,m=0) row),
-        broadcast across all vertical levels.
+        ``rho'`` adds ``Δρ · J`` to the prognostic ``J·rho'``, i.e.
+        ``Δρ · analysis(J)`` to every level of ``jrho_prime_hat``.  With
+        J·rho' prognostic the dry mass already closes to round-off, so
+        this opt-in fixer only removes round-off.
         """
-        rho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)
-        rho_total = self.height_coord.rho_ref + rho_p_grid
-        J = self.terrain_metric.jacobian
-        dz = self.height_coord.dz
-        col_mass = jnp.sum(
-            J[..., None] * rho_total * dz[None, None, :], axis=-1,
-        )
+        current_mass = self.compute_dry_mass(state)
         if target_mass is None:
             target_mass = self._target_mass
+        J = self.terrain_metric.jacobian
+        dz = self.height_coord.dz
         acc = jnp.float64
         area_acc = self.grid.grid_area.astype(acc)
-        current_mass = jnp.sum(col_mass.astype(acc) * area_acc)
         total_vol = jnp.sum(J.astype(acc) * area_acc) * jnp.sum(dz.astype(acc))
         delta_rho = (target_mass - current_mass) / total_vol
-        sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
-        rho_hat = state.rho_prime_hat.data
-        rho_hat_new = rho_hat.at[0, :].add(
-            (delta_rho * sqrt_4pi).astype(rho_hat.dtype),
-        )
+        jrho_hat = state.jrho_prime_hat.data
+        j_hat = sh_analysis(self.grid, J.astype(acc))      # (n_sh,)
+        jrho_hat_new = jrho_hat + (delta_rho * j_hat)[:, None].astype(
+            jrho_hat.dtype)
         return state._replace(
-            rho_prime_hat=state.rho_prime_hat.replace(data=rho_hat_new),
+            jrho_prime_hat=state.jrho_prime_hat.replace(data=jrho_hat_new),
         )
 
     def _build_se_functions(self, *, paired=False):
@@ -902,12 +884,13 @@ class SpectralCompressibleEulerModel:
             n_sh_a, nlev_a = s.theta_prime_hat.data.shape
             s.w_hat.data.shape[-1]  # nlev + 1
             theta_rho_w_hat = jnp.concatenate(
-                [s.theta_prime_hat.data, s.rho_prime_hat.data, s.w_hat.data],
+                [s.theta_prime_hat.data, s.jrho_prime_hat.data, s.w_hat.data],
                 axis=-1,
             )  # (n_sh, 2*nlev + (nlev+1))
             theta_rho_w_grid = sh_synthesis_3d(self.grid, theta_rho_w_hat)
+            jac = self.terrain_metric.jacobian[..., None]
             theta_p_grid = theta_rho_w_grid[..., :nlev_a]
-            rho_p_grid = theta_rho_w_grid[..., nlev_a:2 * nlev_a]
+            rho_p_grid = theta_rho_w_grid[..., nlev_a:2 * nlev_a] / jac
             w_grid = theta_rho_w_grid[..., 2 * nlev_a:]
 
             # Run acoustic substeps in grid space
@@ -916,25 +899,29 @@ class SpectralCompressibleEulerModel:
                 if self.config.semi_implicit_acoustic
                 else _acoustic_substeps_grid
             )
-            acoustic_result = acoustic_fn(
+            (w_new, theta_p_new, _), integrated_flux = acoustic_fn(
                 w_grid, theta_p_grid, rho_p_grid,
                 dt_s, n_sub,
                 self.height_coord, self.terrain_metric, self.config,
-                return_mass_flux=paired,
+                return_mass_flux=True,
             )
-            if paired:
-                acoustic_result, integrated_flux = acoustic_result
-            w_new, theta_p_new, rho_p_new = acoustic_result
+            # J*rho' increment from the stage-integrated vertical mass flux
+            # (positive upward, top-to-bottom index): bottom minus top over
+            # dz, no /J.  Same formula as the paired tracer-mass update.
+            jrho_incr = (
+                integrated_flux[..., 1:] - integrated_flux[..., :-1]
+            ) / self.height_coord.dz
 
             # Convert back to spectral via the same concat trick — 3 SH
             # analyses → 1.  Slot order matches the synthesis so we can
-            # slice the result back into (theta_hat, rho_hat, w_hat).
+            # slice the result back into (theta_hat, jrho_incr_hat, w_hat).
             theta_rho_w_new = jnp.concatenate(
-                [theta_p_new, rho_p_new, w_new], axis=-1,
+                [theta_p_new, jrho_incr, w_new], axis=-1,
             )  # (n_lat, n_lon, 2*nlev + (nlev+1))
             theta_rho_w_new_hat = sh_analysis_3d(self.grid, theta_rho_w_new)
             theta_p_new_hat = theta_rho_w_new_hat[..., :nlev_a]
-            rho_p_new_hat = theta_rho_w_new_hat[..., nlev_a:2 * nlev_a]
+            rho_p_new_hat = (s.jrho_prime_hat.data
+                             + theta_rho_w_new_hat[..., nlev_a:2 * nlev_a])
             w_new_hat = theta_rho_w_new_hat[..., 2 * nlev_a:]
             result = SpectralNHState(
                 vor_hat=s.vor_hat,
@@ -943,7 +930,7 @@ class SpectralCompressibleEulerModel:
                 theta_prime_hat=s.theta_prime_hat.replace(
                     data=theta_p_new_hat,
                 ),
-                rho_prime_hat=s.rho_prime_hat.replace(
+                jrho_prime_hat=s.jrho_prime_hat.replace(
                     data=rho_p_new_hat,
                 ),
                 phis_hat=s.phis_hat,
@@ -965,8 +952,8 @@ class SpectralCompressibleEulerModel:
         q_hat=A(PM/(J*rho)); terrain uses q_hat=A(PM/P(J*rho)).
         KNOWN DIFFERENCE: the final projection of q generally loses local
         and pointwise mass equality. Flat-J global inventory instead relies
-        on native discrete orthogonality and represented rho. Terrain
-        recovery has a measured uniform-tracer gap documented below.
+        on native discrete orthogonality and represented rho. With J*rho'
+        prognostic (#2682) terrain recovery preserves a uniform tracer.
         Source-free/fixer-free tests require the global invariant;
         anchored fixer ordering is unchanged.
         Physics sources are re-projected, with the mask applied to the mass
@@ -981,7 +968,7 @@ class SpectralCompressibleEulerModel:
 
         grid = self.grid
         hc = self.height_coord
-        jac = self.terrain_metric.jacobian[..., None, None]
+        jac = self.terrain_metric.jacobian[..., None]
         mask = dealiasing_mask(grid, self.config.dealiasing_fraction)[:, None, None]
 
         def analysis(q):
@@ -994,30 +981,24 @@ class SpectralCompressibleEulerModel:
             return sh_synthesis_3d(grid, q_hat.reshape(nsh, nz * nt)).reshape(
                 grid.n_lat, grid.n_lon, nz, nt)
 
-        def rho_prime(s):
-            return sh_synthesis_3d(grid, s.rho_prime_hat.data)
+        def jrho(s):
+            # Grid J*rho (total); the prognostic already carries J*rho'.
+            return jac * hc.rho_ref + sh_synthesis_3d(grid, s.jrho_prime_hat.data)
 
-        def tracer_mass(q_hat, rho):
-            return analysis(jac * rho[..., None] * synthesis(q_hat))
+        def tracer_mass(q_hat, jr):
+            return analysis(jr[..., None] * synthesis(q_hat))
 
-        def recover(mass_hat, rho):
+        def recover(mass_hat, jr):
             """Recover q using the geometry's statically selected denominator.
 
-            KNOWN DIFFERENCE: uniform tracer is not preserved over terrain.
-            Historical T29 research (not validation of this Hooks port):
-            on the supplemental TC2a-metric fixture, one source/fixer-free
-            dt=1 s step measured max relative drift 9.59e-7 (explicit) /
-            9.55e-7 (semi-implicit); flat control ~1.7e-14, terrain global
-            inventory residual ~1e-15. This is not a TC2a integration.
-            Minimum P(J*rho) was 0.0464 at FINAL recovery only; intermediate
-            recovery positivity is UNMEASURED. PLAUSIBLE cause: density's
-            terrain update is not mass-consistent with this tracer recovery;
-            not isolated by that experiment. Follow-up: store J*rho as
-            spectral density (issue #2682).
+            Terrain: q = A(S(M) / S(A(J*rho))).  Mass M and J*rho' receive
+            identical spectral increments (slow flux divergence, acoustic
+            integrated flux, RK blends), so M = c * P(J*rho) for a uniform
+            tracer c and the ratio stays c to round-off (#2682).
             """
             if self._flat_tracer_metric:
-                return analysis(synthesis(mass_hat) / (jac * rho[..., None]))
-            return analysis(synthesis(mass_hat) / synthesis(analysis(jac * rho[..., None])))
+                return analysis(synthesis(mass_hat) / jr[..., None])
+            return analysis(synthesis(mass_hat) / synthesis(analysis(jr[..., None])))
 
         def reconstruct(q_hat):
             # No spectral vertical selector exists: keep native centred faces.
@@ -1039,7 +1020,7 @@ class SpectralCompressibleEulerModel:
             )
             horizontal = -flux_q_div.reshape(grid.n_sh, nz, nt) * mask
             # Physics sources are q/s; convert with ACTUAL evaluation density.
-            source = tracer_mass(tend.tracers_hat.data, hc.rho_ref + rho_prime(s))
+            source = tracer_mass(tend.tracers_hat.data, jrho(s))
             return tend, horizontal + source * mask
 
         def flux_tendency(integrated_flux, faces):
@@ -1058,7 +1039,7 @@ class SpectralCompressibleEulerModel:
 
         def physical(carry):
             s, mass_hat = carry
-            return set_q(s, recover(mass_hat, hc.rho_ref + rho_prime(s)))
+            return set_q(s, recover(mass_hat, jrho(s)))
 
         def slow_carry(carry):
             s = physical(carry)
@@ -1072,8 +1053,9 @@ class SpectralCompressibleEulerModel:
             tend = slow_tend[0]
             stage_dt = dt_s * n_sub
             # Preserve T29's base-density recovery and operation order.
-            rho_base = hc.rho_ref + rho_prime(s) - stage_dt * rho_prime(tend)
-            s = set_q(s, recover(mass_hat, rho_base))
+            jrho_base = jrho(s) - stage_dt * sh_synthesis_3d(
+                grid, tend.jrho_prime_hat.data)
+            s = set_q(s, recover(mass_hat, jrho_base))
             updated, integrated_flux = acoustic_fn(s, tend, dt_s, n_sub, cfg)
             return (zero_q(updated), mass_hat), integrated_flux
 
@@ -1087,14 +1069,14 @@ class SpectralCompressibleEulerModel:
             return zero_q(updated), mass_hat
 
         hooks = TracerMassHooks(
-            density=lambda c: hc.rho_ref + rho_prime(c[0]),
+            density=lambda c: jrho(c[0]) / jac,
             tracers=lambda c: c[0].tracers_hat.data,
             with_tracers=lambda c, q: (set_q(c[0], q), c[1]),
             finish_stage=finish_stage,
             mass=lambda c: c[1],
             with_mass=lambda c, m: (zero_q(c[0]), m),
         )
-        mass_hat = tracer_mass(state.tracers_hat.data, hc.rho_ref + rho_prime(state))
+        mass_hat = tracer_mass(state.tracers_hat.data, jrho(state))
         carry = split_explicit_step(
             (zero_q(state), mass_hat), slow_carry, acoustic_carry, dt, se_config,
             tracer_mass=hooks,
@@ -1341,8 +1323,8 @@ def dcmip25_tc1_init_spectral(
         theta_prime_hat=Field(
             data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K",
         ),
-        rho_prime_hat=Field(
-            data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3",
+        jrho_prime_hat=Field(
+            data=rho_p_hat, name="jrho_prime_hat", dims=dims_3d, units="kg/m^3",
         ),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
         tracers_hat=Field(
@@ -1385,8 +1367,8 @@ def nh_rest_state_spectral(
         theta_prime_hat=Field(
             data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K",
         ),
-        rho_prime_hat=Field(
-            data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3",
+        jrho_prime_hat=Field(
+            data=rho_p_hat, name="jrho_prime_hat", dims=dims_3d, units="kg/m^3",
         ),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
         tracers_hat=Field(
@@ -1498,7 +1480,7 @@ def dcmip25_tc2_init_spectral(
         div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
         w_hat=Field(data=w_hat, name="w_hat", dims=dims_w, units="m/s"),
         theta_prime_hat=Field(data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K"),
-        rho_prime_hat=Field(data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3"),
+        jrho_prime_hat=Field(data=rho_p_hat, name="jrho_prime_hat", dims=dims_3d, units="kg/m^3"),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
         tracers_hat=Field(data=tracers_hat, name="tracers_hat", dims=dims_tr, units="kg/kg"),
     ), height_coord, terrain_metric
@@ -1613,7 +1595,7 @@ def dcmip25_tc3_init_spectral(
         div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
         w_hat=Field(data=w_hat, name="w_hat", dims=dims_w, units="m/s"),
         theta_prime_hat=Field(data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K"),
-        rho_prime_hat=Field(data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3"),
+        jrho_prime_hat=Field(data=rho_p_hat, name="jrho_prime_hat", dims=dims_3d, units="kg/m^3"),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
         tracers_hat=Field(data=tracers_hat, name="tracers_hat", dims=dims_tr, units="kg/kg"),
     ), height_coord, terrain_metric

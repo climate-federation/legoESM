@@ -1258,7 +1258,7 @@ class TestCAMSEReference:
         # All perturbations should remain near zero
         from legoesm.grids.gaussian import sh_synthesis_3d
         theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
-        rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data)
+        rho_p = sh_synthesis_3d(grid, state.jrho_prime_hat.data)
         w = sh_synthesis_3d(grid, state.w_hat.data)
 
         theta_max = float(jnp.max(jnp.abs(theta_p)))
@@ -1333,7 +1333,7 @@ class TestCAMSEReference:
 
         # Check 1: all fields still finite (no blowup from split-explicit)
         theta_p_final = sh_synthesis_3d(grid, state.theta_prime_hat.data)
-        rho_p_final = sh_synthesis_3d(grid, state.rho_prime_hat.data)
+        rho_p_final = sh_synthesis_3d(grid, state.jrho_prime_hat.data)
         w_final = sh_synthesis_3d(grid, state.w_hat.data)
 
         assert jnp.all(jnp.isfinite(theta_p_final)), (

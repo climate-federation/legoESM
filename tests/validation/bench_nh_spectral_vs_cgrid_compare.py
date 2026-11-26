@@ -171,7 +171,7 @@ def main():
     ]
     sp_max_rho = [
         float(np.max(np.abs(np.array(
-            sh_synthesis_3d(grid_sp, state_sp.rho_prime_hat.data),
+            sh_synthesis_3d(grid_sp, state_sp.jrho_prime_hat.data),
         )))),
     ]
 
@@ -185,7 +185,7 @@ def main():
                 sh_synthesis_3d(grid_sp, state_sp.theta_prime_hat.data),
             )
             rp_g = np.array(
-                sh_synthesis_3d(grid_sp, state_sp.rho_prime_hat.data),
+                sh_synthesis_3d(grid_sp, state_sp.jrho_prime_hat.data),
             )
             sp_times.append(t_min)
             sp_max_w.append(float(np.max(np.abs(w_g))))

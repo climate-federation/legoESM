@@ -59,7 +59,7 @@ def test_nh_mass_conservation_mpas():
 
 
 def test_nh_mass_conservation_spectral():
-    """Spectral NH (iter-9): ``rho_prime_hat[0,:] += Δρ·sqrt(4π)``."""
+    """Spectral NH (iter-9): ``jrho_prime_hat += Δρ·analysis(J)``."""
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
         SpectralCompressibleEulerModel, SpectralNHConfig,
@@ -131,7 +131,7 @@ def test_long_run_nh_mass_conservation_spectral():
 
     Parallel to iter-33/34/60 long-run guards on cube PE / cube SW /
     cube NH / MPAS NH.  Validates iter-9 spectral NH anchored fixer
-    (`rho_prime_hat[0,:] += Δρ·sqrt(4π)`).  Direct measurement: drift
+    (`jrho_prime_hat += Δρ·analysis(J)`).  Direct measurement: drift
     = 1.94e-16 on T21 spectral NH with DCMIP-2025 TC1 init.
     """
     from legoesm.grids.gaussian import create_gaussian_grid

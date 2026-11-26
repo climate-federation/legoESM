@@ -509,7 +509,8 @@ def spectral_level_quadrature_budget(area, field):
 def spectral_horizontal_quadrature_probe(grid, hc, metric, state, label, datasets):
     """Compare actual horizontal continuity with the canonical flux divergence.
 
-    Horizontal divergence is positive out; density tendency is its negative / J.
+    Horizontal divergence is positive out; the prognostic J*rho' tendency is
+    its negative (#2682).
     No acoustic step, tracer-mass closure or temporal-order claim is made here.
     """
     import jax.numpy as jnp
@@ -525,7 +526,7 @@ def spectral_horizontal_quadrature_probe(grid, hc, metric, state, label, dataset
     tendency = sn.spectral_nh_slow_tendencies(
         state, grid, hc, metric, cfg, physics_tendency=None)
     theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
-    rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data)
+    rho_p = sh_synthesis_3d(grid, state.jrho_prime_hat.data) / metric.jacobian[..., None]
     _, rho = sanitize_theta_rho(hc.theta_ref + theta_p, hc.rho_ref + rho_p)
     u_cos, v_cos = uv_from_vordiv_3d(grid, state.vor_hat.data, state.div_hat.data)
     cos_lat = jnp.clip(grid.cos_lat[:, None, None], sn._COS_LAT_MIN, None)
@@ -533,11 +534,10 @@ def spectral_horizontal_quadrature_probe(grid, hc, metric, state, label, dataset
     jac = metric.jacobian[..., None]
     div_hat = vordiv_from_uv_3d(grid, jac * rho * u, jac * rho * vv)[1]
     divergence = sh_synthesis_3d(grid, div_hat)
-    # Match the actual caller's grid->spectral projection and final de-aliasing.
-    expected_hat = sh_analysis_3d(grid, -divergence / jac)
-    expected_hat = expected_hat * dealiasing_mask(grid, cfg.dealiasing_fraction)[:, None]
+    # Match the actual caller's final de-aliasing (no grid round trip).
+    expected_hat = -div_hat * dealiasing_mask(grid, cfg.dealiasing_fraction)[:, None]
     expected = sh_synthesis_3d(grid, expected_hat)
-    actual = sh_synthesis_3d(grid, tendency.rho_prime_hat.data)
+    actual = sh_synthesis_3d(grid, tendency.jrho_prime_hat.data)
     area = np.asarray(grid.grid_area)
     idx00 = np.flatnonzero((np.asarray(grid.ls) == 0) & (np.asarray(grid.ms) == 0))
     assert len(idx00) == 1
@@ -548,7 +548,7 @@ def spectral_horizontal_quadrature_probe(grid, hc, metric, state, label, dataset
     result = dict(
         path="spectral NH/height", statistic="horizontal quadrature per level",
         fixture=label, config=cfg._asdict(), scope="horizontal continuity only; no time step",
-        actual=spectral_level_quadrature_budget(area, np.asarray(jac * actual)),
+        actual=spectral_level_quadrature_budget(area, np.asarray(actual)),
         canonical=spectral_level_quadrature_budget(area, np.asarray(divergence)),
         divergence_mode00_real=np.asarray(div_hat[idx00[0]].real).tolist(),
         divergence_mode00_imag=np.asarray(div_hat[idx00[0]].imag).tolist(),
@@ -786,14 +786,14 @@ def height_vertical_paths(out, rows, provenance, record):
            native_acoustic_sp(jnp.array(1.0))[2] * hcg.dz * gm.jacobian[..., None] * qh, 0.0, "finite product increment")
     nsn = sn.SpectralCompressibleEulerModel(gg, hcg, gm, sn.SpectralNHConfig()).step(ss, 1.0)
     qn = sh_synthesis_3d(gg, nsn.tracers_hat.data[..., 0]).real
-    rn = hcg.rho_ref + sh_synthesis_3d(gg, nsn.rho_prime_hat.data).real
+    rn = hcg.rho_ref + sh_synthesis_3d(gg, nsn.jrho_prime_hat.data).real / gm.jacobian[..., None]
     record("spectral NH/height", "full split step", 1.0, qh,
            (rn * hcg.dz * qn - rh * hcg.dz * qh) * gm.jacobian[..., None], 0.0, "finite product increment")
 
     objects["spectral_final"] = nsn
     configs["spectral"] = sn.SpectralNHConfig()
     initial_q = sh_synthesis_3d(gg, ss.tracers_hat.data[..., 0]).real[..., None]
-    initial_rho = hcg.rho_ref + sh_synthesis_3d(gg, ss.rho_prime_hat.data).real
+    initial_rho = hcg.rho_ref + sh_synthesis_3d(gg, ss.jrho_prime_hat.data).real / gm.jacobian[..., None]
     record_height_inventory(rows, "spectral NH/height", gg.grid_area, hcg, gm,
                             initial_rho, initial_q, rn, qn[..., None], datasets)
 

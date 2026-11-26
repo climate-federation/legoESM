@@ -53,7 +53,7 @@ def test_spectral_tracer_mass_conserves_20_steps():
     wgt = grid.weights[:, None, None] * hc.dz[None, None, :]
 
     def masses(st):
-        rho = hc.rho_ref + sh_synthesis_3d(grid, st.rho_prime_hat.data)
+        rho = hc.rho_ref + sh_synthesis_3d(grid, st.jrho_prime_hat.data)
         qq = sh_synthesis_3d(grid, st.tracers_hat.data[..., 0])
         return float(jnp.sum(wgt * rho)), float(jnp.sum(wgt * rho * qq))
 
