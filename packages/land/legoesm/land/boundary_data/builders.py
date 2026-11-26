@@ -439,8 +439,10 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *,
     from legoesm.land.config import MultiLayerLandConfig
     from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
 
-    # ``surfdata_path`` may be an in-memory harmonized dataset (a geography's).
-    _ds = None if isinstance(surfdata_path, str) else surfdata_path
+    # ``surfdata_path`` may be an in-memory harmonized dataset (a geography's);
+    # str / os.PathLike are paths (VOTED a/a/a)
+    import xarray as xr
+    _ds = surfdata_path if isinstance(surfdata_path, xr.Dataset) else None
     cfg_sd = get_surfdata_preset("legoesm_surfdata")._replace(
         surf_path=surfdata_path if _ds is None else "")
     # Remap the surfdata soil profile onto the CONFIG's soil grid, not the loader

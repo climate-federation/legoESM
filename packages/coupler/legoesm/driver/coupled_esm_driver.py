@@ -1157,26 +1157,35 @@ class CoupledESMDriver:
                 f"geography needs f_land_mode='analytical' (the coupler's land "
                 f"fraction is the geography's, read from the atmosphere); got "
                 f"{cfg.f_land_mode!r}")
-        if self._atm.config.geography and cfg.land_mode != "none" and (
-                cfg.land_mode != "slab" or cfg.atm_owns_surface
-                or not cfg.use_pft
-                or getattr(cfg, "land_param_source", "analytical") != "clm"
-                or getattr(cfg, "transient_land_cover", False)):
+        if self._atm.config.geography and cfg.land_mode != "none":
+            # VOTED b/b/b: the coupler's land tile cannot close water/energy
+            # with the atmosphere on the MPAS column lane (no flux handback;
+            # each side computes its own land fluxes) and gives the slab's
+            # two-leaf canopy generic geometry; geography land is the
+            # atmosphere's own multilayer land
             raise ValueError(
-                "geography with the coupler's own land tile: only the slab tile "
-                "reads the geography's land map (land_mode='slab', use_pft=True, "
-                "land_param_source='clm', atm_owns_surface=False); or use land_mode='none' (with "
-                "atm_owns_surface=True the atmosphere's land reads the geography).")
-        if (self._atm.config.geography and cfg.land_mode == "none"
-                and not cfg.atm_owns_surface
+                "geography with the coupler's own land tile is not supported: "
+                "use land_mode='none' with atm_owns_surface=True (the "
+                "atmosphere's multilayer land reads the geography)")
+        if (self._atm.config.geography and not cfg.atm_owns_surface
                 and geography_has_land(self._atm.config.geography)):
             # land_mode='none' with analytical f_land would still step a generic
             # slab over the geography's land; has-land is read from the file so
             # every MPI rank agrees
             raise ValueError(
                 "geography has land but no land model runs on it: use "
-                "land_mode='slab' (reads the geography's land map) or "
-                "atm_owns_surface=True")
+                "atm_owns_surface=True (the atmosphere's land reads the geography)")
+        if (self._atm.config.geography and cfg.atm_owns_surface
+                and not geography_has_land(self._atm.config.geography)):
+            # the ice/lake handback rides the atmosphere land model's flux
+            # channel, which an all-ocean mask never builds (it would raise
+            # at the first step); refused at setup, on every rank
+            raise ValueError(
+                f"geography {self._atm.config.geography} is all ocean, and "
+                "atm_owns_surface needs the atmosphere's land model, which builds "
+                "no land columns there (the coupler's ice/lake handback rides its "
+                "flux channel); an all-ocean geography with atm_owns_surface is "
+                "not supported yet")
         if (self._atm.config.geography and cfg.atm_owns_surface
                 and not self._atm.config.use_multilayer_land
                 and geography_has_land(self._atm.config.geography)):
@@ -1548,15 +1557,10 @@ class CoupledESMDriver:
                     f"{cover.shape[0]} years {int(years[0])}-{int(years[-1])}, "
                     f"{variant} tuning), {lat_deg.size} columns")
                 return provider
-            geo = self._atm.config.geography
-            if geo:
-                from legoesm.grids.geography import geography_clm_surface
-            provider = clm_surface_provider(
-                lat_deg, lon_deg, geography_clm_surface(geo) if geo else None,
-                variant=variant, vg_air_entry_m=head)
-            _src = (f"geography {geo} land map" if geo else
-                    "CLM reference surfdata (real PFT map + reference soil)")
-            logger.info(f"  Land params: {_src} ({variant} tuning), {lat_deg.size} columns")
+            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant,
+                                            vg_air_entry_m=head)
+            logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
+                        f"reference soil, {variant} tuning), {lat_deg.size} columns")
             return provider
         if source != "analytical":
             raise ValueError(

@@ -553,7 +553,9 @@ def _amip_main_only_dests(parser):
 _LAND_TILE_ONLY = ("transient_land_cover", "land_cover_surfdata",
                    "snow_albedo_feedback")
 # ...except under --atm-owns-surface, where the atmosphere's own land model
-# owns land (the coupler never steps its land tile) and keeps all three.
+# owns land (the coupler never steps its land tile), so its snow albedo follows
+# the deck as in the AMIP decks.
+_ATM_OWNED_LAND_KEEPS = ("snow_albedo_feedback",)
 
 # Grid -> hydrostatic-dycore discretization when the deck names none.  lat-lon
 # uses the Arakawa C-grid so the atm co-locates with the C-grid 3-D ocean
@@ -591,10 +593,9 @@ def _coupled_atm_config(args):
         raise SystemExit("--max-wallclock-hours and --max-wallclock-seconds both "
                          "set; pass one.")
     from legoesm.driver.config import ExperimentConfig
-    # With atm_owns_surface the atmosphere's land runs, so it keeps them.
-    land_tile_only = () if args.atm_owns_surface else _LAND_TILE_ONLY
     return cfg._replace(
-        **{f: getattr(ExperimentConfig(), f) for f in land_tile_only},
+        **{f: getattr(ExperimentConfig(), f) for f in _LAND_TILE_ONLY
+           if not (args.atm_owns_surface and f in _ATM_OWNED_LAND_KEEPS)},
         # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
         morrison_warm_rain_scheme=(
             args.morrison_warm_rain_scheme

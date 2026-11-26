@@ -49,8 +49,19 @@ def test_optics_weighting():
 
 
 def test_refuses_a_span_off_the_file():
-    with pytest.raises(ValueError, match="expected 2"):
+    with pytest.raises(ValueError, match="2007-01: 0 records"):
         bmc.climatology(_ds("days since 2004-01-01"), 2006, 2007)
+
+
+def test_a_duplicate_month_cannot_hide_a_missing_one():
+    """2005-03 doubled, 2006-03 missing: each month still has 2 records in
+    2005-2006, so only a per-(year, month) check sees it."""
+    ds = _ds("months since 2004-01-01")
+    t = ds["time"].values.copy()
+    t[12 + 12 + 2] = t[12 + 2]          # 2006-03 restamped as 2005-03
+    ds = ds.assign_coords(time=("time", t, ds["time"].attrs))
+    with pytest.raises(ValueError, match="2005-03: 2 records"):
+        bmc.climatology(ds, 2005, 2006)
 
 
 def test_time_bounds_follow_the_first_year_stamps():

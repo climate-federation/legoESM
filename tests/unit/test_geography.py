@@ -232,6 +232,7 @@ def test_driver_terrain_is_the_geography_terrain(mesh, tmp_path):
     ("aquaplanet", dict(land_mode="slab")),
     ("ridge", dict(land_mode="multilayer", land_param_source="clm")),
     ("ridge", dict(land_mode="slab", atm_owns_surface=True)),
+    ("ridge", dict(land_mode="slab", use_pft=True, land_param_source="clm")),
 ])
 def test_coupled_refuses_geography_with_its_own_land_tile(tmp_path, monkeypatch,
                                                           shape, cc_kw):
@@ -260,6 +261,19 @@ def test_geography_has_land(tmp_path):
     ds = mg.idealized("box", box=(-30.0, 30.0, 60.0, 150.0))
     ds["land_fraction"] = ds["elevation"] * 0.0     # explicit: all ocean
     assert not geo.geography_has_land(_write(ds, tmp_path, "zero_lf.nc"))
+
+
+def test_coupled_refuses_an_all_ocean_geography_with_atm_owned_surface(tmp_path):
+    """The ice/lake handback rides the atmosphere land model's flux channel,
+    which an all-ocean mask never builds; refused at setup, not at step 1."""
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet"), use_multilayer_land=True),
+                         CoupledConfig(f_land_mode="analytical", land_mode="none",
+                                       atm_owns_surface=True),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match="is all ocean"):
+        d.setup()
 
 
 def test_coupled_refuses_atm_owned_geography_land_without_a_land_model(tmp_path):
@@ -470,8 +484,8 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
     from legoesm.ocean.vertical import OceanPartialCellCoordinate, create_ocean_z_star
-    cc = CoupledConfig(f_land_mode="analytical", land_mode="slab", use_pft=True,
-                       land_param_source="clm", ocean_mode="dynamic", ocean_H_max_m=5500.0)
+    cc = CoupledConfig(f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+                       ocean_H_max_m=5500.0)
     z = create_ocean_z_star(cc.ocean_nlev, H_max=cc.ocean_H_max_m)
     top = float(np.abs(np.asarray(z.z_half_ref))[-2])        # an interface
     D = top + 0.1 * float(np.asarray(z.dz_ref)[-1])          # 10% into the last level
@@ -479,7 +493,8 @@ def test_coupled_mpas_ocean_reads_the_geography(tmp_path):
     ds["elevation"] = ds["elevation"].where(ds["elevation"] >= 0.0, -D)
     d = CoupledESMDriver(_mpas_cfg(_write(ds, tmp_path, "box_snap.nc")), cc,
                          output_dir=str(tmp_path / "run"))
-    d.setup()
+    d._atm.setup()     # atmosphere + ocean only: this box has land and no
+    d._init_ocean()    # land model, which the coupler refuses
     f = np.asarray(d._atm._f_land).ravel()
     wet = np.asarray(d._ocean_land_mask)
     assert np.array_equal(wet, (f < 1.0).astype(wet.dtype)) and 0 < wet.sum() < wet.size
@@ -540,38 +555,6 @@ def test_coupled_mpas_ocean_on_its_own_mesh_refuses_a_geography(tmp_path):
         output_dir=str(tmp_path / "run"), ocean_grid=create_voronoi_mesh(3))
     with pytest.raises(ValueError, match="on its own mesh"):
         d.setup()
-
-
-@pytest.mark.parametrize("shape", ["box", "aquaplanet"])
-def test_coupled_slab_land_reads_the_geography(tmp_path, monkeypatch, shape):
-    """Slab land + two-leaf canopy on the geography: grass params, the
-    atmosphere's land fraction as-is (no invented continents), no reference
-    CLM file read."""
-    import legoesm.land.clm_surface_map as csm
-    from legoesm.driver.coupled_config import CoupledConfig
-    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
-
-    def no_reference_data(*a, **k):
-        raise AssertionError("coupler read reference CLM data")
-
-    monkeypatch.setattr(csm, "download_clm_surfdata", no_reference_data)
-    built = []
-    orig = CoupledESMDriver._build_pft_provider
-    monkeypatch.setattr(CoupledESMDriver, "_build_pft_provider",
-                        lambda self, sh: built.append(orig(self, sh)) or built[-1])
-    p = _gen(tmp_path, shape, box=(-30.0, 30.0, 60.0, 150.0) if shape == "box" else None)
-    d = CoupledESMDriver(_mpas_cfg(p), CoupledConfig(
-        f_land_mode="analytical", land_mode="slab", use_pft=True,
-        land_param_source="clm"), output_dir=str(tmp_path / "run"))
-    if shape == "aquaplanet":   # all ocean stays all ocean: a dead land tile is refused
-        with pytest.raises(ValueError, match="zero everywhere"):
-            d.setup()
-        return
-    d.setup()
-    f_atm = np.asarray(d._atm._f_land).ravel()
-    assert np.array_equal(np.asarray(d._tile_config.f_land).ravel(), f_atm)
-    pft = np.asarray(built[0].pft_fractions)
-    assert np.all(pft[:, 13] == 1.0) and np.all(np.asarray(built[0].lai) == 2.0)
 
 
 def test_coupled_geography_land_without_a_land_model_is_refused(tmp_path):

@@ -39,11 +39,13 @@ def climatology(ds, first: int, last: int, optics: bool = False):
     years, months = record_year_month(tv.values, tv.attrs["units"],
                                       tv.attrs.get("calendar", "standard"))
     sel = (years >= first) & (years <= last)
-    n_years = last - first + 1
-    for m in range(1, 13):
-        if int(np.sum(sel & (months == m))) != n_years:
-            raise ValueError(f"month {m}: {int(np.sum(sel & (months == m)))} records in "
-                             f"{first}-{last}, expected {n_years}")
+    # every (year, month) exactly once (VOTED a/a/a): a per-month count would
+    # let a duplicate in one year hide a gap in another
+    for y in range(first, last + 1):
+        for m in range(1, 13):
+            n = int(np.sum((years == y) & (months == m)))
+            if n != 1:
+                raise ValueError(f"{y}-{m:02d}: {n} records, expected exactly 1")
     first_idx = [int(np.flatnonzero(sel & (months == m))[0]) for m in range(1, 13)]
     out = ds.drop_vars([v for v in ds.data_vars if "time" in ds[v].dims] + ["time"])
     bounds = tv.attrs.get("bounds")
