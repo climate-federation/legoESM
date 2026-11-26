@@ -288,6 +288,9 @@ def test_apply_ice_init_optional_none_and_zero_path():
     z = np.zeros((2, 2))
     out = r._apply_ice_init(st, NemoIceInit(z, z, None, None, None))
     for name in st._fields:
+        if getattr(st, name) is None:  # optional leaf (h_il off the NEMO pond scheme)
+            assert getattr(out, name) is None, name
+            continue
         np.testing.assert_array_equal(
             np.asarray(getattr(out, name).data),
             np.asarray(getattr(st, name).data), err_msg=name)

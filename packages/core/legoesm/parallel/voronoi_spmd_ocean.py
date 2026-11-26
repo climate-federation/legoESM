@@ -338,6 +338,11 @@ def refuse_unsupported_spmd_config(config) -> None:
             "MPAS ocean SPMD: runoff_depth_spread_map is unsupported — the "
             "model bakes this per-cell static in at construction, so it is "
             "not re-sliced per device.")
+    if getattr(config, "runoff_depth_spread_levels", None) is not None:
+        raise NotImplementedError(
+            "MPAS ocean SPMD: runoff_depth_spread_levels is unsupported — the "
+            "model bakes this per-cell static in at construction, so it is "
+            "not re-sliced per device.")
 
 
 # ---------------------------------------------------------------------------

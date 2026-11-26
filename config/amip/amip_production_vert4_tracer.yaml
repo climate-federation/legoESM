@@ -1,0 +1,9 @@
+# Production deck with the MPAS vertical del4 filter rate set apart for
+# tracers.
+#
+# Everything is amip_production.yaml except mpas_nu_vert4_tracer: tracers
+# take 0 (unfiltered) while temperature keeps mpas_nu_vert4_T.  Ported from
+# the ENSO fork (Isma Di Carlo).  Not a production candidate: an A/B arm
+# against amip_production.yaml.
+include: amip_production.yaml
+mpas_nu_vert4_tracer: 0.0

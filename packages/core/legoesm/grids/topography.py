@@ -11,6 +11,7 @@ All topography generators return surface elevation z_s in meters.
 from __future__ import annotations
 
 import logging
+import os
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -675,6 +676,100 @@ def bin_latlon_to_cells(lat_src_deg, lon_src_deg, fields, cell_lat_rad, cell_lon
                         minlength=n) / denom for f in fields]
 
 
+def subgrid_orography_per_cell(cell_lat_rad, cell_lon_rad, lat_src_deg, lon_src_deg,
+                               read_rows, *, rows_per_chunk: int = 200):
+    """Per-cell subgrid orography ``sgh`` [m] over each cell's own footprint.
+
+    ``sgh`` of a cell is the area-weighted standard deviation of
+    ``max(z, 0)`` over the source points the cell owns, the same quantity
+    the block files of ``prep_subgrid_orography`` hold (std of max(z, 0)
+    in blocks), with the cell's Voronoi footprint as the block.  Ownership
+    and weights are those of :func:`bin_latlon_to_cells` (nearest cell
+    centre, exact on a Voronoi mesh whose centres are its generators; each
+    source point weighted by its spherical area); the source is read in
+    latitude chunks so a 1 minute global field never sits in memory at once.
+
+    ``read_rows(i0, i1)`` returns rows ``i0:i1`` of the elevation as a
+    ``(i1 - i0, n_lon)`` array (metres, ocean negative); ``lat_src_deg``
+    must be increasing and ``lon_src_deg`` equally spaced.  Returns
+    ``(sgh, mean, n_src)`` per cell: the standard deviation, the mean of
+    max(z, 0), and the number of source points owned.  A cell that owns no
+    source point is an error (the source must be finer than every cell).
+    The variance is accumulated in one pass in float64 (E[h^2] - mean^2), so
+    a cell of near-constant elevation h carries an error of order
+    1e-16 h^2 / sgh (about 1e-3 m for a constant 4,000 m plateau); ocean
+    cells (h = 0) are exact.
+    """
+    from scipy.spatial import cKDTree
+    lat_src_deg = np.asarray(lat_src_deg, dtype=np.float64)
+    lon_src_deg = np.asarray(lon_src_deg, dtype=np.float64)
+    if not np.all(np.diff(lat_src_deg) > 0):
+        raise ValueError("subgrid_orography_per_cell: source latitudes must increase")
+    n_lon = lon_src_deg.size
+    xyz_c = _xyz(cell_lat_rad, cell_lon_rad)
+    n = xyz_c.shape[0]
+    tree = cKDTree(xyz_c)
+    # row weights: the spherical area of one source cell in each row
+    w_row = _source_cell_areas(lat_src_deg, np.zeros(1))[:, 0] / n_lon
+    lon_r = np.deg2rad(lon_src_deg)
+    s0 = np.zeros(n)
+    s1 = np.zeros(n)
+    s2 = np.zeros(n)
+    cnt = np.zeros(n, dtype=np.int64)
+    for i0 in range(0, lat_src_deg.size, int(rows_per_chunk)):
+        i1 = min(i0 + int(rows_per_chunk), lat_src_deg.size)
+        h = np.asarray(read_rows(i0, i1), dtype=np.float64)
+        if h.shape != (i1 - i0, n_lon):
+            raise ValueError(f"read_rows({i0}, {i1}) returned {h.shape}")
+        if not np.all(np.isfinite(h)):
+            raise ValueError(f"subgrid_orography_per_cell: non-finite elevation in "
+                             f"rows {i0}:{i1}")
+        h = np.maximum(h, 0.0)
+        lon2, lat2 = np.meshgrid(lon_r, np.deg2rad(lat_src_deg[i0:i1]))
+        owner = tree.query(_xyz(lat2.ravel(), lon2.ravel()), k=1)[1].astype(np.int64)
+        w = np.repeat(w_row[i0:i1], n_lon)
+        hv = h.ravel()
+        s0 += np.bincount(owner, weights=w, minlength=n)
+        s1 += np.bincount(owner, weights=w * hv, minlength=n)
+        s2 += np.bincount(owner, weights=w * hv * hv, minlength=n)
+        cnt += np.bincount(owner, minlength=n)
+    if np.any(s0 <= 0.0):
+        raise ValueError(
+            f"subgrid_orography_per_cell: {int(np.sum(s0 <= 0.0))} cells own no "
+            "source point -- the source is coarser than the mesh")
+    mean = s1 / s0
+    var = np.maximum(s2 / s0 - mean * mean, 0.0)
+    return np.sqrt(var), mean, cnt
+
+
+def load_subgrid_orography_cells(path, n_cells: int, mesh_sha256: str,
+                                 cells=None) -> np.ndarray:
+    """Per-cell ``sgh`` [m] from a file written for one saved MPAS mesh.
+
+    The file (``scripts/data/build_subgrid_orography_cells.py``) holds
+    ``sgh`` ``(nCells,)`` in the mesh's cell order and the SHA-256 of that
+    mesh; it is refused unless the hash equals ``mesh_sha256`` (the run's
+    pinned mesh) and the length equals ``n_cells``.  ``cells`` (global cell
+    indices, e.g. an MPI rank's owned-then-halo cells) selects those entries.
+    """
+    with np.load(os.fspath(path), allow_pickle=False) as d:
+        if "sgh" not in d.files or "mesh_sha256" not in d.files:
+            raise ValueError(f"{path}: not a per-cell subgrid orography file "
+                             "(needs sgh and mesh_sha256)")
+        sgh = np.asarray(d["sgh"], dtype=np.float64)
+        sha = str(d["mesh_sha256"][()]).strip().lower()
+    want = str(mesh_sha256 or "").strip().lower()
+    if not want or sha != want:
+        raise ValueError(
+            f"{path}: built for mesh {sha}, the run's mesh is {want or '(unpinned)'}; "
+            "a per-cell file is only valid on the mesh it was built on")
+    if sgh.shape != (int(n_cells),):
+        raise ValueError(f"{path}: sgh has shape {sgh.shape}, the mesh has {n_cells} cells")
+    if not np.all(np.isfinite(sgh)) or np.any(sgh < 0.0):
+        raise ValueError(f"{path}: sgh must be finite and >= 0")
+    return sgh if cells is None else sgh[np.asarray(cells)]
+
+
 def neighbour_table(grid):
     """``(nb, area)`` -- ``nb`` ``(K, n_cells)`` int neighbour indices (``-1``
     unused), ``area`` ``(n_cells,)`` -- for a cubed-sphere ``(6, n, n)`` grid
@@ -861,6 +956,22 @@ def _target_grid_degrees(grid):
             grid_spacing = voronoi_cell_spacing_deg(np.asarray(grid_lat).size)
 
     return target_lat_2d, target_lon_2d, is_gaussian, grid_spacing
+
+
+# A static land fraction within this of 1 is roundoff from area binning
+# (measured 0.99999999999998 on MPAS level 3 from the real-topography product):
+# its 1e-14 water fraction is a slab the coupler divides by.  Votes 2026-11-19
+# (author/codex/GLM): snap at the source, all lanes, tol 1e-12.
+LAND_FRACTION_ROUNDOFF = 1e-12
+
+
+def snap_land_fraction_roundoff(f_land, tol: float = LAND_FRACTION_ROUNDOFF):
+    """``f_land`` with values within ``tol`` of 1 set to exactly 1.  A static
+    field, so the exact snap keeps gradients of every traced quantity; the
+    near-0 side is left alone (land masks and land IC signatures key on
+    ``f_land > 0``)."""
+    f = jnp.asarray(f_land)
+    return jnp.where(jnp.abs(f - 1.0) < tol, jnp.ones_like(f), f)
 
 
 def load_land_fraction(
@@ -1222,13 +1333,28 @@ def load_subgrid_orography(
         Subgrid orographic stddev [m], clipped to >= 0, shape ``(6, n, n)``
         for cubed-sphere or ``(n_lat, n_lon)`` for Gaussian.
     """
+    sso_grid = _read_regridded_sso_field(grid, path, var_name, aliases=var_name == "SSO_STDH",
+                                         scale_check=scale_check)
+    return jnp.asarray(np.maximum(sso_grid, 0.0))
+
+
+_NO_SCALE_CHECK = object()   # tensor components: the check runs once, on SSO_STDH
+
+
+def _read_regridded_sso_field(grid, path, var_name, *, aliases=False,
+                              scale_check=_NO_SCALE_CHECK):
+    """One subgrid-orography field from ``path``, NaN -> 0, sampled bilinearly
+    onto ``grid`` (unclipped: tensor components are signed).  With
+    ``scale_check`` the #1712 scale check runs before regridding.  The legacy
+    alias names stand in only when the caller passes ``aliases``
+    (``load_subgrid_orography`` does for its default SSO_STDH)."""
     import xarray as xr
 
     ds = xr.open_dataset(path)
     try:
         all_names = set(ds.data_vars) | set(ds.coords)
         sso_var = var_name if var_name in all_names else None
-        if sso_var is None:
+        if sso_var is None and aliases:
             for c in ("SSO_STDH", "sso_stdh", "stddev_orography", "sgh"):
                 if c in all_names:
                     sso_var = c
@@ -1238,7 +1364,6 @@ def load_subgrid_orography(
                 f"Cannot find subgrid orography variable in {path}; "
                 f"available: {sorted(ds.data_vars)}"
             )
-
         lat_var = None
         for c in ("lat", "latitude", "y", "Y"):
             if c in all_names:
@@ -1262,10 +1387,11 @@ def load_subgrid_orography(
     finally:
         ds.close()
 
-    # #1712: does this file's scale decomposition belong to THIS grid?
-    _, _, _, _grid_spacing_deg = _target_grid_degrees(grid)
-    _check_sso_scale_decomposition(
-        built, float(_grid_spacing_deg), path, scale_check)
+    if scale_check is not _NO_SCALE_CHECK:
+        # #1712: does this file's scale decomposition belong to THIS grid?
+        _, _, _, _grid_spacing_deg = _target_grid_degrees(grid)
+        _check_sso_scale_decomposition(
+            built, float(_grid_spacing_deg), path, scale_check)
 
     while sso_data.ndim > 2:
         sso_data = sso_data[0]
@@ -1285,8 +1411,43 @@ def load_subgrid_orography(
     sso_grid = _regrid_to_target(
         lat_src, lon_src, sso_data, target_lat_2d, target_lon_2d
     )
-    sso_grid = np.maximum(sso_grid, 0.0)
-    return jnp.asarray(sso_grid)
+    return sso_grid
+
+
+class SSOFields(NamedTuple):
+    """IFS Lott-Miller subgrid-orography inputs on a model grid."""
+
+    std: jnp.ndarray      # m, subgrid height standard deviation
+    gamma: jnp.ndarray    # 1, anisotropy
+    theta: jnp.ndarray    # rad, principal-axis angle
+    sigma: jnp.ndarray    # 1, mean slope
+
+
+def sso_from_tensor(K, L, M):
+    """Baines-Palmer tensor -> (sigma, gamma, theta); flat cells give sigma 0,
+    gamma 1, theta 0 (the ERA5 builder's convention, scripts/data/
+    prep_era5_sso_fields.py)."""
+    K = np.asarray(K, dtype=np.float64)
+    s = np.hypot(L, M)
+    major = K + s
+    flat = major <= 0.0
+    safe = np.where(flat, 1.0, major)
+    sigma = np.where(flat, 0.0, np.sqrt(np.maximum(major, 0.0)))
+    gamma = np.where(flat, 1.0, np.sqrt(np.clip((K - s) / safe, 0.0, 1.0)))
+    theta = np.where(flat, 0.0, 0.5 * np.arctan2(M, L))
+    return sigma, gamma, theta
+
+
+def load_sso_lott_miller(grid, path: str, *, scale_check: str = "warn") -> SSOFields:
+    """The Lott-Miller inputs from an ERA5 SSO file (SSO_STDH, SSO_K, SSO_L,
+    SSO_M; scripts/data/prep_era5_sso_fields.py) on ``grid``.  The tensor
+    components are sampled and gamma/theta/sigma rebuilt from them, so an
+    angle is never interpolated.  Every variable is required (no aliases)."""
+    std = _read_regridded_sso_field(grid, path, "SSO_STDH", scale_check=scale_check)
+    K, L, M = (_read_regridded_sso_field(grid, path, v) for v in ("SSO_K", "SSO_L", "SSO_M"))
+    sigma, gamma, theta = sso_from_tensor(K, L, M)
+    return SSOFields(jnp.asarray(np.maximum(std, 0.0)), jnp.asarray(gamma), jnp.asarray(theta),
+                     jnp.asarray(sigma))
 
 
 def load_real_topography(

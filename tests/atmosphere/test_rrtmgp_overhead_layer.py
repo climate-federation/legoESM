@@ -110,14 +110,13 @@ def test_flag_reaches_every_lane(monkeypatch):
         physics_pipeline._build_rrtmgp_radiation_fn(ExperimentConfig(
             radiation="rrtmgp", rrtmgp_overhead_layer=True))
     assert seen["cfg"].overhead_layer is True
-    # MPAS / duo-column and spectral lanes build RRTMGPConfig inline in the
-    # driver: every construction must forward the flag.
-    for mod in (model_driver, physics_pipeline):
-        src = inspect.getsource(mod)
-        n_cfg = len(re.findall(r"\bRRTMGPConfig\(\n", src))
-        n_flag = src.count('rrtmgp_overhead_layer", False)') + src.count(
-            "rrtmgp_overhead_layer', False)")
-        assert n_cfg >= 1 and n_flag == n_cfg, mod.__name__
+    # MPAS / duo-column and spectral lanes take the same builder the spy above
+    # went through: no driver construction may bypass it.
+    driver_src = inspect.getsource(model_driver)
+    assert not re.search(r"\bRRTMGPConfig\(", driver_src)
+    assert driver_src.count("rrtmgp=rrtmgp_config_from_experiment(") == 2
+    assert len(re.findall(r"\bRRTMGPConfig\(",
+                          inspect.getsource(physics_pipeline))) == 1
 
     # integration (MPAS / spectral) forwards o3_top_vmr with the override.
     from legoesm.atmosphere.physics.radiation import integration
@@ -140,8 +139,8 @@ def test_cli_and_cam6_decks():
     assert coupled_parser().parse_args(
         ["--rrtmgp-overhead-layer"]).rrtmgp_overhead_layer is True
     from scripts.run import run_coupled
-    assert ("rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,"
-            in inspect.getsource(run_coupled.main))
+    assert run_coupled._coupled_atm_config(coupled_parser().parse_args(
+        ["--rrtmgp-overhead-layer"])).rrtmgp_overhead_layer is True
     from legoesm.driver.run_config_yaml import read_yaml_with_includes
     for deck in ("amip_production.yaml", "amip_production_fv3duo_c24.yaml"):
         d = read_yaml_with_includes(_REPO / "config" / "amip" / deck)
@@ -244,3 +243,29 @@ def test_mcica_model_layer_mask_is_identical_with_overhead_on_or_off(
         cf_pad = jnp.concatenate([jnp.zeros((NCOL, 1)), jnp.asarray(cf0)], 1)
         m_pad = np.asarray(orig(cf_pad, m0.shape[0], shift=jnp.asarray(s0), width=0.0))
         assert not np.array_equal(m_pad[:, :, 1:], m0)
+
+
+def test_absorbed_above_top_is_the_discarded_convergence(solvers):
+    """The exported sink equals, per column and per band, (lid net - surface
+    net) minus the applied model-layer heating -- the energy that entered the
+    reported TOA but never the column -- and is exactly zero with the layer
+    off.  Shown failing if the export reads the wrong faces."""
+    from legoesm.atmosphere.physics.radiation.rrtmgp import constants as C
+    off, on = solvers
+    inp = _inputs()
+    r0 = off.solve_columns(**inp)
+    r1 = on.solve_columns(**inp, o3_top_vmr=jnp.full((NCOL,), 3e-6))
+    dp = np.asarray(inp["p_half"][:, 1:] - inp["p_half"][:, :-1])
+
+    def gap(up, dn, hr):
+        net = np.asarray(dn - up)
+        return net[:, 0] - net[:, -1] - (np.asarray(hr) * dp).sum(1) * C.CP_D / C.G
+    g_sw = gap(r1.sw_flux_up, r1.sw_flux_down, r1.sw_heating_rate)
+    g_lw = gap(r1.lw_flux_up, r1.lw_flux_down, r1.lw_heating_rate)
+    np.testing.assert_allclose(np.asarray(r1.sw_absorbed_above_top), g_sw,
+                               rtol=1e-10, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(r1.lw_absorbed_above_top), g_lw,
+                               rtol=1e-10, atol=1e-9)
+    assert np.all(np.asarray(r1.sw_absorbed_above_top) > 0.0)
+    np.testing.assert_array_equal(np.asarray(r0.sw_absorbed_above_top), 0.0)
+    np.testing.assert_array_equal(np.asarray(r0.lw_absorbed_above_top), 0.0)

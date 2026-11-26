@@ -4069,6 +4069,9 @@ def dino_lat_lon_model_config(
         # the faithful NEMO cards). Default "vector_laplacian" keeps the A_h·cos(φ)
         # scalar path byte-identical for every other recipe.
         lateral_viscosity_operator=cfg.lateral_viscosity_operator,
+        lateral_viscosity_mask_levels=(
+            "per_level" if cfg.lateral_viscosity_operator == "vector_laplacian"
+            else "surface"),
         # #1455: e3-weighting of the nemo_div_curl div/curl (default "off",
         # bit-identical; the kamm card leaves this at "off" -- the
         # e3-weighted variant regressed the dyn_ldf gate rows in a

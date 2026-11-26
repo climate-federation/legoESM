@@ -44,11 +44,13 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 def _louis_reference(Ri, l_mix, dz, b, c, d, blend_sharpness, b_heat):
     """Inline copy of the OLD louis.py stability-function block (pre-dedup),
     with the stable HEAT function moved to the OpenIFS vdfexcu.F90:395 form
-    (sqrt multiplies) by the oracle port; legacy (no-heights) unstable geometry."""
+    (sqrt multiplies) by the oracle port and the ``sqrt(|Ri| + 1e-10)`` floor
+    replaced by the exact ``sqrt(|Ri|)`` (ICON SQRT(ABS(zri)), F4 spread fix);
+    legacy (no-heights) unstable geometry."""
     Ri_neg = jnp.minimum(Ri, 0.0)
     denom_unstable = (
         1.0 + 3.0 * b * c * l_mix ** 2
-        * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz ** 2 + 1e-10)
+        * jnp.sqrt(jnp.abs(Ri_neg)) / (dz ** 2 + 1e-10)
     )
     f_unstable_m = 1.0 - 2.0 * b * Ri_neg / denom_unstable
     f_unstable_h = 1.0 - 2.0 * b_heat * Ri_neg / denom_unstable

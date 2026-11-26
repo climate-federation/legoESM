@@ -215,7 +215,7 @@ verdict returns; it is not relabelled as a pass.
 | `nemo_si3thd_oracle_gate.py` | `VERIFIED` | `VERIFIED`; exact JSON SHA-256 `7e8fcf463fecd83adacbbc94fc70ebe36719ada39edd7b5b42ee46823115b8b0`. |
 | `nemo_si3thd_phase2_gate.py` | `DEBT`, first owner at the pre-BL99 `qns_ice` entry time level | Same `DEBT` and owner. |
 | `nemo_si3thd_phase2b_year_gate.py` | full-year `DEBT` / MIXED DEBT | Same full-year scientific payload and `DEBT`; only the precision-policy representation now explicitly includes `transcendentals='native'`. |
-| `nemo_si3_bulk_flux_gate.py` | `AT-BAR` | `AT-BAR`, 227,760 comparisons and zero over-bar rows; exact SHA-256 `12784cbf13f77a993aa7f11c5dfab08cfbfe97d7db3236c7a544512a6e1178ed`. |
+| `nemo_si3_o7_lane_bulk_flux_gate.py` | `AT-BAR` | `AT-BAR`, 227,760 comparisons and zero over-bar rows; exact SHA-256 `12784cbf13f77a993aa7f11c5dfab08cfbfe97d7db3236c7a544512a6e1178ed`. |
 | `nemo_si3_exchange_drift_gate.py` | two 8,760-step streams byte-identical | Same, zero differing bytes; exact gate SHA-256 `2bde178decf1c6d49bc29d83b207102f56e76a15ff933137773785ca9761b0e0`. |
 | `nemo_si3_scalarmath_v2_gate.py` | `REPRODUCIBLE` | **Not reproduced:** fail-closed `A MY_SRC is not verbatim` before any scientific comparison. |
 

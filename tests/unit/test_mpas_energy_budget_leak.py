@@ -28,7 +28,8 @@ def _load():
     return mod
 
 
-def _series(tmp_path, *, leak, n=6, dt_days=1.0):
+def _series(tmp_path, *, leak, n=6, dt_days=1.0,
+            key="energy_toa_minus_dE_dt"):
     """A synthetic run built from an ENERGY TRAJECTORY, not from the algebra.
 
     Codex, reviewing the first version: building `dE_dt` straight from the
@@ -70,7 +71,7 @@ def _series(tmp_path, *, leak, n=6, dt_days=1.0):
 
     path = tmp_path / "timeseries.npz"
     np.savez(path, days=np.arange(n, dtype=float) * dt_days,
-             energy_toa_net=toa, energy_dE_dt=dedt, energy_residual=residual,
+             energy_toa_net=toa, energy_dE_dt=dedt, **{key: residual},
              sw_net_sfc=sw, lw_net_sfc=lw, hfss=sh, hfls=lh,
              # Interval means unless a test says otherwise: the probe refuses
              # snapshot-sourced series outright.
@@ -83,7 +84,7 @@ def _leak_values(mod, path, drop_first=True):
     """Leak per sample, with the first dropped the way the probe drops it."""
     t = mod.load(path)
     v = (t["sw_net_sfc"] + t["lw_net_sfc"] - t["hfss"] - t["hfls"]
-         - t["energy_residual"])
+         - t["energy_toa_minus_dE_dt"])
     return v[1:] if drop_first else v
 
 
@@ -264,3 +265,96 @@ def test_the_frozen_precipitation_bound_is_the_predicted_size(tmp_path):
 def test_runs_end_to_end(tmp_path):
     mod = _load()
     assert mod.main([str(_series(tmp_path, leak=12.0)), "--skip-days", "1"]) == 0
+
+
+def test_a_file_with_the_legacy_key_gives_the_same_leak(tmp_path, capsys):
+    """Runs written before the rename stored TOA - dE/dt as energy_residual."""
+    mod = _load()
+    new = _leak_values(mod, _series(tmp_path, leak=7.0))
+    old_dir = tmp_path / "old"
+    old_dir.mkdir()
+    old = _leak_values(mod, _series(old_dir, leak=7.0, key="energy_residual"))
+    np.testing.assert_array_equal(old, new)
+    np.testing.assert_allclose(new, 7.0, atol=1e-6)
+    assert "legacy key 'energy_residual'" in capsys.readouterr().err
+
+
+def _series_with_closure_terms(tmp_path, *, a_top, snow_kg_m2_s, n=8):
+    """A closed column (no leak) that also loses radiation above the model top
+    and exports snow.  Built, like ``_series``, from an ENERGY TRAJECTORY: the
+    column's true budget is
+
+        dE/dt = (toa - A_top) - (sw + lw) + sh + lh + L_f * S
+
+    (A_top enters the reported TOA but is absorbed above the model top; snow
+    leaving the column removes its -L_f*q_frozen), solved for sh.
+    """
+    from legoesm import constants
+    rng = np.random.default_rng(1)
+    toa = rng.normal(15.0, 3.0, n)
+    sw = rng.normal(165.0, 5.0, n)
+    lw = rng.normal(-58.0, 3.0, n)
+    lh = rng.normal(75.0, 4.0, n)
+    a = np.full(n, a_top) + rng.normal(0.0, 0.05, n)
+    s = np.full(n, snow_kg_m2_s) * (1.0 + 0.1 * rng.normal(size=n))
+    E = 2.6e9 + np.cumsum(rng.normal(0.0, 3.0e6, n + 1))
+    dedt = (E[1:] - E[:-1]) / 86400.0
+    sh = dedt - (toa - a) + (sw + lw) - lh - constants.L_f * s
+    resid = toa - dedt
+    dedt[0], resid[0] = 0.0, toa[0]
+    path = tmp_path / "timeseries.npz"
+    np.savez(path, days=np.arange(n, dtype=float), energy_toa_net=toa,
+             energy_dE_dt=dedt, energy_toa_minus_dE_dt=resid,
+             sw_net_sfc=sw, lw_net_sfc=lw, hfss=sh, hfls=lh,
+             energy_flux_interval_mean=np.ones(n),
+             energy_rad_above_top=a,
+             energy_snowfall_fusion=constants.L_f * s)
+    return path
+
+
+def test_closure_terms_close_the_budget_and_each_is_needed(tmp_path):
+    """float64: with both terms the column closes to round-off; dropping
+    either one leaves a gap of its own size, so neither is inert."""
+    mod = _load()
+    t = mod.load(_series_with_closure_terms(tmp_path, a_top=0.7,
+                                            snow_kg_m2_s=6.0e-6))
+    leak, leak_new = mod.closure_leak(t)
+    np.testing.assert_allclose(leak_new[1:], 0.0, atol=1e-10)
+    no_snow = dict(t, energy_snowfall_fusion=np.zeros_like(leak))
+    no_top = dict(t, energy_rad_above_top=np.zeros_like(leak))
+    assert np.all(np.abs(mod.closure_leak(no_snow)[1][1:]) > 1.0)
+    assert np.all(np.abs(mod.closure_leak(no_top)[1][1:]) > 0.5)
+    # The old closure carries both terms: +L_f*S - A_top.
+    assert np.all(np.abs(leak[1:]) > 0.5)
+
+
+def test_files_without_the_closure_terms_report_old_leak_only(tmp_path, capsys):
+    mod = _load()
+    t = mod.load(_series(tmp_path, leak=3.0))
+    leak, leak_new = mod.closure_leak(t)
+    assert leak_new is None
+    np.testing.assert_allclose(leak[1:], 3.0, atol=1e-6)
+    sub = tmp_path / "run"
+    sub.mkdir()
+    assert mod.main([str(_series(sub, leak=3.0)), "--skip-days", "0"]) == 0
+    assert "LEAK_new unavailable" in capsys.readouterr().out
+
+
+def test_driver_writes_the_closure_terms():
+    """The probe's closure terms must be persisted by the MPAS series writer
+    and produced by the energy sample (same AST check as the required keys)."""
+    import ast
+    from pathlib import Path
+    driver = (Path(__file__).resolve().parents[2] / "packages" / "coupler"
+              / "legoesm" / "driver" / "model_driver.py")
+    src = driver.read_text()
+    tree = ast.parse(src)
+    written: set[str] = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "savez"):
+            written.update(kw.arg for kw in node.keywords if kw.arg)
+    mod = _load()
+    assert set(mod._CLOSURE_TERMS) <= written
+    from legoesm.driver.model_driver import ModelDriver
+    assert set(mod._CLOSURE_TERMS) <= set(ModelDriver._ENERGY_SERIES_KEYS)

@@ -167,7 +167,18 @@ def _box_breakdown(fieldL, fieldN, area, tgt_lat, tgt_lon):
     return out
 
 
-def _load_legoesm(path):
+def _load_legoesm(path, use_mean=False):
+    """Fields of one legoESM snapshot.
+
+    ``use_mean=True`` reads the driver's ``--state-accumulate`` window means
+    instead of the instantaneous state: NEMO's 5-day files are window means
+    for EVERY field (tos/sos plain hourly means; to/so thickness-weighted
+    @toce_e3t/@e3t), and an instantaneous 00 UTC snapshot against them
+    carries the diurnal phase (nino3 SST +0.49 vs +0.12 window-matched,
+    2026-09-25). Surface fields come from the plain means, the 3-D columns
+    from the thickness-weighted ones, and the MLD from ``mld_mean``; a
+    snapshot lacking any of them is refused, never silently downgraded.
+    """
     s = np.load(path)
     # lat_T/lon_T are written by run_omip_core2._save_snapshot ALREADY IN DEGREES
     # (via _grid_lat2d_deg, which applies np.rad2deg at save time). Applying
@@ -175,18 +186,51 @@ def _load_legoesm(path):
     # mapped every cell to nonsense lat-lon, scrambling the SST/SSS pattern
     # (corr ~0.1) and inflating the bias. Use the stored degrees as-is.
     keys = set(getattr(s, "files", []))
+    if use_mean:
+        # mld_mean is NOT required: a run with --state-accumulate but without
+        # --mld-accumulate still has matched T/S; its MLD is then SKIPPED
+        # loudly by the scorers (never MLD(mean state), which is biased
+        # shallow -- Jensen -- nor the instantaneous MLD).
+        need = ("T_mean", "S_mean", "T_mean_hw", "S_mean_hw", "flux_mean_window_s")
+        missing = [k for k in need if k not in keys]
+        if missing:
+            raise SystemExit(f"{path}: use_mean requested but the snapshot lacks "
+                             f"{missing}; run the driver with --state-accumulate "
+                             "--mld-accumulate (no silent fallback to the instantaneous state)")
+    kT, kS = ("T_mean", "S_mean") if use_mean else ("T", "S")
+    kT3, kS3 = ("T_mean_hw", "S_mean_hw") if use_mean else ("T", "S")
     return {
-        "sst": np.asarray(s["T"])[..., 0], "sss": np.asarray(s["S"])[..., 0],
+        "sst": np.asarray(s[kT])[..., 0], "sss": np.asarray(s[kS])[..., 0],
         # Full T/S columns + geometry for the mixed-layer-depth diagnostic
         # (present only in snapshots written after _save_snapshot grew the MLD
         # geometry; None for older snapshots -> MLD comparison is skipped).
-        "T3d": np.asarray(s["T"]), "S3d": np.asarray(s["S"]),
+        "T3d": np.asarray(s[kT3]), "S3d": np.asarray(s[kS3]),
+        "mld_mean": (np.asarray(s["mld_mean"]) if (use_mean and "mld_mean" in keys)
+                     else None),
+        # Window length of the means [days]; None for the instantaneous state.
+        "window_days": (float(s["flux_mean_window_s"]) / 86400.0) if use_mean else None,
         "H_bathy": np.asarray(s["H_bathy"]) if "H_bathy" in keys else None,
         "z_center_ref": np.asarray(s["z_center_ref"]) if "z_center_ref" in keys else None,
         "lat": np.asarray(s["lat_T"]),
         "lon": np.asarray(s["lon_T"]),
         "mask": np.asarray(s["land_mask"]),
     }
+
+
+NEMO_RECORD_DAYS = 5.0   # ORCA1 grid_T output_freq (file_def_nemo-oce.xml: 5d)
+
+
+def require_window(L, use_mean, record_days=NEMO_RECORD_DAYS, what="snapshot"):
+    """The mode label for reports, after checking that a window mean spans
+    exactly the oracle's record length (codex: a day-30 snapshot averaging
+    days 29-30 must not score against NEMO's days 25-30 record)."""
+    if not use_mean:
+        return "instantaneous"
+    wd = L.get("window_days")
+    if wd is None or not np.isfinite(wd) or abs(wd - record_days) > 1e-6:
+        raise SystemExit(f"{what}: window mean spans {wd} days but the NEMO record "
+                         f"is {record_days} days; not window-matched")
+    return f"window_mean({record_days:g}d)"
 
 
 def _nemo_record_months(ds, tdim, nt):
@@ -313,6 +357,11 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--legoesm-snapshot", type=Path, required=True)
+    p.add_argument("--use-mean-fields", action="store_true",
+                   help="score the driver's --state-accumulate/--mld-accumulate "
+                        "window means (the statistic NEMO's 5-day files hold) "
+                        "instead of the instantaneous snapshot; refuses "
+                        "snapshots that lack them")
     p.add_argument("--nemo-gridt", type=Path, required=True)
     p.add_argument("--nemo-time-idx", type=int, default=-1,
                    help="NEMO grid_T time record (default last).")
@@ -344,7 +393,12 @@ def main() -> int:
     args = p.parse_args()
     out = args.output_dir; out.mkdir(parents=True, exist_ok=True)
 
-    L = _load_legoesm(args.legoesm_snapshot)
+    if args.use_mean_fields and args.nemo_month is not None:
+        raise SystemExit("--use-mean-fields scores a 5-day window mean against one "
+                         "5-day NEMO record; it is not defined against the --nemo-month "
+                         "monthly climatology (drop one of the two)")
+    L = _load_legoesm(args.legoesm_snapshot, use_mean=args.use_mean_fields)
+    fields_mode = require_window(L, args.use_mean_fields, NEMO_RECORD_DAYS)
     N = _load_nemo(args.nemo_gridt, args.nemo_time_idx, month=args.nemo_month)
     print(f"[load] legoESM {L['sst'].shape}, NEMO {N['sst'].shape} "
           f"({N['n_time']} time records)")
@@ -433,18 +487,27 @@ def main() -> int:
     # MLD: MLD(mean T,S) is not seasonal-mean MLD -- label accordingly.
     plot_fields = {"SST": (sstL, sstN), "SSS": (sssL, sssN)}
     mld_report = None
-    if (N.get("mld") is not None and L.get("z_center_ref") is not None
-            and L.get("H_bathy") is not None):
-        from legoesm.ocean.diagnostics import mixed_layer_depth
-        z_c = np.asarray(L["z_center_ref"], dtype=np.float64)         # (nlev,)
-        Hb = np.asarray(L["H_bathy"], dtype=np.float64)
-        # Per-level wet mask: level centre above the sea floor AND in the ocean.
-        wet = ((z_c[(None,) * Hb.ndim + (slice(None),)] < Hb[..., None])
-               & (L["mask"][..., None] > 0.5)).astype(np.float64)
-        bottom = Hb
-        mldL = np.asarray(mixed_layer_depth(
-            L["T3d"], L["S3d"], z_c, delta_sigma=0.01,
-            wet_mask=wet, bottom_depth=bottom))
+    _has_geom = L.get("z_center_ref") is not None and L.get("H_bathy") is not None
+    if args.use_mean_fields and L.get("mld_mean") is None and N.get("mld") is not None:
+        print("[MLD] SKIPPED: --use-mean-fields but the snapshot has no mld_mean "
+              "(run the driver with --mld-accumulate); the MLD of the mean state "
+              "would be biased shallow and is not computed")
+    if N.get("mld") is not None and (L.get("mld_mean") is not None
+                                     or (_has_geom and not args.use_mean_fields)):
+        if L.get("mld_mean") is not None:
+            # --use-mean-fields: the window-mean MLD (mean of MLDs, as NEMO's
+            # mldr10_1 is), never the MLD of the mean state; needs no geometry.
+            mldL = np.asarray(L["mld_mean"], dtype=np.float64)
+        else:
+            from legoesm.ocean.diagnostics import mixed_layer_depth
+            z_c = np.asarray(L["z_center_ref"], dtype=np.float64)         # (nlev,)
+            Hb = np.asarray(L["H_bathy"], dtype=np.float64)
+            # Per-level wet mask: level centre above the sea floor AND in the ocean.
+            wet = ((z_c[(None,) * Hb.ndim + (slice(None),)] < Hb[..., None])
+                   & (L["mask"][..., None] > 0.5)).astype(np.float64)
+            mldL = np.asarray(mixed_layer_depth(
+                L["T3d"], L["S3d"], z_c, delta_sigma=0.01,
+                wet_mask=wet, bottom_depth=Hb))
         mldL_g, ocLm = regrid_curv_to_latlon(
             np.nan_to_num(mldL, nan=0.0), L["lat"], L["lon"],
             np.isfinite(mldL).astype(np.float64), tgt_lat, tgt_lon)
@@ -468,8 +531,12 @@ def main() -> int:
         mld_report = {**mld_raw, "rmse_log1p_m": mld_log["rmse"],
                       "median_bias_m": med_bias, "delta_sigma": 0.01,
                       "bands": mld_bands,
+                      "fields_mode": fields_mode,
                       "method": "de Boyer Montegut / Treguier 2023; dsigma=0.01 wrt 10m "
-                                "to match NEMO mldr10_1; snapshot/annual-state (not seasonal)"}
+                                "to match NEMO mldr10_1; "
+                                + ("window-mean of per-step MLDs (mld_mean)"
+                                   if L.get("mld_mean") is not None else
+                                   "snapshot/annual-state MLD (not seasonal)")}
         print(f"[MLD] rmse {mld_raw['rmse']:.1f} m  bias {mld_raw['bias']:+.1f} m  "
               f"median-bias {med_bias:+.1f} m  corr {mld_raw['corr']:.3f}  "
               f"rmse(log1p) {mld_log['rmse']:.3f}")
@@ -489,6 +556,7 @@ def main() -> int:
               "MLD comparison.")
 
     report = {
+        "fields_mode": fields_mode,
         "legoesm_snapshot": str(args.legoesm_snapshot),
         "nemo_gridt": str(args.nemo_gridt), "nemo_time_idx": args.nemo_time_idx,
         "sst_supercooled_cells": n_below, "sst_raw_min_C": sst_min,

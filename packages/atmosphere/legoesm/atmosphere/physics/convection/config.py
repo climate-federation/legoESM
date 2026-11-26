@@ -52,6 +52,7 @@ __param_spec__ = {
     "BechtoldConfig": {
         "scheme_key": "atm.conv.BechtoldConfig",
         "excluded": {
+            "snow_refill_width_kg_m2_s": "numerics: RULE 5 width of the sub-cloud snow refill max(-snow_left, 0) (cuflxn.F90:493-495; 0 = the oracle's hard switch)",
             "ifs_shallow_supply_width_w_m2": "smoothing width of the faithful-chain max(ZDHPBL, 0) shallow supply ramp (RULE 5 differentiable form), not a tunable",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
@@ -229,6 +230,44 @@ __param_spec__ = {
             "cape_or_sharpness": "numerics: sigmoid sharpness on the CAPE-OR fallback trigger",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
             "cape_threshold": "default 0 = disabled/off (KF gates on the trigger function, not CAPE)",
+            "wrf_lut_knot_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_tpmix_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_condload_sqrt_width_m2s2": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wtw_floor_width_m2s2": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_prof5_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_lcl_gather_width_m": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_l5_gather_width_pa": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_q0_clip_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_q0_floor_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_tlcl_cap_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wklcl_cap_width_m": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_dtlcl_onset_width_ms": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wlcl_onset_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_wlcl_cap_width_ms": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_rad_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_entrain_select_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_entrain_tiny_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_eqf_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_ee2_floor_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_frc_clip_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_freeze_onset_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_abe_pos_width_m": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_chmin_clip_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_top_stop_wtw_width_m2s2": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_top_stop_umf_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_lfs_depth_width_pa": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_melt_t_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_dd_ok_depth_width_pa": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_ldb_tv_width_k": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_nodd_tder_width_kgs": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_ddinc_cap_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_dd_rh_low_width_kgkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_fabe_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_ainc_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_ainc_rel_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_ainc_tol_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_dfda_width": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
+            "wrf_closure_dabe_width_jkg": "numerics: RULE 5 smoothing width of the wrf_kfeta port (#2280)",
             "cloud_depth_min": "trigger: fixed shallow/deep cloud-depth split (not sigmoid-tunable, fix via config)",
             "cloud_depth_sharpness": "numerics: sigmoid sharpness on the deep/shallow blend",
             "cloud_top_detrainment_fraction": "fixed KF-Eta cloud-top detrainment-level fraction (structural detrainment profile, not a tunable closure rate)",
@@ -309,50 +348,12 @@ __param_spec__ = {
         "excluded": {
             "cloud_mask_sharpness": "inert: belonged to the replaced T_moist >= T layer mask; the Isca qe_moist_convection port has no such mask and raises on a non-default value",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the smooth CAPE trigger",
+            "dry_parcel_gate_width": "numerics: RULE 5 smoothing width of the below-LCL-table dry-parcel gate; 0 = hard step",
         },
         "params": {
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Frierson (2007)", "shape": None},
             "rh_ref": {"units": "1", "bounds": (0.4, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Frierson (2007) reference RH", "shape": None, "legacy_name": "sbm_RH_ref"},
             "tau_c": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Frierson (2007) relaxation timescale", "shape": None, "legacy_name": "sbm_tau_c"},
-        },
-    },
-    "TiedtkeConfig": {
-        "scheme_key": "atm.conv.TiedtkeConfig",
-        "excluded": {
-            "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
-            "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
-            "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
-            "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
-            "epsilon_deep": "entrainment: deep-branch base rate held fixed in-scheme",
-            "epsilon_midlevel": "entrainment: mid-level base rate held fixed in-scheme",
-            "epsilon_shallow": "entrainment: shallow-branch base rate held fixed in-scheme",
-            "lcl_membership_sharpness": "numerics: sigmoid sharpness on the below-LCL level membership [1/level index]",
-            "moisture_convergence_sharpness": "numerics: sigmoid sharpness on the MC-proxy threshold",
-            "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
-            "precip_efficiency": "default 0 = disabled (legacy no rain-split, gated `if > 0.0` in tiedtke.py); enable + retune via config, not sigmoid-trained from the off state",
-            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
-        },
-        "params": {
-            "autoconv_q_c_crit": {"units": "kg/kg", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Sundqvist (1978) autoconversion critical cloud water", "shape": None},
-            "autoconv_pe_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "convective precip-efficiency ceiling (Sundqvist 1978 form)", "shape": None},
-            "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Tiedtke (1989) stability cap", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Tiedtke (1989)", "shape": None},
-            "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
-            "cloud_depth_shallow_max": {"units": "m", "bounds": (800.0, 2500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
-            "cmt_c_d": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
-            "cmt_c_u": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
-            "delta_deep": {"units": "1/m", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Tiedtke (1989) deep branch", "shape": None},
-            "delta_midlevel": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Tiedtke (1989) mid-level branch", "shape": None},
-            "delta_shallow": {"units": "1/m", "bounds": (9.9e-05, 0.0009), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Tiedtke (1989) shallow branch", "shape": None},
-            "downdraft_alpha": {"units": "1", "bounds": (0.0, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
-            "downdraft_evap_efficiency": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
-            "mc_proxy_RH_crit": {"units": "1", "bounds": (0.3, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989) moisture-convergence proxy", "shape": None},
-            "midlevel_M_b_fraction": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Tiedtke (1989) mid-level mass-flux fraction", "shape": None},
-            "moisture_convergence_threshold": {"units": "kg/kg/s", "bounds": (3.3e-09, 3e-08), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989) MC-proxy threshold", "shape": None},
-            "parcel_dq": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989) sub-cloud perturbation", "shape": None},
-            "tau_MC_proxy": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) MC-proxy timescale", "shape": None},
-            "tau_M_u_relax": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) profile relaxation", "shape": None},
-            "tau_shallow_M_b": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Tiedtke (1989) shallow cloud-base mass-flux timescale", "shape": None},
         },
     },
     "ZhangMcFarlaneConfig": {
@@ -362,6 +363,7 @@ __param_spec__ = {
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
             "detrain_phase_width_K": "numerics: RULE 5 smoothing width of the detrainment liquid/ice ramp corners (0 = CAM hard switch)",
             "detrain_number_width_kgkg_s": "numerics: RULE 5 smoothing width of max(0, dlf) in the detrainment number source (0 = CAM hard switch)",
+            "trigger_width_J_kg": "numerics: RULE 5 width of the cape > capelmt deep-convection trigger ramp (0 = CAM hard switch)",
         },
         "params": {
             "c0_lnd": {"units": "1/m", "bounds": (0.002, 0.02), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM zmconv_c0_lnd namelist span (0.002-0.0075 across configurations)", "shape": None},
@@ -408,6 +410,12 @@ class SBMConfig(NamedTuple):
     # The oracle's convecting layer is kLZB..surface; sbm_convection raises
     # if this is set to anything but its default.
     cloud_mask_sharpness: float = 5.0
+    # RULE 5 width of the dry-parcel gate in the LCL lookup value
+    # log(e / T**(1/kappa)) (dimensionless, natural-log units): a parcel whose
+    # value lies below the table (LCL T < 173 K, the oracle's FATAL) does not
+    # convect; above it the outputs ramp in with sigmoid((v - v_min)/width - 4).
+    # 0 = the hard step.  Numerics, excluded from __param_spec__.
+    dry_parcel_gate_width: float = 0.1
 
 
 class AhmedNeelinDCAConfig(NamedTuple):
@@ -794,6 +802,17 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # source [kg/kg/s].  0 = CAM's hard switch.
     detrain_phase_width_K: float = 0.1
     detrain_number_width_kgkg_s: float = 1.0e-12
+    # RULE 5 width [J/kg] of the deep-convection trigger cape > capelmt: the
+    # closure mass flux is scaled by a C1 ramp from 0 at capelmt to 1 at
+    # capelmt + width (_zm_cam6 module docstring).  0 = CAM's hard switch.
+    trigger_width_J_kg: float = 10.0
+    # Water positivity right after ZM's update in the macmic loop (MPAS lane,
+    # cld_macmic_num_steps >= 2), where CAM6 runs qneg3 inside physics_update
+    # after convect_deep_tend (physpkg.F90:1925).  CAM6 floors Q at 1e-12 and
+    # creates water; legoESM pays and borrows column by column instead
+    # (core.conservation.after_convection_positivity), a documented
+    # departure.  False (default) = no positivity stage after ZM.
+    positivity_after_zm: bool = False
 
 
 class KainFritschConfig(NamedTuple):
@@ -1010,6 +1029,47 @@ class KainFritschConfig(NamedTuple):
     # KF-Eta port (kain_fritsch_wrf.py), OPT-IN and NOT RULE 5 compliant (its
     # traced-state switches are hard; #2280).  Any other value raises.
     variant: str = "smooth"
+    # RULE 5 widths of the variant="wrf_kfeta" port (#2280; forms and values
+    # voted author/GLM/codex); 0 = the oracle's hard switch.  Read only by that
+    # variant (kain_fritsch_wrf.py -> _kf_eta.KFSmoothing).
+    wrf_lut_knot_width: float = 0.25  # table index units, 0 or (0, 1]
+    wrf_tpmix_width_kgkg: float = 1.0e-6
+    wrf_condload_sqrt_width_m2s2: float = 1.0e-4
+    wrf_wtw_floor_width_m2s2: float = 1.0e-4
+    wrf_prof5_width: float = 0.05
+    wrf_lcl_gather_width_m: float = 50.0
+    wrf_l5_gather_width_pa: float = 500.0
+    wrf_q0_clip_width_kgkg: float = 1.0e-6
+    wrf_q0_floor_width_kgkg: float = 1.0e-7
+    wrf_tlcl_cap_width_k: float = 0.1
+    wrf_wklcl_cap_width_m: float = 100.0
+    wrf_dtlcl_onset_width_ms: float = 1.0e-4
+    wrf_wlcl_onset_width_k: float = 0.01
+    wrf_wlcl_cap_width_ms: float = 0.1
+    wrf_rad_clip_width: float = 0.05
+    wrf_entrain_select_width_k: float = 0.1
+    wrf_entrain_tiny_width_k: float = 1.0e-3
+    wrf_eqf_clip_width: float = 0.02
+    wrf_ee2_floor_width: float = 0.02
+    wrf_frc_clip_width: float = 0.02
+    wrf_freeze_onset_width_k: float = 0.5
+    wrf_abe_pos_width_m: float = 0.01
+    wrf_chmin_clip_width_k: float = 1.0
+    wrf_top_stop_wtw_width_m2s2: float = 2.0e-4
+    wrf_top_stop_umf_width_kgs: float = 2.0
+    wrf_lfs_depth_width_pa: float = 500.0
+    wrf_melt_t_width_k: float = 0.1
+    wrf_dd_ok_depth_width_pa: float = 500.0
+    wrf_ldb_tv_width_k: float = 0.1
+    wrf_nodd_tder_width_kgs: float = 1.0
+    wrf_ddinc_cap_width: float = 0.02
+    wrf_dd_rh_low_width_kgkg: float = 1.0e-6
+    wrf_closure_fabe_width: float = 0.01
+    wrf_closure_ainc_width: float = 5.0e-4
+    wrf_closure_ainc_rel_width: float = 1.0e-3
+    wrf_closure_ainc_tol_width: float = 1.0e-5
+    wrf_closure_dfda_width: float = 0.01
+    wrf_closure_dabe_width_jkg: float = 1.0
 
 
 class EmanuelConfig(NamedTuple):
@@ -1217,144 +1277,8 @@ class EmanuelConfig(NamedTuple):
 
 
 class TiedtkeConfig(NamedTuple):
-    """Configuration for the Tiedtke (1989) bulk mass-flux scheme.
-
-    Three-class scheme with deep, mid-level, and shallow branches
-    blended on cloud depth.  Downdraft is included with an RH-based
-    trigger; convective momentum transport via Gregory et al. 1997.
-    First scheme that actually exercises the new ``(ncol, nlev)``
-    profile carry for ``M_u(k)``.
-
-    The full Tiedtke 1989 closure uses column moisture convergence for
-    the deep branch.  Production passes the real per-level
-    ``compute_moisture_convergence`` field (column-integrated inside the
-    scheme); when it is ``None`` the scheme falls back to a
-    saturation-EXCESS proxy ``MC_proxy = ∫ max(q_v - RH_crit·q_sat, 0)
-    dp / (g·tau_MC_proxy)`` with the same qualitative behavior (positive
-    in moist columns, zero in dry).
-
-    Fields
-    ------
-    epsilon_deep, delta_deep : float
-        Entrainment / detrainment rates for deep branch [1/m].
-    epsilon_shallow, delta_shallow : float
-        Same for shallow branch.
-    epsilon_midlevel, delta_midlevel : float
-        Same for mid-level branch.
-    enable_downdraft : bool
-        Whether to include the downdraft branch (default ``True``).
-    downdraft_alpha : float
-        Downdraft / updraft mass flux ratio at LFS (default 0.3).
-    downdraft_RH_min : float
-        Below this column-mean RH the downdraft fires (default 0.2).
-    moisture_convergence_threshold : float
-        Column moisture-convergence (or saturation-excess proxy)
-        threshold [kg/kg/s].  Below this the deep branch is suppressed
-        (default 1e-8).
-    moisture_convergence_sharpness : float
-        Sigmoid sharpness on the MC threshold [s/(kg/kg)] (default 1e8).
-    cape_threshold : float
-        Secondary CAPE gate [J/kg] (default 70.0).
-    cape_sharpness : float
-        Sigmoid sharpness on CAPE gate (default 0.02).
-    cloud_depth_deep : float
-        Depth threshold separating mid-level from deep branches [m]
-        (default 3000.0).
-    cloud_depth_shallow_max : float
-        Depth threshold separating shallow from mid-level branches
-        [m] (default 1500.0).
-    depth_split_sharpness : float
-        Sigmoid sharpness on the depth thresholds [1/m] (default 1e-3).
-    enable_cmt : bool
-        Whether to compute CMT (default ``True``).
-    cmt_c_u, cmt_c_d : float
-        Gregory et al. 1997 closure coefficients (default 0.7).
-    downdraft_rh_sharpness : float
-        Sigmoid sharpness of the downdraft RH trigger
-        ``sigmoid(k · (downdraft_RH_min − rh_below))`` in
-        [1/RH-fraction].  The RH argument is O(0.1), so the default 10
-        gates crisply around ``downdraft_RH_min``.  NOT interchangeable
-        with a level-index sharpness (different argument units) —
-        replaces the former dead ``smooth_trigger_sharpness`` field,
-        whose 0.02 default was mis-scaled for this argument anyway.
-    lcl_membership_sharpness : float
-        Sigmoid sharpness of the below-LCL level membership
-        ``sigmoid(k · (level − k_lcl_smooth))`` in [1/level index]
-        (default 2.0 — a ~1-level transition).
-    tau_M_u_relax : float
-        Implicit-Euler relaxation timescale [s] for the profile carry
-        ``M_u`` toward its diagnosed equilibrium (default 1800.0).
-    parcel_dT, parcel_dq : float
-        Sub-cloud parcel perturbations (defaults 0.5 K, 1e-3 kg/kg).
-    """
-    epsilon_deep: float = 1.0e-4
-    delta_deep: float = 1.0e-4
-    epsilon_shallow: float = 3.0e-4
-    delta_shallow: float = 3.0e-4
-    epsilon_midlevel: float = 1.0e-4
-    delta_midlevel: float = 2.0e-4
-    enable_downdraft: bool = True
-    downdraft_alpha: float = 0.3
-    downdraft_RH_min: float = 0.2
-    # Fraction of the downdraft mass flux that re-evaporates as rain
-    # falling through the subcloud layer (default 0.05 — matches a
-    # historical hardcoded literal that was previously dimensionally
-    # wrong; the current implementation distributes the resulting
-    # evaporation rate over below-LCL layers by mass weight, with a
-    # matching dq_v source so the column water budget closes).
-    downdraft_evap_efficiency: float = 0.05
-    moisture_convergence_threshold: float = 1.0e-8
-    moisture_convergence_sharpness: float = 1.0e8
-    cape_threshold: float = 70.0
-    cape_sharpness: float = 0.1
-    cloud_depth_deep: float = 3000.0
-    cloud_depth_shallow_max: float = 1500.0
-    depth_split_sharpness: float = 1.0e-3
-    enable_cmt: bool = True
-    cmt_c_u: float = 0.7
-    cmt_c_d: float = 0.7
-    downdraft_rh_sharpness: float = 10.0
-    lcl_membership_sharpness: float = 2.0
-    tau_M_u_relax: float = 1800.0
-    parcel_dT: float = 0.5
-    parcel_dq: float = 1.0e-3
-    tau_MC_proxy: float = 3600.0   # for saturation-excess MC proxy
-    # Critical column-mean RH above which the MC proxy starts firing.
-    # The proxy approximates moisture convergence as the column-integrated
-    # vapor in excess of ``RH_crit * q_sat``: positive in moist columns,
-    # vanishing in dry ones.
-    mc_proxy_RH_crit: float = 0.6
-    tau_shallow_M_b: float = 3600.0  # Shallow-cloud-base mass-flux timescale [s]
-    M_b_max: float = 0.05   # hard cap on the cloud-base mass flux [kg/m^2/s]
-    midlevel_M_b_fraction: float = 0.5  # M_b_midlevel = M_b_shallow * this
-    # Single-plume scheme — see _plume.entraining_detraining_plume(buoyancy_death_memory).
-    buoyancy_death_memory: bool = False
-    # Convective precipitation efficiency [0,1]: the fraction of the detrained
-    # plume condensate that has precipitated in the updraft and is therefore
-    # emitted as RAIN (ConvectionOutput.dq_r_conv_dt — a precipitating species
-    # that sediments via microphysics and is invisible to radiation) rather
-    # than detrained as suspended cloud water.  The plume docstring delegates
-    # precipitation to the calling scheme; this implements it as a bulk
-    # efficiency (same convention as SBMConfig.sbm_precip_efficiency /
-    # EmanuelConfig.precip_efficiency_max).  Observed deep-convective CPE
-    # ~0.5-0.9.  Default 0.0 = OFF (detrain all condensate as cloud, preserving
-    # existing behaviour); without it 100% of convective condensate loads the
-    # grid-scale cloud + radiation, which microphysics cannot drain.
-    precip_efficiency: float = 0.0
-    # Precipitation split scheme (see BechtoldConfig): "constant" (fixed
-    # precip_efficiency, legacy) or "autoconversion" (physical Sundqvist-1978
-    # split on the plume updraft cloud water q_c_u). Unknown => raise at entry.
-    precip_split_scheme: str = "constant"
-    autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
-    autoconv_pe_max: float = 0.9        # [1] ceiling on the precipitating fraction
-    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
-    # See ``MassFluxConfig.subsidence_solve`` (identical semantics; the shared
-    # kernel is ``mass_flux.apply_mass_flux_kernel``).  ``"advective"`` is the
-    # DEFAULT HERE and preserves this scheme's shipped behaviour byte-for-byte;
-    # ``"implicit_flux"`` is the conservative flux-form solve that also books
-    # the ``-dq_c`` vapor sink.  Unknown values raise at kernel entry.
-    subsidence_solve: str = "advective"
-    theta_implicit: float = 1.0
+    """WRF v4.8.0 Tiedtke has no tunable parameters: its constants are the
+    module-level ``_WRF_*`` values in ``tiedtke.py`` (fixed in WRF too)."""
 
 
 # --- CAPE trigger trainability (#1417) --------------------------------------
@@ -1681,6 +1605,18 @@ class BechtoldConfig(NamedTuple):
     # _ifs_cumastrn.cumastrn_column (shallow closure).
     ifs_shallow_nosupply: str = "zero"
     ifs_shallow_supply_width_w_m2: float = 1.0  # W/m2, 0 = hard max
+    # Faithful chain only (RULE 5, #2281): False (default) = the elementwise
+    # switches (so far the closure; ascent and fluxes follow) take their C1 smooth
+    # forms (_ifs_smooth.IfsSmooth, width 0.01 x a scale of the switched
+    # quantity); True = OpenIFS's exact switches.  The level/flag structure is
+    # hard either way (KNOWN DIFFERENCE in _ifs_cumastrn).
+    ifs_hard_switches: bool = False
+    # Faithful chain only (#2594, owner decision 2026-11-24): cloud-top
+    # negative-humidity fixer.  False (default) = corrected: the deficit is
+    # taken out of the detrained condensate.  True = OpenIFS as written
+    # (cumastrn.F90:1171 adds it, driving q more negative).  KNOWN DIFFERENCE
+    # in _ifs_cumastrn.cumastrn_column.
+    ifs_openifs_cloud_top_fixer: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.
@@ -1737,6 +1673,10 @@ class BechtoldConfig(NamedTuple):
     # Default True since 2026-07-17 (RCE A/B: T-drift 0.052 -> 0.026 K/day;
     # AMIP stable).
     use_ifs_snow_melt: bool = True
+    # RULE 5 width [kg/m^2/s] of the snow refill in that march (cuflxn.F90:
+    # 493-495, an overdrawn snow flux topped up from the rain): a one-sided C1
+    # positive part; 0 = the oracle's hard switch.  Default voted 2026-11-10.
+    snow_refill_width_kg_m2_s: float = 1.0e-8
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

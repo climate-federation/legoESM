@@ -32,6 +32,8 @@ _MICRO = {"atm.micro.MorrisonConfig." + f for f in ("k_au", "k_ac", "x_star")}
 _KK = {"atm.micro.MorrisonConfig." + f
        for f in ("autocon_fact", "accre_enhan_fact")}
 _HTOPO = "atm.gwd.McFarlaneConfig.h_topo"
+# default turbulence = smagorinsky, default arm WRF km_opt=3: the Lilly knobs are unread
+_SMAG = {"atm.turb.SmagorinskyConfig." + f for f in ("C_s", "Pr_t", "l_mix_max")}
 
 
 def _cfg(warm_rain="kk2000", gwd="mcfarlane"):
@@ -44,16 +46,16 @@ def _cfg(warm_rain="kk2000", gwd="mcfarlane"):
 
 def test_sets_follow_the_resolved_options():
     assert resolved_inactive_fields(_cfg(), subgrid_orography=True) == (
-        _MICRO | {_HTOPO})
-    assert resolved_inactive_fields(_cfg(), subgrid_orography=False) == _MICRO
+        _MICRO | {_HTOPO} | _SMAG)
+    assert resolved_inactive_fields(_cfg(), subgrid_orography=False) == _MICRO | _SMAG
     assert resolved_inactive_fields(
-        _cfg("kk2000_cam6"), subgrid_orography=False) == _MICRO
+        _cfg("kk2000_cam6"), subgrid_orography=False) == _MICRO | _SMAG
     # "seifert_beheng" runs SB2001 as gSAM does since the 2026-10-20 oracle
     # port: k_au/k_ac/x_star are read by no law.
     assert resolved_inactive_fields(
-        _cfg("seifert_beheng"), subgrid_orography=False) == _MICRO | _KK
+        _cfg("seifert_beheng"), subgrid_orography=False) == _MICRO | _KK | _SMAG
     assert resolved_inactive_fields(
-        _cfg("seifert_beheng_sb2001"), subgrid_orography=False) == _MICRO | _KK
+        _cfg("seifert_beheng_sb2001"), subgrid_orography=False) == _MICRO | _KK | _SMAG
     assert _HTOPO not in resolved_inactive_fields(
         _cfg(gwd="lindzen"), subgrid_orography=True)
     assert _HTOPO in resolved_inactive_fields(
@@ -69,7 +71,8 @@ def test_frozen_names_leave_the_core_trainable_set():
     cut = build_trainable_params(active_scheme_keys=keys, tier="core",
                                  exclude=tuple(sorted(frozen)))
     core_frozen = {"atm.micro.MorrisonConfig.k_au", "atm.micro.MorrisonConfig.k_ac",
-                   _HTOPO}
+                   _HTOPO, "atm.turb.SmagorinskyConfig.C_s",
+                   "atm.turb.SmagorinskyConfig.l_mix_max"}
     assert core_frozen <= set(full.raw_values)        # non-vacuous: they WERE in
     assert not (frozen & set(cut.raw_values))
     assert set(full.raw_values) - set(cut.raw_values) == core_frozen

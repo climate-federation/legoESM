@@ -64,7 +64,8 @@ def test_defaults_preserved():
     assert _main_config([]).snow == SnowConfig()
     expected = SeaIceConfig(dynamics="free_drift", transport="advect",
                             brine=BrineConfig(enabled=True),
-                            sw_transmittance_const=args.ice_thermo_sw_trans)
+                            sw_transmittance_const=args.ice_thermo_sw_trans,
+                            core2_precipitation_closure=True)
     assert _main_config([]) == expected
 
 

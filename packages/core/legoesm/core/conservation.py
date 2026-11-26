@@ -97,7 +97,8 @@ def energy_consistent_moisture_floor(q_v_raw, T, weight):
 #: imports nothing above it" contract.
 BORROW_ELIGIBLE_TRACERS = frozenset(
     {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g",
-     "N_c", "N_r", "N_i", "N_s", "N_g"})
+     "N_c", "N_r", "N_i", "N_s", "N_g",
+     "o3_ifs"})
 
 
 def is_borrow_eligible_tracer(name: str) -> bool:
@@ -160,8 +161,90 @@ def energy_consistent_water_floor(tracers, T):
     return out, T_out
 
 
+CONDENSATE_TRACERS = ("q_c", "q_r", "q_i", "q_s", "q_g")
+
+
+def pay_condensate_deficit_from_vapour(tracers, T, dp):
+    """Pay a column's net-negative condensate from the same column's vapour.
+
+    The column borrow cannot repay a condensate whose column total is
+    negative: :func:`conservative_positive_clip` zeroes the column and the
+    global stage takes the deficit from the positive mass of the whole globe,
+    and when the globe holds less than the debt the floor creates water
+    (measured on the ENSO-fork stage T start: 3.25e-7 of the global water in
+    one step).  Here, before the borrow, each condensate ``x`` with deficit
+    ``D_x = max(-sum(dp q_x), 0)`` is paid ``pay_x = f D_x``,
+    ``f = min(1, V+/D_tot)``, from the column's vapour in proportion to
+    ``max(q_v, 0) dp``; the payment fills its negative levels in proportion
+    to their negative mass ``N_x``, so the column total becomes
+    ``-(1 - f) D_x`` (0 when the vapour can pay) and the column borrow then
+    zeroes it, as the ENSO-fork form did by zeroing the column.  Its latent
+    heat is released where the vapour is removed:
+
+        c_pd dT_k = (q_v+_k / V+) sum_x (L_v - coef_x) pay_x
+
+    with ``coef_x`` of :data:`_FLOOR_LATENT_COEF` (L_v for liquid, L_v + L_f
+    for ice, snow and graupel), as PUMAS books its vapour to condensate
+    transfers (``qvlat``, ``tlat`` with ``xxlv``/``xxls``).  Total water and
+    the column frozen moist static energy ``sum dp (c_pd T + L_v q_v - L_f
+    q_frozen)`` are conserved per column.  Column local: identical serial and
+    under MPI.
+
+    RULE 5 note: the fork zeroed the column on the sign of its total and paid
+    only where ``V+ > D_tot`` -- two traced-state switches, the first an
+    O(q) jump at ``sum(dp q_x) = 0``.  This form is continuous in the state
+    (kinks only, at ``max``/``min``, as the borrow it precedes) and needs no
+    width field; codex and GLM reviewed the change 2026-11-20.  Where the
+    vapour cannot pay all, it pays what it holds (the fork paid nothing),
+    so the stage never creates more water than the fork's form.
+
+    Ported from I. Di Carlo's ENSO fork (iadicarlo/legoESM-enso e9120c2034,
+    0ed16a720d) without its isotope-passenger branch.
+
+    ``dp`` (..., nlev) layer masses.  Returns ``(tracers, T)``.
+    """
+    def raw(f):
+        return f.data if hasattr(f, "data") else f
+
+    def put(f, x):
+        return f.replace(data=x) if hasattr(f, "replace") else x
+
+    if "q_v" not in tracers:
+        return tracers, T
+    w = jnp.asarray(dp)
+    qv = raw(tracers["q_v"])
+    vpos = jnp.maximum(qv, 0.0)
+    V = jnp.sum(vpos * w, axis=-1, keepdims=True)
+    cond = [x for x in CONDENSATE_TRACERS if x in tracers]
+    if not cond:
+        return tracers, T
+    D = {x: jnp.maximum(-jnp.sum(raw(tracers[x]) * w, axis=-1, keepdims=True), 0.0)
+         for x in cond}
+    D_tot = sum(D.values())
+    has_d = D_tot > 0.0
+    f = jnp.where(has_d, jnp.minimum(1.0, V / jnp.where(has_d, D_tot, 1.0)), 0.0)
+    out = dict(tracers)
+    pay = {}
+    for x in cond:
+        q = raw(tracers[x])
+        neg = jnp.maximum(-q, 0.0)
+        N = jnp.sum(neg * w, axis=-1, keepdims=True)
+        pay[x] = f * D[x]
+        # D_x > 0 implies N_x > 0; guard the division before it happens
+        has_n = N > 0.0
+        out[x] = put(tracers[x], q + jnp.where(has_n, pay[x] / jnp.where(has_n, N, 1.0), 0.0) * neg)
+    has_v = V > 0.0
+    V_s = jnp.where(has_v, V, 1.0)
+    out["q_v"] = put(tracers["q_v"], qv - vpos * (sum(pay.values()) / V_s))
+    heat = sum((constants.L_v - _FLOOR_LATENT_COEF[x]) * pay[x] for x in cond)
+    T_data = raw(T)
+    dT = vpos / V_s * heat / constants.c_pd
+    return out, put(T, T_data + dT.astype(T_data.dtype))
+
+
 def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
-                           area, area_ref=None, sum_fn=None):
+                           area, area_ref=None, sum_fn=None,
+                           condensate_from_vapour=True):
     """Single positivity stage for every atmospheric dycore (MPAS/cube/spectral/
     lat-lon), so the three grids stay bit-equivalent by construction.
 
@@ -181,8 +264,20 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
       per-species latent-heat T correction (:func:`energy_consistent_water_floor`).
     * ``conservative=False`` + ``energy_consistent=False``: plain ``max(q,0)``.
 
+    ``condensate_from_vapour`` (``conservative`` only, default True): before
+    the borrow, a column's net-negative condensate is paid from the same
+    column's vapour with its latent heat
+    (:func:`pay_condensate_deficit_from_vapour`), so the borrow never has to
+    take it from other columns or create it.  False selects the legacy form,
+    which creates the deficit when the globe cannot repay it.  The payment
+    books latent heat, so it needs ``T``: lanes that pass ``T=None`` (their
+    temperature is not grid-point, e.g. spectral, the FV3 duo column) keep
+    the legacy borrow.
+
     Returns ``(tracers_out, T_out)``.
     """
+    if condensate_from_vapour and conservative and T is not None:
+        tracers, T = pay_condensate_deficit_from_vapour(tracers, T, dp)
     if conservative:
         out = {}
         for name in sorted(tracers):
@@ -206,6 +301,68 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
         for name, f in tracers.items()
     }
     return out, T
+
+
+def after_convection_positivity(tracers, T, dp):
+    """Water positivity right after deep convection, inside one physics call.
+
+    CAM6 runs ``qneg3`` there (physics_update after convect_deep_tend,
+    physpkg.F90:1925), flooring Q at 1e-12 and so creating water.  This stage
+    conserves it instead, column by column: a column's net-negative
+    condensate is paid from its own vapour with its latent heat
+    (:func:`pay_condensate_deficit_from_vapour`), then every borrow-eligible
+    species is borrowed back within its column
+    (:func:`conservative_positive_clip`); other species are floored.  Column
+    local, so identical serial and under MPI, and continuous in the state.
+    A column with nothing negative is returned unchanged.  All arrays
+    (ncol, nlev), top-down; ``dp`` [Pa].
+
+    KNOWN DIFFERENCE from a fully conservative stage: a column whose vapour
+    total is net-negative, or whose condensate deficit exceeds its vapour,
+    is zeroed by the column borrow, which creates that water (as CAM6's
+    qneg3 does for every hole).  The created mass is reported per column as
+    ``water_created_kg_m2``.
+
+    Returns ``(tracers, T, diag)``; ``diag`` holds per-column counts and
+    deficits of the input, the water mass species (``water_cells``,
+    ``water_deficit_kg_m2``) and the number species (``number_cells``,
+    ``number_deficit_per_m2`` [#/m2]) apart, and ``water_created_kg_m2``.
+
+    Ported from I. Di Carlo's ENSO fork (iadicarlo/legoESM-enso 3e01d6be43,
+    360591d5b3) without its isotope-passenger branch.
+    """
+    from legoesm import constants
+    data = {k: (f.data if hasattr(f, "data") else f) for k, f in tracers.items()}
+    eligible = [k for k in data if is_borrow_eligible_tracer(k)]
+    water = [k for k in eligible if str(k).removeprefix("trc_") in WATER_MASS_SPECIES]
+    number = [k for k in eligible if k not in water]
+    ncol = dp.shape[0]
+
+    def _cells(keys):
+        return (sum(jnp.sum(data[k] < 0.0, axis=-1) for k in keys)
+                if keys else jnp.zeros(ncol)).astype(jnp.int32)
+
+    def _deficit(keys):
+        return (sum(jnp.sum(jnp.maximum(-data[k], 0.0) * dp, axis=-1) for k in keys)
+                / constants.g if keys else jnp.zeros(ncol, dp.dtype))
+
+    diag = {"water_cells": _cells(water), "water_deficit_kg_m2": _deficit(water),
+            "number_cells": _cells(number), "number_deficit_per_m2": _deficit(number)}
+    tracers, T = pay_condensate_deficit_from_vapour(tracers, T, dp)
+    out = {}
+    for name, f in tracers.items():
+        x = f.data if hasattr(f, "data") else f
+        x = (conservative_positive_clip(x, dp, axis=-1)[0]
+             if is_borrow_eligible_tracer(name) else jnp.maximum(x, 0.0))
+        out[name] = f.replace(data=x) if hasattr(f, "replace") else x
+
+    def _col_water(tr):
+        return sum(jnp.sum((tr[k].data if hasattr(tr[k], "data") else tr[k]) * dp,
+                           axis=-1) for k in water) / constants.g if water \
+            else jnp.zeros(ncol, dp.dtype)
+
+    diag["water_created_kg_m2"] = _col_water(out) - _col_water(data)
+    return out, T, diag
 
 
 def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
@@ -717,6 +874,7 @@ def batch_global_area_sums(
     owned_mask: jax.Array | None = None,
     *,
     differentiable_broadcast: bool = False,
+    area: jax.Array | None = None,
 ) -> list[jax.Array]:
     """Compute multiple area-weighted global sums in a single MPI call.
 
@@ -728,9 +886,13 @@ def batch_global_area_sums(
 
     ``differentiable_broadcast``: no longer changes anything (see
     :func:`global_area_sum`; #1814).
+
+    ``area``: the cell areas, for a grid whose areas are not ``grid.area``
+    (the Gaussian grid's quadrature areas ``grid.grid_area``); ``None``
+    reads ``grid.area``.
     """
     acc = conservation_accumulator()
-    area_acc = grid.area.astype(acc)
+    area_acc = (grid.area if area is None else area).astype(acc)
     weight = area_acc
     if owned_mask is not None:
         mask = owned_mask.astype(acc)
@@ -1336,7 +1498,8 @@ def apply_physics_water_mass(tracers, tracer_tendencies, p_s, sigma_coord,
     return out, p_s_new
 
 
-def shift_ps_keep_tracer_mass(p_s, tracers, sigma_coord, correction):
+def shift_ps_keep_tracer_mass(p_s, tracers, sigma_coord, correction,
+                              p_s_dtype=None):
     """Uniform ``p_s += correction`` (a mass fixer's move) with every
     tracer re-weighted onto the new layer masses so each tracer's column
     mass is untouched: ``q' = q * dp_k / dp_k'``.  The added or removed
@@ -1345,8 +1508,13 @@ def shift_ps_keep_tracer_mass(p_s, tracers, sigma_coord, correction):
     unweighted shift changes dry pressure by only ``correction * (1 -
     sum_k dB_k Q_k)`` and moves water by ``Q_bar * correction`` -- codex
     and GLM 2026-09-28).  Returns ``(p_s_new, tracers_new)``.
+
+    ``p_s_dtype``: the dtype ``p_s_new`` is stored in; the tracers are
+    re-weighted against that stored (rounded) value.  ``None``: the add's dtype.
     """
     p_s_new = p_s + correction
+    if p_s_dtype is not None:
+        p_s_new = p_s_new.astype(p_s_dtype)
     if tracers is None:
         return p_s_new, tracers
     ratio = sigma_coord.layer_thickness_dp(p_s) / sigma_coord.layer_thickness_dp(p_s_new)
@@ -1844,7 +2012,7 @@ def energy_fixer_dT(e_before, e_after, mass) -> jax.Array:
 
 
 def gridded_energy_fixer_dT(pre, post, grid, sigma_coord,
-                            owned_mask=None) -> jax.Array:
+                            owned_mask=None, area=None) -> jax.Array:
     """:func:`energy_fixer_dT` for the structured lanes (lat-lon C-grid, cube
     C-D grid), serial and distributed.
 
@@ -1854,8 +2022,8 @@ def gridded_energy_fixer_dT(pre, post, grid, sigma_coord,
     F15b-V1).  The three global integrals go through ONE
     :func:`batch_global_area_sums` call -- the reduction the lanes' own mass
     fixers use (serial, MPI allreduce-SUM, lat-band / tile SPMD psum, cube
-    face GSPMD), all AD-safe.  ``owned_mask`` as for that call (the
-    owned-face MPI segment lane).
+    face GSPMD), all AD-safe.  ``owned_mask`` and ``area`` as for that call
+    (the owned-face MPI segment lane; the spectral lane's quadrature areas).
     """
     acc = conservation_accumulator()
 
@@ -1868,7 +2036,7 @@ def gridded_energy_fixer_dT(pre, post, grid, sigma_coord,
     e0, _ = _col(*pre)
     e1, m1 = _col(*post)
     s0, s1, sm = batch_global_area_sums([e0, e1, m1], grid,
-                                        owned_mask=owned_mask)
+                                        owned_mask=owned_mask, area=area)
     return energy_fixer_dT(s0, s1, sm)
 
 

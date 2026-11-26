@@ -174,7 +174,7 @@ class TestRayleigh:
     def test_sponge_layer_active(self):
         ncol, nlev = 4, 10
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
-        config = RayleighConfig(sponge_top=0.1, sponge_k=1.0 / 3600.0)
+        config = RayleighConfig(sponge_pbottom_Pa=1.0e4, sponge_k=1.0 / 3600.0)
         out = rayleigh_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config)
         # Near model top, drag should be nonzero
         assert float(jnp.max(jnp.abs(out.du_dt[:, 0]))) > 0.0

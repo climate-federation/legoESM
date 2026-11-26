@@ -231,8 +231,6 @@ class TestMPASNHMicrophysicsSchemeCoverage:
     @pytest.mark.parametrize(
         "scheme,min_slots,cfg_field,cfg_cls_path",
         [
-            ("sundqvist", 3, "sundqvist",
-             "legoesm.atmosphere.physics.microphysics.config.SundqvistConfig"),
             ("seifert_beheng", 9, "seifert_beheng",
              "legoesm.atmosphere.physics.microphysics.config.SeifertBehengConfig"),
             ("thompson", 9, "thompson",
@@ -266,6 +264,18 @@ class TestMPASNHMicrophysicsSchemeCoverage:
         assert tend.dtracers_dt.data.shape == (ncol, nlev, min_slots)
         assert bool(jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data)))
         assert bool(jnp.all(jnp.isfinite(tend.dtracers_dt.data)))
+
+    def test_sundqvist_refuses_a_lane_without_its_carry(self, mpas_setup):
+        """Sundqvist's gscond condenses the tendencies since its previous
+        call; the MPAS NH lane threads no PhysicsState, so it refuses."""
+        ncol, nlev = mpas_setup["ncol"], mpas_setup["nlev"]
+        tracers = jnp.zeros((ncol, nlev, 3), dtype=jnp.float64)
+        state = mpas_setup["state"]._replace(
+            tracers=mpas_setup["state"].tracers.replace(data=tracers))
+        physics_fn = make_microphysics_physics(
+            MicrophysicsConfig(scheme="sundqvist"), model_type="mpas_nh", dt=1.0)
+        with pytest.raises(ValueError, match="previous step's carry"):
+            physics_fn(state, mpas_setup["mesh"], mpas_setup["hc"], mpas_setup["tm"])
 
     def test_too_few_slots_raises_for_every_scheme(self, mpas_setup):
         """Per-scheme tracer-slot validation must fire for any scheme

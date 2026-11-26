@@ -88,6 +88,10 @@ class SurfaceFluxOutput(NamedTuple):
     # ``T_sfc`` for the atmosphere's sensible-heat coupling.  Distinct from the
     # LW-derived radiometric ``T_surface``.  None for SimpleSEB.
     T_canopy_air: jax.Array | None = None
+    # CLM5 ``t_ref2m``: 2 m air temperature from the scheme's OWN surface layer
+    # (roughness, displacement, Obukhov length, canopy-air node) [K].  The CMIP
+    # ``tas`` land leg.  None for schemes that do not solve one.
+    T_2m: jax.Array | None = None
     gs_Sun: jax.Array | None = None        # sunlit stomatal conductance [m/s]
     gs_Sh: jax.Array | None = None         # shaded stomatal conductance [m/s]
     n_iters: jax.Array | None = None       # canopy Newton iteration count
@@ -111,6 +115,12 @@ class SurfaceFluxOutput(NamedTuple):
     # ``None`` when interception is off.
     LE_wet_canopy: jax.Array | None = None
     LE_soil: jax.Array | None = None
+    # Canopy-air condensation (dew limit) [kg m-2 s-1, >= 0], already netted
+    # out of ``lhflx`` (at the snow-weighted ground charge ``L_soil``) and added
+    # to ``shflx``.  The land step deposits it: the snow-covered share on the
+    # pack as ice, the rest in the canopy-water store (overflow to the soil).
+    # None for schemes without a canopy-air node.
+    condensation: jax.Array | None = None
     # SimpleSEB over a layered pack (fractional cover f): the pack's share of
     # ``lhflx`` [W/m^2 per cell area], f times the snow surface's own latent
     # flux.  ``None`` on the binary snow path and for the canopy schemes.
@@ -224,3 +234,16 @@ class SurfaceFluxOutput(NamedTuple):
     # iterate this step (any water left over is in RichardsOutput.water_created).
     # Filled in by the land step (appended last, same positional reason).
     soil_unconverged: jax.Array | None = None
+    # Ground temperature [K] the scheme's ``G_soil`` was evaluated at, when the
+    # scheme hands a ``surface_conductance`` to be linearised about it rather
+    # than about the start-of-step top layer (two-leaf canopy with
+    # ``implicit_ground_flux``).  The land step then applies
+    # G_soil - surface_conductance * (T_top_new - surface_conductance_T_ref)
+    # and returns the difference to sensible heat (appended last, same
+    # positional reason).  None otherwise.
+    surface_conductance_T_ref: jax.Array | None = None
+    # Canopy snow sublimation [kg m-2 s-1] drawn from the intercepted canopy
+    # snow store (CLM5 ON_RAD, ``MultiLayerLandConfig.canopy_snow``), charged
+    # L_s; included in the surface mass flux.  Filled in by the land step
+    # (appended last, same positional reason).  None when canopy snow is off.
+    canopy_snow_sublimation: jax.Array | None = None

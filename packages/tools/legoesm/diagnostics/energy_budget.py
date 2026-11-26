@@ -1,14 +1,18 @@
 """Energy budget closure diagnostics.
 
 Provides functions to compute column-integrated moist static energy,
-TOA and surface radiative fluxes, and track the energy budget residual
-for validating conservation in climate simulations.
+TOA and surface radiative fluxes, and track the energy budget for
+validating conservation in climate simulations.
 
-The key diagnostic is the energy budget residual:
-    R = R_TOA - dE/dt
+The tracker records TOA minus atmospheric storage change:
+    toa_minus_dE_dt = R_TOA - dE/dt
 where R_TOA is the net TOA radiation (positive downward) and dE/dt
-is the column energy tendency. For a well-conserving model, the
-global-mean |R| should be < 0.1 W/m².
+is the column energy tendency.  This is NOT a closure residual: it
+still contains the net surface energy flux (~20 W/m² of surface
+uptake in AMIP).  Closure subtracts that flux too (see
+``scripts/validate/mpas_energy_budget_leak.py``).  Saved series use the
+key :data:`TOA_MINUS_DE_DT_KEY`; :func:`read_toa_minus_dE_dt` also reads
+files written under the legacy key ``energy_residual``.
 
 References
 ----------
@@ -18,6 +22,7 @@ References
 
 from __future__ import annotations
 
+import sys
 from typing import NamedTuple
 
 import jax
@@ -26,6 +31,26 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.diagnostics.column_integrals import column_water_vapor
+
+
+TOA_MINUS_DE_DT_KEY = "energy_toa_minus_dE_dt"
+LEGACY_TOA_MINUS_DE_DT_KEY = "energy_residual"
+
+
+def read_toa_minus_dE_dt(series, source: str = "input"):
+    """The saved TOA-minus-dE/dt series, or ``None`` if absent.
+
+    Reads :data:`TOA_MINUS_DE_DT_KEY`, falling back to the legacy key
+    ``energy_residual`` (same quantity, misleading name) with a one-line note.
+    """
+    if TOA_MINUS_DE_DT_KEY in series:
+        return np.asarray(series[TOA_MINUS_DE_DT_KEY], dtype=float)
+    if LEGACY_TOA_MINUS_DE_DT_KEY in series:
+        print(f"note: {source} uses the legacy key "
+              f"'{LEGACY_TOA_MINUS_DE_DT_KEY}' = TOA net minus atmospheric "
+              "dE/dt (not a closure residual)", file=sys.stderr)
+        return np.asarray(series[LEGACY_TOA_MINUS_DE_DT_KEY], dtype=float)
+    return None
 
 
 # ======================================================================
@@ -95,6 +120,9 @@ def area_weighted_profile(field: jax.Array, area: jax.Array | None) -> jax.Array
 # Column Energy
 # ======================================================================
 
+# Jitted so the hydrostatic scan inside compiles once per shape: called
+# eagerly from the host-side budget ledger it recompiled at every call.
+@jax.jit
 def column_moist_static_energy(
     T: jax.Array,
     q_v: jax.Array,
@@ -255,6 +283,9 @@ def column_moist_static_energy(
     return E
 
 
+# Jitted so the hydrostatic scan inside compiles once per shape: called
+# eagerly from the host-side budget ledger it recompiled at every call.
+@jax.jit
 def column_dry_static_energy(
     T: jax.Array,
     phis: jax.Array,
@@ -390,14 +421,20 @@ class EnergyBudget(NamedTuple):
     sfc_net: float          # total surface net radiation
     column_energy: float    # column-integrated moist static energy [J/m²]
     dE_dt: float            # energy tendency [W/m²]
-    residual: float         # R_TOA - dE/dt [W/m²]
+    # R_TOA - dE/dt [W/m²]: NOT a closure residual -- it still contains the
+    # net surface energy flux (in AMIP, the prescribed surface's uptake).
+    toa_minus_dE_dt: float
 
 
 class EnergyBudgetTracker:
     """Track energy budget evolution over a simulation.
 
     Accumulates global-mean diagnostics at each call to `update()`.
-    The residual R_TOA - dE/dt is computed from successive energy snapshots.
+    ``toa_minus_dE_dt`` = R_TOA - dE/dt is computed from successive energy
+    snapshots; it is 0 on the first sample (no previous snapshot).  It omits
+    the surface flux, so the atmospheric closure is
+    ``toa_minus_dE_dt - (sfc_sw_net + sfc_lw_net) + hfss + hfls``
+    (``scripts/validate/mpas_energy_budget_leak.py``).
 
     Usage
     -----
@@ -423,7 +460,7 @@ class EnergyBudgetTracker:
         self.sfc_net: list[float] = []
         self.column_energy: list[float] = []
         self.dE_dt: list[float] = []
-        self.residual: list[float] = []
+        self.toa_minus_dE_dt: list[float] = []
         self._prev_energy: float | None = None
         self._prev_time: float | None = None
 
@@ -523,17 +560,17 @@ class EnergyBudgetTracker:
         mean_toa_net = mean_sw_down_toa - mean_sw_up_toa - mean_lw_up_toa
         mean_sfc_net = mean_sw_sfc + mean_lw_sfc
 
-        # Energy tendency and residual
+        # Energy tendency and TOA minus storage change
         if self._prev_energy is not None and self._prev_time is not None:
             dt = elapsed_seconds - self._prev_time
             if dt > 0:
                 dE_dt = (mean_E - self._prev_energy) / dt
             else:
                 dE_dt = 0.0
-            residual = mean_toa_net - dE_dt
+            toa_minus_dE_dt = mean_toa_net - dE_dt
         else:
             dE_dt = 0.0
-            residual = 0.0
+            toa_minus_dE_dt = 0.0
 
         self._prev_energy = mean_E
         self._prev_time = elapsed_seconds
@@ -548,7 +585,7 @@ class EnergyBudgetTracker:
             sfc_net=mean_sfc_net,
             column_energy=mean_E,
             dE_dt=dE_dt,
-            residual=residual,
+            toa_minus_dE_dt=toa_minus_dE_dt,
         )
 
         self.times.append(elapsed_seconds)
@@ -561,7 +598,7 @@ class EnergyBudgetTracker:
         self.sfc_net.append(mean_sfc_net)
         self.column_energy.append(mean_E)
         self.dE_dt.append(dE_dt)
-        self.residual.append(residual)
+        self.toa_minus_dE_dt.append(toa_minus_dE_dt)
 
         return budget
 
@@ -582,7 +619,7 @@ class EnergyBudgetTracker:
             "sfc_net": self.sfc_net,
             "column_energy": self.column_energy,
             "dE_dt": self.dE_dt,
-            "residual": self.residual,
+            "toa_minus_dE_dt": self.toa_minus_dE_dt,
         }
         # Clear lists but preserve _prev state for continuity
         self.times = []
@@ -595,7 +632,7 @@ class EnergyBudgetTracker:
         self.sfc_net = []
         self.column_energy = []
         self.dE_dt = []
-        self.residual = []
+        self.toa_minus_dE_dt = []
         return data
 
     def summary(self) -> str:
@@ -604,7 +641,7 @@ class EnergyBudgetTracker:
             return "Energy budget: not enough data points for summary."
 
         import numpy as np
-        res = np.array(self.residual[1:])  # skip first (no dE/dt)
+        res = np.array(self.toa_minus_dE_dt[1:])  # skip first (no dE/dt)
         toa = np.array(self.toa_net[1:])
         dEdt = np.array(self.dE_dt[1:])
 
@@ -614,9 +651,9 @@ class EnergyBudgetTracker:
             f"  Samples:           {len(res)}",
             f"  <R_TOA>:           {np.mean(toa):+.2f} W/m²",
             f"  <dE/dt>:           {np.mean(dEdt):+.2f} W/m²",
-            f"  <Residual>:        {np.mean(res):+.4f} W/m²",
-            f"  |Residual| max:    {np.max(np.abs(res)):.4f} W/m²",
-            f"  |Residual| std:    {np.std(res):.4f} W/m²",
+            f"  <TOA - dE/dt>:     {np.mean(res):+.4f} W/m²",
+            f"  |TOA - dE/dt| max:{np.max(np.abs(res)):.4f} W/m²",
+            f"  |TOA - dE/dt| std:{np.std(res):.4f} W/m²",
         ]
         status = "PASS" if np.max(np.abs(res)) < 1.0 else "CHECK"
         lines.append(f"  Status:            {status}")
@@ -669,6 +706,15 @@ class MoistureBudgetTracker:
         self.residual: list[float] = []
         self._prev_water: float | None = None
         self._prev_time: float | None = None
+
+    def drop_baseline(self) -> None:
+        """Forget the last water sample, so the next update reports NaN.
+
+        Call when a window was not recorded: the next closure's dW/dt would
+        otherwise span the gap while its E and P cover only the latest window.
+        """
+        self._prev_water = None
+        self._prev_time = None
 
     def update(
         self,

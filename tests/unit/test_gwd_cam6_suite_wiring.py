@@ -34,6 +34,7 @@ from legoesm.driver.physics_pipeline import gwd_config_for
 
 from legoesm import constants
 
+
 CAM6_KW = dict(
     gravity_wave_drag="e3sm_cam",
     e3sm_cam_source="orographic+frontal+convective",
@@ -43,7 +44,19 @@ CAM6_KW = dict(
     e3sm_cam_effgw_beres=0.4,
     e3sm_cam_frontgfc=3.0e-15,
     e3sm_cam_beres_variant="cam6",
+    e3sm_cam_mfcc_table_path="",          # set per test by _table_file (V41)
 )
+
+
+@pytest.fixture(autouse=True)
+def _table_file(tmp_path, monkeypatch):
+    """validate_strict refuses a convective source without a table path and
+    only checks the path EXISTS, so an empty file stands in for the pinned
+    newmfspectra40_dc25.nc here; content is gated at load (sha256)."""
+    p = tmp_path / "newmfspectra40_dc25.nc"
+    p.touch()
+    monkeypatch.setitem(CAM6_KW, "e3sm_cam_mfcc_table_path", str(p))
+    return str(p)
 
 
 def test_cam6_suite_resolves_from_experiment_config():
@@ -60,7 +73,7 @@ def test_cam6_suite_resolves_from_experiment_config():
     assert g.e3sm_cam.beres.source_level_rule == "interface_below_p"
     assert g.e3sm_cam.beres.hd_index_rule == "nearest_grid"
     assert g.e3sm_cam.beres.hdepth_min_km == 1.0          # gw_drag.F90:882
-    assert g.e3sm_cam.beres.mfcc_table_path == ""
+    assert g.e3sm_cam.beres.mfcc_table_path == CAM6_KW["e3sm_cam_mfcc_table_path"]
     assert g.e3sm_cam.dttke_use_intrinsic is False        # separate explicit knob
     g2 = gwd_config_for(ExperimentConfig(**dict(CAM6_KW, e3sm_cam_dttke_intrinsic=True)))
     assert g2.e3sm_cam.dttke_use_intrinsic is True
@@ -90,6 +103,7 @@ def test_defaults_are_byte_identical_to_before():
     dict(e3sm_cam_mfcc_table_path="/nonexistent/mfcc.nc"),
     dict(gravity_wave_drag="mcfarlane+e3sm_cam", e3sm_cam_source="orographic+frontal"),
     dict(convection="none"),
+    dict(e3sm_cam_mfcc_table_path=""),    # convective source on the stand-in table
 ])
 def test_validate_strict_rejects(bad):
     kw = dict(CAM6_KW)
@@ -110,6 +124,14 @@ def test_composite_with_mcfarlane_allows_frontal_and_convective():
         _validate_gwd_composite("mcfarlane+e3sm_cam", "orographic+frontal")
     with pytest.raises(ValueError, match="Unknown e3sm_cam source"):
         _validate_gwd_composite("hines+e3sm_cam", "bogus")
+
+
+def test_convective_source_without_table_is_refused():
+    kw = dict(CAM6_KW, e3sm_cam_mfcc_table_path="")
+    with pytest.raises(ValueError, match="stand-in"):
+        ExperimentConfig(**kw).validate_strict()
+    # the empty default stays legal when no convective source is selected
+    ExperimentConfig(**dict(kw, e3sm_cam_source="orographic+frontal")).validate_strict()
 
 
 def test_amip_cli_round_trips_the_cam6_suite():
@@ -219,8 +241,12 @@ def test_stateful_predicate_counts_the_beres_carry():
 
 # --- Beres table plumbing -----------------------------------------------------
 
-def test_mfcc_table_loaded_once_from_config_path(tmp_path):
+def test_mfcc_table_loaded_once_from_config_path(tmp_path, monkeypatch):
+    import hashlib
+
     import xarray as xr
+
+    from legoesm.atmosphere.physics.gravity_wave_drag import e3sm_cam as _e3sm
     n_ps, n_mw, n_hd = 9, 5, 3
     data = np.random.default_rng(0).uniform(0, 1, (n_ps, n_mw, n_hd))
     path = tmp_path / "mfcc.nc"
@@ -230,6 +256,10 @@ def test_mfcc_table_loaded_once_from_config_path(tmp_path):
         scheme="e3sm_cam",
         e3sm_cam=E3SMCAMConfig(source="frontal+convective", pgwv=2,
                                beres=E3SMBeresConfig(mfcc_table_path=str(path))))
+    with pytest.raises(ValueError, match="not the pinned"):
+        e3sm_mfcc_table(g)                                 # V40: unpinned file refused
+    monkeypatch.setattr(_e3sm, "MFCC_TABLE_SHA256",
+                        hashlib.sha256(path.read_bytes()).hexdigest())
     with pytest.raises(ValueError, match="maxuh"):
         e3sm_mfcc_table(g)                                 # default maxh/maxuh != file
     g = g._replace(e3sm_cam=g.e3sm_cam._replace(
@@ -336,7 +366,8 @@ def _mpas_lane_body(lane, held_suarez_init_mpas):
             beres=E3SMBeresConfig(effgw=0.4, hdepth_min_km=1.0,
                                   spectrum_shift="end_off",
                                   storm_speed_truncate=False,
-                                  source_level_rule="interface_below_p")))
+                                  source_level_rule="interface_below_p",
+                                  use_stand_in_table=True)))   # explicit stand-in
     fn = make_gwd_physics(g, lane, 900.0)
     pcfg = PhysicsConfig(gravity_wave_drag=g)
     ps0 = init_physics_state(ncol, 10, pcfg)

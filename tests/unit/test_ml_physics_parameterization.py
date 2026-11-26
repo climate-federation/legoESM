@@ -7,6 +7,7 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.physics.ml_parameterization import (
@@ -36,6 +37,11 @@ from legoesm.ml.physics import (
 from legoesm.ml.physics.io import PhysicsNormalizationBundle
 from legoesm.ml.normalization import NormalizationStats
 
+
+
+def _sq_fresh(T):
+    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_carry_init
+    return sundqvist_carry_init(*T.shape, T.dtype)
 
 def test_feature_vector_shape():
     nlev = 4
@@ -350,7 +356,7 @@ def test_sundqvist_rain_survival_rebuild_matches_physical_scheme():
         rho=rho,
         dz=dz,
         dt=150.0,
-        config=config, cell_area=1.0e10)
+        config=config, cell_area=1.0e10, prev_state=_sq_fresh(T))
     rates = diagnose_sundqvist_process_rates(
         T=T,
         q_v=q_v,
@@ -360,7 +366,7 @@ def test_sundqvist_rain_survival_rebuild_matches_physical_scheme():
         rho=rho,
         dz=dz,
         dt=150.0,
-        config=config, cell_area=1.0e10)
+        config=config, cell_area=1.0e10, prev_state=_sq_fresh(T))
     generated_flux = jnp.sum(
         rates.autoconversion * (p_half[:, 1:] - p_half[:, :-1]) / constants.g, axis=1)
     rain_survival_fraction = jnp.where(
@@ -380,7 +386,7 @@ def test_sundqvist_rain_survival_rebuild_matches_physical_scheme():
         dt=150.0,
         config=config,
         carries_q_i=False,
-        cell_area=1.0e10,
+        cell_area=1.0e10, prev_state=_sq_fresh(T),
     )
     assert jnp.allclose(
         rebuilt.dT_dt,
@@ -423,7 +429,11 @@ def test_sundqvist_rain_survival_rebuild_gradient_finite_in_rain_free_column():
             frac, T=T_, q_v=q_v, hydrometeors=hm, p_full=p_full,
             p_half=p_half, rho=rho, dz=dz, dt=150.0, config=SundqvistConfig(),
             carries_q_i=False,
-            cell_area=1.0e10)
+            cell_area=1.0e10,
+            # moistening since the previous step: gscond condenses, so dT is
+            # live in T
+            prev_state={"zc_T_prev": T_, "zc_q_v_prev": 0.99 * q_v,
+                        "zc_p_s_prev": p_half[:, -1]})
         return jnp.sum(out.dT_dt) + jnp.sum(out.dq_v_dt) + jnp.sum(out.precipitation)
 
     gT, gf = jax.grad(loss, argnums=(0, 1))(T, jnp.array([0.6, 0.6]))
@@ -468,7 +478,7 @@ def test_sundqvist_rain_survival_rebuild_drains_incoming_qr():
     physical = sundqvist_microphysics(
         T=T, q_v=q_v, hydrometeors=hydrometeors,
         p_full=p_full, p_half=p_half, rho=rho, dz=dz, dt=dt, config=config,
-        carries_q_i=False, cell_area=1.0e10)
+        carries_q_i=False, cell_area=1.0e10, prev_state=_sq_fresh(T))
     # Use survival-fraction = 1 (no rain re-evaporation) for the rebuild;
     # the q_r-drain channel is independent.
     rebuilt = apply_predicted_sundqvist_rain_survival_fraction(
@@ -476,7 +486,7 @@ def test_sundqvist_rain_survival_rebuild_drains_incoming_qr():
         T=T, q_v=q_v, hydrometeors=hydrometeors,
         p_full=p_full, p_half=p_half, rho=rho, dz=dz, dt=dt, config=config,
         carries_q_i=False,
-        cell_area=1.0e10,
+        cell_area=1.0e10, prev_state=_sq_fresh(T),
     )
     # q_r drains in both paths.
     q_r_after_phys = q_r + physical.dq_r_dt * dt
@@ -507,4 +517,29 @@ def test_sundqvist_rain_survival_rebuild_refuses_a_q_i_lane():
             jnp.ones((1,)), T=jnp.full((1, n), 270.0), q_v=jnp.full((1, n), 1e-3),
             hydrometeors=hyd, p_full=0.5 * (p_half[:, 1:] + p_half[:, :-1]),
             p_half=p_half, rho=jnp.ones((1, n)), dz=jnp.full((1, n), 100.0),
-            dt=150.0, config=SundqvistConfig(), carries_q_i=True, cell_area=1.0e10)
+            dt=150.0, config=SundqvistConfig(), carries_q_i=True, cell_area=1.0e10,
+            prev_state=_sq_fresh(z))
+
+
+def test_sundqvist_rain_survival_rebuild_heats_ice_condensation_like_the_scheme():
+    """codex 2026-11-04 reproducer: a cold column condensing as ice (gscond
+    heats with L_v + L_f); with survival fraction 1 and no rain the rebuild's
+    heating equals the physical scheme's."""
+    T = jnp.full((1, 2), 250.0)
+    q_v = jnp.full((1, 2), 1e-3)
+    z = jnp.zeros((1, 2))
+    hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
+    p_full = jnp.array([[7.5e4, 8.5e4]])
+    p_half = jnp.array([[7.0e4, 8.0e4, 9.0e4]])
+    rho = p_full / (constants.R_d * T)
+    dz = jnp.full((1, 2), 1000.0)
+    prev = {"zc_T_prev": T, "zc_q_v_prev": 0.99 * q_v, "zc_p_s_prev": p_half[:, -1]}
+    kw = dict(T=T, q_v=q_v, hydrometeors=hyd, p_full=p_full, p_half=p_half, rho=rho,
+              dz=dz, dt=600.0, config=SundqvistConfig(), cell_area=1.0e10,
+              prev_state=prev)
+    physical = sundqvist_microphysics(**kw)
+    rebuilt = apply_predicted_sundqvist_rain_survival_fraction(
+        jnp.ones((1,)), carries_q_i=False, **kw)
+    assert float(jnp.max(physical.dT_dt)) > 0.0
+    np.testing.assert_allclose(np.asarray(rebuilt.dT_dt), np.asarray(physical.dT_dt),
+                               rtol=1e-12, atol=0.0)

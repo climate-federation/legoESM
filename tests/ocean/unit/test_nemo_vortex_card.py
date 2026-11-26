@@ -651,9 +651,20 @@ _CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
 # GYRE resolves vertical_mixing.scheme = "tke"); the non-config part of the
 # digest is identical.
 _CERTIFIED_CARD_DIGESTS = {
-    "GYRE-zco": "9fa9fec09b9cb850",
-    "LOCK_EXCHANGE-zco": "10516c2a4d166c73",
-    "OVERFLOW-zps": "9be98498ac9f50de",
+    # Main's NamedTuple field order: the config re-printed in e3fd562b8's order
+    # gives that lane's pins (6e62ad9e2f13da2b, fe969dad638d27b6, 7a4559a730c1079d).
+    "GYRE-zco": "2efa6ac0692b7ff4",
+    # LOCK/OVERFLOW re-pinned for the appended lateral_viscosity_file_coastal
+    # field (default "four_cell"); with that field dropped from the repr they
+    # reproduce the previous pins 3f8ec523690fbe51 / a1fd1ae1b93dab73 exactly.
+    # GYRE-zco is red on main too and is left as main has it.
+    # Re-pinned for the five appended fields (store_tracer_budget from the
+    # tracer-budget port; momentum_face_mask, coriolis_time_scheme,
+    # coriolis_baroclinic_operator, open_boundary_smooth_width from the Pacific
+    # zoom port; all default off); with those five dropped from the repr the
+    # digests reproduce 8f0f10523a1d4641 / be68a39f58cc44ee exactly.
+    "LOCK_EXCHANGE-zco": "0eb2610fb3b1e024",
+    "OVERFLOW-zps": "0c58d034b5258a46",
 }
 
 
@@ -674,6 +685,13 @@ def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case)
     # certified card must keep the metric formula it already ran.
     assert cfg.lateral_viscosity_coefficient_source == "nemo_ldf_c2d"
     assert cfg.eos == "nemo_teos10"
+    assert cfg.nemo_qsr_stage3_kmm_source_association is (
+        True if case == "GYRE-zco" else None)
+    assert cfg.vmix_eos_use_config_rho0 is True
+    # Appended lateral_viscosity_mask_levels: every certified card keeps the
+    # surface masks it always ran.
+    assert cfg.lateral_viscosity_mask_levels == "surface"
+    assert cfg.lateral_shlat == 2.0 and cfg.lateral_side_bc != "nemo_shlat"
 
 
 def _card_digest(card):

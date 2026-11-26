@@ -35,6 +35,11 @@ from legoesm.atmosphere.physics.turbulence.integration import (
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 
 
+# WRF Tiedtke's lagged qvpblten / qfx, published by every scheme (kept only
+# where PhysicsState materialises the slots)
+_LAGS = ("turb_tendency_qv", "evap_sfc")
+
+
 def _turb_out(cf):
     z = jnp.zeros((2, 3))
     s = jnp.zeros((2,))
@@ -48,8 +53,10 @@ class TestCarryPackaging:
         carry = jnp.ones((2, 3))
         tout = _turb_out(None)
         out = _carry_update_with_cloud_fraction("tke", carry, tout)
-        assert isinstance(out, dict) and set(out) == {"tke", "pblh"}
+        assert isinstance(out, dict) and set(out) == {"tke", "pblh", *_LAGS}
         assert out["tke"] is carry and out["pblh"] is tout.h_pbl
+        assert out["turb_tendency_qv"] is tout.dq_v_dt
+        assert out["evap_sfc"] is tout.evap_sfc
 
     def test_cf_returns_multifield_dict(self):
         """CLUBB (cf set) => dict co-locating the carry AND cloud_fraction so
@@ -58,7 +65,7 @@ class TestCarryPackaging:
         cf = jnp.full((2, 3), 0.3)
         out = _carry_update_with_cloud_fraction("tke", carry, _turb_out(cf))
         assert isinstance(out, dict)
-        assert set(out) == {"tke", "cloud_fraction", "pblh"}
+        assert set(out) == {"tke", "cloud_fraction", "pblh", *_LAGS}
         assert bool(jnp.array_equal(out["tke"], carry))
         assert bool(jnp.array_equal(out["cloud_fraction"], cf))
 
@@ -67,7 +74,7 @@ class TestCarryPackaging:
         cloud fraction and the PBL height."""
         cf = jnp.full((2, 3), 0.2)
         out = _carry_update_with_cloud_fraction(None, None, _turb_out(cf))
-        assert isinstance(out, dict) and set(out) == {"cloud_fraction", "pblh"}
+        assert isinstance(out, dict) and set(out) == {"cloud_fraction", "pblh", *_LAGS}
 
 
 def _cfg(turbulence="clubb", clubb=None, use_clubb_cf=True):

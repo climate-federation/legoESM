@@ -1,0 +1,28 @@
+--- l4_r175_stage1.F90
++++ l4_r175_stage1.F90
+@@ -10,1 +10,1 @@
+-   INTEGER, PARAMETER :: target_kt = 1, target_stage = 1, expected_fields = 23
++   INTEGER, PARAMETER :: target_kt = 7, target_stage = 1, expected_fields = 23
+@@ -25,3 +25,3 @@
+-      IF(record_unit /= -1) CALL ctl_stop('round175: stage-1 record already open')
+-      IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round175: stage-1 record requires fp64')
+-      WRITE(filename,'("oracle_r175_stage1_rank",I4.4,"_kt",I8.8,".bin")') mpprank, kt
++      IF(record_unit /= -1) CALL ctl_stop('round297: stage-1 record already open')
++      IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round297: stage-1 record requires fp64')
++      WRITE(filename,'("oracle_r297_stage1_rank",I4.4,"_kt",I8.8,".bin")') mpprank, kt
+@@ -30,2 +30,2 @@
+-      IF(ios /= 0) CALL ctl_stop('round175: cannot open rank stage-1 record')
+-      magic = 'NEMO_L4_R175S1'
++      IF(ios /= 0) CALL ctl_stop('round297: cannot open rank stage-1 record')
++      magic = 'NEMO_L4_R297S7'
+@@ -45,1 +45,1 @@
+-      IF(record_unit == -1) CALL ctl_stop('round175: stage-1 record is not open')
++      IF(record_unit == -1) CALL ctl_stop('round297: stage-1 record is not open')
+@@ -59,1 +59,1 @@
+-      IF(record_unit == -1) CALL ctl_stop('round175: stage-1 record is not open')
++      IF(record_unit == -1) CALL ctl_stop('round297: stage-1 record is not open')
+@@ -71,2 +71,2 @@
+-      IF(record_unit == -1) CALL ctl_stop('round175: stage-1 record is not open')
+-      IF(field_count /= expected_fields) CALL ctl_stop('round175: stage-1 field count moved')
++      IF(record_unit == -1) CALL ctl_stop('round297: stage-1 record is not open')
++      IF(field_count /= expected_fields) CALL ctl_stop('round297: stage-1 field count moved')

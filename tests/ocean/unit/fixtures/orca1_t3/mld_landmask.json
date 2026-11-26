@@ -1,0 +1,49 @@
+{
+ "records": [
+  {
+   "rank": "0005",
+   "kind": "coast",
+   "ji": [
+    11,
+    16
+   ],
+   "jj": [
+    38,
+    43
+   ],
+   "n_land": 15
+  },
+  {
+   "rank": "0004",
+   "kind": "coast",
+   "ji": [
+    41,
+    46
+   ],
+   "jj": [
+    8,
+    13
+   ],
+   "n_land": 22
+  },
+  {
+   "rank": "0006",
+   "kind": "rand",
+   "ji": [
+    61,
+    66
+   ],
+   "jj": [
+    31,
+    36
+   ],
+   "n_land": 18
+  }
+ ],
+ "recorder_cfg": "nemo_5.0.1/cfgs/ORCA1_T3TKE MY_SRC t3_tke.F90 (t3_mxl + t3_tke records, kt 17281, day-30 restart, 32 ranks)",
+ "harness": "tier3/mxl/port_mxl.py",
+ "legoesm_base": "ee8534602b",
+ "layout": "p<n>_* legoESM layout (lat=jj, lon=ji[, k]); ji/jj 1-based NEMO local tile indices, inclusive; interior points only",
+ "measured": "job 11022605 probe.py, all 32 ranks, fix applied: arm NEMO rn2b + fp64 ladder hmlp rel 1.26e-16 on all columns (land max |hmlp| 0.0; base 1.024 m); official row (own N2) wet 0.905 = separate defect P6",
+ "spread_note": "tier3 round 13: NEMO 20-seed spread hmlp 6.9e-16, nmln never changes"
+}

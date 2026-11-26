@@ -30,11 +30,10 @@ from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphy
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import RCE_CELL_AREA_M2
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
-from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
 from legoesm.atmosphere.physics.microphysics.config import (
     KesslerConfig, SundqvistConfig, SeifertBehengConfig,
-    MorrisonConfig, ThompsonConfig, P3Config,
+    MorrisonConfig, P3Config,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.thermo import saturation_mixing_ratio
@@ -51,11 +50,11 @@ SCHEMES = [
     ("Seifert-Beheng", seifert_beheng_microphysics, SeifertBehengConfig(), "#00aaaa", "-",  1.2),
     # Morrison pinned kk2000: an unset law resolves to kk2000_cam6 under mg.
     ("Morrison",       morrison_microphysics,       MorrisonConfig(warm_rain_scheme="kk2000"), "#2166ac", "-",  2.0),
-    ("Thompson",       thompson_microphysics,       ThompsonConfig(),      "#762a83", "--", 2.0),
+    # Thompson (WRF port) needs the resolved w this offline column lacks.
     ("P3",             p3_microphysics,             P3Config(),            "#d6604d", "-.", 2.0),
 ]
 
-ICE_SCHEMES = {"Morrison", "Thompson", "P3"}
+ICE_SCHEMES = {"Morrison", "P3"}
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +359,7 @@ for case_key, case in CASES.items():
     fig.text(
         0.5, -0.008,
         "Gray dotted lines = T$_{freeze}$ / saturation reference.  "
-        "Ice panels (dq$_i$, dq$_s$) show Morrison, Thompson, P3 only.  "
+        "Ice panels (dq$_i$, dq$_s$) show Morrison, P3 only.  "
         "P3: q$_s$ slot → q$_{rim}$; q$_g$ slot → B$_{rim}$ (not shown).",
         ha="center", fontsize=8, color="dimgray",
     )

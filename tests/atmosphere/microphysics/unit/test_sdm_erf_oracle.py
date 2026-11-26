@@ -91,6 +91,29 @@ def test_collision_kernels_match_erf():
     assert _rel(kb, f["k_brownian"]).max() <= TOL
 
 
+def test_brownian_kernel_matches_erf_at_1e12():
+    """Campaign bar (rel 1e-12, fp64): ERF's operation order, x^1.5 as
+    x*sqrt(x) (exp(1.5 log x) left a 4.7e-12 gap after the cancellation in the
+    Fuchs length term)."""
+    f = _fx()
+    keys = ("k_r1", "k_r2", "k_m1", "k_m2", "k_p", "k_T")
+    kb = sk.brownian_kernel(*(jnp.asarray(f[k]) for k in keys))
+    assert _rel(kb, f["k_brownian"]).max() <= 1.0e-12
+
+
+def test_brownian_kernel_gradient_matches_finite_differences():
+    from jax.test_util import check_grads
+    f = _fx()
+    m1, m2, p, temp = (jnp.asarray(f[k][:8]) for k in ("k_m1", "k_m2", "k_p", "k_T"))
+    r2 = jnp.asarray(f["k_r2"][:8])
+
+    def fn(r1_um):
+        return sk.brownian_kernel(r1_um * 1e-6, r2, m1, m2, p, temp) * 1e12
+
+    check_grads(fn, (jnp.asarray(f["k_r1"][:8]) * 1e6,), order=1, modes=("rev",),
+                eps=1e-6)
+
+
 def test_saturation_pressure_matches_erf_esatw():
     f = _fx()
     es = scond.saturation_vapor_pressure_erf(jnp.asarray(f["esat_T"]))

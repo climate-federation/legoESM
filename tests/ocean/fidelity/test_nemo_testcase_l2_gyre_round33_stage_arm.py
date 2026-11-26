@@ -308,7 +308,7 @@ def test_the_check_rejects_stage3_keeping_the_qco_form():
         "            u3_raw = rk3_stage_velocity_update(\n"
         "                u0, p2u_corr, dt_mom, _ws_stage_u_mask,\n"
         "                vector_form=_vector_velocity_stage_update,\n"
-        "                qco_before=_qu_b, qco_now=_qu_12, qco_after=_qu_aa)\n",
+        "                qco_before=_qu_b, qco_now=_qu_12, qco_after=_qu_aa, written_order=_cfg_b.rk3_stage_velocity_written_order)\n",
         "            u3_raw = (_qu_b * u0 + dt_mom * _qu_12 * p2u_corr) "
         "/ _qu_aa\n")
     assert any("not a call to the shared" in d
@@ -327,8 +327,8 @@ def test_the_check_rejects_a_stage_pinned_to_one_arm():
 
 def test_the_check_rejects_a_swapped_stage_time_level():
     mutated = _mutate(
-        "qco_before=_qu_b, qco_now=_qu_12, qco_after=_qu_aa)",
-        "qco_before=_qu_b, qco_now=_qu_aa, qco_after=_qu_12)")
+        "qco_before=_qu_b, qco_now=_qu_12, qco_after=_qu_aa, written_order=_cfg_b.rk3_stage_velocity_written_order)",
+        "qco_before=_qu_b, qco_now=_qu_aa, qco_after=_qu_12, written_order=_cfg_b.rk3_stage_velocity_written_order)")
     assert any("passes ratios" in d for d in stage_arm_defects(mutated))
 
 

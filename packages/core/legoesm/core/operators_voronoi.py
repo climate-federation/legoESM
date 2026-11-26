@@ -775,6 +775,68 @@ def vector_laplacian_del2_3d(u_edge_3d, mesh):
     return grad_div - grad_curl_tangent
 
 
+def nemo_vertex_shlat_factor_3d(is_active_3d, mesh, rn_shlat: float):
+    """NEMO ``fmask`` (dommsk.F90:207-210) carried to Voronoi vertices.
+
+    Interior vertex (all surrounding cells wet at the level): 1.  A coastal
+    vertex touched by at least one wet edge takes
+    ``(rn_shlat / 2) * areaTriangle / (wet kite area)``, so the vorticity
+    ``circulation / areaTriangle * factor`` becomes the wet-edge circulation
+    over the WET part of the dual cell (times rn_shlat/2).  On NEMO's quad the
+    wet kite is half the F cell, so this is exactly NEMO's ``fmask = rn_shlat``;
+    on an MPAS triangle with one dry cell it is 1.5 for rn_shlat=2.  Vertices
+    with no wet edge: 0.  Returns ``(nVertices, nlev)``.
+    """
+    a = is_active_3d.astype(mesh.areaTriangle.dtype)
+    cov = mesh.cellsOnVertex
+    valid = (cov >= 0).astype(a.dtype)[:, :, None]
+    ac = a[jnp.maximum(cov, 0)] * valid                        # (deg, nV, nk)
+    interior = jnp.prod(ac, axis=0) * jnp.min(valid, axis=0)
+    eov = mesh.edgesOnVertex
+    ev = (eov >= 0).astype(a.dtype)[:, :, None]
+    e_safe = jnp.maximum(eov, 0)
+    wet_edge = a[mesh.cellsOnEdge[0]][e_safe] * a[mesh.cellsOnEdge[1]][e_safe] * ev
+    wet_kite = jnp.sum(mesh.kiteAreasOnVertex[:, :, None] * ac, axis=0)
+    coast = (0.5 * rn_shlat * mesh.areaTriangle[:, None]
+             / jnp.maximum(wet_kite, 1e-30) * jnp.max(wet_edge, axis=0))
+    return jnp.where(interior > 0.0, 1.0, coast)
+
+
+def nemo_vertex_thickness_3d(h_cell, is_active, dz_ref, mesh):
+    """NEMO e3f at Voronoi vertices: min of the surrounding cells' thickness
+    with LAND cells at their reference thickness (domain_cfg e3f_0 == min of
+    the four filled e3t_0 at every coastal F point).  A plain wet-only min
+    would be 0 at the coast and silently switch no-slip off."""
+    h_fill = jnp.where(is_active, h_cell, jnp.asarray(dz_ref, h_cell.dtype)[None, :])
+    cov = mesh.cellsOnVertex
+    return jnp.min(jnp.where((cov >= 0)[:, :, None], h_fill[jnp.maximum(cov, 0)],
+                             jnp.inf), axis=0)
+
+
+def nemo_ldf_lap_e3_voronoi_3d(u_edge_3d, mesh, ahmt_cell, ahmf_vertex,
+                               h_cell, h_edge, h_vertex, edge_mask):
+    """NEMO ``dynldf_lev_rot_scheme.h90`` (lap) on the Voronoi C-grid.
+
+    ``zdiv = ahmt / e3t * div(e3u u)``, ``zcur = ahmf * e3f * curl(u)``,
+    tendency ``grad(zdiv) - k x grad(zcur) / e3u`` -- the same form (and the
+    same sign convention as :func:`vector_laplacian_del2_3d`) as the tripole's
+    ``nemo_ldf_lap_viscosity_e3_cgrid``.  ``ahmf_vertex`` already carries the
+    fmask / :func:`nemo_vertex_shlat_factor_3d`; ``h_vertex`` must be non-zero
+    at coastal vertices (NEMO e3f = min of the surrounding e3t with land
+    cells filled), else no-slip silently vanishes.
+    """
+    u = u_edge_3d * edge_mask
+    div_e3 = divergence_cell_3d(h_edge * u, mesh)
+    zdiv = ahmt_cell * div_e3 / jnp.where(h_cell > 0.0, h_cell, 1.0)
+    zcur = ahmf_vertex * h_vertex * curl_vertex_3d(u, mesh)
+    grad_div = gradient_edge_3d(zdiv, mesh)
+    v0 = mesh.verticesOnEdge[0]
+    v1 = mesh.verticesOnEdge[1]
+    grad_curl = ((zcur[v1] - zcur[v0]) / mesh.dvEdge[:, None]
+                 / jnp.where(h_edge > 0.0, h_edge, 1.0))
+    return (grad_div - grad_curl) * edge_mask
+
+
 def vector_laplacian_del4_3d(u_edge_3d, mesh, *, mid_refresh=None):
     """Biharmonic vector Laplacian for all levels.
 
@@ -1429,3 +1491,36 @@ def scalar_del2_cell_cfl_factor(mesh):
         np.where(mask, dv / np.maximum(dc, 1e-30), 0.0),
         axis=0) / np.asarray(mesh.areaCell)
     return float(np.max(g_cell))
+
+
+def vector_laplacian_row_sum(mesh):
+    """Per-edge Gershgorin row sum ``G_e`` [1/m^2] of :func:`vector_laplacian_del2_3d`.
+
+    The operator is ``grad(div u) - grad_t(curl u)``.  Its row at edge e takes
+    the divergence of the edge's two cells (``(1/A_c) sum dvEdge``) over
+    ``dcEdge_e`` and the curl of its two vertices (``(1/A_v) sum dcEdge``) over
+    ``dvEdge_e``, so the sum of the absolute coefficients is
+
+        G_e = (S_c0 + S_c1) / dcEdge_e + (T_v0 + T_v1) / dvEdge_e ,
+        S_c = (1/areaCell_c) sum_{e' of c} dvEdge_e' ,
+        T_v = (1/areaTriangle_v) sum_{e' of v} dcEdge_e' .
+
+    It bounds the operator's eigenvalues touching that edge from the actual
+    local geometry (32 / dc**2 on a regular hexagon), unlike a spacing taken
+    from meshDensity.  Edges with a missing cell or vertex (the outer ring of a
+    partition's local mesh, padding) get 0.  jax.numpy, so it can run inside a
+    traced step on a rank-local mesh.
+    """
+    eoc = jnp.asarray(mesh.edgesOnCell)
+    eov = jnp.asarray(mesh.edgesOnVertex)
+    dv = jnp.asarray(mesh.dvEdge)
+    dc = jnp.asarray(mesh.dcEdge)
+    s_cell = jnp.sum(jnp.where(eoc >= 0, dv[jnp.maximum(eoc, 0)], 0.0), axis=0) / jnp.asarray(mesh.areaCell)
+    t_vert = jnp.sum(jnp.where(eov >= 0, dc[jnp.maximum(eov, 0)], 0.0), axis=0) / jnp.where(
+        jnp.asarray(mesh.areaTriangle) > 0, jnp.asarray(mesh.areaTriangle), 1.0)
+    c0, c1 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
+    v0, v1 = mesh.verticesOnEdge[0], mesh.verticesOnEdge[1]
+    complete = (c0 >= 0) & (c1 >= 0) & (v0 >= 0) & (v1 >= 0) & (dc > 0) & (dv > 0)
+    g = ((s_cell[jnp.maximum(c0, 0)] + s_cell[jnp.maximum(c1, 0)]) / jnp.where(dc > 0, dc, 1.0)
+         + (t_vert[jnp.maximum(v0, 0)] + t_vert[jnp.maximum(v1, 0)]) / jnp.where(dv > 0, dv, 1.0))
+    return jnp.where(complete, g, 0.0)

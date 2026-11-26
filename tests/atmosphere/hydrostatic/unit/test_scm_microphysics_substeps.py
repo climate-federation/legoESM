@@ -152,14 +152,9 @@ def test_scm_substeps_prevent_campaign_negative_condensate() -> None:
     assert morrison_single >= _TINY_NEGATIVE
     assert morrison_subbed >= _TINY_NEGATIVE
 
-    # thompson gained a scheme-level sublimation/sedimentation flux-limiter fix
-    # (#477) that keeps condensate non-negative even at a single dt=600 s step;
-    # the SCM substep is then redundant-but-harmless defense. Assert both paths
-    # stay non-negative (documents the #477 + substep alignment).
-    thompson_single = _campaign_style_min_qcond("thompson", microphysics_substeps=1)
-    thompson_subbed = _campaign_style_min_qcond("thompson", microphysics_substeps=_SUBSTEPS)
-    assert thompson_single >= _TINY_NEGATIVE
-    assert thompson_subbed >= _TINY_NEGATIVE
+    # thompson (WRF port) is not run here: this campaign-style column
+    # prescribes no w, which the port requires (vote V5a; the campaign
+    # scripts dropped thompson too).
 
 
 def _substep_water_residual(scheme: str) -> tuple[float, float]:
@@ -244,7 +239,10 @@ def _substep_water_residual(scheme: str) -> tuple[float, float]:
     return float(jnp.max(jnp.abs(residual / scale))), float(min_cond)
 
 
-@pytest.mark.parametrize("scheme", ("morrison", "thompson"))
+# thompson: the WRF port leaves WRF's own residual (not 1e-10); its host
+# budget is pinned against the port's own in tests/unit/test_thompson_adapter.py
+# (vote V4b).
+@pytest.mark.parametrize("scheme", ("morrison",))
 def test_scm_substep_sequence_conserves_water_plus_precipitation(
     scheme: str,
 ) -> None:
@@ -294,3 +292,20 @@ def test_scm_microphysics_substeps_preserve_reverse_mode_ad() -> None:
     grad = jax.grad(loss)(jnp.asarray(1.0, dtype=jnp.float64))
 
     assert jnp.isfinite(grad)
+
+
+def test_scm_substeps_refuse_a_microphysics_carry() -> None:
+    """Sundqvist's gscond carries its previous-step state; the substep loop
+    cannot thread it, so construction refuses (loud, not a mid-run error)."""
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="sundqvist"),
+    )
+    T0 = jnp.linspace(220.0, 300.0, _NLEV)
+    with pytest.raises(ValueError, match="cannot thread a microphysics carry"):
+        SingleColumnModel.create(
+            physics_config=cfg, nlev=_NLEV, dt=600.0, T_profile=T0,
+            cell_area_m2=1.0e10, microphysics_substeps=2)

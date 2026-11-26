@@ -1,0 +1,302 @@
+"""Production RCEMIP1 CRM dycore on the multi-rank ``step_halo`` path.
+
+The dycore configuration is the one the scaling bench runs: the production
+deck (``run_rcemip1_crm.sh``: centred momentum advection, van Leer scalars,
+Smagorinsky with vertical SGS, horizontal acoustics on the substeps,
+semi-implicit) built by the RCEMIP driver itself, with Morrison's 11 tracer
+slots. Multi-rank gathered states, per-step budget changes and the gradient
+must match the single-rank run.
+
+    mpiexec -n 2|4|8 python -m pytest tests/distributed/test_plane_crm_production_halo_mpi.py
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+MPI = pytest.importorskip("mpi4py.MPI")
+pytest.importorskip("mpi4jax")
+
+jax.config.update("jax_enable_x64", True)
+
+_REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO / "scripts" / "bench"))
+sys.path.insert(0, str(_REPO / "scripts" / "run"))
+
+import bench_plane_crm_dd_scaling as bench  # noqa: E402
+import run_rcemip_plane as rcp  # noqa: E402
+
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (  # noqa: E402
+    PlaneCompressibleEulerModel, horizontal_advection_halo_width,
+    make_flat_plane_terrain_metric, make_rest_state,
+)
+from legoesm.grids.plane import create_plane_grid  # noqa: E402
+from legoesm.parallel.plane_mpi import (  # noqa: E402
+    gather_plane_field, make_plane_pencil_layout,
+)
+from legoesm.parallel.reductions import global_sum_mpi  # noqa: E402
+
+NY, NX, NLEV, N_STEPS = 16, 16, 8, 3
+N_TRACERS = rcp.microphysics_n_tracers("morrison")
+FIELDS = ("u", "v", "w", "theta_prime", "rho_prime", "tracers")
+
+
+def _production_setup(fix_mass):
+    rargs = rcp.parse_args([*bench.RCEMIP1_DECK_ARGV, "--nx", str(NX),
+                            "--ny", str(NY), "--nlev", str(NLEV)])
+    hc, _, _ = rcp.build_rcemip_height_coord(rargs, rcp.P_SFC_RCEMIP,
+                                             jnp.float64)
+    # Exact serial parity of the acoustic moist buoyancy needs the global
+    # horizontal mean (the production default uses the rank-local mean).
+    cfg = rcp.build_dycore_config(rargs)._replace(
+        acoustic_moist_global_mean=True, fix_mass=fix_mass)
+    assert cfg.horizontal_momentum_advection_scheme == "centered"
+    assert cfg.sgs_vertical_diffusion and cfg.substep_horizontal_acoustic
+    return rargs, hc, cfg
+
+
+def _global_state(grid, hc):
+    rest = make_rest_state(grid, hc, dtype=jnp.float64)
+    k = jax.random.split(jax.random.PRNGKey(7), 6)
+    tr = jnp.abs(1.0e-3 * jax.random.normal(k[5], (NY, NX, NLEV, N_TRACERS)))
+    return rest._replace(
+        u=rest.u.replace(data=0.5 * jax.random.normal(k[0], rest.u.data.shape)),
+        v=rest.v.replace(data=0.5 * jax.random.normal(k[1], rest.v.data.shape)),
+        w=rest.w.replace(data=(0.05 * jax.random.normal(k[2], rest.w.data.shape))
+                         .at[..., 0].set(0.0).at[..., -1].set(0.0)),
+        theta_prime=rest.theta_prime.replace(
+            data=0.5 * jax.random.normal(k[3], rest.theta_prime.data.shape)),
+        rho_prime=rest.rho_prime.replace(
+            data=1.0e-3 * jax.random.normal(k[4], rest.rho_prime.data.shape)),
+        tracers=rest.tracers.replace(data=tr),
+    )
+
+
+def _slice(state, lay):
+    def s(a):
+        return a[lay.iy_start:lay.iy_end, lay.ix_start:lay.ix_end]
+    return state._replace(**{f: getattr(state, f).replace(
+        data=s(getattr(state, f).data)) for f in (*FIELDS, "phis")})
+
+
+def _budgets(state, hc):
+    """Domain integrals per unit column area (fp64): dry mass, tracer mass,
+    x/y momentum, kinetic energy, θ' content."""
+    dz = np.asarray(hc.dz)
+    rho = np.asarray(hc.rho_ref) + np.asarray(state.rho_prime.data)
+    u = np.asarray(state.u.data)
+    v = np.asarray(state.v.data)
+    q = np.asarray(state.tracers.data)
+    terms = {
+        "mass": rho * dz,
+        "tracer_mass": (rho[..., None] * q * dz[:, None]).sum(-1),
+        "momentum_x": rho * u * dz,
+        "momentum_y": rho * v * dz,
+        "kinetic_energy": 0.5 * rho * (u ** 2 + v ** 2) * dz,
+        "theta_content": rho * np.asarray(state.theta_prime.data) * dz,
+    }
+    return {k: (t.sum(), np.abs(t).sum()) for k, t in terms.items()}
+
+
+def _layout_or_skip(nry, nrx, halo):
+    comm = MPI.COMM_WORLD
+    if comm.Get_size() != nry * nrx:
+        pytest.skip(f"needs {nry * nrx} ranks")
+    return make_plane_pencil_layout(
+        rank=comm.Get_rank(), n_ranks=comm.Get_size(), n_ranks_y=nry,
+        n_ranks_x=nrx, ny_global=NY, nx_global=NX, halo=halo)
+
+
+DECOMPS = [(2, 1), (1, 2), (2, 2), (4, 2), (2, 4)]
+MIXED_HALO_RTOL = 1e-5   # measured max 5.3e-7 (voted 2-1)
+MIXED_HALO_TRACER_TOL = 1e-7    # = the serial mixed tracer-mass test tolerance
+
+
+def _run(model, state, dt, lay, owned):
+    out = [state]
+    for _ in range(N_STEPS):
+        out.append(model.step_halo(out[-1], dt=dt, layout=lay,
+                                   owned_mask=owned))
+    return out
+
+
+@pytest.mark.parametrize("fix_mass", [False, True])
+@pytest.mark.parametrize("nry,nrx", DECOMPS)
+def test_production_step_halo_matches_single_rank(nry, nrx, fix_mass):
+    rargs, hc, cfg = _production_setup(fix_mass)
+    halo = horizontal_advection_halo_width(cfg)
+    lay = _layout_or_skip(nry, nrx, halo)
+    g_glob = create_plane_grid(nx=NX, ny=NY, nlev=NLEV, dx=rargs.dx,
+                               dy=rargs.dx, dtype=jnp.float64)
+    s_glob = _global_state(g_glob, hc)
+
+    lay1 = make_plane_pencil_layout(rank=0, n_ranks=1, n_ranks_y=1,
+                                    n_ranks_x=1, ny_global=NY, nx_global=NX,
+                                    halo=halo)
+    m_ref = PlaneCompressibleEulerModel(
+        g_glob, hc, make_flat_plane_terrain_metric(g_glob, hc), cfg)
+    ref = _run(m_ref, s_glob, rargs.dt, lay1, None)
+
+    g_loc = create_plane_grid(nx=lay.nx_local, ny=lay.ny_local, nlev=NLEV,
+                              dx=rargs.dx, dy=rargs.dx, dtype=jnp.float64)
+    m_loc = PlaneCompressibleEulerModel(
+        g_loc, hc, make_flat_plane_terrain_metric(g_loc, hc), cfg)
+    owned = jnp.ones((lay.ny_local, lay.nx_local), jnp.float64)
+    loc = _run(m_loc, _slice(s_glob, lay), rargs.dt, lay, owned)
+
+    gathered = [{f: gather_plane_field(getattr(s, f).data, lay)
+                 for f in FIELDS} for s in loc]
+    if lay.rank != 0:
+        return
+    worst = 0.0
+    for n in range(1, N_STEPS + 1):
+        for f in FIELDS:
+            a, b = np.asarray(gathered[n][f]), np.asarray(getattr(ref[n], f).data)
+            worst = max(worst, float(np.max(np.abs(a - b))))
+            np.testing.assert_allclose(a, b, rtol=1e-10, atol=1e-10,
+                                       err_msg=f"{f} step {n}")
+    print(f"max|multi-serial| over {N_STEPS} steps = {worst:.3e}")
+    # RULE 0: per-step change of every budget equals the serial change.
+    for n in range(1, N_STEPS + 1):
+        g_prev = ref[n - 1]._replace(**{
+            f: getattr(ref[n - 1], f).replace(data=gathered[n - 1][f])
+            for f in FIELDS})
+        g_now = ref[n]._replace(**{
+            f: getattr(ref[n], f).replace(data=gathered[n][f]) for f in FIELDS})
+        bm0, bm1 = _budgets(g_prev, hc), _budgets(g_now, hc)
+        bs0, bs1 = _budgets(ref[n - 1], hc), _budgets(ref[n], hc)
+        for k in bm0:
+            d_multi = bm1[k][0] - bm0[k][0]
+            d_serial = bs1[k][0] - bs0[k][0]
+            scale = max(bs1[k][1], bs0[k][1])
+            assert abs(d_multi - d_serial) <= 1e-12 * scale, (
+                k, n, d_multi, d_serial, scale)
+
+
+@pytest.mark.parametrize("nry,nrx", [(2, 1), (2, 2)])
+def test_production_step_halo_gradient_matches_single_rank(nry, nrx):
+    """d(global KE after 2 steps)/d(θ' perturbation amplitude): multi-rank
+    reverse-mode == single-rank reverse-mode == central finite difference."""
+    rargs, hc, cfg = _production_setup(fix_mass=False)
+    halo = horizontal_advection_halo_width(cfg)
+    lay = _layout_or_skip(nry, nrx, halo)
+    comm = MPI.COMM_WORLD
+    g_glob = create_plane_grid(nx=NX, ny=NY, nlev=NLEV, dx=rargs.dx,
+                               dy=rargs.dx, dtype=jnp.float64)
+    s_glob = _global_state(g_glob, hc)
+    dtheta = jax.random.normal(jax.random.PRNGKey(3), s_glob.theta_prime.data.shape)
+
+    def make_loss(model, state, layout, distributed):
+        d = (dtheta[layout.iy_start:layout.iy_end, layout.ix_start:layout.ix_end]
+             if distributed else dtheta)
+
+        def loss(eps):
+            s = state._replace(theta_prime=state.theta_prime.replace(
+                data=state.theta_prime.data + eps * d))
+            for _ in range(2):
+                s = model.step_halo(s, dt=rargs.dt, layout=layout)
+            ke = jnp.sum(s.u.data ** 2 + s.v.data ** 2)
+            return global_sum_mpi(ke, final_loss=True) if distributed else ke
+        return loss
+
+    lay1 = make_plane_pencil_layout(rank=0, n_ranks=1, n_ranks_y=1,
+                                    n_ranks_x=1, ny_global=NY, nx_global=NX,
+                                    halo=halo)
+    m_ref = PlaneCompressibleEulerModel(
+        g_glob, hc, make_flat_plane_terrain_metric(g_glob, hc), cfg)
+    g_ref = float(jax.grad(make_loss(m_ref, s_glob, lay1, False))(0.0))
+
+    g_loc = create_plane_grid(nx=lay.nx_local, ny=lay.ny_local, nlev=NLEV,
+                              dx=rargs.dx, dy=rargs.dx, dtype=jnp.float64)
+    m_loc = PlaneCompressibleEulerModel(
+        g_loc, hc, make_flat_plane_terrain_metric(g_loc, hc), cfg)
+    loss_loc = make_loss(m_loc, _slice(s_glob, lay), lay, True)
+    # eps is replicated, so the total derivative sums every rank's share.
+    g_multi = comm.allreduce(float(jax.grad(loss_loc)(0.0)), op=MPI.SUM)
+    eps = 1.0e-4
+    g_fd = (float(loss_loc(eps)) - float(loss_loc(-eps))) / (2 * eps)
+
+    assert np.isfinite(g_multi) and g_multi != 0.0
+    np.testing.assert_allclose(g_multi, g_ref, rtol=1e-9)
+    np.testing.assert_allclose(g_multi, g_fd, rtol=1e-5)
+
+
+@pytest.mark.parametrize("nry,nrx", [(2, 1), (1, 2), (2, 2)])
+def test_mixed_precision_step_halo_matches_single_rank(nry, nrx):
+    """--precision mixed (fp32 state, fp64 acoustic substeps and fixer sums):
+    the halo path keeps every leaf's dtype and matches the serial step."""
+    rargs = rcp.parse_args([*bench.RCEMIP1_DECK_ARGV, "--nx", str(NX),
+                            "--ny", str(NY), "--nlev", str(NLEV),
+                            "--precision", "mixed"])
+    hc, _, _ = rcp.build_rcemip_height_coord(rargs, rcp.P_SFC_RCEMIP,
+                                             jnp.float32)
+    cfg = rcp.build_dycore_config(rargs)._replace(
+        acoustic_moist_global_mean=True, fix_mass=True)
+    assert cfg.mixed_precision
+    halo = horizontal_advection_halo_width(cfg)
+    lay = _layout_or_skip(nry, nrx, halo)
+    g_glob = create_plane_grid(nx=NX, ny=NY, nlev=NLEV, dx=rargs.dx,
+                               dy=rargs.dx, dtype=jnp.float32)
+    s64 = _global_state(create_plane_grid(nx=NX, ny=NY, nlev=NLEV, dx=rargs.dx,
+                                          dy=rargs.dx, dtype=jnp.float64),
+                        hc)
+    s_glob = jax.tree.map(lambda a: a.astype(jnp.float32)
+                          if jnp.issubdtype(a.dtype, jnp.floating) else a, s64)
+    lay1 = make_plane_pencil_layout(rank=0, n_ranks=1, n_ranks_y=1,
+                                    n_ranks_x=1, ny_global=NY, nx_global=NX,
+                                    halo=halo)
+    m_ref = PlaneCompressibleEulerModel(
+        g_glob, hc, make_flat_plane_terrain_metric(g_glob, hc), cfg)
+    ref = _run(m_ref, s_glob, rargs.dt, lay1, None)
+    g_loc = create_plane_grid(nx=lay.nx_local, ny=lay.ny_local, nlev=NLEV,
+                              dx=rargs.dx, dy=rargs.dx, dtype=jnp.float32)
+    m_loc = PlaneCompressibleEulerModel(
+        g_loc, hc, make_flat_plane_terrain_metric(g_loc, hc), cfg)
+    owned = jnp.ones((lay.ny_local, lay.nx_local), jnp.float32)
+    loc = _run(m_loc, _slice(s_glob, lay), rargs.dt, lay, owned)
+    for f in FIELDS:
+        assert getattr(loc[-1], f).data.dtype == jnp.float32, f
+    gathered = [{f: gather_plane_field(getattr(s, f).data, lay)
+                 for f in FIELDS} for s in loc]
+    if lay.rank != 0:
+        return
+    for n in range(1, N_STEPS + 1):
+        for f in FIELDS:
+            a = np.asarray(gathered[n][f], np.float64)
+            b = np.asarray(getattr(ref[n], f).data, np.float64)
+            rel = np.max(np.abs(a - b)) / max(np.max(np.abs(b)), 1e-300)
+            print(f"MIXED_HALO {nry}x{nrx} {f} step {n} rel={rel:.3e}")
+            assert rel <= MIXED_HALO_RTOL, (f, n, rel)
+    # RULE 0 on the multi-rank mixed run (fp32 storage, fp64 sums). Dry mass:
+    # the fp64 fixer sets the fp64 sum to the anchor every step, then storing
+    # rho' in fp32 moves it by at most sum_i ulp32(rho'_i)/2 dz_i (vote
+    # B16-revised: this derived bound, for the multi-rank and the single-rank
+    # run, each against its own initial mass). hc is the mixed run's stored
+    # fp32 geometry, the one the fixer's fp64 sums use. Tracer mass: fp32
+    # storage round-off (serial tolerance).
+    dz = np.asarray(hc.dz, np.float64)
+    rho_ref = np.asarray(hc.rho_ref, np.float64)
+
+    def masses(g):
+        rho_p = np.asarray(g["rho_prime"], np.float32)
+        rho = rho_ref + rho_p.astype(np.float64)
+        q = np.asarray(g["tracers"], np.float64)
+        bound = (0.5 * np.spacing(np.abs(rho_p)).astype(np.float64) * dz).sum()
+        return ((rho * dz).sum(), (rho[..., None] * q * dz[:, None]).sum((0, 1, 2)),
+                bound)
+    d0, t0, _ = masses(gathered[0])
+    d0s = masses({f: getattr(ref[0], f).data for f in FIELDS})[0]
+    for n in range(1, N_STEPS + 1):
+        d, t, bound = masses(gathered[n])
+        ds, _, bound_s = masses({f: getattr(ref[n], f).data for f in FIELDS})
+        print(f"MIXED_HALO {nry}x{nrx} step {n} dry={abs(d - d0) / d0:.3e} "
+              f"serial_dry={abs(ds - d0s) / d0s:.3e} bound={bound / d0:.3e} "
+              f"tracer={np.max(np.abs(t - t0) / t0):.3e}")
+        assert abs(d - d0) <= bound + 1e-14 * d0, (n, d, d0, bound)
+        assert abs(ds - d0s) <= bound_s + 1e-14 * d0s, (n, ds, d0s, bound_s)
+        assert np.max(np.abs(t - t0) / t0) <= MIXED_HALO_TRACER_TOL, (n, t, t0)

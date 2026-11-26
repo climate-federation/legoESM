@@ -220,7 +220,8 @@ def build_arms(args, mod, variant):
     ics, targets, forcings = mod.load_window_pairs(
         grid, sigma, [(2015, 0, 1)], rollout_hours=6, forcing_ctx=ctx,
         grid_kind=cli.grid, era5_zarr=cli.era5_zarr,
-        microphysics=cli.microphysics, turbulence=cli.turbulence)
+        microphysics=cli.microphysics, turbulence=cli.turbulence,
+        convection=cli.convection)
     loss_config = mod.make_loss_config(cli)
 
     if variant == "classical":

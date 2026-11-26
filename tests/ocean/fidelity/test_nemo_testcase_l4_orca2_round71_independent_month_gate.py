@@ -114,8 +114,10 @@ def test_chlorophyll_clock_switches_month_pair_at_step_125(tmp_path) -> None:
     expected240 = np.float64(231) / np.float64(472)
     assert np.array_equal(step240, np.full((148, 180), expected240))
 
+    # The certified year extension admits the complete 2920-step no-leap
+    # cycle; the original independent-month gate ended at step 240.
     with pytest.raises(gate.ladder.GateError):
-        gate.ladder.chlorophyll_at_step(path.parent, 241, wet, dt_s=10800.0)
+        gate.ladder.chlorophyll_at_step(path.parent, 2921, wet, dt_s=10800.0)
 
 
 def test_surface_schema_calibration_registers_legacy_only_fields() -> None:

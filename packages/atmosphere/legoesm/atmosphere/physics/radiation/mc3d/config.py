@@ -23,6 +23,10 @@ _KNULL_FLOOR_DEFAULT = 1.0e-3  # [1/m]
 # (raytracer_kernels.cu:212) is reached at s = inf. At s = 1e6 1/m the floor
 # adds log(2)/s ~ 6.9e-7 m at u = 0 and < 1e-40 m for steps >= 1e-4 m.
 _FREE_PATH_FLOOR_SHARPNESS_DEFAULT = 1.0e6  # [1/m]
+# Photon weight below which the walk deposits the remainder in place and stops,
+# instead of microhh's Russian roulette (raytracer_kernels.cu w_thres = 0.5),
+# which conserves energy only in expectation. Bias <= this fraction of a photon.
+_WEIGHT_FLOOR_DEFAULT = 1.0e-6  # [-]
 
 
 class MC3DRadiationConfig(NamedTuple):
@@ -34,7 +38,7 @@ class MC3DRadiationConfig(NamedTuple):
   # over, bounding peak photon-state memory independently of photon count.
   n_batches: int = 1
   # Hard cap on Woodcock tracking steps per photon (free-path + null-collision
-  # events). A photon hitting the cap is terminated as escaped (logged in tests).
+  # events). Weight still in flight at the cap is reported as residual_frac.
   max_iterations: int = 4096
   # Majorant extinction floor [1/m]; see module constant above.
   knull_floor: float = _KNULL_FLOOR_DEFAULT
@@ -51,12 +55,14 @@ class MC3DRadiationConfig(NamedTuple):
   # reduction (fewer photons for a target error -> less GPU memory). Opt-in;
   # default off keeps pure pseudo-random (threefry) launch. See qrng.py.
   use_qrng: bool = False
-  # Cloud scattering phase: True -> sample the microhh Mie LUT (mie.py) by
-  # effective radius + band; False (default) -> Henyey-Greenstein with the cloud
-  # asymmetry g. Mie is the oracle-faithful cloud phase (RRTMGP optics path).
-  use_mie: bool = False
+  # Cloud scattering phase: True (default, microhh) -> sample the microhh Mie LUT
+  # (mie.py) by effective radius + band; False -> Henyey-Greenstein with the
+  # cloud asymmetry g (microhh's no-table fallback).
+  use_mie: bool = True
   # Smooth free-path step floor sharpness [1/m]; inf = microhh hard max.
   free_path_floor_sharpness: float = _FREE_PATH_FLOOR_SHARPNESS_DEFAULT
+  # Weight floor replacing Russian roulette (module constant above).
+  weight_floor: float = _WEIGHT_FLOOR_DEFAULT
 
 
 # Excluded from trainable collection: counts are int (auto-exempt) and
@@ -78,6 +84,15 @@ __param_spec__ = {
         "transform": "none",
         "category": "numerics",
         "reference": "microhh rte-rrtmgp-cpp raytracer_kernels.cu:212 max(eps, tau/k_null) at inf",
+        "shape": None,
+    },
+    "weight_floor": {
+        "units": "1",
+        "bounds": (1e-12, 0.5),
+        "tunable_tier": 0,
+        "transform": "none",
+        "category": "numerics",
+        "reference": "replaces microhh raytracer_kernels.cu Russian roulette (w_thres 0.5) to conserve energy per realization",
         "shape": None,
     },
 }

@@ -46,12 +46,25 @@ class SpongeForcing(NamedTuple):
         Reference u velocity (optional).
     v_ref : array or None
         Reference v velocity (optional, not used for MPAS edge velocity).
+    nemo_kt : int or None
+        NEMO step whose time-interpolated target is stored in ``T_ref`` and
+        ``S_ref``.  ``None`` for ordinary, time-independent sponge forcing.
+        The ORCA2 L6 card stamps this field and refuses a missing or stale
+        target before entering the compiled model step.
     """
     gamma: jnp.ndarray
     T_ref: jnp.ndarray
     S_ref: jnp.ndarray
     u_ref: jnp.ndarray | None = None
     v_ref: jnp.ndarray | None = None
+    nemo_kt: int | None = None
+    # Open lateral boundaries of a regional lat-lon run (OpenBoundaryData of
+    # dynamics/open_boundary_latlon.py); None keeps every side a wall.
+    open_boundary: object | None = None
+    # Laplacian sponge viscosity [m2/s] at cell centres, (n_lat, n_lon), added to
+    # the OM4p25 lateral friction next to open sides (CROCO SPONGE_VIS2,
+    # set_nudgcof.F); None adds nothing.
+    visc2: jnp.ndarray | None = None
 
 
 def compute_sponge_gamma(

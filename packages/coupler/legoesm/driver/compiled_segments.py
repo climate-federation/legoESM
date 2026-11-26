@@ -341,6 +341,12 @@ class SegmentCarry(NamedTuple):
     # by the physics step (#2106).  None unless ice_skin_prognostic is on =>
     # byte-identical legacy carry.
     ice_T_skin: jax.Array = None
+    # WRF Tiedtke's previous-step turbulence inputs: the turbulence q_v
+    # tendency (``qvpblten``, q_v shape) and surface water flux (``qfx``, p_s
+    # shape) of the last physics step.  None unless convection is tiedtke
+    # (the driver seeds zeros then) => byte-identical legacy carry.
+    turb_dq_v_prev: jax.Array = None
+    evap_sfc_prev: jax.Array = None
     # FROZEN part of the surface precip [kg/m²/s] (review 2026-10-10 F29):
     # ``precip_frozen_prev`` lags it one step (like ``conv_precip_prev``) for
     # the radiation-step multilayer land tile's snowfall;
@@ -371,6 +377,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                land_ml=None, w_land=None, snow=None,
                conv_prog_nlev=None, budget_ledger_accum=None,
                precip_frozen_prev=None, precip_frozen_accum=None,
+               turb_dq_v_prev=None, evap_sfc_prev=None,
                ice_T_skin=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
@@ -541,7 +548,31 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                              else _promote(precip_frozen_accum, storage)),
         ice_T_skin=(None if ice_T_skin is None
                     else _promote(ice_T_skin, storage)),
+        turb_dq_v_prev=(None if turb_dq_v_prev is None
+                        else _promote(turb_dq_v_prev, storage)),
+        evap_sfc_prev=(None if evap_sfc_prev is None
+                       else _promote(evap_sfc_prev, storage)),
     )
+
+
+def tiedtke_lag_seeds(convection, q_v, p_s, prev=None):
+    """``pack_carry`` kwargs seeding WRF Tiedtke's previous-step turbulence
+    carries: ``prev`` (a ``(turb_dq_v_prev, evap_sfc_prev)`` pair persisted
+    from the previous segment) when given, else zeros shaped like ``q_v`` /
+    ``p_s`` (cold start); ``{}`` for any other convection scheme (carry
+    pytree unchanged)."""
+    if convection != "tiedtke":
+        return {}
+    if prev is not None and (prev[0] is None) != (prev[1] is None):
+        raise ValueError(
+            "tiedtke lag carries: restored pair has only one of "
+            "(turb_dq_v_prev, evap_sfc_prev); a checkpoint carries both or "
+            "neither")
+    if prev is not None and prev[0] is not None:
+        return {"turb_dq_v_prev": prev[0], "evap_sfc_prev": prev[1]}
+    p_s = getattr(p_s, "data", p_s)
+    return {"turb_dq_v_prev": jnp.zeros_like(q_v),
+            "evap_sfc_prev": jnp.zeros_like(p_s)}
 
 
 def unpack_carry(carry, state_template):
@@ -852,6 +883,10 @@ class SegmentForcing(NamedTuple):
     # Column-mean ozone VMR above the model top (ncol,) for the RRTMGP
     # overhead layer.  ``None`` => the solver falls back to the top-layer o3.
     o3_top_vmr: jax.Array | None = None
+    # Volcanic SHORTWAVE aerosol with the CMIP6 file's own per-band optics,
+    # (ncol, nlev, 3, n_bnd_sw) moments (tau, tau*ssa, tau*ssa*g).  ``None`` =>
+    # no such source (the volcanic SW, if any, is inside ``aerosol_od``).
+    aerosol_sw_volc: jax.Array | None = None
 
 
 # Canonical GHG species ordering for the ghg_vmr array.  The three halogens
@@ -909,6 +944,7 @@ def pack_forcing(
     land_ml_params=None,
     aerosol_ccn_aod=None,
     o3_top_vmr=None,
+    aerosol_sw_volc=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
 
@@ -1035,6 +1071,9 @@ def pack_forcing(
         o3_top_vmr=(
             None if o3_top_vmr is None else jnp.asarray(o3_top_vmr)
         ),
+        aerosol_sw_volc=(
+            None if aerosol_sw_volc is None else jnp.asarray(aerosol_sw_volc)
+        ),
     )
 
 
@@ -1050,7 +1089,7 @@ GRID_SHAPED_FORCING_FIELDS = (
     "sfc_shflx_override", "sfc_lhflx_override", "sfc_evap_override",
     "sfc_taux_override", "sfc_tauy_override",
     "sfc_lw_up", "sfc_sw_up", "sfc_sw_down", "land_frac", "aerosol_ccn_aod",
-    "o3_top_vmr",
+    "o3_top_vmr", "aerosol_sw_volc",
 )
 
 
@@ -1287,6 +1326,8 @@ class _SplitStepLocals(NamedTuple):
     precip_frozen_prev_new: object = None
     precip_frozen_accum: object = None
     ice_T_skin_new: object = None
+    phys_turb_dq_v: object = None
+    phys_evap_sfc: object = None
 
 
 MOIST_FIELDS = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")
@@ -1547,6 +1588,12 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         _fld = getattr(carry, _nm)
         if _fld is not None:
             _dm_in[_nm] = _fld
+    if carry.turb_dq_v_prev is not None:
+        # WRF Tiedtke: this step's dynamics q_v tendency (post-dynamics minus
+        # the carried, post-previous-physics q_v) + the lagged turbulence pair.
+        _dm_in["dq_v_dt_dyn"] = (moist["q_v"] - carry.q_v) / statics.dt
+        _dm_in["turb_dq_v_prev"] = carry.turb_dq_v_prev
+        _dm_in["evap_sfc_prev"] = carry.evap_sfc_prev
     _ret = statics.step_unified(
         need_rad,
         T_new, p_s_new,
@@ -1564,6 +1611,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         albedo_ice=statics.albedo_ice, albedo_ocean=statics.albedo_ocean,
         ghg_vmr_override=statics.ghg_vmr_override,
         aerosol_lw_od=statics.forcing.aerosol_lw_od,
+        aerosol_sw_volc=statics.forcing.aerosol_sw_volc,
         aerosol_ccn_aod=statics.forcing.aerosol_ccn_aod,
         o3_top_vmr=statics.forcing.o3_top_vmr,
         sfc_albedo_override=statics.forcing.sfc_albedo_override,
@@ -1619,6 +1667,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
                 statics.forcing.solar_weights, statics.forcing.s_0,
                 statics.forcing.o3_vmr, statics.forcing.aerosol_od,
                 aerosol_lw_od_precomputed=statics.forcing.aerosol_lw_od,
+                aerosol_sw_volc_precomputed=statics.forcing.aerosol_sw_volc,
                 aerosol_ccn_aod=statics.forcing.aerosol_ccn_aod,
                 o3_top_vmr=statics.forcing.o3_top_vmr,
                 tau_equator=statics.tau_equator, tau_pole=statics.tau_pole,
@@ -1782,6 +1831,8 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         phys_cloud_fraction=phys_out.cloud_fraction,
         budget_ledger_step=_led_step,
         ice_T_skin_new=ice_T_skin_new,
+        phys_turb_dq_v=getattr(phys_out, "turb_dq_v_dt", None),
+        phys_evap_sfc=getattr(phys_out, "evap_sfc", None),
     )
 
 
@@ -1992,8 +2043,25 @@ def finalize_split_step(carry, lz, statics):
                                                carry.precip_frozen_accum)),
         ice_T_skin=(None if carry.ice_T_skin is None
                     else _match_dtype(lz.ice_T_skin_new, carry.ice_T_skin)),
+        turb_dq_v_prev=(None if carry.turb_dq_v_prev is None
+                        else _match_dtype(_required_lag(
+                            lz.phys_turb_dq_v, "turbulence q_v tendency"),
+                            carry.turb_dq_v_prev)),
+        evap_sfc_prev=(None if carry.evap_sfc_prev is None
+                       else _match_dtype(_required_lag(
+                           lz.phys_evap_sfc, "surface water flux evap_sfc"),
+                           carry.evap_sfc_prev)),
     )
     return new_carry
+
+
+def _required_lag(value, what):
+    if value is None:
+        raise ValueError(
+            f"convection='tiedtke' carries the previous step's {what}, but "
+            "this step's physics published none (no turbulence scheme / "
+            "surface flux?)")
+    return value
 
 
 def build_segment_fn(
@@ -2478,6 +2546,11 @@ def build_segment_fn(
             _doy_step, _sod_step = day_to_calendar(_abs_day)
 
             if owned_face_ids is not None:
+                if carry.turb_dq_v_prev is not None:
+                    raise NotImplementedError(
+                        "convection='tiedtke' is wired on the single-rank compiled "
+                        "segment only; the MPI owned-face physics does not thread its "
+                        "dynamics / lagged turbulence inputs")
                 # MPI replicated dynamics: physics on owned faces only.
                 # Dynamics state is full (6, n, n, ...) but physics inputs
                 # (forcing, lat/lon) are rank-local.  Extract owned faces
@@ -2529,6 +2602,7 @@ def build_segment_fn(
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
                     aerosol_lw_od=forcing.aerosol_lw_od,
+                    aerosol_sw_volc=forcing.aerosol_sw_volc,
                     aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                     o3_top_vmr=forcing.o3_top_vmr,
                     sfc_albedo_override=forcing.sfc_albedo_override,
@@ -2571,6 +2645,7 @@ def build_segment_fn(
                             forcing.solar_weights, forcing.s_0,
                             forcing.o3_vmr, forcing.aerosol_od,
                             aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                            aerosol_sw_volc_precomputed=forcing.aerosol_sw_volc,
                             aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                             o3_top_vmr=forcing.o3_top_vmr,
                             tau_equator=_tau_equator, tau_pole=_tau_pole,
@@ -2977,6 +3052,11 @@ def build_segment_fn(
         _doy_step, _sod_step = day_to_calendar(_abs_day)
 
         if owned_face_ids is not None:
+            if carry.turb_dq_v_prev is not None:
+                raise NotImplementedError(
+                    "convection='tiedtke' is wired on the single-rank compiled "
+                    "segment only; the MPI owned-face physics does not thread its "
+                    "dynamics / lagged turbulence inputs")
             _ofi = owned_face_ids
             _T_land_in = (carry.T_land[_ofi]
                           if carry.T_land is not None else None)
@@ -3005,6 +3085,7 @@ def build_segment_fn(
                     forcing.solar_weights, forcing.s_0,
                     forcing.o3_vmr, forcing.aerosol_od,
                     aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                    aerosol_sw_volc_precomputed=forcing.aerosol_sw_volc,
                     aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                     o3_top_vmr=forcing.o3_top_vmr,
                     tau_equator=_tau_equator, tau_pole=_tau_pole,
@@ -3038,6 +3119,7 @@ def build_segment_fn(
                         forcing.solar_weights, forcing.s_0,
                         forcing.o3_vmr, forcing.aerosol_od,
                         aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                        aerosol_sw_volc_precomputed=forcing.aerosol_sw_volc,
                         aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                         o3_top_vmr=forcing.o3_top_vmr,
                         tau_equator=_tau_equator, tau_pole=_tau_pole,
@@ -3092,6 +3174,7 @@ def build_segment_fn(
                     forcing.solar_weights, forcing.s_0,
                     forcing.o3_vmr, forcing.aerosol_od,
                     aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                    aerosol_sw_volc_precomputed=forcing.aerosol_sw_volc,
                     aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                     o3_top_vmr=forcing.o3_top_vmr,
                     tau_equator=_tau_equator, tau_pole=_tau_pole,
@@ -3125,6 +3208,7 @@ def build_segment_fn(
                         forcing.solar_weights, forcing.s_0,
                         forcing.o3_vmr, forcing.aerosol_od,
                         aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                        aerosol_sw_volc_precomputed=forcing.aerosol_sw_volc,
                         aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                         o3_top_vmr=forcing.o3_top_vmr,
                         tau_equator=_tau_equator, tau_pole=_tau_pole,
@@ -3691,10 +3775,7 @@ def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False,
     # keying off it would silently rebuild a cell-centre state around corner
     # arrays (found by the #1028 gate).
     if persistent_dgrid:
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
-            FV3HydrostaticState,
-        )
-        StateType = FV3HydrostaticState
+        raise ValueError("fv3_duo replaces the retired persistent_dgrid atmosphere state.")
     if persistent_cgrid:
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             LatLonFaceWindState,

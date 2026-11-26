@@ -11,7 +11,8 @@ from legoesm.ocean.eos import (
 )
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import OceanState, OceanTendencies
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
+from legoesm.ocean.vertical import (OceanZStarCoordinate, compute_layer_thickness,
+                                    compute_ocean_jacobian)
 from legoesm.ocean.physics.vertical_mixing.config import (
     VALID_VERTICAL_MIXING_SCHEMES,
     VerticalMixingConfig,
@@ -271,6 +272,11 @@ def _make_kpp(config: VerticalMixingConfig,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=apply_diffusion, ice_frac=_kpp_ice_fr,
             eos_fn=eos_fn,
+            # live thicknesses with partial bottom cells (lat-lon C-grid), so
+            # the explicit non-local term conserves the column content
+            h_k=(None if getattr(state, "H_bathy", None) is None else
+                 compute_layer_thickness(state.eta.data, state.H_bathy.data,
+                                         z_coord)),
         )
         # When apply_diffusion is False, KPP returns zero du/dv at
         # cell-center shape (from the C-grid u/v interpolation above).
@@ -295,11 +301,15 @@ def _make_epbl(config: VerticalMixingConfig,
     the backward-Euler solver and no explicit tendency, so the host model
     must run with ``implicit_vertical_mixing=True``.
 
-    ``cfg.dt_s`` is used as given: this factory does not know the caller's
-    timestep and does not check it.  The OMIP driver, the ocean SCM and the
-    lat-lon tendency probe check (or set) it against their dt; any other
-    caller of this factory must set ``EPBLConfig.dt_s`` to the dt its
-    implicit solve uses.
+    The returned ``physics_fn`` takes an optional keyword ``dt``: when given
+    it replaces ``cfg.dt_s`` for that call.  The lat-lon C-grid model (via
+    ``_vmix_K_profiles``) always passes its step dt this way, the same dt
+    quantity CATKE receives on that lane, so ``EPBLConfig.dt_s`` is not read
+    there.  Without ``dt``, ``cfg.dt_s`` is used as given: this factory does
+    not know the caller's timestep and does not check it.  The OMIP driver
+    and the ocean SCM check (or set) it against their dt; any other caller
+    that omits ``dt`` must set ``EPBLConfig.dt_s`` to the dt its implicit
+    solve uses.
 
     ``shortwave`` (#2178) is the ``ShortwavePenetrationConfig`` that deposits
     ``surface_forcing.sw_down`` with ``q_net`` holding the NON-SOLAR heat (the
@@ -347,7 +357,10 @@ def _make_epbl(config: VerticalMixingConfig,
     eos_fn = make_eos_fn() if eos_fn is None else eos_fn
 
     def physics_fn(state: OceanState, grid, z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
+                   surface_forcing=None, *, dt=None) -> OceanTendencies:
+        # ``dt`` may be traced (the jitted model step), so it travels as an
+        # argument, never through the static config.
+        dt_run = cfg.dt_s if dt is None else dt
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         h = z_coord.dz_ref * J[..., jnp.newaxis]          # layer thickness [m]
         T = state.T.data
@@ -419,14 +432,14 @@ def _make_epbl(config: VerticalMixingConfig,
         tke_top = surface_tke_forcing(
             q_net, Q_sfc_S * rho_0,
             h[..., 0], dSV_dT[..., 0], dSV_dS[..., 0],
-            g=g, rho_0=rho_0, c_sw=c_sw, dt=cfg.dt_s)
+            g=g, rho_0=rho_0, c_sw=c_sw, dt=dt_run)
         tke_forcing = jnp.zeros_like(T).at[..., 0].set(tke_top)
         if sw is not None:
             sw_b = (jnp.asarray(sw, T.dtype)[..., None]
                     * jnp.asarray(sw_frac, T.dtype))
             tke_forcing = tke_forcing + penetrating_sw_tke(
                 sw_b, jnp.asarray(sw_inv_scale, T.dtype), h, dSV_dT,
-                c_sw=c_sw, dt=cfg.dt_s, g=g, rho_0=rho_0)
+                c_sw=c_sw, dt=dt_run, g=g, rho_0=rho_0)
 
         # Coriolis from the grid latitude (ePBL's rotational length scale).
         lat = getattr(grid, "grid_lat", None)
@@ -447,7 +460,7 @@ def _make_epbl(config: VerticalMixingConfig,
             u_data, v_data, T, S, dSV_dT, dSV_dS, h, cfg,
             tau_x=tau_x, tau_y=tau_y, B_flux=B_flux,
             tke_forcing=tke_forcing, absf=absf,
-            g=g, rho_0=rho_0, apply_diffusion=False,
+            g=g, rho_0=rho_0, apply_diffusion=False, dt=dt_run,
         )
         return _wrap_tendencies(None, None, out.dT_dt, out.dS_dt, state,
                                 K_v=out.K_v, A_v=out.A_v)

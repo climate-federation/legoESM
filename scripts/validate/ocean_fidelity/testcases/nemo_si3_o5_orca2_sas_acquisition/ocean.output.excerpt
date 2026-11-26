@@ -1,0 +1,71 @@
+# Selected lines from the admitted NEMO 5.0.2 ORCA2_SAS_ICE O1 run matching this deck; trailing whitespace removed.
+# Source path: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round4/refused/oracle_o1_orca2_sas_ice_admission_refused_20261024T161410Z_1010784/rec_2step/ocean.output
+# Complete source SHA-256: aa5a33dc0e3bdacc81507087785efad29b9a9547e6b6cee902f2cf86cd146ac2
+# Source lines: 1-50, 636-651, 909.
+
+    CNRS - NERC - Met OFFICE - MERCATOR-ocean - CMCC
+                        NEMO team
+             Ocean General Circulation Model
+                 NEMO version 5.0  (2024)
+              StandAlone Surface version (SAS)
+            ._      ._      ._      ._      ._
+        _.-._)`\_.-._)`\_.-._)`\_.-._)`\_.-._)`\_
+
+            o         _,           _,
+             o      .' (        .-' /
+            o     _/..._'.    .'   /
+       (    o .-'`      ` '-./  _.'
+        )    ( o)           ;= <_         (
+       (      '-.,\\__ __.-;`\   '.        )
+        )  )       \) |`\ \)  '.   \      (   (
+       (  (           \_/       '-._\      )   )
+        )  ) jgs                     `    (   (
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+AAAAAAAA
+
+
+ domain_cfg : domain size read in ORCA_R2_zps_domcfg file
+ ~~~~~~~~~~
+                     iom_nf90_open ~~~ open existing file: ORCA_R2_zps_domcfg.nc in READ mode
+                    ---> ORCA_R2_zps_domcfg.nc OK
+                     iom_close ~~~ close file: ORCA_R2_zps_domcfg.nc ok
+    .
+    ==>>>   ORCA configuration
+    .
+       nn_cfg =            2
+       Ni0glo =          180
+       Nj0glo =          148
+       jpkglo =           31
+    Namelist nammpp
+       jpni and jpnj will be calculated automatically
+       avoid use of mpi_allgather at the north fold  ln_nnogather =  T
+       halo width (applies to both rows and columns)       nn_hls =            2
+       choice of communication method                     nn_comm =            1
+       use delayed global communications?             ln_mppdelay =  T
+                     iom_nf90_open ~~~ open existing file: ORCA_R2_zps_domcfg.nc in READ mode
+                    ---> ORCA_R2_zps_domcfg.nc OK
+
+ mpp_init:
+ ~~~~~~~~
+    ==> you use the best mpi decomposition
+
+          number of ice  categories                           jpl       =            5
+          number of ice  layers                               nlay_i    =           10
+          number of snow layers                               nlay_s    =            5
+          virtual ITD param for jpl=1 (T) or not (F)     ln_virtual_itd =  F
+          Ice dynamics       (T) or not (F)                   ln_icedyn =  F
+          Ice thermodynamics (T) or not (F)                   ln_icethd =  F
+          maximum ice concentration for NH                              =   0.99700000000000000
+          maximum ice concentration for SH                              =   0.99700000000000000
+
+       ice timestep rDt_ice = nn_fsbc*rn_Dt =    10800.000000000000
+
+ ice_itd_init: Initialization of ice cat distribution
+ ~~~~~~~~~~~~
+    Namelist namitd:
+       Ice categories are defined by a function of rn_himean**(-0.05)    ln_cat_hfn =  T
+          mean ice thickness in the domain                               rn_himean  =    2.0000000000000000
+AAAAAAAA

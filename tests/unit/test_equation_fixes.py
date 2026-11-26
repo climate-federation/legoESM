@@ -239,7 +239,6 @@ class TestIssue3_MicrophysicsRateSemantics:
         ("sundqvist", "sundqvist_microphysics"),
         ("seifert_beheng", "seifert_beheng_microphysics"),
         ("morrison", "morrison_microphysics"),
-        ("thompson", "thompson_microphysics"),
     ])
     def test_all_schemes_condensation_depends_on_dt(self, scheme_name, scheme_fn):
         """All backends' condensation component should depend on dt."""
@@ -254,7 +253,13 @@ class TestIssue3_MicrophysicsRateSemantics:
         # dt-independent rain-evaporation rate, so the dt-dependence of
         # condensation could never be detected.
         q_v = 1.05 * saturation_mixing_ratio(T, p_full)
-        kw = {"cell_area": 1.0e10} if scheme_name == "sundqvist" else {}
+        kw = {}
+        if scheme_name == "sundqvist":
+            # Zhao-Carr gscond condenses what the other processes supplied
+            # since the previous step: carry a 1 % lower q_v (moistening).
+            kw = {"cell_area": 1.0e10, "prev_state": {
+                "zc_T_prev": T, "zc_q_v_prev": 0.99 * q_v,
+                "zc_p_s_prev": p_half[:, -1]}}
         out1 = fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt=60.0, **kw)
         out2 = fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt=600.0, **kw)
 

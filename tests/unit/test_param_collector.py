@@ -16,6 +16,7 @@ from legoesm.training.param_collector import (
     _resolve_shape,
     _seed_raw,
     build_registry,
+    build_orca2_rung10_trainable_params,
     build_trainable_params,
 )
 from legoesm.core.param_overrides import apply_param_overrides
@@ -370,3 +371,86 @@ def test_unresolvable_unset_dcs_is_a_clear_error() -> None:
         build_trainable_params(
             tier="extended", active_scheme_keys={key},
             scheme_configs={key: MorrisonConfig(morrison_flavor="other")})
+
+
+_GM_REDI_KEY = "ocean.lat.gm_redi"
+_RN_UD = f"{_GM_REDI_KEY}.kappa_redi_diffusive_velocity"
+_KAPPA_REDI = f"{_GM_REDI_KEY}.kappa_Redi"
+_ORCA2_RN_UD = 0.018
+
+
+def test_explicit_only_registry_keeps_unset_rn_ud_out_of_every_tier() -> None:
+    reg = {m.qualified_name: m for m in build_registry()}
+    ud = reg[_RN_UD]
+    assert ud.explicit_only and ud.default is None
+    for tier in ("core", "extended", "aggressive"):
+        names = {c.name for c in build_trainable_params(
+            tier=tier, dtype=jnp.float64).constraints}
+        assert _RN_UD not in names
+    assert _KAPPA_REDI in names  # proves the GM/Redi tier path was live
+
+
+def test_explicit_only_request_with_start_value_returns_rn_ud() -> None:
+    params = build_trainable_params(
+        active_scheme_keys={_GM_REDI_KEY}, tier=0, include=(_RN_UD,),
+        init_values={_RN_UD: _ORCA2_RN_UD}, dtype=jnp.float64)
+    assert [c.name for c in params.constraints] == [_RN_UD]
+    np.testing.assert_allclose(
+        float(params.as_dict()[_RN_UD]), _ORCA2_RN_UD, rtol=1e-12)
+
+
+def test_explicit_only_request_without_start_value_is_refused() -> None:
+    with pytest.raises(ValueError, match="explicit_only"):
+        build_trainable_params(
+            active_scheme_keys={_GM_REDI_KEY}, tier="extended",
+            include=(_RN_UD,), dtype=jnp.float64)
+    with pytest.raises(ValueError, match="explicit_only"):
+        build_trainable_params(
+            active_scheme_keys={_GM_REDI_KEY}, tier="extended",
+            include=(_RN_UD,), init_values={_KAPPA_REDI: 1000.0},
+            dtype=jnp.float64)
+
+
+def test_explicit_only_request_that_is_inactive_or_excluded_is_refused() -> None:
+    with pytest.raises(ValueError, match="not reachable"):
+        build_trainable_params(
+            active_scheme_keys={"ocean.lat.visbeck"}, tier=0,
+            include=(_RN_UD,), init_values={_RN_UD: _ORCA2_RN_UD},
+            dtype=jnp.float64)
+    with pytest.raises(ValueError, match="both requested.*excluded"):
+        build_trainable_params(
+            active_scheme_keys={_GM_REDI_KEY}, tier=0, include=(_RN_UD,),
+            exclude=(_RN_UD,), init_values={_RN_UD: _ORCA2_RN_UD},
+            dtype=jnp.float64)
+
+
+def test_orca2_rung10_builder_refuses_every_explicit_frozen_request() -> None:
+    """The ORCA2 wrapper, not only the generic collector, owns the freeze."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        ORCA2_RUNG10_FROZEN_PARAMS,
+    )
+
+    frozen = next(iter(ORCA2_RUNG10_FROZEN_PARAMS))
+    for kwargs in (
+        {"include": (frozen,)},
+        {"include_tier0": (frozen,)},
+        {"init_values": {frozen: 1.0}},
+    ):
+        with pytest.raises(ValueError, match="frozen on ORCA2 rung 10"):
+            build_orca2_rung10_trainable_params(**kwargs)
+
+
+def test_orca2_rung10_builder_excludes_frozen_but_keeps_explicit_rn_ud() -> None:
+    """The wrapper delegates the live selection after adding its exclusions."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        ORCA2_RUNG10_FROZEN_PARAMS,
+    )
+
+    params = build_orca2_rung10_trainable_params(
+        active_scheme_keys={_GM_REDI_KEY}, tier=0, include=(_RN_UD,),
+        init_values={_RN_UD: _ORCA2_RN_UD}, dtype=jnp.float64)
+    names = {c.name for c in params.constraints}
+    assert names == {_RN_UD}
+    assert names.isdisjoint(ORCA2_RUNG10_FROZEN_PARAMS)
+    np.testing.assert_allclose(
+        float(params.as_dict()[_RN_UD]), _ORCA2_RN_UD, rtol=1e-12)

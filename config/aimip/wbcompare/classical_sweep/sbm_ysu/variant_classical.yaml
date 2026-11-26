@@ -4,6 +4,7 @@
 aimip_variant: "classical"
 aimip_convection: "sbm"
 aimip_turbulence: "ysu"
+# UNCALIBRATED: tuned on the bulk Hines, not retuned for the LMDZ Doppler-spread port (#2378).
 aimip_gwd: "hines"
 aimip_microphysics: "morrison"
 aimip_cloud: "sundqvist"

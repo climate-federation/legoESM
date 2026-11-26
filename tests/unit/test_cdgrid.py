@@ -9,6 +9,8 @@ Tests cover:
 
 import unittest
 
+import pytest
+
 import jax
 import jax.numpy as jnp
 
@@ -3572,6 +3574,62 @@ class TestCgridCornerMin(unittest.TestCase):
         np.testing.assert_allclose(
             raw_y_peff[sl], decomp_y[sl], rtol=1e-11, atol=1e-9)
 
+
+
+@pytest.mark.parametrize("n", [24, 96])
+def test_polar_gradient_matrix_built_in_float64_with_x64_off(n):
+    import numpy as np
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+    c = n // 2
+    with jax.enable_x64(True):
+        ref = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n, dtype=jnp.float64))
+    with jax.enable_x64(False):
+        got = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    leaks = [k for k, v in got._asdict().items()
+             if hasattr(v, "dtype") and v.dtype in (jnp.float64, jnp.int64)]
+    assert not leaks, leaks
+    diag = np.abs(np.asarray(ref.grad_c00, np.float64)[4:6, c, c]).max()
+    for k in ("grad_c00", "grad_c01", "grad_c10", "grad_c11"):
+        err = np.abs(np.asarray(getattr(got, k), np.float64)[4:6, c, c]
+                     - np.asarray(getattr(ref, k), np.float64)[4:6, c, c]).max()
+        assert err <= 1e-5 * diag, (k, err / diag)
+
+
+def test_nonstandard_base_refused_with_x64_off():
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+    with jax.enable_x64(False):
+        stretched = create_cubed_sphere(24, stretch_fac=1.5,
+                                        target_lat=0.5, target_lon=0.0)
+        with pytest.raises(ValueError, match="does not match the standard"):
+            create_cubed_sphere_cdgrid(stretched)
+
+
+
+def test_metric_gradient_through_traced_base_with_x64_off():
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+    with jax.enable_x64(False):
+        base = create_cubed_sphere(8)
+        g = jax.grad(lambda lat: jnp.sum(create_cubed_sphere_cdgrid(
+            base._replace(lat=lat)).grad_c00))(base.lat)
+    assert bool(jnp.all(jnp.isfinite(g)))
+    assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_half_precision_base_refused_with_x64_off():
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+    with jax.enable_x64(False):
+        base = create_cubed_sphere(8, dtype=jnp.float16)
+        with pytest.raises(ValueError, match="must be float32"):
+            create_cubed_sphere_cdgrid(base)
 
 if __name__ == "__main__":
     unittest.main()

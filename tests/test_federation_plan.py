@@ -117,3 +117,11 @@ def test_supported_matrix_lists_every_resolvable_atmosphere_solver() -> None:
         "supported_matrix ATMOSPHERE_MATRIX is out of sync with the resolvable "
         "solvers in dynamics._SOLVER_TO_CLASS — add/remove the SolverEntry."
     )
+    from legoesm.supported_matrix import ATMOSPHERE_MATRIX
+
+    cube_dynamics = {
+        entry.canonical_name for entry in ATMOSPHERE_MATRIX
+        if entry.dynamics in ("shallow_water", "hydrostatic", "nonhydrostatic")
+        and "cube" in entry.grid
+    }
+    assert cube_dynamics == {"fv3_duo_primitive_equations"}

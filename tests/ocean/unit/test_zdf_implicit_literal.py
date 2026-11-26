@@ -375,3 +375,43 @@ def test_rounded_thickness_is_refused_without_the_literal_solver():
             x, x, x, x, jnp.ones((1, 1, 2)), x,
             jnp.ones((1, 1, 2)), 1.0, jnp.ones((1, 1, 3), bool),
             rounded_thickness=True)
+
+
+def test_nemo_ordered_solve_reverse_gradient_is_finite_with_a_zero_pivot():
+    """A dry column has a zero pivot; the forward inf/NaN is masked by the
+    caller, and the jitted reverse pass must stay finite (round 316)."""
+    from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+        _nemo_ordered_solve,
+    )
+
+    rng = np.random.default_rng(316)
+    wet = jnp.asarray([1.0, 0.0])[:, None]
+    lower = jnp.asarray(rng.uniform(-0.4, -0.1, (2, 4))) * wet
+    upper = jnp.asarray(rng.uniform(-0.4, -0.1, (2, 4))) * wet
+    diagonal = (1.0 - lower - upper) * wet
+    rhs = jnp.asarray(rng.uniform(-1.0, 1.0, (2, 4))) * wet
+
+    def loss(d, b):
+        x = _nemo_ordered_solve(lower, d, upper, b)
+        return jnp.sum(jnp.where(wet > 0.5, x, 0.0) ** 2)
+
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1)))(diagonal, rhs)
+    for g in grads:
+        assert np.all(np.isfinite(np.asarray(g)))
+
+    # Wet column: VJP/JVP equal the unguarded dense solve's to rounding (1e-12).
+    def dense(d, b):
+        a = jnp.diag(d[0]) + jnp.diag(lower[0, 1:], -1) + jnp.diag(upper[0, :-1], 1)
+        return jnp.sum(jnp.linalg.solve(a, b[0]) ** 2)
+
+    ref = jax.jit(jax.grad(dense, argnums=(0, 1)))(diagonal, rhs)
+    for g, r in zip(grads, ref):
+        assert np.all(np.asarray(r)[0] != 0.0)
+        np.testing.assert_allclose(np.asarray(g)[0], np.asarray(r)[0], rtol=1.0e-12, atol=0.0)
+    dirs = tuple(jnp.asarray(rng.standard_normal((2, 4))) * wet for _ in range(2))
+    tan = jax.jit(lambda *a: jax.jvp(loss, a[:2], a[2:])[1])(diagonal, rhs, *dirs)
+    tan_ref = jax.jit(lambda *a: jax.jvp(dense, a[:2], a[2:])[1])(diagonal, rhs, *dirs)
+    np.testing.assert_allclose(float(tan), float(tan_ref), rtol=1.0e-12, atol=0.0)
+    np.testing.assert_array_equal(
+        np.asarray(_nemo_ordered_solve(lower, diagonal, upper, rhs))[0],
+        np.asarray(_nemo_ordered_solve(lower[:1], diagonal[:1], upper[:1], rhs[:1]))[0])

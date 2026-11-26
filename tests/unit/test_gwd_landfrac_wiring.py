@@ -192,11 +192,13 @@ def test_e3sm_convective_source_receives_netdt():
     from types import SimpleNamespace
 
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMBeresConfig,
         E3SMCAMConfig,
         GravityWaveDragConfig,
     )
     over = GravityWaveDragConfig(
-        scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source="convective", pgwv=8))
+        scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source="convective", pgwv=8,
+                                                  beres=E3SMBeresConfig(use_stand_in_table=True)))   # stand-in: explicit opt-in
     grid, pipe = _pipe_over(over, convection="none")
     assert pipe._gwd_takes_netdt is True
 
@@ -251,6 +253,7 @@ def test_e3sm_frontal_source_threads_frontgf_on_latlon(monkeypatch):
     array (mirrors the netdt sentinel test)."""
     from legoesm.atmosphere.physics.gravity_wave_drag import frontogenesis
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMBeresConfig,
         E3SMCAMConfig,
         GravityWaveDragConfig,
     )
@@ -288,6 +291,7 @@ def test_e3sm_frontal_source_rejected_on_unsupported_grid(monkeypatch):
     zeros path would otherwise be a silent no-op."""
     from legoesm.atmosphere.physics.gravity_wave_drag import frontogenesis
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMBeresConfig,
         E3SMCAMConfig,
         GravityWaveDragConfig,
     )
@@ -303,12 +307,14 @@ def test_e3sm_nonfrontal_sources_never_send_frontgf():
     """Orographic / convective sources: the flag stays False and no
     frontgf kwarg is sent (no useless per-step producer calls)."""
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMBeresConfig,
         E3SMCAMConfig,
         GravityWaveDragConfig,
     )
     for src in ("orographic", "convective"):
         grid, pipe = _pipe_over(GravityWaveDragConfig(
-            scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source=src, pgwv=8)))
+            scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source=src, pgwv=8,
+                                                      beres=E3SMBeresConfig(use_stand_in_table=True))))
         assert pipe._gwd_takes_frontgf is False
         rec = _Recorder()
         pipe.gwd_fn = rec

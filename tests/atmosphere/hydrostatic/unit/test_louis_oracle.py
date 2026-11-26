@@ -25,7 +25,8 @@ compute_vdiff, ``test_holtslag_boville_oracle.py``).
 Metric (the tier-1 audit metric, as tests/atmosphere/test_clubb_core_oracle.py
 and test_holtslag_boville_oracle.py): per field, ``max |ours - oracle| /
 max |oracle|`` per column over the interfaces of the compared branch; bound
-1e-10 in fp64 (user decision 2026-10-19) with ``blend_ri_sharpness`` at its
+1e-12 in fp64 (oracle-fidelity rule; the F4 1-ulp spread of the oracle is
+~1e-15; budget / jit-parity checks keep 1e-10) with ``blend_ri_sharpness`` at its
 hard-switch limit (1e12) and ``shear_floor_sharpness`` at inf (the hard
 vdfexcu MAX; the fixture was generated with the hard floor).  At the
 production defaults of the two smooth switches the per-column gaps are pinned
@@ -54,6 +55,7 @@ from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 jax.config.update("jax_enable_x64", True)
 
 TOL = 1.0e-10
+TOL_ORACLE = 1.0e-12  # port vs oracle at the hard limit (F4 spread: oracle 1-ulp spread 1.2e-15)
 FIXTURE = Path(__file__).resolve().parents[2] / "oracle_fixtures" / "louis.npz"
 GAPS = FIXTURE.with_name("louis_default_gaps.json")
 FIELDS = ("T", "q", "u", "v", "p_full", "p_half", "zm", "zi",
@@ -137,7 +139,7 @@ def test_stable_diffusivities_match_openifs_vdfexcu(fx, monkeypatch):
          # Ri is legoESM's (it was the oracle's input PRI): regression pin only
          "ri_pin": _err(Ri, fx["ifs_Ri"], True)}
     print("Louis stable vs OpenIFS vdfexcu, hard limit, max rel err", e)
-    assert max(e.values()) <= TOL, e
+    assert max(e.values()) <= TOL_ORACLE, e
 
 
 def test_unstable_diffusivities_match_icon_louis79(fx, monkeypatch):
@@ -148,7 +150,7 @@ def test_unstable_diffusivities_match_icon_louis79(fx, monkeypatch):
          "kh": _err(_masked(Kh, m), _masked(fx["ora_icon_kh"], m), True),
          "ri_pin": _err(Ri, fx["icon_Ri"], True)}
     print("Louis unstable vs ICON mo_turb_vdiff_diag:518-530, hard limit, max rel err", e)
-    assert max(e.values()) <= TOL, e
+    assert max(e.values()) <= TOL_ORACLE, e
 
 
 _SWITCHES = {"blend": "blend_ri_sharpness", "floor": "shear_floor_sharpness"}
@@ -213,6 +215,31 @@ def test_shear_floor_check_grads_at_default(fx, du):
     g = lambda u: _km_sum(fx, f, u)  # noqa: E731
     check_grads(g, (f["u"],), order=2, modes=("rev",), eps=1e-6)
     assert float(jnp.max(jnp.abs(jax.grad(g)(f["u"])))) > 0.0
+
+
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+def test_icon_unstable_sqrt_grad_at_neutral(dtype):
+    """ICON unstable branch takes SQRT(ABS(zri)) exactly (double-where sqrt,
+    no additive floor): f at Ri = 0 is 1, the derivative at Ri = 0 and at
+    tiny negative Ri is finite, and check_grads passes on unstable Ri."""
+    z_up = jnp.asarray([400.0, 400.0, 400.0, 900.0], dtype)
+    z_lo = jnp.asarray([150.0, 150.0, 150.0, 400.0], dtype)
+    l = jnp.asarray([30.0, 30.0, 30.0, 60.0], dtype)
+    dz = z_up - z_lo
+
+    def fsum(Ri):
+        fm, fh = L.louis_stability_functions(Ri, l, dz, 5.0, 5.0, 5.0, 1e12,
+                                             b_heat=7.5, z_full_pair=(z_up, z_lo))
+        return jnp.sum(fm + fh)
+    for Ri in (jnp.zeros(4, dtype), jnp.asarray([-1e-30, -1e-12, -1e-6, 0.0], dtype)):
+        g = jax.grad(fsum)(Ri)
+        assert bool(jnp.all(jnp.isfinite(g))), g
+    fm, _ = L.louis_stability_functions(jnp.zeros(4, dtype), l, dz, 5.0, 5.0, 5.0, 1e12,
+                                        z_full_pair=(z_up, z_lo))
+    np.testing.assert_array_equal(np.asarray(fm), 1.0)
+    if dtype == jnp.float64:
+        check_grads(fsum, (jnp.asarray([-0.8, -0.3, -0.05, -2.0]),), order=2,
+                    modes=("rev",), eps=1e-6)
 
 
 def test_column_water_budget_closes(fx):

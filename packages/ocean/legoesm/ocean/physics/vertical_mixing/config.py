@@ -37,6 +37,8 @@ __param_spec__ = {
             "smooth_energy_sharpness_m2j": "RULE 5 smoothing sharpness of the ePBL energy switches; a numerics regulariser, not physics",
             "smooth_colht_sharpness_per_m": "RULE 5 smoothing sharpness of the ePBL column-height switches; a numerics regulariser, not physics",
             "smooth_ratio_sharpness": "RULE 5 smoothing sharpness of the ePBL nondimensional caps; a numerics regulariser, not physics",
+            "smooth_velocity_sharpness_s_m": "RULE 5 smoothing sharpness of the ePBL velocity caps; a numerics regulariser, not physics",
+            "smooth_slope_sharpness": "RULE 5 smoothing sharpness of the ePBL column-height slope switches; a numerics regulariser, not physics",
         },
         "params": {
             "nstar": {"units": "1", "bounds": (0.02, 0.4), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) NSTAR: fraction of released PE available to drive entrainment", "shape": None},
@@ -44,11 +46,12 @@ __param_spec__ = {
             "tke_decay": {"units": "1", "bounds": (0.001, 12.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "TKE_DECAY: ratio of the Ekman depth to the TKE decay scale", "shape": None},
             "wstar_ustar_coef": {"units": "1", "bounds": (0.5, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "WSTAR_USTAR_COEF: efficiency of convective relative to mechanical TKE", "shape": None},
             "ekman_scale_coef": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EKMAN_SCALE_COEF: rotational inhibition of the mixing length", "shape": None},
-            "mke_to_tke_effic": {"units": "1", "bounds": (0.0, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MKE_TO_TKE_EFFIC: conversion of resolved shear KE into TKE", "shape": None},
+            # Off by default: the default sits on a bound, so a sigmoid cannot seed it.
+            "mke_to_tke_effic": {"units": "1", "bounds": (0.0, 0.2), "tunable_tier": 0, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MKE_TO_TKE_EFFIC: conversion of resolved shear KE into TKE", "shape": None},
             "mstar_cap": {"units": "1", "bounds": (-1.0, 20.0), "tunable_tier": 0, "transform": "none", "category": "vertical_mixing", "reference": "MSTAR_CAP: upper bound on mstar (OM4 scheme only, as in MOM6); negative disables", "shape": None},
             "mstar_coef": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR2_COEF1: rotation/stabilization balance (OM4 scheme)", "shape": None},
             "c_ek": {"units": "1", "bounds": (0.02, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR2_COEF2: Ekman-limited mixing coefficient (OM4 scheme)", "shape": None},
-            "mstar_convect_coef": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR_CONV_ADJ: reduction of mstar under convection", "shape": None},
+            "mstar_convect_coef": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR_CONV_ADJ: reduction of mstar under convection", "shape": None},
             "rh18_mstar_cn1": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN1 (Reichl & Hallberg 2018 value 0.275)", "shape": None},
             "rh18_mstar_cn2": {"units": "1", "bounds": (1.0, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN2 (Reichl & Hallberg 2018 value 8.0)", "shape": None},
             "rh18_mstar_cn3": {"units": "1", "bounds": (-12.0, -1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN3 (Reichl & Hallberg 2018 value -5.0)", "shape": None},
@@ -58,7 +61,7 @@ __param_spec__ = {
             "translay_scale": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EPBL_TRANSITION_SCALE: mixing length in the transition layer as a fraction of the boundary-layer depth", "shape": None},
             "vstar_scale_fac": {"units": "1", "bounds": (0.2, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EPBL_VEL_SCALE_FACTOR: overall scaling of the turbulent velocity", "shape": None},
             "vstar_surf_fac": {"units": "1", "bounds": (0.5, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "VSTAR_SURF_FAC: surface mechanical contribution to vstar (REICHL_H18 scheme)", "shape": None},
-            "omega_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "ML_OMEGA_FRAC: blend of 2*Omega with the local f in the rotational scale", "shape": None},
+            "omega_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "sigmoid", "category": "vertical_mixing", "reference": "ML_OMEGA_FRAC: blend of 2*Omega with the local f in the rotational scale", "shape": None},
             "K_bg": {"units": "m^2/s", "bounds": (1e-6, 1e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KD: background tracer diffusivity added below the boundary layer", "shape": None},
             "A_bg": {"units": "m^2/s", "bounds": (1e-5, 1e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KV: background viscosity added below the boundary layer", "shape": None},
         },
@@ -79,6 +82,7 @@ __param_spec__ = {
         "scheme_key": "ocean.vm.richardson",
         "excluded": {
             "Pr_t": "dead field: the Pr-Ri scaling is built into the K formula; richardson.py only warns when Pr_t != default and never reads it — phantom trainable",
+            "ri_clip_width": "numerics: RULE 5 smoothing width (0 = hard reference)",
         },
         "params": {
             "A_bg": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
@@ -171,6 +175,8 @@ __param_spec__ = {
             "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "crossing_sharpness": "numerics: solver/CFL/smoothing parameter",
             "crossing_threshold": "numerics: solver/CFL/smoothing parameter",
+            "surrogate_width_sigma": "numerics: backward-pass surrogate width (gradients only, never fitted)",
+            "surrogate_width_n2": "numerics: backward-pass surrogate width (gradients only, never fitted)",
             "epsilon_lmd": "numerics: floor/cap",
             "gamma_S": "Large 1994 fixed nondim constant",
             "gamma_T": "Large 1994 fixed nondim constant",
@@ -239,7 +245,7 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     # ----- Static-stability N^2 mode for the gradient Richardson number -----
     # ``"insitu"`` (default, BIT-IDENTICAL legacy) / ``"insitu_signed"``: N^2
     #   from the in-situ density difference (``eos.compute_buoyancy_frequency``,
-    #   already signed/unclipped here — the downstream ``richardson_number``
+    #   already signed/unclipped here — ``_pp81_diffusivities``
     #   clips Ri>=0), which carries the compressibility bias (~too stable).
     # ``"adiabatic"``: PP81's TRUE static stability via adiabatic parcel
     #   displacement to the upper cell's pressure
@@ -248,6 +254,8 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     #   ``richardson_vertical_mixing``. Both integration factory and the
     #   implicit k_profiles path supply it when this is selected.
     n2_mode: str = "insitu"
+    # RULE 5 width [1] of the C1 Ri >= 0 clip (0 = CVMix's hard clip).
+    ri_clip_width: float = 0.01
 
 
 class TKEConfig(NamedTuple):
@@ -685,12 +693,18 @@ class TKEConfig(NamedTuple):
     # Arithmetic used by the nn_etau penetration profile. ``jax_expression``
     # is the historical single jnp.exp call. ``nemo_literal`` reproduces the
     # ordinary-range glibc-2.34 vector EXP linked into the DINO oracle; only
-    # the two complete DINO oracle cards select it.
+    # the two complete DINO oracle cards select it. ``nemo_scalar_libm`` is the
+    # historical selector name for the source-written expression: it calls the
+    # precision policy's exp (scalar libm on exact cards, native XLA on the
+    # explicitly selected fast-literal card; round-off-only difference).
     tke_etau_exponential_evaluation: str = "jax_expression"
     # Latitude-profile arithmetic for nn_htau=1. ``jax_expression`` is the
     # historical jnp.deg2rad+jnp.sin path. ``nemo_literal`` consumes native
     # mesh degrees and transcribes glibc-2.34's two-lane vector SIN arithmetic.
-    # Only complete DINO oracle cards select it.
+    # Only complete DINO oracle cards select it. ``nemo_scalar_libm`` takes the
+    # same native-degree phase through the precision policy's sin (scalar libm
+    # on exact cards, native XLA on the explicitly selected fast-literal card;
+    # round-off-only difference).
     tke_htau_evaluation: str = "jax_expression"
     # Raw nn_mxl buoyancy length. ``factored`` preserves the historical
     # sqrt(2)*sqrt(e)/sqrt(max(N2,1e-12)) expression. ``nemo_literal`` uses
@@ -701,6 +715,14 @@ class TKEConfig(NamedTuple):
     # order, including the per-column mbkt+1 no-crossing fallback. Only the
     # complete DINO NEMO cards select it; all other cards remain vectorized.
     tke_langmuir_evaluation: str = "vectorized"
+    # Langmuir source vs NEMO's explicit dissipation add-back.  NEMO adds the
+    # Langmuir increment to en BEFORE the matrix (zdftke.F90:367), so the RHS
+    # add-back zfact3*dissl*en (:419) multiplies the post-Langmuir en.
+    # ``separate`` (historical): Langmuir is a plain RHS source and the
+    # add-back uses the pre-Langmuir e_old.  ``nemo_pre_solve``: the add-back
+    # also acts on dt*source, as in NEMO (factored matrix + nemo_1p5_split
+    # only; the literal matrix already assembles it that way).
+    tke_langmuir_rhs_coupling: str = "separate"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
     # NEMO cards instead freeze p_sh2 from selected step-entry face levels and
@@ -875,6 +897,51 @@ class TKEConfig(NamedTuple):
 
 
 # --- LMD94 nonlocal-transport constants (Large, McWilliams & Doney 1994, eq. 20 + App. B) ---
+
+    # NEMO nn_mxlice: the ln_mxl0 anchor under sea ice (zdftke.f90:605-633).
+    # 0 (DEFAULT, main's behaviour) = CASE 0, no scaling.  2 = CASE 2,
+    # ``((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask`` with raw ``fr_i`` and SI3's
+    # mean thickness ``hm_i`` (OceanSurfaceForcing.ice_concentration and
+    # .ice_mean_thickness_hm_i, both required); needs the masked anchor.
+    nemo_mxlice: int = 0
+    # NEMO's nn_mxl bottom-up scan starts at jpkm1 and therefore reads
+    # e3t_3d(jpk), the masked dummy-bottom T-cell thickness. Generic grids do
+    # not carry that extra slot. A record-backed NEMO card may select this arm
+    # and supply ``z_coord.nemo_e3t_jpk``; missing data then raises.
+    nemo_mxl_terminal_e3t: bool = False
+    # nn_etau=1 penetration masks, zdftke.f90:500-501 (`* wmask(jk) *
+    # tmask(1)`). The historical injection also fills dry W rows, which the
+    # nn_mxl bottom-up sweep then carries into wet cells. Card-selected.
+    nemo_etau_wmask: bool = False
+    # NEMO's rab_3d_t/bn2_t (eosbn2.F90) with every source operation rounded
+    # before its consumer; the compiled default lets XLA contract them.
+    # Card-selected.
+    nemo_bn2_source_rounded: bool = False
+    # zdf_sh2's r3u/r3v at the whole-step entry level (RK3 zdf_phy(Nbb,Nbb),
+    # zdfsh2.F90 e3w_1d*(1+r3u(Kmm))), not the stage Kmm. Card-selected.
+    # None preserves main's resolved RK3-WS behavior: use step-entry SSH when
+    # that operand is supplied.  Certified cards state True or False.
+    nemo_sh2_step_entry_ssh: bool | None = None
+    # zdftke.f90:466,472 recurrences with each product rounded before its
+    # subtraction (NEMO's build has no FMA); the default lets XLA contract.
+    # Card-selected.
+    nemo_tke_solve_source_rounded: bool = False
+    # zdf_sh2 on the T-pivot row's north V face (zdfsh2.f90:98-113): wet raw
+    # vmask, north avm_k and r3v ssh from the fold images (lbcnfd.f90:584-720)
+    # instead of a wall. Card-selected.
+    nemo_sh2_fold_top_v: bool = False
+    # zdftke.f90:420 zdiag and :423-426 RHS with every operation rounded in
+    # written order (NEMO's build has no FMA). Card-selected.
+    nemo_tke_matrix_rhs_source_rounded: bool = False
+    # zdf_sh2's step-entry r3u/r3v rounded before zdfsh2.f90:104-108 adds 1
+    # (NEMO stores pr3u/pr3v, domqco.f90:266-269); the default lets XLA fuse
+    # the quotient into an FMA with the "1 +". Card-selected.
+    nemo_sh2_r3_source_rounded: bool = False
+    # zdf_sh2's step-entry r3u/r3v as NEMO forms them, (num * r1_hu_0) times
+    # the stored 1/e1e2u (domqco.f90:266-269); the default divides, which
+    # XLA folds with r1_hu_0 into one constant. Card-selected.
+    nemo_sh2_r3_stored_reciprocal: bool = False
+
 _LMD94_C_S = 98.96       # c_s, scalar convective constant (App. B)
 _LMD94_EPSILON = 0.1     # epsilon, surface-layer fraction (App. A/B)
 # C_s = C* kappa (c_s kappa epsilon)^(1/3) (LMD94 eq. 20; POP/CVMix ``Cg``). At kappa = 0.4
@@ -964,6 +1031,36 @@ class KPPConfig(NamedTuple):
     #   Siberian salty — that TKEConfig.eice fixed on the TKE grid but never
     #   reached the KPP grids).
     eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
+    # N^2 for V_t^2, the interior Richardson number and the convective trigger (ENSO core-0030).
+    # "adiabatic": the local buoyancy gradient (both cells of an interface at one pressure), as LMD94,
+    # CVMix/MOM6, MITgcm and POP.  "insitu_signed": the earlier difference of in-situ densities at each
+    # cell's own pressure (biased by g^2/c_s^2, about +4e-5 s^-2), kept bit for bit.  User-approved default 2026-11-20 (published form).
+    n2_mode: str = "adiabatic"
+    # Velocity scale w_s inside the unresolved shear V_t^2 of the bulk Richardson
+    # number.  "column" (default, unchanged behaviour): w_s at each depth d for a
+    # boundary layer of depth h_bl_prev, or of the full column when the caller
+    # passes no h_bl_prev (the lat-lon K-profile path), so the surface-layer cap
+    # d_eff = min(d, epsilon*h) does not act.  "candidate": the CVMix / MOM6 form,
+    # each candidate depth d is its own boundary-layer depth and w_s is taken at
+    # sigma = epsilon of it, d_eff = epsilon*d, in stable and unstable forcing
+    # (CVMix cvmix_kpp_compute_turbulent_scales_1d_OBL with l_LMD_ws = .false.,
+    # its default; MOM6 MOM_CVMix_KPP.F90 KPP_compute_BLD, Vt_layer = 1.0 and
+    # OBL_depth = cell-centre depth).
+    vt2_velocity_scale: str = "column"
+    # Surface buoyancy flux in the KPP velocity scales.  False (default, unchanged
+    # behaviour): |B_f| below float32 machine epsilon (1.19e-7 m^2/s^3) is replaced by
+    # that floor with the same sign, which covers most tropical fluxes.  True: the actual
+    # flux, with zeta = d_eff kappa B_f / u*^3 written without a division by B_f, as
+    # LMD94 and CVMix (cvmix_kpp_compute_turbulent_scales_1d_OBL) use it.
+    actual_buoyancy_flux: bool = False
+    # Gradient surrogates (docs/88 6.12 (a2)): the boundary-layer base switch (K_bl inside, interior K below
+    # sigma = 1) and the convective switch (K_conv where N2 < Ri_conv) keep their exact forward values but
+    # take the derivative of a logistic blend in the backward pass, with these widths (numerical, stated
+    # before use, never fitted).  False (default): exact gradients of the step functions.
+    gradient_surrogates: bool = False
+    surrogate_switches: str = "bl_base,convective"   # which switches get a surrogate (comma list)
+    surrogate_width_sigma: float = 0.1     # in sigma = depth / h_bl
+    surrogate_width_n2: float = 1.0e-6     # in N2 [s^-2]
 
 
 class CATKEConfig(NamedTuple):
@@ -991,11 +1088,15 @@ class CATKEConfig(NamedTuple):
 
     Field names map 1:1 to Oceananigans ``CATKEMixingLength`` / ``CATKEEquation``
     (Cˢ→c_surface_shear, Cᶜc→c_conv_c, CʰⁱD→c_hi_diss, ...); defaults are the
-    LES-calibrated values from Wagner et al. (2025).
+    LES-calibrated values from Wagner et al. (2025), except ``c_bottom_shear``, which
+    the LES do not constrain and Oceananigans sets so the bottom von Kármán constant is 0.4.
     """
     # --- stable (shear) mixing length: surface/bottom + stratification ---
     c_surface_shear: float = 1.131       # Cˢ  surface-distance coefficient
-    c_bottom_shear: float = 0.28         # Cᵇ  bottom-distance coefficient
+    # Cᵇ bottom-distance coefficient. Oceananigans CATKEMixingLength (main, 8e4f98d, 5 November 2026): Cᵇ = 0.967,
+    # chosen so that the near-bottom similarity constant Cᵇ (Cˡᵒu^3 / CˡᵒD)^(1/4) is 0.4, because Cᵇ is not
+    # constrained by the surface-forced calibration LES (Wagner et al. 2025, section 3.1.3). Was 0.28 (ENSO core-0026).
+    c_bottom_shear: float = 0.967
     c_ri_lower: float = 0.254            # CRi⁰ stability-function lower Ri
     c_ri_width: float = 1.02             # CRiᵟ stability-function width
     c_sheared_plume: float = 0.505       # Cˢᵖ sheared-convective-plume coefficient
@@ -1035,6 +1136,23 @@ class CATKEConfig(NamedTuple):
     maximum_viscosity: float = float("inf")           # K_u cap [m^2/s]
     maximum_tracer_diffusivity: float = float("inf")  # K_c cap [m^2/s]
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
+    # Shortwave in CATKE's surface buoyancy flux Jb (ENSO core-0027). Oceananigans' CATKE takes Jb from the top boundary
+    # fluxes of T and S only (catke_vertical_diffusivity.jl, top_buoyancy_flux of the top tracer BCs); with
+    # penetrating radiation (NumericalEarth/ClimaOcean TwoColorRadiation) the whole shortwave is a body forcing and
+    # shortwave_radiative_forcing returns zero for the top flux (radiative_forcing.jl, apply_air_sea_radiative_fluxes.jl),
+    # so Jb is formed from the non-solar flux. "exclude" (default) does the same here when the surface forcing
+    # carries sw_down: Jb uses q_net - sw_down. "include" keeps the earlier behaviour (Jb from the full q_net).
+    # With a skin fraction above 0 (the "auto" or default jerlov_2band path, or sweeney_2band) part of sw_down is
+    # absorbed at the top and still sits in the tracer surface flux; it is left out of Jb all the same, as
+    # NumericalEarth leaves all shortwave out even where most is absorbed in the top cell. The regional driver uses
+    # skin fraction 0, where the split is exact.
+    surface_buoyancy_flux_shortwave: str = "exclude"
+    # N^2 for CATKE (ENSO core-0029). Oceananigans' CATKE uses the local buoyancy gradient ∂z_b = g (alpha ∂zT - beta ∂zS)
+    # (SeawaterBuoyancy), with no compressibility term. "adiabatic" (default) evaluates both cells of an interface
+    # at the upper cell's pressure (eos.compute_buoyancy_frequency_adiabatic), which is that local gradient for any
+    # EOS. "insitu_signed" keeps the earlier behaviour: the difference of in-situ densities, biased stable by the
+    # compressibility of seawater (about +4e-5 s^-2 near the surface with Wright).
+    n2_mode: str = "adiabatic"
 
 
 class EPBLConfig(NamedTuple):
@@ -1050,6 +1168,8 @@ class EPBLConfig(NamedTuple):
     while legoESM's vertical-mixing factory signature carries no timestep, so
     ePBL — which is an energy-per-timestep closure — reads it from the config.
     It MUST equal the model timestep; the scheme raises if it is not positive.
+    The lat-lon C-grid model does not read it: that model passes its step dt
+    to ePBL at run time, as it does for CATKE.
     """
     # --- timestep (no MOM6 equivalent; see class docstring) ---
     dt_s: float = 1800.0
@@ -1127,6 +1247,8 @@ class EPBLConfig(NamedTuple):
     smooth_energy_sharpness_m2j: float = 1.0e6    # [m^2/J] TKE / PE per area
     smooth_colht_sharpness_per_m: float = 1.0e10  # [1/m] column-height change
     smooth_ratio_sharpness: float = 1.0e3         # [1] nondimensional ratios
+    smooth_velocity_sharpness_s_m: float = 1.0e6  # [s/m] velocity scales
+    smooth_slope_sharpness: float = 1.0e10        # [1] d(ColHt)/d(Kddt_h), ~1e-5
 
     # --- background floors added to the ePBL diffusivity ---
     K_bg: float = 1.0e-5               # KD   [m^2/s]

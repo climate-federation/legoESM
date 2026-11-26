@@ -112,6 +112,7 @@ def test_spatial_surface_path_carries_most():
         make_aimip_classical_spectral_physics(
             p, grid, dt=1800.0,
             radiation="gray",
+            convection_scheme="sbm",  # tiedtke (WRF port) refused on spectral
             turbulence_scheme="louis",
             surface_bulk_scheme="most",
             land_mask=land_mask,
@@ -150,6 +151,9 @@ def _assemble_physics_config(p, grid, *, turbulence_scheme, surface_bulk_scheme,
         make_aimip_classical_spectral_physics(
             p, grid, dt=1800.0,
             radiation="gray",
+            # the default convection (tiedtke, WRF port) is refused on the
+            # spectral lane; sbm keeps these surface tests buildable
+            convection_scheme="sbm",
             turbulence_scheme=turbulence_scheme,
             surface_bulk_scheme=surface_bulk_scheme,
             land_mask=land_mask,
@@ -166,8 +170,7 @@ def _assemble_physics_config(p, grid, *, turbulence_scheme, surface_bulk_scheme,
 # path).  That is a pre-existing, unrelated limitation; the config-level
 # threading for mynn25 is covered by test_mynn25_config_threads_most below,
 # which does not go through make_physics.
-@pytest.mark.parametrize("turb_scheme", ["edmf", "holtslag_boville", "ysu",
-                                         "clubb_lite"])
+@pytest.mark.parametrize("turb_scheme", ["edmf", "holtslag_boville", "ysu"])
 def test_non_louis_turbulence_honours_bulk_scheme(turb_scheme):
     """A non-Louis turbulence scheme must NOT stay pinned to constant.
 

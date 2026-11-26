@@ -82,17 +82,15 @@ def _run(name, col, dt=300.0):
     from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
         seifert_beheng_microphysics)
     from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
-    from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
     fn, cfg = {"kessler": (kessler_microphysics, mc.KesslerConfig()),
                "sundqvist": (sundqvist_microphysics, mc.SundqvistConfig()),
                "seifert_beheng": (seifert_beheng_microphysics,
                                   mc.SeifertBehengConfig()),
-               "morrison": (morrison_microphysics, mc.MorrisonConfig()),
-               "thompson": (thompson_microphysics, mc.ThompsonConfig())}[name]
+               "morrison": (morrison_microphysics, mc.MorrisonConfig())}[name]
     return fn(*col, dt, config=cfg)
 
 
-@pytest.mark.parametrize("name", ["morrison", "thompson"])
+@pytest.mark.parametrize("name", ["morrison"])
 def test_ice_schemes_publish_their_frozen_fall(name):
     """Cold column holding only snow: everything that lands is frozen.
     Warm column holding only rain: nothing that lands is frozen.  (The old

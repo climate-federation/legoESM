@@ -181,7 +181,6 @@ def test_bridge_touches_only_pt_delp_pressures_and_tracers_on_the_block(
             < state["delp"][:, ci, ci].sum(-1)).any()
 
 
-@pytest.mark.xfail(strict=True, reason="Faithful ESCOMP kessler_run sediments over level-centre spacing and floors negatives, so column water is not conserved against rho*dz (oracle residual reproduced to round-off); pending user decision (Kessler port PR, ASK 2)")
 def test_column_mass_change_is_the_surface_rain(duo_bundle):
     """FV3's mass adjustment removes EXACTLY the water that sedimented
     out of the column bottom: sum_k d(delp)/g == -precip*dt per column,
@@ -246,17 +245,29 @@ def test_bridge_refuses_fewer_than_three_tracers(duo_bundle):
     assert KESSLER_TRACER_SLOTS == ("q_v", "q_c", "q_r")
 
 
-@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
-def test_dry_columns_are_a_no_op(duo_bundle):
+# RULE 5 record (x64 SLURM 2026-11-11): max |q| per species (q_v, q_c, q_r)
+# after one default step on all-zero water; the bounded smooth switch's
+# round-off residual.  Exactly zero at the hard limit.
+DEFAULT_GAP_DRY_Q = (3.4496277765e-20, 3.707203646e-20, 0.0)
+
+
+@pytest.mark.parametrize("hard", [True, False], ids=["hard_limit", "default"])
+def test_dry_columns_are_a_no_op(duo_bundle, hard):
     """No vapour, no cloud, no rain -> zero tendency everywhere (a sign or
     layout slip would show up as spurious heating on a dry column)."""
+    from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
+    cfg = KesslerConfig(saturation_sharpness=1.0e30) if hard else None
     state, press, _ = duo_bundle
     zeros = [jnp.zeros((6, M, M, KM)) for _ in range(3)]
     out_state, out_press, out_q = apply_kessler_step_sixface_jax(
-        state, press, zeros, dt=DT, **KW)
+        state, press, zeros, dt=DT, config=cfg, **KW)
     assert np.array_equal(np.asarray(out_state["pt"]), state["pt"])
     assert np.array_equal(np.asarray(out_state["delp"]), state["delp"])
     for nm in press:
         assert np.array_equal(np.asarray(out_press[nm]), np.asarray(press[nm])), nm
-    for x in out_q:
-        assert not np.asarray(x).any()
+    if hard:
+        for x in out_q:
+            assert not np.asarray(x).any()
+    else:
+        np.testing.assert_allclose([float(np.abs(np.asarray(x)).max()) for x in out_q],
+                                   DEFAULT_GAP_DRY_Q, rtol=1e-6, atol=1e-12)

@@ -264,7 +264,7 @@ def test_land_step_closes_pack_plus_soil_energy(scheme, ft):
     dt*(applied ground flux + geothermal) + the enthalpy carried by mass
     (snowfall, frost, rain in; sublimated ice, drainage out)."""
     two = scheme == "two_leaf"
-    cfg = _cfg(scheme=TwoLeafCanopyConfig() if two else None)
+    cfg = _cfg(scheme=TwoLeafCanopyConfig(implicit_ground_flux=False) if two else None)
     cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=ft))
     n = 2
     lp = bare_canopy_params(n)._replace(LAI=jnp.asarray([0.3, 2.0])) if two else None
@@ -283,6 +283,13 @@ def test_land_step_closes_pack_plus_soil_energy(scheme, ft):
                 s, s_new, grid, hc, tc)
             src = dt * (sfc.snow_ground_heat_applied + tc.Q_geothermal) + sfc.snow_advected_heat
             np.testing.assert_allclose(dE, src, rtol=1e-9, atol=1e-3)
+            if not two:
+                # ... and that applied ground flux is what the atmosphere was
+                # NOT handed: Rn - SH_atm - LE_atm (#2542; SimpleSEB's Robin
+                # correction leaves as sensible heat).  W/m2, into the land.
+                np.testing.assert_allclose(
+                    sfc.sw_net + sfc.lw_net - resp.shflx - resp.lhflx,
+                    sfc.snow_ground_heat_applied, rtol=0, atol=1e-8)
             assert int(sfc.n_held) == 0
             moved |= bool(jnp.any(jnp.abs(s_new.theta_soil - s.theta_soil) > 1e-4))
             saw["drain"] |= bool(jnp.any(s_new.snow_depth < s.snow_depth - 1e-3))
@@ -299,7 +306,7 @@ def test_melt_is_dt_converged_and_overshoot_is_first_order():
     solve, melt applied after, as CLM5's post-solve phase change) is a
     time-discretisation error: it shrinks with dt.  Measured 2026-09-27: melt
     129.9 vs 130.9 kg/m2, overshoot 31.9 K vs 19.9 K."""
-    cfg = _cfg(scheme=TwoLeafCanopyConfig())
+    cfg = _cfg(scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.3]))
     f = _forcing(1, T_air=279.0, sw=700.0, lw=320.0, q=0.004)
     melt, over = {}, {}
@@ -397,7 +404,7 @@ def test_grad_through_snow_active_step_matches_finite_difference(scheme, nstep):
     the EAGER two-leaf gradient's compile exhausts the node's memory-map limit
     (vm.max_map_count 65530) on Levante, not RAM."""
     two = scheme == "two_leaf"
-    cfg0 = _cfg(scheme=TwoLeafCanopyConfig() if two else None)
+    cfg0 = _cfg(scheme=TwoLeafCanopyConfig(implicit_ground_flux=False) if two else None)
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.5])) if two else None
     st0 = _state(cfg0, 1, T_soil=268.0, swe=30.0)
     f = _forcing(1, T_air=258.0, lw=200.0, sw=0.0)
@@ -540,7 +547,7 @@ def test_trace_pack_does_not_block_ground_evaporation():
     latent is the pack's, so the reported latent flux matches the snow-free
     column's.  A binary split sent ALL ground latent to the pack, whose
     top-layer clamp returned it to the ground heat flux."""
-    cfg = _cfg(scheme=TwoLeafCanopyConfig())
+    cfg = _cfg(scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.3]))
     f = _forcing(1, T_air=285.0, sw=500.0, lw=330.0, q=0.004)
     lh = {}
@@ -559,7 +566,7 @@ def test_exported_humidity_agrees_with_latent_flux_sign(scheme, q_air):
     on the same side of the air humidity as the reported latent flux, for thin
     and deep packs, so a humidity-based consumer infers the realised exchange."""
     two = scheme == "two_leaf"
-    cfg = _cfg(scheme=TwoLeafCanopyConfig() if two else None)
+    cfg = _cfg(scheme=TwoLeafCanopyConfig(implicit_ground_flux=False) if two else None)
     n = 3
     lp = bare_canopy_params(n)._replace(LAI=jnp.asarray([0.5, 2.0, 4.0])) if two else None
     st = _state(cfg, n, T_soil=268.0, swe=40.0)
@@ -591,7 +598,7 @@ def test_layered_step_closes_energy_against_realised_latent_on_dry_soil(ft):
     dropping the post-hydrology remainder leaves the first identity open."""
     from legoesm.land.richards import psi_dry_floor
     from legoesm.land.soil_hydraulics import psi_from_theta, theta_from_psi
-    cfg = _cfg(scheme=TwoLeafCanopyConfig(),
+    cfg = _cfg(scheme=TwoLeafCanopyConfig(implicit_ground_flux=False),
                soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0))
     # Freeze/thaw on: the remainder goes into the top layer's enthalpy target.
     cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=ft))
@@ -872,7 +879,7 @@ def test_meltwater_into_frozen_soil_closes_and_converges_in_dt():
     150 kg/m2 so the pack covers the cell (f = 0.995): under a partial pack the
     bare fraction thaws the top soil before any meltwater arrives.  Measured
     2026-10-06: dt gap 0.25 kg/m2 in pack, <= 0.16 K in the top four layers."""
-    cfg = _cfg_ft(scheme=TwoLeafCanopyConfig())
+    cfg = _cfg_ft(scheme=TwoLeafCanopyConfig(implicit_ground_flux=False))
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.5]))
     f = _forcing(1, T_air=281.0, sw=600.0, lw=320.0, q=0.004)
     end = {}

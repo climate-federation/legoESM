@@ -12,10 +12,12 @@ Aerodynamic parameters from Ryu et al. (2011) / DifferBESS defaults.
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
 
+from legoesm.core.smooth import validate_smoothing_width
 from legoesm.land.canopy.sif import SIFConfig
 
 
@@ -120,6 +122,32 @@ PFT_LEAF_WIDTH: dict[str, float] = {
     "WET": 0.02,
 }
 
+# --- Leaf optics per PFT for the two-stream shortwave (CLM5 Tech Note Table 2.3.1) ---
+# (rho_vis, tau_vis, rho_nir, tau_nir, chi_L): leaf reflectance / transmittance per
+# band and the Ross-Goudriaan leaf-angle index, exactly as DifferBESS
+# ``util/constants.py`` DEFAULT_LEAF_OPTICS (table version clm5_table_2.3.1_2026-10-03),
+# keyed by this model's PFT names.  SHR = CLM broadleaf deciduous shrub (BDS, the
+# upstream CSH/OSH row); SAV is a tree + C3-grass mixture (see
+# PFT_LEAF_OPTICS_MIXTURE); WET has no upstream row and takes the C3-grass optics
+# (wetland canopies are graminoid-dominated; voted 2026-11-17).
+PFT_LEAF_OPTICS: dict[str, tuple[float, float, float, float, float]] = {
+    "ENF": (0.07, 0.05, 0.35, 0.10, 0.01),    # CLM NET
+    "DNF": (0.07, 0.05, 0.35, 0.10, 0.01),    # CLM NDT
+    "EBF": (0.10, 0.05, 0.45, 0.25, 0.10),    # CLM BET
+    "DBF": (0.10, 0.05, 0.45, 0.25, 0.25),    # CLM BDT temperate
+    "MF":  (0.085, 0.05, 0.40, 0.175, 0.13),  # mean(NET, BDT temperate)
+    "SHR": (0.10, 0.05, 0.45, 0.25, 0.25),    # CLM BDS
+    "GRA": (0.11, 0.05, 0.35, 0.34, -0.30),   # CLM C3 grass
+    "CRO": (0.11, 0.05, 0.35, 0.34, -0.30),   # CLM C3 crop
+    "WET": (0.11, 0.05, 0.35, 0.34, -0.30),   # C3-grass optics (no CLM wetland row)
+}
+# Tree/grass mixtures by leaf-area share (DifferBESS MIXED_COVER_TREE_FRACTION):
+# our SAV merges IGBP woody savanna and savanna; it takes the woody-savanna share
+# 0.45 (IGBP 30-60 % tree-cover midpoint) of the BDT tree row, the rest C3 grass.
+PFT_LEAF_OPTICS_MIXTURE: dict[str, tuple[str, str, float]] = {
+    "SAV": ("DBF", "GRA", 0.45),
+}
+
 # Default canopy heights per PFT [m]  (used when gridded hc not provided)
 PFT_CANOPY_HEIGHT: dict[str, float] = {
     "ENF": 15.0,
@@ -141,6 +169,7 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 # Valid values for the static leaf-gas-exchange dispatch field.  Kept next to
 # the config so the fail-early validator and the config default cannot drift.
 _VALID_STOMATAL_MODELS = ("ball_berry", "medlyn")
+VALID_SW_SCHEMES = ("ryu", "two_stream")
 VALID_LE_MODULES = ("BT", "PM")
 
 # Valid values for the CLM-ML canopy-airspace turbulence dispatch field
@@ -268,6 +297,56 @@ class CanopyConfig(NamedTuple):
     # 13.5 W/m2; at 10 the worst error is 0.25%.  Default 5 -> 10 (user
     # 2026-09-30).  Appended at the end of the tuple.
     most_n_iters: int = 10
+    # Columns per batch of the canopy Newton solve; 0 = every column of the
+    # call (one batch per GPU in the model).  A batch iterates until its
+    # slowest column stops, so small batches stop early but launch more
+    # kernels; with the step launch-bound, one batch is fastest (AMIP 4 A100:
+    # 64 -> 0.242 s/step, 1024 -> 0.148, one batch -> 0.138).  A positive value
+    # bounds the solve's memory.  Answers equal to rounding for every value.
+    # 64 -> 0 (user 2026-11-07).  Appended at the end of the tuple.
+    solve_group: int = 0
+    # Canopy shortwave partition: "ryu" = Ryu et al. (2011) closed forms (the
+    # default, ``canopy_shortwave_rt``); "two_stream" = the Sellers (1985) analytic
+    # two-stream with CLM5 per-PFT leaf optics and leaf-angle geometry, DifferBESS
+    # v10 ``two_stream_shared`` (``canopy_shortwave_two_stream``; needs the
+    # ``leaf_*`` CanopyLandParams).  Static Python string.  Appended at the end.
+    sw_scheme: str = "ryu"
+    # Smoothing width [-] of the two-stream clip of the sunlit share of canopy
+    # absorption (sunlit / canopy absorbed) to [0, 1] (upstream clips hard).  0 =
+    # the reference's hard clip.  Read only by sw_scheme="two_stream".
+    two_stream_clip_width: float = 0.01
+    # Hand the soil the ground heat flux together with its derivative with
+    # respect to the ground temperature, so the final soil solve treats the
+    # top boundary semi-implicitly (CLM5 Technical Description, eqs. 2.5.123
+    # and 2.5.124 for the derivative, 2.6.15 for the linearised flux in the
+    # soil solve).  False = the explicit Neumann flux: a converged midday solve
+    # over sparse dry canopy then put 290-390 W/m2 into the 2.9 mm top layer
+    # and raised it 17-43 K in one 1800 s step (I. Di Carlo, legoESM-enso
+    # 16f7ac09a7).  Default False -> True (user 2026-11-20: fixed value is the
+    # default).  Bulk snowpack without the snow thermal node only.  Appended.
+    implicit_ground_flux: bool = True
+    # A column whose canopy solve stops at the iteration cap takes the fluxes
+    # of its LAST iterate (when that iterate is an admissible state), as CLM5
+    # does after its forty iterations (Technical Description 2.5.3.2, step 12;
+    # the energy error goes to sensible heat, eqs. 2.5.135, 2.5.138-2.5.139,
+    # which the multilayer land's fallback closure already does).  False = the
+    # cold state (canopy at air temperature), whose sensible heat reached
+    # 1,100-1,430 W/m2 over hot dry soil and was then rejected and held
+    # (legoESM-enso 9b70a0f84b).  Default True (user 2026-11-20).  Appended.
+    # Gradient: such a column carries the implicit-function adjoint at its last
+    # iterate (core.nonlinear adjoint_unconverged), the root's gradient as the
+    # residual left there goes to zero.  KNOWN DIFFERENCE from d(last
+    # iterate)/d(input), measured d(SH+LE)/d(T_air) AD/FD: 1.000 at residual
+    # 7e-15 of the seed's, 0.988 at 1e-7, 0.655 one step from the cold seed
+    # (4.8e-4); over 64 random columns one step from the cold seed, median
+    # 0.968, range -0.13 to 14.7, max |AD| 18 W/m2/K against max |FD| 1.3e3:
+    # in that sample it did not blow up where it is least exact
+    # (scripts/validate/canopy_fallback_gradient_fd.py [--sweep]).  Like a
+    # converged root, the last iterate carries no gradient to its seed, so the
+    # dependence on the previous pass's state is dropped.  The forward output
+    # jumps between last iterate and cold state at the admissibility boundary.
+    # False = cold state, whose gradient is exact.
+    fallback_from_last_iterate: bool = True
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -301,6 +380,21 @@ class CanopyConfig(NamedTuple):
         if not (isinstance(self.most_n_iters, int) and self.most_n_iters >= 1):
             raise ValueError("most_n_iters must be a positive int, got "
                              f"{self.most_n_iters!r}")
+        if not (isinstance(self.solve_group, int) and self.solve_group >= 0):
+            raise ValueError("solve_group must be an int >= 0 (0 = one batch), "
+                             f"got {self.solve_group!r}")
+        if self.sw_scheme not in VALID_SW_SCHEMES:
+            raise ValueError(
+                f"unknown sw_scheme {self.sw_scheme!r}; the canopy shortwave "
+                f"scheme must be one of {VALID_SW_SCHEMES}")
+        validate_smoothing_width("two_stream_clip_width", self.two_stream_clip_width)
+        if self.two_stream_clip_width > 1.0:
+            raise ValueError(
+                "two_stream_clip_width must be <= 1 (the smoothing bands at 0 and 1 of "
+                f"the sunlit share would overlap), got {self.two_stream_clip_width!r}")
+        for _f in ("implicit_ground_flux", "fallback_from_last_iterate"):
+            if not isinstance(getattr(self, _f), bool):
+                raise ValueError(f"{_f} must be a bool, got {getattr(self, _f)!r}")
         return self
 
 
@@ -315,6 +409,9 @@ __param_spec__ = {
             "rh_cap_smoothing_width": "numerics: smoothing width of the "
                                       "RH_c <= 1 cap (keeps the canopy "
                                       "Newton residual differentiable)",
+            "two_stream_clip_width": "numerics: smoothing width of the "
+                                     "two-stream sunlit-fraction clip "
+                                     "(RULE 5; 0 = upstream hard clip)",
             "zeta_cap_smoothing_width": "numerics: smoothing width of the "
                                         "stable zeta <= 0.5 cap (keeps the "
                                         "canopy Newton residual differentiable)",
@@ -350,6 +447,8 @@ __param_spec__ = {
                 "discretisation cadence, not a physical parameter — tuning it "
                 "changes the integration error, not the physics."
             ),
+            "dew_limit_smoothing_mol": "numerics: smoothing width of the "
+                                       "canopy-air dew-limit switch (RULE 5); 0 = hard",
         },
         "params": {
             "o2ref": {
@@ -557,6 +656,31 @@ class CanopyLandParams(NamedTuple):
     hbot_dom: jax.Array | None = None
     pft_dom: jax.Array | None = None
 
+    # ---- Canopy band albedo and leaf emissivity (per-column; optional) ----
+    # Snow-free band albedo of the vegetation itself.  When set (with the
+    # soil-colour bounds), ``soil_albedo.rewet_soil_bands`` blends it with the
+    # wet soil bands by canopy cover, ``cov*CAN + (1-cov)*SOIL``.  ``None`` keeps
+    # the soil-colour bands alone (byte-identical to before these fields).
+    ALB_VIS_CAN: jax.Array | None = None
+    ALB_NIR_CAN: jax.Array | None = None
+    # Leaf longwave emissivity; ``None`` uses the scheme's scalar ``epsf``.
+    epsf: jax.Array | None = None
+
+    # ---- Leaf optics + leaf-angle geometry for the two-stream shortwave ----
+    # Read ONLY when ``CanopyConfig.sw_scheme == "two_stream"`` (which refuses a
+    # column without them); built per PFT by
+    # ``radiative_transfer.two_stream_leaf_optics``.  Band leaf reflectance /
+    # transmittance [-], the Ross-Goudriaan coefficients phi1/phi2 [-], the
+    # diffuse extinction k_d [-] and the diffuse-upscatter cos^2(theta_bar) [-].
+    leaf_rho_vis: jax.Array | None = None
+    leaf_tau_vis: jax.Array | None = None
+    leaf_rho_nir: jax.Array | None = None
+    leaf_tau_nir: jax.Array | None = None
+    leaf_phi1: jax.Array | None = None
+    leaf_phi2: jax.Array | None = None
+    leaf_kd: jax.Array | None = None
+    leaf_cos2_theta: jax.Array | None = None
+
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface
 # scheme of ``MultiLayerLandConfig`` (and, in Phase 3b, ``LandConfig``):
@@ -570,6 +694,11 @@ class CanopyLandParams(NamedTuple):
 # ---------------------------------------------------------------------------
 # CLMMLCanopyConfig — configuration for the CLM-ML-JAX multilayer canopy
 # ---------------------------------------------------------------------------
+
+# CLM's shr_orb_decl (Berger cubic series): 0.008 deg true-anomaly error at
+# e=0.1, 0.68 deg at e=0.3 vs exact Kepler.
+CLM_ML_MAX_ECCENTRICITY = 0.1
+
 
 class CLMMLCanopyConfig(NamedTuple):
     """Configuration for the CLM-ML-JAX multilayer canopy surface scheme.
@@ -862,6 +991,22 @@ class CLMMLCanopyConfig(NamedTuple):
     # wants the full CLM PFT parameterisation validated first.
     use_surfdata_pft: bool = False
 
+    # Canopy-air dew limit (legoESM deviation): width [mol/mol] of the smoothed
+    # complementarity "condense only where saturated" (RULE 5, CHKS smoothing in
+    # humidity units).  0.0 = the hard active-set switch.  Installed every step
+    # into the process-global backend control (one width per process).
+    dew_limit_smoothing_mol: float = 1e-6
+
+    # The coupled run's orbit and solar constant (legoesm.driver.orbit, set by
+    # the coupled driver).  None (land-only runs) = CLM's year-2001 Berger
+    # orbit and constants.S_0.  Perihelion longitude is from the moving vernal
+    # equinox (radiation convention, = CESM mvelp + 180).  CLM's shr_orb_decl
+    # is Berger's cubic series, so eccentricity above 0.1 is refused.
+    orbit_eccentricity: float | None = None
+    orbit_obliquity_deg: float | None = None
+    orbit_long_perihelion_deg: float | None = None
+    solar_s0: float | None = None
+
     def validate(self) -> "CLMMLCanopyConfig":
         """Fail-early check of the static string-dispatch fields.
 
@@ -870,6 +1015,16 @@ class CLMMLCanopyConfig(NamedTuple):
         setup instead of silently running the default RSL physics.  Returns
         ``self`` for chaining.
         """
+        _orb = (self.orbit_eccentricity, self.orbit_obliquity_deg,
+                self.orbit_long_perihelion_deg)
+        if any(v is None for v in _orb) and any(v is not None for v in _orb):
+            raise ValueError(
+                f"CLM-ML orbit needs all three elements or none; got {_orb}")
+        if (self.orbit_eccentricity is not None
+                and not 0.0 <= self.orbit_eccentricity <= CLM_ML_MAX_ECCENTRICITY):
+            raise ValueError(
+                f"CLM-ML orbit_eccentricity={self.orbit_eccentricity}: CLM's "
+                f"shr_orb_decl series is only accurate to e={CLM_ML_MAX_ECCENTRICITY}")
         if self.turbulence_scheme not in VALID_CLM_ML_TURBULENCE_SCHEMES:
             raise ValueError(
                 f"unknown turbulence_scheme {self.turbulence_scheme!r}; the "
@@ -899,4 +1054,9 @@ class CLMMLCanopyConfig(NamedTuple):
                 f"one of {VALID_CLM_ML_STOMATAL_MODELS} "
                 "('wue'=water-use-efficiency optimization (default), "
                 "'medlyn'=Medlyn 2011, 'ball_berry'=Ball-Berry)")
+        _eps = self.dew_limit_smoothing_mol
+        if isinstance(_eps, bool) or not (math.isfinite(_eps) and _eps >= 0.0):
+            raise ValueError(
+                "CLM-ML dew_limit_smoothing_mol is a humidity width and must be "
+                f"finite and >= 0; got {_eps!r}")
         return self

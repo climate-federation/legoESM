@@ -30,6 +30,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.core.profile_metrics import safe_sqrt
+from legoesm.core.smooth import max_rel, min_rel, sqrt_c1, stable_div, step_rel
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
 from legoesm.grids.halo_latlon import (
@@ -41,10 +42,12 @@ from legoesm.grids.operators_latlon_cgrid import (
     reads_stored_vface_metric,
     fold_is_local,
     north_fold_mask,
+    north_neighbor_T,
     apply_north_fold,
     lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
     fold_row,
+    fold_perm_f,
     fold_ghost_source_T,
     pad_ns_vector_v,
     pad_lon_cgrid,
@@ -1675,6 +1678,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     vertex_mask: jnp.ndarray | None = None,
+    h_vtx: jnp.ndarray | None = None,
     thickness_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
                               jnp.ndarray, jnp.ndarray, jnp.ndarray] | None = None,
     metric_reciprocal_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
@@ -1682,6 +1686,8 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
                                       jnp.ndarray] | None = None,
     coefficient_fmask_already_applied: bool = False,
     return_intermediates: bool = False,
+    stored_r1_e1e2f: jnp.ndarray | None = None,
+    nemo_fold_rows: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
     jnp.ndarray, jnp.ndarray, dict[str, jnp.ndarray]
 ]:
@@ -1766,6 +1772,13 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         ``r1_e2u`` and ``r1_e1v`` operands.  The NEMO identity harness passes
         these as dynamic given inputs so XLA cannot replace the compiled
         multiply-then-divide statements with reciprocal multiplication.
+    stored_r1_e1e2f : (n_lat+1, n_lon+1), optional
+        NEMO's stored ``r1_e1e2f`` on the vertex layout, replacing
+        ``1/grid.area_q`` when ``metric_reciprocal_operands`` is not given.
+    nemo_fold_rows : bool, default False
+        T-pivot fold: the divergence reads the V fold row's flux as the
+        fold image of the row below, and the F fold row's curl term is the
+        F image of the row below (NEMO's lbc-complete operands).
     coefficient_fmask_already_applied : bool, default False
         The ``nn_ahm_ijk_t=-30`` read path stores ``ahmf*fmask`` before
         ``dyn_ldf`` runs (``ldfdyn.f90:387-393``).  Do not apply legoESM's
@@ -1800,14 +1813,24 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     # Historical single-thickness path remains unchanged for non-WS callers.
     # The NEMO identity path supplies the six distinct operands read by
     # dynldf_lev.f90:123,127-129,135,139.
+    # ``h_vtx`` override: the min-rule gives e3f = 0 at every coastal F point
+    # (a dry neighbour has h = 0), which silently zeroes zcur there and turns a
+    # no-slip fmask (rn_shlat=2) back into free-slip. NEMO's e3f_0 at a coastal
+    # F point is the min of the four e3t_0 INCLUDING the land cells' filled
+    # values (domain_cfg: 389099/389099 coastal F points), so a caller running
+    # no-slip passes that thickness here.
     if thickness_operands is None:
         e3t_kbb = h_k
         e3u_kbb = min_cell_to_uface(h_k)
         e3v_kbb = min_cell_to_vface(h_k, grid)
-        e3f_live = min_cell_to_vertex(h_k, grid)
+        e3f_live = (min_cell_to_vertex(h_k, grid) if h_vtx is None
+                    else h_vtx)
         e3u_kmm = e3u_kbb
         e3v_kmm = e3v_kbb
     else:
+        if h_vtx is not None:
+            raise ValueError(
+                "h_vtx and thickness_operands both supply e3f; pass one")
         (e3t_kbb, e3u_kbb, e3v_kbb, e3f_live,
          e3u_kmm, e3v_kmm) = thickness_operands
 
@@ -1829,12 +1852,18 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         e1v = jnp.asarray(grid.dx_v)[..., jnp.newaxis]
         zu = sbr(sbr(e2u * e3u_kbb) * u_eff)
         zv = sbr(sbr(e1v * e3v_kbb) * v_eff)
+        if nemo_fold_rows:
+            # dynldf_lev.f90:127-129 reads pv on the V fold row, which the
+            # lbc_lnk 'V', -1 exchange holds as the image of the row below.
+            fold = grid.fold
+            zv = zv.at[-1].set(fold.vector_sign_v * zv[-2][fold.perm_v])
         dx = sbr(zu[:, 1:] - zu[:, :-1])
         dy = sbr(zv[1:] - zv[:-1])
         flux_sum = sbr(dx + dy)
         if metric_reciprocal_operands is None:
             r1_area_t = sr(1.0 / jnp.asarray(grid.area_T))[..., jnp.newaxis]
-            r1_area_f = sr(1.0 / jnp.asarray(grid.area_q))[..., jnp.newaxis]
+            r1_area_f = (sr(1.0 / jnp.asarray(grid.area_q)) if stored_r1_e1e2f is None
+                         else jnp.asarray(stored_r1_e1e2f))[..., jnp.newaxis]
             r1_e1u = sr(1.0 / jnp.asarray(grid.dx_u))[..., jnp.newaxis]
             r1_e2v = sr(
                 1.0 / jnp.maximum(jnp.asarray(grid.dy_v), 1.0e-30)
@@ -1864,6 +1893,13 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
             ahmf_live = sr(ahmf_live * _bm(fmask))
         zcur_scale = sbr(sbr(ahmf_live * e3f_live) * r1_area_f)
         zcur = sbr(zcur_scale * curl_bracket)
+        if nemo_fold_rows:
+            # dynldf_lev.f90:123 computes zwf on the F fold row from halo
+            # operands; it equals the F image of the row below.  Vertex
+            # [j+1, i+1] is NEMO's F(j, i); vertex column 0 is F(:, n_lon-1).
+            from legoesm.ocean.vertical import nemo_t_fold_f_owned
+            top = nemo_t_fold_f_owned(zcur[1:, 1:], grid)[-1]
+            zcur = zcur.at[-1].set(jnp.concatenate([top[-1:], top], axis=0))
 
         zdiv_pad_x = pad_lon_cgrid(zdiv, halo=1)
         div_dx = sbr(zdiv_pad_x[:, 1:] - zdiv_pad_x[:, :-1])
@@ -3415,6 +3451,14 @@ def om4p25_lateral_friction_tendency_cgrid(
     mask: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
+    Kh_sin_lat: float = 0.0,
+    Kh_sin_power: float = 4.0,
+    bound_coriolis_vel: float = 0.0,
+    resolution_fn: tuple | None = None,
+    bound_coef: float = 0.0,
+    dt: float | None = None,
+    nu2_sponge_h: jnp.ndarray | None = None,
+    smooth_width: float = 0.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """OM4p25 lateral-friction closure (GFDL OM4.0, Adcroft et al. 2019) — the
     Silvestri et al. 2024 "SM2" comparison case. A Laplacian + biharmonic
@@ -3442,9 +3486,46 @@ def om4p25_lateral_friction_tendency_cgrid(
     for the idealised baroclinic jet it is ~uniform (~6.75 km). A spatially-
     varying L_d from the local N² is a faithfulness refinement.
 
+    The OM4p5 parameter file (MOM6-examples OM4_05, MOM_hor_visc.F90) adds,
+    each off by default here so the call above is unchanged:
+    ``Kh_sin_lat`` (KH_SIN_LAT, 2000 m2/s in OM4p5): a third Laplacian
+    background ``Kh_sin_lat |sin(lat)|^Kh_sin_power`` inside the maximum;
+    ``bound_coriolis_vel`` (BOUND_CORIOLIS_VEL, 6 m/s): the biharmonic
+    Smagorinsky becomes ``Δ⁴|D| (C4 + Δ² f_max |D| / (5 V²))``;
+    ``resolution_fn`` = (R_h, R_q), MOM6's resolution function at h and q
+    points (``om4_resolution_function``), which then replaces the scalar
+    taper F; ``bound_coef`` (HORVISC_BOUND_COEF, 0.8) with ``dt``: MOM6's
+    BOUND_KH and BOUND_AH caps, ``bound_coef min(dx,dy)² / (8 dt)`` and
+    ``bound_coef min(dx,dy)⁴ / (64 dt)`` (MOM6's metric expressions reduced
+    to rectangular cells).  With ``resolution_fn`` given, the Smagorinsky and
+    static terms use MOM6's grid spacing Δ² = 2 dx² dy² / (dx² + dy²).
+
+    ``smooth_width`` (OM4p5 form only): the RULE 5 width of its viscosity
+    maxima and BOUND caps (``OMp25Config.smooth_width``); 0 is MOM6's hard form.
+
+    ``nu2_sponge_h`` (n_lat, n_lon) [m²/s], OM4p5 form only: a sponge
+    viscosity next to open sides (CROCO SPONGE_VIS2, set_nudgcof.F), ADDED
+    to the Laplacian after the bound caps and not scaled by the resolution
+    function (CROCO has neither); q points take the mean of the four cells
+    around them (CROCO's psi points), zonally periodic as the strain-rate
+    corners (``jnp.roll``), the edge rows repeated meridionally.
+
     Returns ``(tend_u, tend_v)`` already combining Laplacian (added) and
     biharmonic (subtracted); the caller ADDS these to du/dt.
     """
+    if resolution_fn is not None:
+        return _om4_mom6_tendency(
+            u, v, grid, C2=C2, Cu2=Cu2, C4=C4, Cu4=Cu4, Kh_sin_lat=Kh_sin_lat,
+            Kh_sin_power=Kh_sin_power, bound_coriolis_vel=bound_coriolis_vel,
+            resolution_fn=resolution_fn, bound_coef=bound_coef, dt=dt,
+            mask=mask, u_mask=u_mask, v_mask=v_mask, nu2_sponge_h=nu2_sponge_h,
+            width=smooth_width)
+    if nu2_sponge_h is not None:
+        raise ValueError("nu2_sponge_h needs resolution_fn (the OM4p5 form of "
+                         "om4p25_lateral_friction_tendency_cgrid)")
+    if Kh_sin_lat != 0.0 or bound_coriolis_vel != 0.0 or bound_coef != 0.0:
+        raise ValueError("Kh_sin_lat, bound_coriolis_vel and bound_coef need resolution_fn "
+                         "(the OM4p5 form of om4p25_lateral_friction_tendency_cgrid)")
     # Δ²·|D| at h- and q-points via the Smagorinsky helpers with unit
     # coefficient (smagorinsky_viscosity_cgrid returns (C·Δ)²·|D| = Δ²·|D| at C=1).
     S_h = smagorinsky_viscosity_cgrid(
@@ -3481,6 +3562,148 @@ def om4p25_lateral_friction_tendency_cgrid(
     bih_u, bih_v = viscous_tendency_cgrid(
         u_star, v_star, grid, c4_h, c4_q,
         mask=mask, u_mask=u_mask, v_mask=v_mask)
+    return lap_u - bih_u, lap_v - bih_v
+
+
+def _h_q_spacings(grid):
+    """dx, dy at h points (n_lat, 1) and q points (n_lat+1, 1) of a lat-lon grid [m]."""
+    R = grid.radius
+    dx_h = (R * jnp.asarray(grid.cos_lat) * grid.dlon)[:, jnp.newaxis]
+    dy_h = jnp.asarray(grid.area) / dx_h                       # exact cell height from the cell area
+    dy_h = dy_h[:, :1]
+    lat = jnp.asarray(grid.lat)
+    dlat = jnp.diff(lat)
+    dy_q = R * jnp.concatenate([dlat[:1], dlat, dlat[-1:]])[:, jnp.newaxis]   # centre to centre; edges copied
+    dx_q = (R * jnp.asarray(grid.cos_lat_v) * grid.dlon)[:, jnp.newaxis]
+    return dx_h, dy_h, dx_q, dy_q
+
+
+def wkb_first_baroclinic_wave_speed(T, S, h_k, active, eos_fn, rho0, g, *, width):
+    """First baroclinic gravity wave speed by the WKB estimate c1 = (1/pi) * integral of N dz
+    (Chelton et al. 1998, J. Phys. Oceanogr. 28, 433), per column [m/s].
+
+    N^2 at each interior interface from the locally referenced density difference of the two
+    adjacent cells at the interface pressure rho0 g z (so compressibility does not enter):
+    N^2 = (g / rho0) (rho(T_k+1, S_k+1, p) - rho(T_k, S_k, p)) / dz, dz the distance between
+    the cell centres.  Unstable or inactive interfaces contribute nothing.  MOM6's OM4 solves
+    the vertical eigenproblem instead (wave_speed); the WKB value differs from it by about
+    10 to 20 percent (Chelton et al. 1998).
+
+    ``width`` (RULE 5, dimensionless, static): N is a C1 ``sqrt(max(N^2, 0))``
+    with its bridge over N^2 below ``width`` times the column's mean |N^2|
+    (MOM6: hard, ``width = 0``).
+    """
+    z_int = jnp.cumsum(h_k, axis=-1)[..., :-1]
+    p = rho0 * g * z_int
+    drho = eos_fn(T[..., 1:], S[..., 1:], p) - eos_fn(T[..., :-1], S[..., :-1], p)
+    dz = 0.5 * (h_k[..., 1:] + h_k[..., :-1])
+    both = (active[..., 1:] & active[..., :-1]).astype(h_k.dtype)
+    N2 = g / rho0 * drho / max_rel(dz, 1.0e-6, width)
+    if width == 0:
+        N = jnp.sqrt(jnp.maximum(N2, 1.0e-30)) * (N2 > 0.0).astype(h_k.dtype)
+    else:
+        ref = (jnp.sum(jnp.abs(N2) * both, axis=-1, keepdims=True)
+               / (jnp.sum(both, axis=-1, keepdims=True) + 1.0))
+        ok = ref > 0                      # an unstratified column has N = 0, as the hard form
+        ref1 = jnp.where(ok, ref, 1.0)
+        N = jnp.where(ok, jnp.sqrt(ref1) * sqrt_c1(stable_div(N2, ref1), width), 0.0)
+    return jnp.sum(N * both * dz, axis=-1) / jnp.pi
+
+
+def om4_resolution_function(c1, grid, mask=None, coef=1.0, gill_equatorial=True, *, width):
+    """MOM6's resolution function with VISC_RES_FN_POWER >= 100 (a step), as in OM4p5
+    (MOM_lateral_mixing_coeffs.F90, calc_resoln_function; Hallberg 2013): R = 0 where
+    (coef c1)^2 > (dx^2 + dy^2)(f^2 + c1 beta*), R = 1 elsewhere, with beta* = 2 |grad f|
+    when ``gill_equatorial`` (GILL_EQUATORIAL_LD), else |grad f|.  c1 at h points; at q
+    points the mean of the wet neighbours, as MOM6.  Returns (R_h (n_lat, n_lon),
+    R_q (n_lat+1, n_lon+1)).  ``width`` (RULE 5): the step is a C1 ramp over
+    ``|A - B| < width (A + B) / 2``, A = (coef c1)^2, B = (dx^2 + dy^2)(f^2 + c1 beta*);
+    ``width = 0`` is MOM6's hard step."""
+    om = grid.omega
+    lat, lat_v = jnp.asarray(grid.lat), jnp.asarray(grid.lat_v)
+    dx_h, dy_h, dx_q, dy_q = _h_q_spacings(grid)
+    k = 2.0 if gill_equatorial else 1.0
+    f_h = (2 * om * jnp.sin(lat))[:, jnp.newaxis]
+    b_h = (k * 2 * om * jnp.cos(lat) / grid.radius)[:, jnp.newaxis]
+    f_q = (2 * om * jnp.sin(lat_v))[:, jnp.newaxis]
+    b_q = (k * 2 * om * jnp.cos(lat_v) / grid.radius)[:, jnp.newaxis]
+    m = jnp.ones_like(c1) if mask is None else mask.astype(c1.dtype)
+    def step(c, dx, dy, f, b):
+        A, B = (coef * c) ** 2, (dx ** 2 + dy ** 2) * (f ** 2 + c * b)
+        return 1.0 - step_rel(A - B, A + B, width)
+    R_h = step(c1, dx_h, dy_h, f_h, b_h) * m
+    cp = jnp.pad(c1 * m, 1, mode="edge")
+    mp = jnp.pad(m, 1, mode="edge")
+    num = cp[:-1, :-1] + cp[1:, :-1] + cp[:-1, 1:] + cp[1:, 1:]
+    den = mp[:-1, :-1] + mp[1:, :-1] + mp[:-1, 1:] + mp[1:, 1:]
+    c1_q = num / jnp.maximum(den, 1.0)
+    R_q = step(c1_q, dx_q, dy_q, f_q, b_q)
+    return R_h, R_q
+
+
+def _om4_mom6_tendency(u, v, grid, *, C2, Cu2, C4, Cu4, Kh_sin_lat, Kh_sin_power, bound_coriolis_vel,
+                       resolution_fn, bound_coef, dt, mask=None, u_mask=None, v_mask=None,
+                       nu2_sponge_h=None, width):
+    """OM4p5 lateral friction with MOM6's definitions (see om4p25_lateral_friction_tendency_cgrid)."""
+    S_h = smagorinsky_viscosity_cgrid(u, v, grid, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask)  # area_h |D|
+    D_T, D_S = strain_rate_cgrid(u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    S_q = smagorinsky_viscosity_q_cgrid(D_T, D_S, grid, 1.0, mask=mask)                          # area_q |D|
+    A_h = jnp.asarray(grid.area)
+    A_q = vertex_area_1d(grid)
+    nd = S_h.ndim
+
+    def col(x):                       # (n,) or (n, m) -> broadcast against S_h / S_q
+        x = x if x.ndim == 2 else x[:, jnp.newaxis]
+        return x[..., jnp.newaxis] if nd == 3 else x
+
+    D_h = S_h / col(A_h)
+    D_q = S_q / col(A_q)
+    dx_h, dy_h, dx_q, dy_q = _h_q_spacings(grid)
+    d2_h = col(2.0 * dx_h ** 2 * dy_h ** 2 / (dx_h ** 2 + dy_h ** 2))       # MOM6 grid_sp_h2
+    d2_q = col(2.0 * dx_q ** 2 * dy_q ** 2 / (dx_q ** 2 + dy_q ** 2))
+    sin_h = col(jnp.abs(jnp.asarray(grid.sin_lat)))
+    sin_q = col(jnp.abs(jnp.sin(jnp.asarray(grid.lat_v))))
+    R_h, R_q = (col(r) for r in resolution_fn)
+    nu2_h = R_h * max_rel(max_rel(Cu2 * jnp.sqrt(d2_h), Kh_sin_lat * sin_h ** Kh_sin_power, width),
+                          C2 * d2_h * D_h, width)
+    nu2_q = R_q * max_rel(max_rel(Cu2 * jnp.sqrt(d2_q), Kh_sin_lat * sin_q ** Kh_sin_power, width),
+                          C2 * d2_q * D_q, width)
+    sm_h, sm_q = C4 * jnp.ones_like(D_h), C4 * jnp.ones_like(D_q)
+    if bound_coriolis_vel > 0.0:
+        om = grid.omega
+        lat_v = jnp.asarray(grid.lat_v)
+        fq = jnp.abs(2 * om * jnp.sin(lat_v))
+        fmax_h = col(jnp.maximum(fq[:-1], fq[1:]))
+        fmax_q = col(fq)
+        k = 1.0 / (5.0 * bound_coriolis_vel ** 2)
+        sm_h = sm_h + d2_h * fmax_h * k * D_h
+        sm_q = sm_q + d2_q * fmax_q * k * D_q
+    nu4_h = max_rel(Cu4 * d2_h ** 1.5, d2_h ** 2 * D_h * sm_h, width)
+    nu4_q = max_rel(Cu4 * d2_q ** 1.5, d2_q ** 2 * D_q * sm_q, width)
+    if bound_coef > 0.0:
+        if dt is None:
+            raise ValueError("bound_coef needs dt")
+        dmin_h = col(jnp.minimum(dx_h, dy_h)) ** 2
+        dmin_q = col(jnp.minimum(dx_q, dy_q)) ** 2
+        nu2_h = min_rel(nu2_h, bound_coef * dmin_h / (8.0 * dt), width)
+        nu2_q = min_rel(nu2_q, bound_coef * dmin_q / (8.0 * dt), width)
+        nu4_h = min_rel(nu4_h, bound_coef * dmin_h ** 2 / (64.0 * dt), width)
+        nu4_q = min_rel(nu4_q, bound_coef * dmin_q ** 2 / (64.0 * dt), width)
+    if nu2_sponge_h is not None:      # CROCO SPONGE_VIS2: added after the caps, no resolution function
+        sp = jnp.asarray(nu2_sponge_h, dtype=nu2_h.dtype)
+        spp = jnp.pad(jnp.pad(sp, ((1, 1), (0, 0)), mode="edge"), ((0, 0), (1, 1)), mode="wrap")
+        sp_q = 0.25 * (spp[:-1, :-1] + spp[:-1, 1:] + spp[1:, :-1] + spp[1:, 1:])   # (n_lat+1, n_lon+1)
+        nu2_h = nu2_h + (sp[..., jnp.newaxis] if nd == 3 else sp)
+        nu2_q = nu2_q + (sp_q[..., jnp.newaxis] if nd == 3 else sp_q)
+    if mask is not None:
+        nu2_h = nu2_h * (mask[..., jnp.newaxis] if nd == 3 else mask)
+        nu4_h = nu4_h * (mask[..., jnp.newaxis] if nd == 3 else mask)
+    lap_u, lap_v = viscous_tendency_cgrid(u, v, grid, nu2_h, nu2_q, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    u_star, v_star = viscous_tendency_cgrid(u, v, grid, 1.0, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask,
+                                            normalize=False)
+    # the two-pass biharmonic has effective coefficient c * area, so c = nu4 / area realises nu4
+    bih_u, bih_v = viscous_tendency_cgrid(u_star, v_star, grid, nu4_h / col(A_h), nu4_q / col(A_q),
+                                          mask=mask, u_mask=u_mask, v_mask=v_mask)
     return lap_u - bih_u, lap_v - bih_v
 
 
@@ -4270,6 +4493,97 @@ def compute_face_masks_3d(
     return u_mask, v_mask
 
 
+def per_level_viscosity_masks(
+    is_active_3d: jnp.ndarray,
+    grid,
+    mask: jnp.ndarray | None,
+    u_mask: jnp.ndarray | None,
+    v_mask: jnp.ndarray | None,
+    vertex_mask: jnp.ndarray | None,
+    dtype,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Per-level cell / u-face / v-face / vertex masks for the vector Laplacian.
+
+    NEMO builds its momentum masks level by level from the 3-D tmask
+    (dommsk.F90:148-153): ``umask = tmask*tmask(i+1)``, ``vmask =
+    tmask*tmask(j+1)`` and the free-slip ``fmask`` = product of the four
+    surrounding T cells, all at level k.  Each level here is built the same
+    way from ``is_active_3d`` (neighbour cells through the backend pads, so
+    MPI partition cuts see the neighbour rank's cells; ``compute_vertex_mask``
+    on the 3-D mask for the vertices), then multiplied by
+    the caller's 2-D masks broadcast over levels, so a face or vertex the
+    caller closes (fold wall, seam, partition cut) stays closed at every
+    level.  Returns ``(mask3, u_mask3, v_mask3, vertex_mask3)`` with a
+    trailing level axis, in ``dtype``.
+    """
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_flat, get_meridionally_periodic, pad_with_pole_bc_lat)
+    cell = jnp.asarray(is_active_3d).astype(dtype)
+    if mask is not None:
+        cell = cell * jnp.asarray(mask, dtype)[..., jnp.newaxis]
+
+    # Neighbour cells through the backend-dispatched pads (as in
+    # compute_vertex_mask), all levels in one pad: a face on an MPI partition
+    # cut sees the neighbour rank's true edge cell instead of a zero.
+    lon = pad_lon_cgrid(cell, halo=1)                         # (n_lat, n_lon+2, nlev)
+    lat = pad_with_pole_bc_lat(cell, halo=1, south_value=0.0, north_value=0.0)
+    um3, vm3 = lon[:, :-1] * lon[:, 1:], lat[:-1] * lat[1:]
+    if get_meridionally_periodic() or get_meridionally_flat():
+        # y-re-entrant boundary v-faces wrap; compute_face_masks_3d owns that.
+        vm3 = compute_face_masks_3d(cell, grid)[1]
+    um3 = um3.astype(dtype)
+    vm3 = vm3.astype(dtype)
+    if u_mask is not None:
+        um3 = um3 * jnp.asarray(u_mask, dtype)[..., jnp.newaxis]
+    if v_mask is not None:
+        vm3 = vm3 * jnp.asarray(v_mask, dtype)[..., jnp.newaxis]
+    vx3 = compute_vertex_mask(cell, grid=grid).astype(dtype)
+    if vertex_mask is not None:
+        vx3 = vx3 * jnp.asarray(vertex_mask, dtype)[..., jnp.newaxis]
+    return cell, um3, vm3, vx3
+
+
+def nemo_shlat_vertex_mask(
+    vertex_mask: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    shlat: float,
+    grid=None,
+) -> jnp.ndarray:
+    """NEMO's f-mask with the lateral momentum boundary condition rn_shlat.
+
+    dommsk.F90:209-215: where the free-slip f-mask is 0,
+    ``fmask = rn_shlat * MIN(1, MAX(umask(i,j), umask(i,j+1), vmask(i,j),
+    vmask(i+1,j)))`` -- a coastal vorticity point next to any wet face takes
+    rn_shlat (0 free slip, 2 no slip).  NEMO f(i,j) is vertex [j+1, i+1] here,
+    so its four faces are u[r-1, c], u[r, c], v[r, c-1], v[r, c].  The
+    neighbours come through the backend-dispatched pads (MPI cuts see the
+    neighbour rank).  As NEMO's lbc_lnk(fmask, 'F') after the change, a
+    tripolar fold row is then re-filled from its fold partners (the same
+    mapping compute_vertex_mask uses).  Masks are static geometry, so the hard
+    MAX/MIN carry no gradient.  2-D or per-level (trailing level axis) masks.
+    Rows at a physical (non-fold) latitude end stay as the vector Laplacian
+    treats them: the curl is zero on those wall rows, so no rn_shlat stress
+    reaches a wet cell in the array's first or last row.
+    """
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    vx = jnp.asarray(vertex_mask)
+    u_pad = pad_with_pole_bc_lat(jnp.asarray(u_mask, vx.dtype), halo=1,
+                                 south_value=0.0, north_value=0.0)
+    v_pad = pad_lon_cgrid(jnp.asarray(v_mask, vx.dtype), halo=1)
+    adj = jnp.maximum(jnp.maximum(u_pad[:-1], u_pad[1:]),
+                      jnp.maximum(v_pad[:, :-1], v_pad[:, 1:]))
+    coast = jnp.asarray(shlat, vx.dtype) * jnp.minimum(adj, 1.0)
+    full = jnp.where(vx == 0.0, coast, vx)
+    nmask = north_fold_mask(grid)
+    if grid is not None and (fold_is_local(grid) or nmask is not None):
+        fold = grid.fold
+        north = fold_row(full[-2:-1], fold_perm_f(fold), 1.0,
+                         fold.perm_T.shape[0])
+        full = apply_north_fold(full, north, grid, north_mask=nmask)
+    return full
+
+
 def _nemo_hpg_sco_literal_cgrid_impl(
     rhd: jnp.ndarray,
     e3w: jnp.ndarray,
@@ -4281,6 +4595,7 @@ def _nemo_hpg_sco_literal_cgrid_impl(
     _source_round: bool = True,
     _j_periodic: bool = False,
     _north_fold_density: bool = False,
+    _north_fold_geometry: bool = False,
 ) -> tuple[jnp.ndarray, ...]:
     """Literal NEMO ``hpg_sco`` recurrence on native east/north faces.
 
@@ -4312,26 +4627,22 @@ def _nemo_hpg_sco_literal_cgrid_impl(
 
     rhd_i1 = jnp.roll(rhd, -1, axis=1)
     rhd_j1 = jnp.roll(rhd, -1, axis=0)
-    fold = getattr(grid, "fold", None)
     if _north_fold_density:
         # dynhpg.f90:414-416,445-453 reads jj+1 at V points.  At NEMO's
         # northern fold that neighbour is the T-point fold ghost supplied by
         # lbc_lnk, not a cyclic roll of the final owned row.
-        source = fold_ghost_source_T(rhd, fold)[0]
-        folded = source[fold.perm_T]
-        nmask = north_fold_mask(grid)
-        if fold_is_local(grid):
-            rhd_j1 = rhd_j1.at[-1].set(folded)
-        elif nmask is not None:
-            selector = nmask
-            while selector.ndim < folded.ndim:
-                selector = selector[..., None]
-            rhd_j1 = rhd_j1.at[-1].set(
-                jnp.where(selector, folded, rhd_j1[-1]))
+        rhd_j1 = north_neighbor_T(rhd, grid, rolled=rhd_j1)
     e3w_i1 = jnp.roll(e3w, -1, axis=1)
     e3w_j1 = jnp.roll(e3w, -1, axis=0)
     dep_i1 = jnp.roll(gdept_z0, -1, axis=1)
     dep_j1 = jnp.roll(gdept_z0, -1, axis=0)
+    if _north_fold_geometry:
+        # Same compiled V statements as density: the north e3w product and
+        # terrain-correction depth are halo reads too, not cyclic rolls of the
+        # owned pivot row.  Kept behind an explicit card choice because only
+        # the G6 multilevel record has certified this composition.
+        e3w_j1 = north_neighbor_T(e3w, grid, rolled=e3w_j1)
+        dep_j1 = north_neighbor_T(gdept_z0, grid, rolled=dep_j1)
 
     zhpi = multiply(
         multiply(zcoef0, r1_e1u),
@@ -4437,7 +4748,7 @@ _nemo_hpg_sco_literal_cgrid_compiled = jax.jit(
     _nemo_hpg_sco_literal_cgrid_impl,
     static_argnames=(
         "return_components", "_source_round", "_j_periodic",
-        "_north_fold_density"))
+        "_north_fold_density", "_north_fold_geometry"))
 
 
 def nemo_hpg_sco_literal_cgrid(
@@ -4449,6 +4760,7 @@ def nemo_hpg_sco_literal_cgrid(
     *,
     return_components: bool = False,
     _source_round: bool = True,
+    fold_north_geometry: bool = False,
 ) -> tuple[jnp.ndarray, ...]:
     """Run NEMO's SCO recurrence identically inside and outside outer JIT."""
     fold = getattr(grid, "fold", None)
@@ -4463,13 +4775,15 @@ def nemo_hpg_sco_literal_cgrid(
             rhd, e3w, gdept_z0, grid, g,
             return_components=return_components, _source_round=_source_round,
             _j_periodic=get_meridionally_periodic(),
-            _north_fold_density=north_fold_density)
+            _north_fold_density=north_fold_density,
+            _north_fold_geometry=(north_fold_density and fold_north_geometry))
     with jax.disable_jit(False):
         return _nemo_hpg_sco_literal_cgrid_compiled(
             rhd, e3w, gdept_z0, grid, g,
             return_components=return_components, _source_round=_source_round,
             _j_periodic=get_meridionally_periodic(),
-            _north_fold_density=north_fold_density)
+            _north_fold_density=north_fold_density,
+            _north_fold_geometry=(north_fold_density and fold_north_geometry))
 
 
 def partial_cell_pgf_correction_x(
@@ -5222,6 +5536,7 @@ def pv_flux_al81_partial_cell(
     q_boundary: str = "neumann_fill",
     metric_widths: tuple | None = None,
     written_order: bool = False,
+    north_fold_grid=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
 
@@ -5400,6 +5715,10 @@ def pv_flux_al81_partial_cell(
         divides by the thickness, weights each triad by 1/12, multiplies the
         transport by the width last and sums the four products left to
         right, which is equal as real numbers and differs in the last place.
+    north_fold_grid : grid or None
+        Active T-pivot grid whose owned top V row reads NEMO's northern
+        fold-cell triads and signed U-transport halo.  ``None`` retains the
+        physical-pole zero halo used by every non-fold caller.
 
     Returns
     -------
@@ -5529,6 +5848,40 @@ def pv_flux_al81_partial_cell(
         t_NW = sr(sr(q_SW + q_NW) + q_NE)
         t_SE = sr(sr(q_NE + q_SE) + q_SW)
         t_SW = sr(sr(q_SE + q_SW) + q_NW)
+    # The stored top V row of a T-pivot ORCA mesh is an owned vector row, not
+    # a physical pole wall.  Its northern cell is supplied by ``lbc_lnk``'s
+    # fold halo.  Keep that one halo explicit for the V update below: its F
+    # corners are the ordinary F-fold image and its U transports are the
+    # signed U-fold image.  The default remains a zero pole halo.
+    _north_t = None
+    if north_fold_grid is not None:
+        _fold = getattr(north_fold_grid, "fold", None)
+        if _fold is None or not bool(getattr(_fold, "is_active", False)):
+            raise ValueError("north_fold_grid needs an active north fold")
+        from legoesm.grids.operators_latlon_cgrid import fold_perm_f
+        _src = -3 if bool(getattr(_fold, "pivot_row_stored", False)) else -2
+        # q's column 0 is the cyclic copy of native F column n; native
+        # columns live in [1:].  Fold in that native layout, then restore the
+        # west cyclic copy.  Folding ``q[:, :n]`` shifts the reflected row by
+        # two native columns (one on each side of the reflection).
+        _q_n_native = q[_src, 1:][fold_perm_f(_fold)]
+        _q_n = jnp.concatenate([_q_n_native[-1:], _q_n_native])
+        _q_sw, _q_se = q[-1, :-1], q[-1, 1:]
+        _q_nw, _q_ne = _q_n[:-1], _q_n[1:]
+        if written_order:
+            _north_t = (
+                sr(sr(_q_sw + _q_nw) + _q_ne),
+                sr(sr(_q_nw + _q_ne) + _q_se),
+                sr(sr(_q_se + _q_sw) + _q_nw),
+                sr(sr(_q_ne + _q_se) + _q_sw),
+            )
+        else:
+            _north_t = (
+                inv12 * (_q_nw + _q_sw + _q_ne),
+                inv12 * (_q_ne + _q_se + _q_nw),
+                inv12 * (_q_sw + _q_se + _q_nw),
+                inv12 * (_q_se + _q_sw + _q_ne),
+            )
 
     # --- 4. AL81 PV flux at u-faces --------------------------------
     # u-face u[j, i] is between west cell (j, i-1) and east cell
@@ -5654,6 +6007,24 @@ def pv_flux_al81_partial_cell(
     t_stack_pad, F_u_pad = pad_with_pole_bc_lat_multi(
         (t_stack, F_u), halo=1,
     )  # (n_lat+2, n_lon, 4*nlev), (n_lat+2, n_lon+1, nlev)
+    if _north_t is not None:
+        from legoesm.grids.operators_latlon_cgrid import (
+            apply_north_fold, fold_ghost_source_T, fold_is_local,
+            fold_perm_u, north_fold_mask,
+        )
+        _north_stack = jnp.concatenate(_north_t, axis=-1)[jnp.newaxis]
+        _fu_native = fold_ghost_source_T(F_u, _fold)[0, 1:]
+        _north_fu_native = (
+            _fold.vector_sign_u * _fu_native[fold_perm_u(_fold)])
+        _north_fu = jnp.concatenate(
+            [_north_fu_native[-1:], _north_fu_native])[jnp.newaxis]
+        _nmask = north_fold_mask(north_fold_grid)
+        if fold_is_local(north_fold_grid) or _nmask is not None:
+            t_stack_pad = apply_north_fold(
+                t_stack_pad, _north_stack, north_fold_grid,
+                north_mask=_nmask)
+            F_u_pad = apply_north_fold(
+                F_u_pad, _north_fu, north_fold_grid, north_mask=_nmask)
     t_NW_pad, t_NE_pad, t_SW_pad, t_SE_pad = jnp.split(t_stack_pad, 4, axis=-1)
     t_NW_S = t_NW_pad[:-1, :, :]   # south-cell NW at v-face j
     t_NE_S = t_NE_pad[:-1, :, :]

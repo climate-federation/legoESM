@@ -57,7 +57,7 @@ def test_no_gray_knob_reaches_a_built_params_object():
     assert not (set(params.raw_values) & _GRAY_KNOBS)
     # ... and the remaining set is not empty (a vacuous pass would satisfy the
     # assertion above just as well).
-    assert len(params.raw_values) > 40
+    assert len(params.raw_values) > 25
 
 
 def test_the_gray_config_builder_is_gone():

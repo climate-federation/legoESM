@@ -58,13 +58,22 @@ launch gate as a one-sided quintic ramp, exact from 2.5 m/s at the default
 100 % low just above 2 m/s; no oracle column launches in that band (source
 winds 1.74 and 2.66 m/s are the nearest), so the per-column gap below is
 unchanged by it, measured 2026-10-30).  The mountain-height gate, the 1 Pa
-pressure floors (static: orography, the model-top interface) and the
-limiters are hard, as in E3SM (piecewise smooth).  The production smoothing values are NOT the hard
-limit; the oracle test pins that gap per column.  KNOWN DIFFERENCE at the
-defaults (vs the E3SM oracle, 17 columns): up to 6.3e-2 relative in du/dt and
-3.6e-2 in dT/dt, in the column whose stresses sit near taudmp = tausat; 2.4e-3
-elsewhere (measured 2026-10-28; with the earlier sigmoid-blend smooth min,
-which was not C1 at taudmp = tausat, it was 8.2e-4).
+pressure floors are static (orography, the model-top interface) and stay
+hard.  Since #2241 (2026-11-12) the same p (``Fr_sharpness``) also smooths
+the tendency limiters (orographic saturation, ``umcfac``, ``tndmax``),
+``dscal = min(1, .)``, the diffusivity ``max(dback, .)`` and the launch Froude
+cap ``min(hdsp^2, fcrit2 (U/N)^2)``; since 2026-11-16 ``umcfac_abs_width``
+(0.01 m/s, the smooth ``|ubm|`` of the ``umcfac`` limit),
+``umcfac_sign_width`` (1e-3 m/s, the smooth sign of the tendency) and
+``taumin_ramp_width`` (1e-10 Pa, the ``taumin`` zeroing as a quintic ramp)
+smooth the last two switches on model state (#2241; per-column gap below
+unchanged to 1e-6 relative).  The production smoothing values are NOT
+the hard limit; the oracle test pins that gap per column.  KNOWN DIFFERENCE
+at the defaults (vs the E3SM oracle, 17 columns, measured 2026-11-12): up to
+6.9e-2 relative in du/dt (column 9; 6.2e-2 column 15, 4.4e-2 column 8) and
+7.3e-2 in dT/dt (column 9), other columns below 1e-2 (2026-10-28, before the
+#2241 additions: 6.3e-2 du/dt, 3.6e-2 dT/dt; with the earlier sigmoid-blend
+smooth min, not C1 at taudmp = tausat, 8.2e-4).
 
 Field mapping: ``k_wave`` = E3SM ``kwv`` (E3SM's own parameter is
 ``6.28e-5``; the default here, ``2*pi/1e5``, is the value the audit's oracle
@@ -198,6 +207,7 @@ def lindzen_gwd(
         u, v, T, sgh, pmid, pint, dpm, z_full, nm, R_d, cfg.kwv, cfg.fcrit2,
         cfg.orographic.oro_min_h, cfg.orographic.oro_min_wind,
         oro_wind_ramp_width=config.oro_wind_ramp_width,
+        froude_cap_sharpness=config.Fr_sharpness,
     )
     _tau, du_dt, dv_dt, _gwut, _tau_sat = gw_drag_prof(
         tau0, c, src_level, tend_level, T, ti, piln, rhoi, nm, ni,
@@ -207,6 +217,9 @@ def lindzen_gwd(
         crit_level_sharpness=config.crit_level_sharpness,
         crit_level_floor=config.crit_level_floor,
         tndmax_per_day=config.tndmax_per_day,
+        umcfac_abs_width=config.umcfac_abs_width,
+        umcfac_sign_width=config.umcfac_sign_width,
+        taumin_ramp_width=config.taumin_ramp_width,
     )
 
     # E3SM driver discrete-KE heating (gw_drag.F90:908-913; ttgw = 0 for the

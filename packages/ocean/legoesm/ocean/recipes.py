@@ -115,6 +115,7 @@ LATLON_RECIPES = {
         "implicit_vmix_dzw_slot": True,
         "implicit_vertical_mixing": True,
         "lateral_viscosity_operator": "flux_divergence",
+        "lateral_viscosity_mask_levels": "surface",
         "vertical_momentum_scheme": "centered_full",
     },
     # NEMO-STYLE dycore (#487/#496; RENAMED from "nemo_v1" 2026-09-02 — that
@@ -187,6 +188,10 @@ LATLON_RECIPES = {
         # carried here so catalog-based assembly does not silently fall back to
         # the config default False (codex).
         "normalize_freshwater": True,
+        "lateral_viscosity_mask_levels": "per_level",
+        # NEMO ORCA1 rn_shlat = 2 (dommsk.F90:209-215).
+        "lateral_side_bc": "nemo_shlat",
+        "lateral_shlat": 2.0,
     },
     # Oracle dycores — the canonical numerics of the runnable oracle models. SINGLE
     # SOURCE for the *_canonical_ocean_config factory defaults (the factories splat
@@ -212,6 +217,7 @@ LATLON_RECIPES = {
         # explicit_ab2 validation) and one passes the flag via **overrides
         # (duplicate-kwarg).  Short compare decks tolerate the weak growth.
         "lateral_viscosity_operator": "flux_divergence",
+        "lateral_viscosity_mask_levels": "surface",
         "A_h_lat_scaling": False,
         "C_smag": 0.0,
         "differentiable_barotropic": True,
@@ -230,6 +236,7 @@ LATLON_RECIPES = {
         "barotropic_implicit_theta_eta": 1.0,        # fully backward-Euler free surface
         "barotropic_implicit_theta_pgf": 1.0,
         "lateral_viscosity_operator": "flux_divergence",
+        "lateral_viscosity_mask_levels": "surface",
         "A_h_lat_scaling": False,
         "C_smag": 0.0,
         "bottom_drag_r": 0.0,

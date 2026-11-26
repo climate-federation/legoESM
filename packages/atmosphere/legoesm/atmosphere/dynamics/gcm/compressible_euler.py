@@ -481,6 +481,11 @@ class CompressibleEulerConfig(NamedTuple):
                                           # AMD softplus denominator-floor width
                                           # [s^-2] (RULE 5 smooth default 10 eps
                                           # = 2.22e-15; 0.0 = AMR-Wind's hard floor).
+    mixed_precision: bool = False         # Plane CRM mixed mode (fp32 state and
+                                          # dynamics): every leaf keeps its own
+                                          # storage dtype each stage, SSP-RK3 uses
+                                          # rounding-safe combinations, and the
+                                          # dry-mass fixer sums run in fp64.
 
 
 # ==============================================================================
@@ -1032,7 +1037,11 @@ def semi_implicit_acoustic_column_kernel(
             b_tri = b_tri + b_buoy_full
             c_tri = c_tri + c_buoy
 
-    w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
+    # Mixed precision runs this with an fp64 right-hand side and fp32
+    # reference-state coefficients; solve in the wider dtype (no-op otherwise).
+    _dt = jnp.result_type(a_tri, b_tri, c_tri, rhs)
+    w_inner_new = thomas_solve_batched(
+        a_tri.astype(_dt), b_tri.astype(_dt), c_tri.astype(_dt), rhs.astype(_dt))
     # Rigid lid/bottom: w=0 at top and bottom interfaces. Padding with
     # 0 fuses better than `w_c.at[..., 1:-1].set(...)` because pad is a
     # simple HLO op without the dynamic-update-slice fusion barrier on
@@ -1209,7 +1218,11 @@ def acoustic_substeps_semi_implicit(
         a_tri, b_tri, c_tri = a_tri_pre, b_tri_pre, c_tri_pre
 
         # Solve tridiagonal system
-        w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
+        # Mixed precision runs this with an fp64 right-hand side and fp32
+        # reference-state coefficients; solve in the wider dtype (no-op otherwise).
+        _dt = jnp.result_type(a_tri, b_tri, c_tri, rhs)
+        w_inner_new = thomas_solve_batched(
+            a_tri.astype(_dt), b_tri.astype(_dt), c_tri.astype(_dt), rhs.astype(_dt))
 
         # Construct full w_new via pad-with-0 (rigid lid/bottom BC),
         # avoiding the dynamic-update-slice fusion barrier that the

@@ -212,6 +212,7 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
         (np.float64(0.5) * p_w[..., 1:-1]) * sum_w) * wmask_inner
     expected = expected - (
         (flux_w[..., :-1] - flux_w[..., 1:]) * r1_area) / e3t
+    literal_storage_expected = expected.copy()
     expected[tmask == 0.0] = 0.0
 
     actual = np.asarray(jax.jit(
@@ -220,6 +221,27 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
         jnp.asarray(tracer), jnp.asarray(p_u), jnp.asarray(p_v),
         jnp.asarray(p_w), jnp.asarray(e3t), jnp.asarray(tmask)))
     np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
+
+    # The certified WS/FCT production route preserves the lane's literal
+    # accumulator on inactive storage.  Both contracts are bit-identical on
+    # wet and partial-bottom cells (tmask > 0, e3t > 0), and differ only where
+    # the main contract masks inactive cells to exact zero.
+    certified_storage = np.asarray(jax.jit(
+        lambda tr, pu, pv, pw, h, tm: model_module._nemo_cen2_tracer_rhs(
+            tr, pu, pv, pw, h, tm, grid,
+            _certified_nemo_storage=True,
+        ))(
+        jnp.asarray(tracer), jnp.asarray(p_u), jnp.asarray(p_v),
+        jnp.asarray(p_w), jnp.asarray(e3t), jnp.asarray(tmask)))
+    active = tmask > 0.0
+    np.testing.assert_array_equal(
+        certified_storage[active].view(np.uint64), actual[active].view(np.uint64)
+    )
+    np.testing.assert_array_equal(
+        certified_storage[~active].view(np.uint64),
+        literal_storage_expected[~active].view(np.uint64),
+    )
+    assert np.any(certified_storage[~active] != actual[~active])
 
     # The cropped GYRE card stores its unowned perimeter as zero-thickness
     # cells.  Seed the pullback only at such a cell: the outer selection must
@@ -1192,3 +1214,45 @@ def test_nemo_ws_split_freeze_hooks_compose_to_the_freeze_arm():
     live = _lock_model().step(entry, dt=card.dt_s)
     eta_arm = _lock_model(H(freeze_stage_hpg_eta=True)).step(entry, dt=card.dt_s)
     assert float(np.abs(np.asarray(eta_arm.u.data) - np.asarray(live.u.data)).max()) > 0.0
+
+
+def test_nemo_cen2_tracer_rhs_reverse_gradient_is_finite_on_dry_cells():
+    """A dry cell (e3t = 0) is masked in the forward pass; its 0/0 must not
+    turn the jitted reverse pass NaN (round 316, ORCA2 rung 0)."""
+    set_policy(PrecisionPolicy.fp64())
+    rng = np.random.default_rng(316)
+    ny, nx, nz = 3, 4, 2
+    base = create_latlon_grid(ny, nx, dtype=jnp.float64)
+    grid = SimpleNamespace(**base._asdict(),
+                           area_T=jnp.asarray(rng.uniform(1.0e5, 9.0e6, (ny, nx))))
+    tmask = np.ones((ny, nx, nz))
+    tmask[0, 0, 1] = 0.0
+    tracer = jnp.asarray(rng.uniform(-3.0, 37.0, (ny, nx, nz)))
+    p_u = jnp.asarray(rng.uniform(-8.0e5, 8.0e5, (ny, nx + 1, nz)))
+    p_v = jnp.asarray(rng.uniform(-8.0e5, 8.0e5, (ny + 1, nx, nz)))
+    p_w = jnp.asarray(np.pad(rng.uniform(-2.0e3, 2.0e3, (ny, nx, nz - 1)),
+                             ((0, 0), (0, 0), (1, 1))))
+    e3t = jnp.asarray(rng.uniform(0.2, 250.0, (ny, nx, nz)) * tmask)
+    tm = jnp.asarray(tmask)
+
+    def loss(tr, h):
+        rhs = model_module._nemo_cen2_tracer_rhs(tr, p_u, p_v, p_w, h, tm, grid)
+        return jnp.sum(jnp.where(tm > 0.5, rhs, 0.0) ** 2)
+
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1)))(tracer, e3t)
+    for g in grads:
+        assert np.all(np.isfinite(np.asarray(g)))
+
+    # Wet cells: e3t enters only as the divisor, so the unguarded formula's
+    # derivative is d(rhs)/d(e3t) = -rhs/e3t, i.e. dL/de3t = -2 rhs^2 / e3t.
+    wet = tmask > 0.5
+    rhs = np.asarray(model_module._nemo_cen2_tracer_rhs(
+        tracer, p_u, p_v, p_w, e3t, tm, grid))
+    ref = np.where(wet, -2.0 * rhs ** 2 / np.where(wet, np.asarray(e3t), 1.0), 0.0)
+    assert np.all(np.abs(ref[wet]) > 0.0)
+    # Rounding bound 1e-13 relative (two rounded divisions vs one).
+    np.testing.assert_allclose(np.asarray(grads[1])[wet], ref[wet], rtol=1.0e-13, atol=0.0)
+    d = jnp.asarray(rng.standard_normal(e3t.shape) * tmask)
+    jvp = jax.jit(lambda h, v: jax.jvp(lambda x: loss(tracer, x), (h,), (v,))[1])(e3t, d)
+    np.testing.assert_allclose(float(jvp), float(np.sum(ref * np.asarray(d))),
+                               rtol=1.0e-13, atol=0.0)

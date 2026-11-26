@@ -216,6 +216,13 @@ class CanopyForcingBundle(NamedTuple):
 # Residual function (defines the closure equations)
 # ---------------------------------------------------------------------------
 
+def condensate_latent_heat(b: CanopyForcingBundle) -> jax.Array:
+    """Latent heat [J kg-1] of canopy-air condensation: the snow-weighted ground
+    charge, because the land step stores the snow-covered share of the dew on
+    the pack as ice (L_s) and the rest as liquid leaf water (L_v)."""
+    return b.lam if b.lam_soil is None else b.lam_soil
+
+
 def _canopy_residual(
     x: jax.Array,
     bundle: CanopyForcingBundle,
@@ -321,14 +328,22 @@ def _canopy_residual(
         b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
     # ---- Canopy air update (FULLY_COUPLED: soil included) ----
-    Tc_new, q_c_new = canopy_air_update(
+    # A leaf with no area has no energy balance to invert: its "new" leaf
+    # temperature is garbage (measured -0.71 K on hot desert ground and 4.9e6 K
+    # on a bare test column, where even its ~4e-6 weight warmed the canopy air
+    # 2.5 K), and the saturation humidity evaluated there overflows to NaN.
+    # Feed the pinned state instead: at the root it equals Tc, so the empty
+    # leaves drop out of the canopy-air balance exactly.
+    bare = b.LAI <= LEAF_AREA_FLOOR
+    Tc_new, q_c_new, _ = canopy_air_update(
         b.Ta, b.q_atm,
-        Tf_Sun_new, Tf_Sh_new, Ts,
+        jnp.where(bare, Tf_Sun, Tf_Sun_new), jnp.where(bare, Tf_Sh, Tf_Sh_new), Ts,
         gs_Sun, gs_Sh,
         Rb_Sun, Rb_Sh,
         rah_above, raw_above,
         rah_below, raw_soil_evap,
-        b.fStress_soil, b.Ps, fwet=b.fwet)
+        b.fStress_soil, b.Ps, Tc, condensate_latent_heat(b), b.Cp, rh_cap_width,
+        fwet=b.fwet)
 
     # ---- Sunlit-leaf anchor when fSun is too small for two-leaf split ----
     # When ``fSun`` is small, ``Rb_Sun = rb / (LAI · fSun)`` is large, the
@@ -380,7 +395,6 @@ def _canopy_residual(
     # or below it both leaf classes are bit-identical to bare ground, so a
     # column with LAI = 1e-7 is pinned too, and no column with distinct leaf
     # physics is.
-    bare = b.LAI <= LEAF_AREA_FLOOR
     pinned = jnp.array([
         Tf_Sun - Tc,
         Tf_Sh  - Tc,
@@ -421,9 +435,10 @@ def canopy_forward(
     Ts = b.Ts_bc
     zldis = b.z0 - b.displa
 
-    ustar, rah_above, raw_above, uav, zeta = monin_obukhov_stability(
+    ustar, rah_above, raw_above, uav, zeta, obu = monin_obukhov_stability(
         b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m,
-        n_iters=most_n_iters, zeta_cap_width=zeta_cap_width)
+        n_iters=most_n_iters, zeta_cap_width=zeta_cap_width,
+        return_flux_obu=True)
 
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
@@ -464,23 +479,23 @@ def canopy_forward(
     if LE_module == "BT":
         q_f_Sun = saturation_specific_humidity(Tf_Sun, b.Ps)
         q_f_Sh  = saturation_specific_humidity(Tf_Sh,  b.Ps)
-        Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_bt(
+        Rn_Sun, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, _ = leaf_energy_balance_bt(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
-        Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh, _  = leaf_energy_balance_bt(
+        Rn_Sh,  LE_Sh,  H_Sh,  Tf_Sh_new, gs_Sh, _  = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
     else:
-        Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_pm(
+        Rn_Sun, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, _ = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
-        Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh,  _ = leaf_energy_balance_pm(
+        Rn_Sh,  LE_Sh,  H_Sh,  Tf_Sh_new, gs_Sh,  _ = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
@@ -510,7 +525,22 @@ def canopy_forward(
         rah_below, raw_soil_evap, b.fStress_soil,
         b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
+    # Canopy-air condensation (the dew limit; see canopy_air_update), with the
+    # residual's exact inputs so it is the condensation the closure balanced.
+    # Mass flux [kg m-2 s-1], deposited on the surface by the caller; its
+    # latent heat leaves the canopy top as sensible heat.
+    bare = b.LAI <= LEAF_AREA_FLOOR
+    _, _, cond_mix = canopy_air_update(
+        b.Ta, b.q_atm,
+        jnp.where(bare, Tf_Sun, Tf_Sun_new), jnp.where(bare, Tf_Sh, Tf_Sh_new), Ts,
+        gs_Sun, gs_Sh, Rb_Sun, Rb_Sh,
+        rah_above, raw_above, rah_below, raw_soil_evap,
+        b.fStress_soil, b.Ps, Tc, condensate_latent_heat(b), b.Cp, rh_cap_width,
+        fwet=b.fwet)
+    condensation = b.rhoa * cond_mix
+
     return dict(
+        condensation=condensation, raw_above=raw_above,
         An_Sun=An_Sun, An_Sh=An_Sh,
         Agross_Sun=Agross_Sun, Agross_Sh=Agross_Sh,
         LE_Sun=LE_Sun, LE_Sh=LE_Sh, LE_Soil=LE_Soil,
@@ -520,11 +550,68 @@ def canopy_forward(
         G=G, Ls=Ls, Lcanopy_up=Lcanopy_up, gap_LW=gap_LW, LW_out=LW_out,
         eps_col=eps_col, LW_emit=LW_emit,
         gs_Sun=gs_Sun, gs_Sh=gs_Sh,
-        ustar=ustar, zeta=zeta,
+        ustar=ustar, zeta=zeta, obu=obu,
         rah_above=rah_above, rah_below=rah_below,
         Rb_Sun=Rb_Sun, Rb_Sh=Rb_Sh,
         ALW_Sun=ALW_Sun, ALW_Sh=ALW_Sh, ALW_Soil=ALW_Soil,
     )
+
+
+def ground_heat_conductance(
+    x: jax.Array,
+    bundle: CanopyForcingBundle,
+    config,
+    converged: jax.Array,
+) -> jax.Array:
+    """lambda = -dG/dTs [W m-2 K-1] of ONE column, CLM5's linearisation.
+
+    ``G = Rn_soil - LE_soil - H_soil`` is the ground heat flux of
+    :func:`canopy_forward` and ``Ts`` the ground temperature (``bundle.Ts_bc``).
+    As in the CLM5 Technical Description (eqs. 2.5.123, 2.5.124 and 2.6.24) the
+    leaf temperatures are held fixed and the canopy air (``Tc``, ``q_c``) is
+    allowed to follow the ground: with ``xa = (Tc, q_c)`` and ``F_a`` the canopy
+    air rows of the closure residual,
+
+        dxa/dTs = -(dF_a/dxa)^-1 dF_a/dTs,
+        dG/dTs  = dG/dTs|x + dG/dxa . dxa/dTs.
+
+    That is the factor (c_a + c_v)/(c_a + c_v + c_g) of eq. 2.5.123 for the
+    sensible flux, the matching factor of eq. 2.5.124 for the latent flux, and
+    the ground's longwave emission derivative, all from this model's own
+    equations.  An unconverged column (``x`` not a root) takes the partial
+    derivative at fixed ``x``.  A non-finite result is replaced by the partial
+    one and, if that is non-finite too, by 0 (the explicit flux).
+    """
+    def _residual(xa, ts):
+        return _canopy_residual(
+            x.at[4:6].set(xa), bundle._replace(Ts_bc=ts),
+            LE_module=config.LE_module,
+            stomatal_model=config.stomatal_model,
+            le_cap_mode=config.le_cap_mode,
+            use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
+            rh_cap_width=config.rh_cap_smoothing_width,
+            zeta_cap_width=config.zeta_cap_smoothing_width,
+            most_n_iters=config.most_n_iters)[4:6]
+
+    def _ground_flux(xa, ts):
+        return canopy_forward(
+            x.at[4:6].set(xa), bundle._replace(Ts_bc=ts),
+            config.LE_module, config.stomatal_model, config.le_cap_mode,
+            config.use_ta_for_photosynthesis, config.rh_cap_smoothing_width,
+            config.zeta_cap_smoothing_width, config.most_n_iters)["G"]
+
+    xa, ts = x[4:6], bundle.Ts_bc
+    J_a = jax.jacfwd(_residual, 0)(xa, ts)
+    F_t = jax.jacfwd(_residual, 1)(xa, ts)
+    g_a, g_t = jax.grad(_ground_flux, (0, 1))(xa, ts)
+    # Double where: a singular J_a would put inf/NaN in the unselected branch,
+    # which reaches the reverse-mode cotangent through the select.
+    ok = converged & jnp.all(jnp.isfinite(J_a)) & (jnp.linalg.det(J_a) != 0.0)
+    dxa = -jnp.linalg.solve(jnp.where(ok, J_a, jnp.eye(2, dtype=J_a.dtype)), F_t)
+    lam_full = -(g_t + g_a @ dxa)
+    lam_part = -g_t
+    lam = jnp.where(ok & jnp.isfinite(lam_full), lam_full, lam_part)
+    return jnp.where(jnp.isfinite(lam), lam, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +672,7 @@ def solve_canopy_closure(
         most_n_iters=config.most_n_iters,
         max_iters=config.max_iters,
         tol=config.tol,
+        adjoint_unconverged=config.fallback_from_last_iterate,
     )
     return solver(initial_state, bundle)[:3]
 
@@ -629,6 +717,7 @@ def solve_canopy_closure_diag(
         most_n_iters=config.most_n_iters,
         max_iters=config.max_iters,
         tol=config.tol,
+        adjoint_unconverged=config.fallback_from_last_iterate,
     )
     return solver(initial_state, bundle)
 
@@ -647,6 +736,7 @@ def _make_implicit_newton_solver(
     most_n_iters: int,
     max_iters: int,
     tol: float,
+    adjoint_unconverged: bool = False,
 ):
     """Bind the shared implicit root solver to the canopy residual."""
     del tol  # Legacy step tolerance; convergence is the residual contract.
@@ -672,4 +762,5 @@ def _make_implicit_newton_solver(
         atol=_LM_ATOL,
         n_sq_max=_ROOT_NSQ_MAX,
         admissible=canopy_state_admissible,
+        adjoint_unconverged=adjoint_unconverged,
     )

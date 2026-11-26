@@ -328,13 +328,14 @@ def probe_latlon_cgrid(
         )
         _dt_tr = dt_tracer if dt_tracer is not None else dt
         if (getattr(_vm_cfg, "scheme", "none") == "epbl"
-                and float(_vm_cfg.epbl.dt_s) != float(_dt_tr)):
-            # ePBL's energy budget is per timestep and feeds the tracer
-            # implicit solve below, which runs over the tracer dt.
+                and float(_dt_tr) != float(dt)):
+            # ePBL takes the momentum dt (as CATKE does, below) and feeds the
+            # tracer implicit solve, which runs over the tracer dt; the model
+            # refuses dt_mom_ratio != 1 for ePBL, and so does the probe.
             raise ValueError(
-                f"EPBLConfig.dt_s is {float(_vm_cfg.epbl.dt_s)} s but the "
-                f"probe's tracer timestep is {float(_dt_tr)} s; ePBL must use "
-                "the tracer dt")
+                f"ePBL needs the tracer timestep ({float(_dt_tr)} s) to equal "
+                f"the momentum timestep ({float(dt)} s), as the model's "
+                "dt_mom_ratio == 1 requirement for ePBL")
         _nemo_literal_tke = (
             getattr(_vm_cfg, "scheme", "none") == "tke"
             and getattr(

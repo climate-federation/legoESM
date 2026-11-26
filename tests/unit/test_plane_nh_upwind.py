@@ -65,7 +65,7 @@ def test_centered_advection_x_reduces_to_centered_difference():
     (non-diffusive, dispersive — = gSAM `advect2_mom_xy.f90`). Guards the
     momentum-leg scheme used by the ADV-SPLIT #86 per-field split."""
     from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
-        _centered_advection_x,
+        centered_advection_x,
     )
     nx = 8
     f = jnp.asarray(
@@ -73,7 +73,7 @@ def test_centered_advection_x_reduces_to_centered_difference():
     ).reshape(1, nx, 1)
     u = jnp.full_like(f, 2.0)            # constant velocity
     dx = 0.5
-    tend = _centered_advection_x(f, u, dx)
+    tend = centered_advection_x(f, u, dx)
     expected = -2.0 * (
         jnp.roll(f, -1, axis=1) - jnp.roll(f, 1, axis=1)) / (2.0 * dx)
     assert np.allclose(np.asarray(tend), np.asarray(expected), atol=1e-12), (
@@ -130,12 +130,12 @@ def test_centered_momentum_is_non_dissipative_vs_van_leer():
 
     This is why centered restores the updraft extremes van_leer damps."""
     from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
-        _centered_advection_x, _van_leer_advection_x,
+        centered_advection_x, _van_leer_advection_x,
     )
     rng = np.random.default_rng(5)
     u = jnp.asarray(rng.standard_normal((2, 32, 3)))
     dx = 1.0
-    tc = _centered_advection_x(u, u, dx)
+    tc = centered_advection_x(u, u, dx)
     tv = _van_leer_advection_x(u, u, dx)
     norm = float(jnp.sum(u * u))
     # momentum conservation (flux-form): Σ tend ≈ 0 for both

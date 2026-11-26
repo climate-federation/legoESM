@@ -129,7 +129,7 @@ class EarthSystemDriver:
 
         # Cell-centre view: a lat-lon C-grid run carries face winds between steps.
         state = self._atm.cell_centre_state()
-        q_v = self._atm.q_v
+        q_v = self._atm.current_tracer("q_v")
         p_s = state.p_s.data
         T_low = state.T.data[..., -1]
         u_low = state.u.data[..., -1]
@@ -255,12 +255,12 @@ class EarthSystemDriver:
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import (
-                daily_mean_insolation, earth_orbit, earth_sun_distance_factor,
+                daily_mean_insolation, earth_sun_distance_factor,
             )
             S_0 = cfg.S_0
             # Realistic orbit (Berger 1978) when enabled; None ⇒ circular.
-            _orbit = (earth_orbit()
-                      if getattr(cfg, "orbital_insolation", False) else None)
+            from legoesm.driver.orbit import experiment_orbit
+            _orbit = experiment_orbit(cfg)
             _eccf = (earth_sun_distance_factor(float(doy), _orbit)
                      if _orbit is not None else 1.0)
             Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0,

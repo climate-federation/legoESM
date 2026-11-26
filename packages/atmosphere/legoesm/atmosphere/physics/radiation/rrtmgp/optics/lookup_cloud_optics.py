@@ -90,14 +90,14 @@ def _load_data(
   data['n_size_ice'] = dims['nsize_ice']
   data['radius_liq_lower'] = tables['radliq_lwr']
   data['radius_liq_upper'] = tables['radliq_upr']
-  data['diameter_ice_lower'] = tables['radice_lwr']
-  data['diameter_ice_upper'] = tables['radice_upr']
-  data['ext_liq'] = tables['lut_extliq']
-  data['ssa_liq'] = tables['lut_ssaliq']
-  data['asy_liq'] = tables['lut_asyliq']
-  data['ext_ice'] = tables['lut_extice']
-  data['ssa_ice'] = tables['lut_ssaice']
-  data['asy_ice'] = tables['lut_asyice']
+  data['diameter_ice_lower'] = tables['diamice_lwr']
+  data['diameter_ice_upper'] = tables['diamice_upr']
+  data['ext_liq'] = tables['extliq']
+  data['ssa_liq'] = tables['ssaliq']
+  data['asy_liq'] = tables['asyliq']
+  data['ext_ice'] = tables['extice']
+  data['ssa_ice'] = tables['ssaice']
+  data['asy_ice'] = tables['asyice']
   return data
 
 

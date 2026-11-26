@@ -50,7 +50,7 @@ from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.convection.config import (
     SBMConfig, DCAConfig, MassFluxConfig, ConvectiveEDMFConfig, KuoConfig,
     ZhangMcFarlaneConfig, KainFritschConfig, EmanuelConfig,
-    TiedtkeConfig, BechtoldConfig,
+    BechtoldConfig,
 )
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.atmosphere.physics.convection.mass_flux import (
@@ -65,7 +65,6 @@ from legoesm.atmosphere.physics.convection.kain_fritsch import (
     kain_fritsch_convection,
 )
 from legoesm.atmosphere.physics.convection.emanuel import emanuel_convection
-from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection
 from legoesm.atmosphere.physics.convection.bechtold import bechtold_convection
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.grids.vertical import create_sigma_coordinate
@@ -157,7 +156,6 @@ _CONFIG_FACTORY = {
     "zhang_mcfarlane": ZhangMcFarlaneConfig,
     "kain_fritsch": KainFritschConfig,
     "emanuel": EmanuelConfig,
-    "tiedtke": TiedtkeConfig,
     "bechtold": BechtoldConfig,
 }
 
@@ -227,14 +225,6 @@ def call_scheme(
     if name == "emanuel":
         out, _ = emanuel_convection(
             **common, conv_prog_profile=prog, config=EmanuelConfig(),
-        )
-        return out
-    if name == "tiedtke":
-        out, _ = tiedtke_convection(
-            **common, u=u, v=v, conv_prog_profile=prog,
-            config=_with_solve(
-                TiedtkeConfig(enable_cmt=False), subsidence_solve),
-            moisture_convergence=jnp.zeros_like(T),
         )
         return out
     if name == "bechtold":
@@ -331,8 +321,10 @@ SCHEMES = (
     "sbm", "dca",
     "mass_flux", "edmf", "kuo",
     "zhang_mcfarlane", "kain_fritsch", "emanuel",
-    "tiedtke", "bechtold",
+    "bechtold",
 )
+# tiedtke is not probed: the WRF port needs the dynamics q_v tendency, omega
+# and the previous-step turbulence inputs this static probe has none of.
 
 
 # Schemes whose *near-zero* tendency on the static tropical probe is

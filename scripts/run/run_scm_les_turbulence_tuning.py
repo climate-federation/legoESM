@@ -96,10 +96,12 @@ from legoesm.training.trainable_params import (  # noqa: E402
 )
 
 # Every selectable closure in turbulence/integration.py::get_turbulence_fn,
-# minus "none" (which is the absence of a closure, not a candidate).
+# minus "none" (which is the absence of a closure, not a candidate) and the WRF
+# ports with no tunable parameters ("tke" = MYJ, "mynn25", "ysu" = WRF YSU +
+# WRF surface layer, R4 vote X17).
 TURBULENCE_SCHEMES: tuple[str, ...] = (
-    "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
-    "holtslag_boville", "ysu", "edmf",
+    "smagorinsky", "louis", "clubb",
+    "holtslag_boville", "edmf",
 )
 
 # Cases whose LES applies a radiative forcing the SCM cannot reproduce. Scoring
@@ -359,8 +361,7 @@ def _dead_params_for(scheme: str) -> frozenset[str]:
         return unimplemented_params(mod, mod.CLUBBParams)
     cls_name = {
         "smagorinsky": "SmagorinskyConfig", "louis": "LouisConfig",
-        "tke": "TKEConfig", "mynn25": "MYNN25Config",
-        "clubb_lite": "CLUBBLiteConfig", "ysu": "YSUConfig",
+        "tke": "TKEConfig",
         "holtslag_boville": "HoltslagBovilleConfig",
         "edmf": "TurbulentEDMFConfig",
     }.get(scheme)
@@ -429,6 +430,7 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
                          bulk_ce: float | None = None,
                          surface=None,
                          clubb_prognostic: bool = True,
+                         clubb_routec_inversion: bool = False,
                          smag_stability_form: str = "lilly",
                          simple_lw: bool = False) -> PhysicsConfig:
     """PhysicsConfig with ONLY the turbulence scheme varying.
@@ -451,7 +453,8 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
             f"Unknown turbulence scheme {scheme!r}; choose from "
             f"{list(TURBULENCE_SCHEMES)}."
         )
-    turb = TurbulenceConfig(scheme=scheme)
+    turb = TurbulenceConfig(scheme=scheme,
+                            clubb_routec_inversion=bool(clubb_routec_inversion))
     if scheme == "clubb":
         # The DIAGNOSTIC path (prognostic=False, the library default) reads only
         # six CLUBBParams fields and just four of them have a live gradient
@@ -464,8 +467,11 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
         turb = turb._replace(
             clubb=clubb_cfg._replace(prognostic=bool(clubb_prognostic))
         )
+    if clubb_routec_inversion and not (scheme == "clubb" and clubb_prognostic):
+        raise ValueError("--clubb-routec-inversion needs --schemes clubb on the "
+                         "prognostic path; elsewhere it would be silently inert.")
     sub = getattr(turb, scheme)
-    if scheme == "smagorinsky" and smag_stability_form != "lilly":
+    if scheme == "smagorinsky":
         # The Deardorff stable-length option (PR #1647): stratification shrinks
         # the mixing length instead of driving a stability factor to zero. The
         # Lilly default is untunable on stable cases (its sqrt cutoff has an
@@ -931,6 +937,7 @@ def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
         simple_lw=arm.name in _SIMPLE_LW_CASES,
         bulk_ch=arm.case.spec.bulk_ch, bulk_ce=arm.case.spec.bulk_ce,
         surface=arm.surface, clubb_prognostic=args.clubb_prognostic,
+        clubb_routec_inversion=getattr(args, "clubb_routec_inversion", False),
         smag_stability_form=getattr(args, "smag_stability_form", "lilly"),
     )
 
@@ -1392,7 +1399,7 @@ def parse_args(argv=None):
                    help="Gaussian scale (raw/pre-sigmoid space) on the initial "
                         "params when --seed is set. 0 disables jitter.")
     p.add_argument("--smag-stability-form", default="lilly",
-                   choices=["lilly", "deardorff"],
+                   choices=["lilly", "deardorff", "wrf_km3"],
                    help="smagorinsky stable-stratification treatment. 'lilly' "
                         "(default, unchanged) is untunable on stable cases; "
                         "'deardorff' (PR #1647) shrinks the mixing length and "
@@ -1420,6 +1427,12 @@ def parse_args(argv=None):
                    help="run full CLUBB on its prognostic path. The diagnostic "
                         "default leaves 44 of 48 tunable params with a zero "
                         "gradient; prognostic makes 35 of 48 live.")
+    p.add_argument("--clubb-routec-inversion", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="Route C: Grenier-Bretherton (2001) subgrid inversion with "
+                        "explicit cloud-top entrainment inside CLUBB (prognostic "
+                        "path only). Widths of its smooth switches are CLUBBConfig "
+                        "fields.")
     p.add_argument("--surface-bulk-scheme", default="constant",
                    choices=("constant", "most"),
                    help="surface flux law, IDENTICAL on every arm. 'constant' "

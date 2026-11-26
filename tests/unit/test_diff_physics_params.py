@@ -409,7 +409,7 @@ class TestTurbulenceParams:
         )
 
         def loss(c_s):
-            cfg = SmagorinskyConfig()._replace(C_s=c_s)
+            cfg = SmagorinskyConfig(stability_form="lilly")._replace(C_s=c_s)
             out = smagorinsky_turbulence(
                 u, v, T, q_v, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, 300.0, cfg,
@@ -424,7 +424,7 @@ class TestTurbulenceParams:
         )
 
         def loss(pr):
-            cfg = SmagorinskyConfig()._replace(Pr_t=pr)
+            cfg = SmagorinskyConfig(stability_form="lilly")._replace(Pr_t=pr)
             out = smagorinsky_turbulence(
                 u, v, T, q_v, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, 300.0, cfg,

@@ -1,0 +1,68 @@
+{
+ "data_set": "openifs-48r1-ifsdata-b8364fe2ab722bf2249b42106fd4ba1d",
+ "departure": "49r1 reads aerosol_ifs_49R1_20230725.nc (su_radiation_scheme.F90:441); the public 48r1 aerosol_ifs_49R1_20230119.nc is used under that name (user decision 2026-11-04, vote A1a)",
+ "harness_base_commit": "e6396ddda6ab5867b822184f1498932d910e1ae4",
+ "npz_sha256": "d043903d0a110544a11ce8b17c153c858f55f1c456aba6a3827ba43595e0b920",
+ "optics_file": "aerosol_ifs_49R1_20230119.nc",
+ "optics_sha256": "47bc7892fd11b412d38c1f3c1e2f67583fb58472bb17d57d89de92a8782d4349",
+ "oracle": "openifs-8f6f722f732b92fed2c39af763d8fcd1ab15f573",
+ "oracle_exe_sha256": "46af7a3eaf50870ea0a279321adab05744d2ba284165ae55566a51c9c691cce2",
+ "run": "/burg/glab/users/pg2328/oracle_audit/ifs_port/ecrad/agents/aerosol/run_aer/aer_a",
+ "shapes": {
+  "g_sw_philic": [
+   14,
+   12,
+   13
+  ],
+  "g_sw_phobic": [
+   14,
+   18
+  ],
+  "itype_strat_bg": [],
+  "itype_trop_bg": [],
+  "mass_ext_lw_philic": [
+   16,
+   12,
+   13
+  ],
+  "mass_ext_lw_phobic": [
+   16,
+   18
+  ],
+  "mass_ext_sw_philic": [
+   14,
+   12,
+   13
+  ],
+  "mass_ext_sw_phobic": [
+   14,
+   18
+  ],
+  "rh_lower": [
+   12
+  ],
+  "ssa_lw_philic": [
+   16,
+   12,
+   13
+  ],
+  "ssa_lw_phobic": [
+   16,
+   18
+  ],
+  "ssa_sw_philic": [
+   14,
+   12,
+   13
+  ],
+  "ssa_sw_phobic": [
+   14,
+   18
+  ],
+  "strat_bg_mass_ext": [],
+  "trop_bg_mass_ext": [],
+  "type_map": [
+   13
+  ]
+ }
+}

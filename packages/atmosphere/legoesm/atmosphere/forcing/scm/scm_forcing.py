@@ -242,6 +242,14 @@ def _eval_profile(fn, t, nlev, dtype):
     return out
 
 
+def subsidence_w_profile(forcing, t, nlev, dtype):
+    """The prescribed large-scale vertical velocity ``(nlev,)`` [m/s,
+    positive up] at time ``t``; zeros when there is no forcing or no
+    ``subsidence_w``."""
+    fn = None if forcing is None else forcing.subsidence_w
+    return _eval_profile(fn, t, nlev, dtype)
+
+
 def compute_forcing_tendencies(
     state: HydrostaticState,
     sigma_coord,

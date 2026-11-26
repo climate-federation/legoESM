@@ -91,6 +91,7 @@ def compute_plane_sw_heating(
     *,
     mu0,
     albedo,
+    diffuse_frac: float,
     config: MC3DRadiationConfig,
     key: Array,
     azimuth: float = 0.0,
@@ -110,6 +111,7 @@ def compute_plane_sw_heating(
     z_half_td: interface heights ``(nlev+1,)`` top-down (index 0 = TOD).
     rho_td: total density ``(ny, nx, nlev)`` top-down [kg/m^3].
     mu0: cosine solar zenith angle. albedo: surface albedo. (may be traced scalars)
+    diffuse_frac: diffuse share of the top-of-domain incident flux (static).
     rayleigh_frac_td: optional per-g-point gas Rayleigh fraction of total
       scattering ``(ngpt, ny, nx, nlev)`` -> explicit Rayleigh + HG-cloud phase.
 
@@ -127,8 +129,8 @@ def compute_plane_sw_heating(
 
   res = raytracer_sw.solve_sw_spectral(
       tau_tr, ssa_tr, g_tr, incident_flux, geom,
-      mu0=mu0, azimuth=azimuth, albedo=albedo, config=config, key=key,
-      rayleigh_frac=rf_tr, mie_lut_cdf=mie_lut_cdf,
+      mu0=mu0, azimuth=azimuth, albedo=albedo, diffuse_frac=diffuse_frac,
+      config=config, key=key, rayleigh_frac=rf_tr, mie_lut_cdf=mie_lut_cdf,
       mie_lut_ang=mie_lut_ang, band_of_gpt=band_of_gpt, r_eff=reff_tr)
 
   dz_asc = jnp.diff(z_faces_asc)                        # (nz,) [m]

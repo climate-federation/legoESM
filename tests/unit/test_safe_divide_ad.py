@@ -28,12 +28,11 @@ from legoesm.atmosphere.physics.convection.config import (
     SBMConfig, DCAConfig, KuoConfig,
 )
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
-from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
     seifert_beheng_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.config import (
-    MorrisonConfig, ThompsonConfig, SeifertBehengConfig,
+    MorrisonConfig, SeifertBehengConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.physics.radiation.solar import (
@@ -222,8 +221,7 @@ class TestMicrophysicsADSafety:
     @pytest.mark.parametrize("scheme_fn,config", [
         (seifert_beheng_microphysics, SeifertBehengConfig()),
         (morrison_microphysics, MorrisonConfig()),
-        (thompson_microphysics, ThompsonConfig()),
-    ], ids=["seifert_beheng", "morrison", "thompson"])
+    ], ids=["seifert_beheng", "morrison"])
     def test_grad_finite_in_cloud_free_column(self, scheme_fn, config):
         T, q_v, p_full, p_half, rho, dz = _moist_column()
         hydro = _cloud_free_state()
@@ -242,8 +240,7 @@ class TestMicrophysicsADSafety:
 
     @pytest.mark.parametrize("scheme_fn,config", [
         (morrison_microphysics, MorrisonConfig()),
-        (thompson_microphysics, ThompsonConfig()),
-    ], ids=["morrison", "thompson"])
+    ], ids=["morrison"])
     def test_dN_i_dt_trace_positive_q_i_matches_legacy_limit(self, scheme_fn, config):
         """Forward regression for the ``aggregation * N_i / q_i`` term
         in the trace-positive-ice regime ``q_i ∈ (1e-15, 1e-12]`` —
@@ -319,8 +316,7 @@ class TestMicrophysicsADSafety:
 
     @pytest.mark.parametrize("scheme_fn,config", [
         (morrison_microphysics, MorrisonConfig()),
-        (thompson_microphysics, ThompsonConfig()),
-    ], ids=["morrison", "thompson"])
+    ], ids=["morrison"])
     def test_dN_i_dt_sub_floor_q_i_uses_clip(self, scheme_fn, config):
         """Forward regression in the ``q_i < 1e-15`` sub-clip regime.
         The legacy / production form ``aggregation * N_i / clip(q_i,
@@ -394,8 +390,7 @@ class TestMicrophysicsADSafety:
 
     @pytest.mark.parametrize("scheme_fn,config", [
         (morrison_microphysics, MorrisonConfig()),
-        (thompson_microphysics, ThompsonConfig()),
-    ], ids=["morrison", "thompson"])
+    ], ids=["morrison"])
     def test_dN_i_dt_grad_finite_through_q_i(self, scheme_fn, config):
         """``dN_i_dt`` must stay finite (forward AND VJP) when
         differentiating *through ``q_i``* at exactly zero — the singular

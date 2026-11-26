@@ -12,6 +12,7 @@ Supported model types:
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import Callable
 
@@ -183,6 +184,50 @@ def resolve_prescribed_radiative_bc(forcing, radiation_config, ncol,
     return T_sfc_col, alb_col, emis_col
 
 
+def resolve_land_radiative_bc(forcing, radiation_config, ncol,
+                              T_sfc_col, emis_col):
+    """Apply the land-coupled radiating surface, per column.
+
+    Reads the optional traced forcing pair ``T_sfc_rad`` [K] and
+    ``sfc_emissivity`` [1]: the area blend of the surface tiles' radiating
+    pairs, ``eps * sigma * T_sfc_rad**4 = sum_i f_i * eps_i * sigma *
+    T_rad_i**4`` with ``eps = sum_i f_i * eps_i`` (the coupler's tile-blend
+    rule, ``coupler/tile_fractions.py``).  The solver's upward LW
+    ``eps*sigma*T^4 + (1 - eps)*La`` is then the area sum of the tiles' own
+    grey-body LW, i.e. the LW the land balanced its energy with (tier-5
+    U11-1).  ``forcing["T_sfc"]`` stays the TURBULENT surface temperature.
+
+    Identity when both keys are absent.  Refuses one key without the other
+    (a half-applied blend) and a scheme that takes no per-column emissivity.
+    A prescribed ``sfc_lw_up`` applied afterwards still wins.
+    """
+    if forcing is None:
+        return T_sfc_col, emis_col
+    T_rad = forcing.get("T_sfc_rad")
+    eps = forcing.get("sfc_emissivity")
+    if T_rad is None and eps is None:
+        return T_sfc_col, emis_col
+    if (T_rad is None) != (eps is None):
+        raise ValueError(
+            "the land-coupled radiating surface needs BOTH 'T_sfc_rad' and "
+            "'sfc_emissivity' in the radiation forcing; got only "
+            f"{'T_sfc_rad' if T_rad is not None else 'sfc_emissivity'!r}.")
+    if radiation_config.scheme not in ("rrtmgp", "ecrad_ifs"):
+        raise ValueError(
+            "a per-column surface emissivity (forcing 'T_sfc_rad' / "
+            "'sfc_emissivity', the multilayer land's radiating surface) is "
+            "only consumed by the rrtmgp and ecrad_ifs schemes; radiation "
+            f"scheme is {radiation_config.scheme!r}, which would ignore it "
+            "and break the land LW energy closure.")
+    T_rad = jnp.asarray(T_rad)
+    eps = jnp.asarray(eps)
+    if T_rad.size != ncol or eps.size != ncol:
+        raise ValueError(
+            f"forcing 'T_sfc_rad' / 'sfc_emissivity' have {T_rad.size} / "
+            f"{eps.size} values but this grid has ncol={ncol} columns.")
+    return T_rad.reshape(ncol), eps.reshape(ncol)
+
+
 def _apply_T_sfc_override(T_sfc, override):
     """Apply a per-column ``T_sfc`` override over an arbitrary-shape T_sfc.
 
@@ -276,6 +321,11 @@ def _get_radiation_fn(config: RadiationConfig):
             "radiation scheme 'simple_lw' does not go through "
             "_get_radiation_fn; _call_radiation_backend handles it directly."
         )
+    elif config.scheme == "ecrad_ifs":
+        # Its own builder branch (between-call carry, RADHEATN every step).
+        raise ValueError(
+            "radiation scheme 'ecrad_ifs' does not go through "
+            "_get_radiation_fn; the hydrostatic/MPAS physics_fn handles it.")
     elif config.scheme == "rrtmgp":
         from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
             rrtmgp_radiation,
@@ -623,6 +673,60 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None,
     return q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col
 
 
+def _refuse_hydrostatic_only_cloud_options(radiation_config, lane):
+    """CAM6 snow in the radiation and the specified droplet number are wired
+    on the hydrostatic radiation builder only; refuse them elsewhere at
+    construction instead of on the first radiation call."""
+    cc = radiation_config.cloud_config
+    if radiation_config.cloud_scheme != "none" and (
+            getattr(cc, "cam6_snow_in_rad", False)
+            or getattr(cc, "cam6_rad_specified_nc", False)):
+        raise ValueError(
+            "CloudConfig.cam6_snow_in_rad / cam6_rad_specified_nc are wired on "
+            f"the hydrostatic radiation lane only, not the {lane} lane.")
+
+
+def _specified_droplet_number(radiation_config, micro_leaf, nc_from_aerosol):
+    """MG2's specified droplet number Nc_0 [1/m3] for the radiation when
+    ``CloudConfig.cam6_rad_specified_nc`` is on, else ``None``.  Refused
+    when the droplets are not specified (prognostic number, gSAM predict_Nc
+    or the aerosol-CCN field), where the radiation has its own number."""
+    cc = radiation_config.cloud_config
+    if radiation_config.cloud_scheme == "none" or not getattr(
+            cc, "cam6_rad_specified_nc", False):
+        return None
+    if micro_leaf is None or not hasattr(micro_leaf, "Nc_0"):
+        raise ValueError(
+            "CloudConfig.cam6_rad_specified_nc reads Nc_0 from the run's "
+            "Morrison/MG2 microphysics config; none was passed to the "
+            "radiation factory.")
+    if (getattr(micro_leaf, "prognostic_droplet_number", False)
+            or getattr(micro_leaf, "predict_Nc", False)
+            or getattr(micro_leaf, "nc_from_aerosol", False) or nc_from_aerosol):
+        raise ValueError(
+            "CloudConfig.cam6_rad_specified_nc is for SPECIFIED droplets; "
+            "this run predicts them or takes them from the aerosol field.")
+    return float(micro_leaf.Nc_0)
+
+
+def _extract_snow_columns(state, ncol, nlev):
+    """Snow mass q_s [kg/kg] and number N_s [1/kg] columns for CAM6 snow in
+    the radiation; raises when the state carries no two-moment snow."""
+    tracers = getattr(state, "tracers", None) or {}
+    if "q_s" not in tracers or "N_s" not in tracers:
+        raise ValueError(
+            "CloudConfig.cam6_snow_in_rad reads the snow mass q_s and number "
+            "N_s tracers; this run carries "
+            f"{sorted(k for k in ('q_s', 'N_s') if k in tracers)} (run MG2 "
+            "two-moment snow).")
+    out = []
+    for name in ("q_s", "N_s"):
+        raw = tracers[name]
+        data = raw.data if hasattr(raw, "data") else raw
+        out.append(jnp.maximum(data.reshape(ncol, nlev), 0.0))
+    return tuple(out)
+
+
 def _get_grid_lat_lon(grid_or_mesh, shape_2d):
     """Get latitude/longitude arrays from any grid type.
 
@@ -656,7 +760,8 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                  sw_up_toa=None, lw_up_toa=None,
                                  sw_down_toa=None,
                                  sw_down_sfc=None, lw_down_sfc=None,
-                                 sw_up_toa_clr=None, lw_up_toa_clr=None):
+                                 sw_up_toa_clr=None, lw_up_toa_clr=None,
+                                 rad_absorbed_above_top=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
@@ -739,6 +844,10 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
         # sw_up_toa/lw_up_toa above).  None (the default) => leaf absent.
         sw_up_toa_clr=_toa_field(sw_up_toa_clr, "sw_up_toa_clr_rad"),
         lw_up_toa_clr=_toa_field(lw_up_toa_clr, "lw_up_toa_clr_rad"),
+        # Net radiation absorbed above the model top [W/m^2] (energy-budget
+        # sink, CAM overhead layer); None when the backend does not compute it.
+        rad_absorbed_above_top=_toa_field(rad_absorbed_above_top,
+                                          "rad_absorbed_above_top"),
     )
 
 
@@ -809,10 +918,15 @@ def _column_constraint(column_mesh, ncol: int):
     """Sharding constraint for arrays whose leading axis is the ``ncol`` columns.
 
     Every other leaf (scalars, per-band tables, None) passes through unchanged.
+    The columns are split over ALL axes of ``column_mesh`` (a 1-D ``'col'``
+    mesh, or the dycore's own step mesh, e.g. the duo ``'face'`` mesh or its
+    3-D window mesh: one mesh per compiled physics step).
     """
     from jax.sharding import NamedSharding, PartitionSpec as P
 
-    n_dev = column_mesh.shape["col"]
+    names = column_mesh.axis_names
+    axis = names[0] if len(names) == 1 else tuple(names)
+    n_dev = column_mesh.size
     if ncol % n_dev:
         raise ValueError(
             f"column_mesh: solver column count {ncol} is not divisible by "
@@ -820,12 +934,25 @@ def _column_constraint(column_mesh, ncol: int):
 
     def cons(x):
         if getattr(x, "ndim", 0) >= 1 and x.shape[0] == ncol:
-            spec = P("col", *((None,) * (x.ndim - 1)))
+            spec = P(axis, *((None,) * (x.ndim - 1)))
             return jax.lax.with_sharding_constraint(
                 x, NamedSharding(column_mesh, spec))
         return x
 
     return cons
+
+
+@functools.lru_cache(maxsize=4)
+def _snow_optics_table(path: str):
+    """The CAM6 Mitchell table for snow, loaded once per path (checksum
+    pinned in ``mitchell_ice_optics``)."""
+    if not path:
+        raise ValueError(
+            "CloudConfig.cam6_snow_in_rad needs cam6_snow_optics_file: the "
+            "path of CESM inputdata atm/cam/physprops/iceoptics_c080917.nc")
+    from legoesm.atmosphere.physics.radiation.rrtmgp.optics.mitchell_ice_optics import (
+        load_mitchell_ice_optics)
+    return load_mitchell_ice_optics(path)
 
 
 def _call_radiation_backend(
@@ -855,6 +982,7 @@ def _call_radiation_backend(
     o3_top_vmr: jnp.ndarray | None = None,
     aerosol_od: jnp.ndarray | None = None,
     aerosol_lw_od: jnp.ndarray | None = None,
+    aerosol_sw_volc: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
     eccf: float | jnp.ndarray = 1.0,
     tsi: jnp.ndarray | None = None,
@@ -862,11 +990,16 @@ def _call_radiation_backend(
     conv_precip: jnp.ndarray | None = None,
     conv_mass_flux_up: jnp.ndarray | None = None,
     conv_icwmr: jnp.ndarray | None = None,
+    mf_cloudfrac: jnp.ndarray | None = None,
+    mf_qc: jnp.ndarray | None = None,
     clear_sky_toa: bool = False,
     column_mesh=None,
     clubb_config=None,
     mg2_ice_dcs_m: float | None = None,
     mg2_ice_slope_log_width: float | None = None,
+    q_snow: jnp.ndarray | None = None,
+    n_snow: jnp.ndarray | None = None,
+    n_cloud_specified: float | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -920,6 +1053,10 @@ def _call_radiation_backend(
         ``aerosol_absorption_optical_depth_lw``.  ``None`` (default) is a
         no-op in the solver — byte-identical to no volcanic LW aerosol.
         Ignored by gray radiation.
+    aerosol_sw_volc : jnp.ndarray or None
+        Volcanic SHORTWAVE aerosol with its own per-band optics from the
+        CMIP6 file, (ncol, nlev, 3, n_bnd_sw) moments (tau, tau*ssa,
+        tau*ssa*g), passed to the solver as ``aerosol_volcanic_moments_sw``.
     solar_spectral_fraction : jnp.ndarray or None
         Per-g-point solar weights for spectral solar-cycle forcing,
         passed through to ``solve_columns``.
@@ -936,6 +1073,11 @@ def _call_radiation_backend(
             "open_ocean_frac (direct/diffuse ocean albedo split) is wired for "
             f"the rrtmgp solver only; scheme {radiation_config.scheme!r} has a "
             "single surface albedo and would silently drop the direct beam.")
+    if aerosol_sw_volc is not None and radiation_config.scheme != "rrtmgp":
+        raise ValueError(
+            "aerosol_sw_volc (volcanic SW per-band optics) is wired for the "
+            f"rrtmgp solver only; scheme {radiation_config.scheme!r} would "
+            "silently drop the volcanic shortwave aerosol.")
     if radiation_config.scheme == "simple_lw":
         return _simple_lw_radiation(
             T=T, p_half=p_half, q_v=q_v, q_cloud=q_cloud, q_ice=q_ice,
@@ -1056,10 +1198,17 @@ def _call_radiation_backend(
             lat=lat,
             conv_mass_flux_up=conv_mass_flux_up,
             conv_icwmr=conv_icwmr,
+            mf_cloudfrac=mf_cloudfrac,
+            mf_qc=mf_qc,
             p_half=p_half,
             clubb_config=clubb_config,
+            subcolumn_inhomogeneity=(getattr(cloud_config, "cloud_vertical_overlap_optics",
+                                             "none") == "max_random"),
             mg2_ice_dcs_m=mg2_ice_dcs_m,
             mg2_ice_slope_log_width=mg2_ice_slope_log_width,
+            q_snow=q_snow,
+            n_snow=n_snow,
+            n_cloud_specified=n_cloud_specified,
         )
         if cloud_config.cap_floor_on:
             from legoesm.atmosphere.physics.clouds.cloud_fraction import apply_cap_cloud_floor
@@ -1095,6 +1244,8 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    if aerosol_sw_volc is not None:
+        _rad_kwargs["aerosol_volcanic_moments_sw"] = aerosol_sw_volc
     if cloud_config is not None:
         # One bulk ice density for the PSD radius and the optics size (CAM6).
         _rad_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
@@ -1125,11 +1276,25 @@ def _call_radiation_backend(
         # CAM draws different uniforms in every column; the per-column shift
         # (seeded from the bottom pressure, as for mcica) does the same, so a
         # layer with cf < 1/n_sub is cloudy in some columns instead of never.
+        _shift = _sub.cam_seed_shift(p_full)
         _mask = _sub.generate_subcolumns(
-            cloud_props.cloud_fraction, _n_sub, shift=_sub.cam_seed_shift(p_full),
+            cloud_props.cloud_fraction, _n_sub, shift=_shift,
             width=float(cloud_config.cloud_subcolumn_mask_width))
-        _lwp, _iwp = _sub.subcolumn_paths(
-            _mask, cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
+        if cloud_config.cloud_optics_inhomogeneity == "two_region":
+            # ecRad McICA gamma-PDF scaling of each cloudy cell's optical depth
+            # (liquid and ice alike), replacing the mask in the paths.
+            from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+                cam_interface_temperature)
+            _od = _sub.ecrad_inhomogeneity_scaling(
+                _mask, cloud_config.cloud_fsd, lat, p_half,
+                cam_interface_temperature(T, p_full, p_half, sfc_temperature), shift=_shift)
+            _lwp, _iwp = (
+                jnp.reshape(_od * ic[None], (_n_sub * T.shape[0], T.shape[1]))
+                for ic in _sub.in_cloud_paths(
+                    cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp))
+        else:
+            _lwp, _iwp = _sub.subcolumn_paths(
+                _mask, cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
         _rad_kwargs = _sub.expand_kwargs(_rad_kwargs, _n_sub, _ncol)
         _rad_kwargs["cloud_path_liq"] = _lwp
         _rad_kwargs["cloud_path_ice"] = _iwp
@@ -1143,6 +1308,26 @@ def _call_radiation_backend(
             cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
         _rad_kwargs["mcica_cloud_fraction"] = cloud_props.cloud_fraction
         _rad_kwargs["mcica_mask_width"] = float(cloud_config.cloud_subcolumn_mask_width)
+        if cloud_props.cldfsnow is not None:
+            # CAM6 snow (radiation.F90:928-993, 1057-1067): McICA samples
+            # cldfprime = max(CLD, cldfsnow), and a cloudy subcolumn sees
+            # (cldfsnow snow + CLD cloud)/cldfprime of each optical property.
+            # Every optical property is linear in its path, so the weights go
+            # on the in-cloud paths.
+            _cld = cloud_props.cloud_fraction
+            _cfp = jnp.maximum(_cld, cloud_props.cldfsnow)
+            _pos = _cfp > 0.0
+            _den = jnp.where(_pos, _cfp, 1.0)
+            _w_cld = jnp.where(_pos, _cld / _den, 0.0)
+            _w_snow = jnp.where(_pos, cloud_props.cldfsnow / _den, 0.0)
+            _rad_kwargs["cloud_path_liq"] = _rad_kwargs["cloud_path_liq"] * _w_cld
+            _rad_kwargs["cloud_path_ice"] = _rad_kwargs["cloud_path_ice"] * _w_cld
+            _rad_kwargs["cloud_path_snow"] = cloud_props.icswp * _w_snow
+            _rad_kwargs["cloud_snow_weight"] = _w_snow
+            _rad_kwargs["cloud_d_eff_snow"] = cloud_props.des
+            _rad_kwargs["snow_optics"] = _snow_optics_table(
+                cloud_config.cam6_snow_optics_file)
+            _rad_kwargs["mcica_cloud_fraction"] = _cfp
     elif _ov != "none":
         # Dispatch hardening: a typo must never silently run the legacy
         # single-column path (validated on the static config value).
@@ -1150,6 +1335,11 @@ def _call_radiation_backend(
             f"unknown cloud_vertical_overlap_optics {_ov!r}; "
             "expected 'none', 'max_random' or 'mcica'"
         )
+    if (cloud_props is not None and cloud_props.cldfsnow is not None
+            and _ov != "mcica"):
+        raise ValueError(
+            "CloudConfig.cam6_snow_in_rad is wired for the CAM6 McICA "
+            f"overlap only (cloud_vertical_overlap_optics='mcica'); got {_ov!r}.")
 
     # Column-chunk the rrtmgp solve when configured: the per-block body
     # compiles ONCE at ``column_chunk_size`` columns, capping the highly
@@ -1199,6 +1389,9 @@ def _call_radiation_backend(
             lw_flux_up_toa_clr=result.lw_flux_up_toa_clr,
             sw_flux_up_toa_clr=(None if result.sw_flux_up_toa_clr is None
                                 else result.sw_flux_up_toa_clr * _sw_scale),
+            sw_absorbed_above_top=(None if result.sw_absorbed_above_top is None
+                                   else result.sw_absorbed_above_top * _sw_scale),
+            lw_absorbed_above_top=result.lw_absorbed_above_top,
         )
 
     # Carry the prescribed TOA insolation (this scope's per-column
@@ -1265,8 +1458,22 @@ def make_radiation_physics(
     use_clubb_cloud_fraction: bool = False,
     clubb_config=None,
     micro_leaf_config=None,
+    cloud_fraction_tracer: str | None = None,
+    ecrad_ifs_full_call: bool = True,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
+
+    ``ecrad_ifs_full_call`` (``scheme="ecrad_ifs"``, MPAS lane only): whether
+    this variant makes the full radiation call (the TSI, gas and ozone inputs
+    come from the input4MIPs ``forcing`` keys every call, user 2026-11-04,
+    votes M1-M10) (static; ``False`` = RADHEATN on the carry only,
+    the held-radiation steps, votes L4a/S4a).  The fn then writes the packed
+    carry to ``PhysicsState.ecrad_carry``.
+
+    ``cloud_fraction_tracer`` (MPAS lane only): the name of an ADVECTED
+    prognostic cloud-fraction tracer (IFS CLOUDSC's ``cloud_fraction_ifs``)
+    routed to the cloud optics through the same ``cloud_fraction_override``
+    the CLUBB carry uses; ``None`` (default) leaves radiation unchanged.
 
     Parameters
     ----------
@@ -1278,9 +1485,11 @@ def make_radiation_physics(
     column_mesh : jax.sharding.Mesh or None, optional
         Issue #273 follow-up.  When supplied, the per-column radiation
         kernel (which is naturally embarrassingly parallel across
-        columns) is sharded across the mesh's ``'col'`` axis.  Use
-        ``legoesm.parallel.column_shard.create_column_mesh`` to build
-        one.  Required invariant: ``ncol`` (the flattened horizontal
+        columns) is sharded across all of the mesh's axes.  A dycore that
+        runs on its own step mesh must pass that mesh (one mesh per
+        compiled step; see ``model_driver.radiation_column_mesh``);
+        otherwise ``legoesm.parallel.column_shard.create_column_mesh``
+        builds a 1-D ``'col'`` mesh.  Required invariant: ``ncol`` (the flattened horizontal
         column count = ``6 · n · n`` on the cubed sphere) must be
         divisible by the mesh's device count.  Default ``None``
         preserves single-mesh behavior bit-exact.
@@ -1383,6 +1592,24 @@ def make_radiation_physics(
             radiation_config.ozone.ml_weights_path
         )
 
+    if cloud_fraction_tracer is not None and model_type != "mpas":
+        raise ValueError(
+            "cloud_fraction_tracer (the advected IFS cloud fraction) is wired "
+            f"on the MPAS lane only; got model_type={model_type!r}.")
+    if radiation_config.scheme == "ecrad_ifs":
+        if model_type != "mpas":
+            raise ValueError(
+                "radiation scheme 'ecrad_ifs' is wired on the MPAS column lane "
+                f"only (vote L2a); got model_type={model_type!r}.")
+        if cloud_fraction_tracer is None:
+            raise ValueError(
+                "radiation scheme 'ecrad_ifs' reads CLOUDSC's advected "
+                "cloud_fraction_ifs (microphysics='ifs_cloudsc'); none is "
+                "routed.")
+        if not radiation_config.diurnal_cycle:
+            raise ValueError(
+                "radiation scheme 'ecrad_ifs' needs the instantaneous solar "
+                "zenith angle (RadiationConfig.diurnal_cycle=True).")
     if model_type == "hydrostatic":
         return _make_hydrostatic_radiation(radiation_config, rrtmgp_solver,
                                             ml_ozone_coefs=ml_ozone_coefs,
@@ -1418,7 +1645,9 @@ def make_radiation_physics(
                                      nc_from_aerosol=nc_from_aerosol,
                                      use_clubb_cloud_fraction=use_clubb_cloud_fraction,
                                      clubb_config=clubb_config,
-                                     micro_leaf_config=micro_leaf_config)
+                                     micro_leaf_config=micro_leaf_config,
+                                     cloud_fraction_tracer=cloud_fraction_tracer,
+                                     ecrad_ifs_full_call=ecrad_ifs_full_call)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -1431,6 +1660,20 @@ def make_radiation_physics(
 # Hydrostatic PE (cubed-sphere, lat-lon, and MPAS Voronoi)
 # ===========================================================================
 
+def full_column_cloud_fraction_override(radiation_config: RadiationConfig):
+    """The radiation config with ``cloud_fraction_override`` applied over the
+    WHOLE column: an advected prognostic fraction (IFS CLOUDSC) replaces the
+    diagnosed one at every level, without the CLUBB boundary-layer level gate
+    (vote VC24).  Unchanged when clouds are off."""
+    if radiation_config.cloud_scheme == "none":
+        return radiation_config
+    cc = (radiation_config.cloud_config
+          if radiation_config.cloud_config is not None
+          else CloudConfig(scheme=radiation_config.cloud_scheme))
+    return radiation_config._replace(
+        cloud_config=cc._replace(clubb_cf_override_p_min_pa=0.0))
+
+
 def _make_hydrostatic_radiation(
     radiation_config: RadiationConfig,
     rrtmgp_solver=None,
@@ -1441,6 +1684,8 @@ def _make_hydrostatic_radiation(
     use_clubb_cloud_fraction: bool = False,
     clubb_config=None,
     micro_leaf_config=None,
+    cloud_fraction_tracer: str | None = None,
+    ecrad_ifs_full_call: bool = True,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -1451,10 +1696,10 @@ def _make_hydrostatic_radiation(
     Signature: (state, grid_or_mesh, sigma_coord) -> HydrostaticTendencies
 
     When ``column_mesh`` is provided (issue #273 follow-up), the
-    per-column radiation kernel runs sharded across the mesh's
-    ``'col'`` axis.  Caller is responsible for ensuring the flattened
-    column count ``ncol = ∏ shape_2d`` divides the mesh's device
-    count.
+    per-column radiation kernel runs sharded across all of the mesh's
+    axes (a 1-D ``'col'`` mesh, or the dycore's own step mesh).  Caller
+    is responsible for ensuring the flattened column count
+    ``ncol = ∏ shape_2d`` is divisible by the mesh's device count.
 
     When the attached cloud config enables ``convective_cloud``, the fn
     reads the LAGGED ``phys_state.conv_precip`` carry (published by the
@@ -1507,6 +1752,20 @@ def _make_hydrostatic_radiation(
             "cloud scheme 'cam6_clubb' takes its liquid cloud fraction from "
             "the CLUBB carry, which is routed only with "
             "RadiationConfig.use_clubb_cloud_fraction=True; got False.")
+    if cloud_fraction_tracer is not None and use_clubb_cloud_fraction:
+        raise ValueError(
+            "two cloud-fraction sources for the optics: the advected tracer "
+            f"{cloud_fraction_tracer!r} and the CLUBB carry "
+            "(use_clubb_cloud_fraction=True); select one.")
+    if cloud_fraction_tracer is not None:
+        radiation_config = full_column_cloud_fraction_override(radiation_config)
+    # CAM6 snow in the radiation reads the snow tracers (static gate).
+    _cam6_snow_active = _cam6_cf_active and bool(getattr(
+        radiation_config.cloud_config, "cam6_snow_in_rad", False))
+    # Specified droplets (MG2 nccons): the radiation takes the microphysics'
+    # own Nc_0 instead of the N_c tracer (CloudConfig.cam6_rad_specified_nc).
+    _nc_specified = _specified_droplet_number(
+        radiation_config, micro_leaf_config, nc_from_aerosol)
     # Clear-sky TOA diagnostic (#843 lean-lane port): a STATIC clouds-off
     # config variant for the second radiation pass.  ``cloud_scheme="none"``
     # skips the cloud diagnosis entirely (no cloud kwargs -> the solver's
@@ -1521,6 +1780,13 @@ def _make_hydrostatic_radiation(
     _clr_sky_cfg = (
         radiation_config._replace(cloud_scheme="none", cloud_config=None)
         if radiation_config.clear_sky_diag else None)
+    # OpenIFS 49r1 ecRad (scheme "ecrad_ifs"): its own column step (votes
+    # L3-L11, S1-S6), reached after the shared column preparation below.
+    _ecrad = radiation_config.scheme == "ecrad_ifs"
+    if _ecrad:
+        _ecrad_ifs_physics = _make_ecrad_ifs_step(
+            radiation_config, ecrad_ifs_full_call,
+            column_mesh)
     # RRTMGP computes the clear-sky fluxes inside the all-sky solve instead of
     # a second solve; gray/simple_lw keep the second pass.
     _clr_sky_fused = (_clr_sky_cfg is not None
@@ -1571,6 +1837,9 @@ def _make_hydrostatic_radiation(
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
+        )
+        _aer_volc_ext = (
+            forcing.get("aerosol_sw_volc") if forcing is not None else None
         )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
         # Tile-blended SURFACE SHORTWAVE ALBEDO as a per-step TRACED forcing
@@ -1678,6 +1947,10 @@ def _make_hydrostatic_radiation(
                     "forcing carries both a prescribed surface shortwave "
                     "(sfc_sw_up) and open_ocean_frac; the prescribed albedo "
                     "would be overwritten on the direct beam.")
+        # Land-coupled radiating surface (multilayer land, U11-1); a
+        # prescribed LW below still wins.
+        T_sfc_col, _emis_col = resolve_land_radiative_bc(
+            forcing, radiation_config, ncol, T_sfc_col, _emis_col)
         T_sfc_col, _alb_col, _emis_col = resolve_prescribed_radiative_bc(
             forcing, radiation_config, ncol, T_sfc_col, _alb_col, _emis_col)
 
@@ -1687,6 +1960,9 @@ def _make_hydrostatic_radiation(
                 rho_col=_rho_for_number_conversion(
                     state, ncol, nlev, T_col, p_full_col))
         )
+        q_snow_col = n_snow_col = None
+        if _cam6_snow_active:
+            q_snow_col, n_snow_col = _extract_snow_columns(state, ncol, nlev)
 
         # Aerosol-CCN droplet number for the cloud-optics PSD (Twomey first
         # indirect effect): override the (dead-zeros / constant-r_eff) N_c
@@ -1752,6 +2028,16 @@ def _make_hydrostatic_radiation(
             _cf_ovr = getattr(phys_state, "cloud_fraction", None)
             if _cf_ovr is not None:
                 _cf_ovr = _cf_ovr.reshape(T_col.shape)
+        if cloud_fraction_tracer is not None:
+            # the advected prognostic fraction (IFS CLOUDSC), as the state
+            # carries it at the start of this physics call
+            if (state.tracers is None
+                    or cloud_fraction_tracer not in state.tracers):
+                raise ValueError(
+                    f"radiation reads the advected {cloud_fraction_tracer!r} "
+                    "tracer, which the state does not carry.")
+            _cf_ovr = state.tracers[cloud_fraction_tracer].data.reshape(
+                T_col.shape)
 
         # Convective-precip READ (standalone-path Slingo-1987-inspired surrogate cumulus fraction):
         # the convection module published its column-integrated in-updraft
@@ -1769,6 +2055,7 @@ def _make_hydrostatic_radiation(
         # CAM6 deepcu inputs (lagged carry, same convention as conv_precip).
         _conv_mf_col = None
         _conv_icwmr_col = None
+        _mf_cf_col = _mf_qc_col = None
         if _cam6_cf_active and phys_state is not None:
             _conv_mf_col = getattr(phys_state, "conv_mass_flux_up", None)
             _conv_icwmr_col = getattr(phys_state, "conv_icwmr", None)
@@ -1776,6 +2063,11 @@ def _make_hydrostatic_radiation(
                 _conv_mf_col = _conv_mf_col.reshape(ncol, nlev + 1)
             if _conv_icwmr_col is not None:
                 _conv_icwmr_col = _conv_icwmr_col.reshape(T_col.shape)
+            # CAM7 CLUBB-MF plume cloud (lagged carry, read only when the
+            # cloud config's hookup is on).
+            if getattr(radiation_config.cloud_config, "clubb_mf_cloud", False):
+                _mf_cf_col = phys_state.mf_cloudfrac.reshape(T_col.shape)
+                _mf_qc_col = phys_state.mf_qc.reshape(T_col.shape)
 
         # Issue #273 follow-up: optionally shard the per-column radiation
         # workload across ``column_mesh`` so a 4×A100 (or any device
@@ -1785,7 +2077,7 @@ def _make_hydrostatic_radiation(
         # backend kernels are purely functional over the column axis.
         if column_mesh is not None:
             from legoesm.parallel.column_shard import shard_columns
-            n_dev = column_mesh.shape["col"]
+            n_dev = column_mesh.size
             if ncol % n_dev != 0:
                 raise ValueError(
                     f"column_mesh requires ncol={ncol} divisible by "
@@ -1805,6 +2097,8 @@ def _make_hydrostatic_radiation(
             # (uniform) albedo has no column axis and stays replicated.
             if _alb_col is not None and _alb_col.ndim > 0:
                 _alb_col = shard_columns(_alb_col, column_mesh)
+            if _emis_col is not None and jnp.ndim(_emis_col) > 0:
+                _emis_col = shard_columns(_emis_col, column_mesh)
             if _ocn_frac_col is not None:
                 _ocn_frac_col = shard_columns(_ocn_frac_col, column_mesh)
             if q_v_col is not None:
@@ -1827,10 +2121,25 @@ def _make_hydrostatic_radiation(
                 _aer_ext = shard_columns(_aer_ext, column_mesh)
             if _aer_lw_ext is not None:
                 _aer_lw_ext = shard_columns(_aer_lw_ext, column_mesh)
+            if _aer_volc_ext is not None:
+                _aer_volc_ext = shard_columns(_aer_volc_ext, column_mesh)
             if _cf_ovr is not None:
                 _cf_ovr = shard_columns(_cf_ovr, column_mesh)
+            if q_snow_col is not None:
+                q_snow_col = shard_columns(q_snow_col, column_mesh)
+                n_snow_col = shard_columns(n_snow_col, column_mesh)
             if _conv_precip_col is not None:
                 _conv_precip_col = shard_columns(_conv_precip_col, column_mesh)
+
+        if _ecrad:
+            return _ecrad_ifs_physics(
+                state, grid_or_mesh, phys_state, forcing, shape_3d, shape_2d,
+                ncol=ncol, nlev=nlev, T_col=T_col, p_full_col=p_full_col,
+                p_half_col=p_half_col, T_sfc_col=T_sfc_col, lat_col=lat_col,
+                lon_col=lon_col, cos_sza_col=cos_sza_col, alb_col=_alb_col,
+                ocn_frac_col=_ocn_frac_col, emis_col=_emis_col, q_v_col=q_v_col,
+                q_cloud_col=q_cloud_col, q_ice_col=q_ice_col, cf_col=_cf_ovr,
+                eccf=eccf, tsi=_tsi_ext, o3_vmr_col=_o3_ext, ghg_vmr=_ghg_ext)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -1859,17 +2168,23 @@ def _make_hydrostatic_radiation(
             o3_top_vmr=_o3_top_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
+            aerosol_sw_volc=_aer_volc_ext,
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
             conv_precip=_conv_precip_col,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            mf_cloudfrac=_mf_cf_col,
+            mf_qc=_mf_qc_col,
             solar_spectral_fraction=_ssf_ext,
             tsi=_tsi_ext,
             clear_sky_toa=_clr_sky_fused,
             clubb_config=clubb_config,
             mg2_ice_dcs_m=_mg2_ice_dcs_m,
             mg2_ice_slope_log_width=_mg2_ice_slope_w,
+            q_snow=q_snow_col,
+            n_snow=n_snow_col,
+            n_cloud_specified=_nc_specified,
         )
 
         # #843 lean-lane clear-sky second pass: SAME column state and
@@ -1916,6 +2231,7 @@ def _make_hydrostatic_radiation(
                 o3_top_vmr=_o3_top_ext,
                 aerosol_od=_aer_ext,
                 aerosol_lw_od=_aer_lw_ext,
+                aerosol_sw_volc=_aer_volc_ext,
                 ghg_vmr_override=_ghg_ext,
                 cloud_fraction_override=None,
                 conv_precip=None,
@@ -1954,7 +2270,12 @@ def _make_hydrostatic_radiation(
             sw_down_sfc=rad_out.sw_flux_down[:, -1],
             lw_down_sfc=rad_out.lw_flux_down[:, -1],
             sw_up_toa_clr=sw_up_toa_clr,
-            lw_up_toa_clr=lw_up_toa_clr)
+            lw_up_toa_clr=lw_up_toa_clr,
+            rad_absorbed_above_top=(
+                None if (rad_out.sw_absorbed_above_top is None
+                         or rad_out.lw_absorbed_above_top is None)
+                else rad_out.sw_absorbed_above_top
+                + rad_out.lw_absorbed_above_top))
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override
@@ -1972,7 +2293,161 @@ def _make_hydrostatic_radiation(
     # forwarded => the RH grid-scale cloud path is unchanged).
     if use_clubb_cloud_fraction or _conv_cloud_active:
         physics_fn._wants_phys_state_ro = True
+    # ecrad_ifs writes its between-call carry (PhysicsState.ecrad_carry):
+    # combined.py registers it as an (fn, accepts_ps=True, "ecrad_carry")
+    # module, so it returns (tendencies, packed carry).
+    physics_fn._writes_phys_state = _ecrad
     return physics_fn
+
+
+# ecRad gas name -> the input4MIPs loader's ``ghg_vmr`` key (vote M4a: the
+# loader's "cfc22" is HCFC-22; its cf4 is not an ecRad gas).
+_ECRAD_IFS_GHG_KEYS = {"co2": "co2", "ch4": "ch4", "n2o": "n2o",
+                       "cfc11": "cfc11", "cfc12": "cfc12",
+                       "hcfc22": "cfc22", "ccl4": "ccl4"}
+
+
+def _ecrad_ifs_sources(full_call, tsi, eccf, o3_vmr, ghg_vmr, dtype):
+    """EcradIFSSources from the input4MIPs forcing (user 2026-11-04, votes
+    M1-M10): RII0 = TSI x the lane's Earth-Sun factor (every step, RADHEATN
+    reads it); on the full call the ozone and gas mole fractions -> mass
+    mixing ratios with ecRad's molar masses (L15a).  A missing key raises
+    (M9a); a gas absent from ``ghg_vmr`` is left out, and the lane step
+    raises on it (L16b)."""
+    from legoesm.atmosphere.physics.radiation.ecrad_ifs.config import (
+        EcradIFSSources)
+    if tsi is None:
+        raise ValueError(
+            "radiation 'ecrad_ifs' needs forcing['tsi'] (the input4MIPs TSI; "
+            "solar_source 'file' or 'spectral_file').")
+    rii0 = (jnp.asarray(tsi) * jnp.asarray(eccf)).astype(dtype)
+    if not full_call:
+        return EcradIFSSources(solar_irradiance=rii0, gas_mmr={}, o3_mmr=None)
+    for key, val in (("o3_vmr", o3_vmr), ("ghg_vmr", ghg_vmr)):
+        if val is None:
+            raise ValueError(
+                f"radiation 'ecrad_ifs' needs forcing[{key!r}] (input4MIPs "
+                "ozone/GHG; ozone_forcing and ghg_forcing 'external').")
+    to_mmr = lambda name, x: (  # noqa: E731
+        jnp.asarray(x) * (constants.M_gas_ecrad[name] / constants.M_air_ecrad)
+    ).astype(dtype)
+    gas = {name: to_mmr(name, ghg_vmr[key])
+           for name, key in _ECRAD_IFS_GHG_KEYS.items() if key in ghg_vmr}
+    return EcradIFSSources(solar_irradiance=rii0, gas_mmr=gas,
+                           o3_mmr=to_mmr("o3", o3_vmr))
+
+
+def _make_ecrad_ifs_step(radiation_config, full_call, column_mesh):
+    """The ecrad_ifs column step of the hydrostatic/MPAS physics_fn: the
+    shared column preparation hands it T, pressures, skin T, mu0, surface
+    albedo/emissivity and the condensate; it reads q_r, q_s, the land
+    fraction, the carry and the seed time, runs
+    :func:`~legoesm.atmosphere.physics.radiation.ecrad_ifs.lane.step` and
+    packs the tendencies.  Every missing input raises (vote S6a)."""
+    from legoesm.atmosphere.physics.convection.integration import (
+        land_fraction_for_columns)
+    from legoesm.atmosphere.physics.radiation.ecrad_ifs import lane as _lane
+    cfg = radiation_config.ecrad_ifs
+    _rcfg = radiation_config.rrtmgp
+
+    def run(state, grid_or_mesh, phys_state, forcing, shape_3d, shape_2d, *,
+            ncol, nlev, T_col, p_full_col, p_half_col, T_sfc_col, lat_col,
+            lon_col, cos_sza_col, alb_col, ocn_frac_col, emis_col, q_v_col,
+            q_cloud_col, q_ice_col, cf_col, eccf, tsi, o3_vmr_col, ghg_vmr):
+        _need = ("q_v", "q_c", "q_i", "q_r", "q_s", "cloud_fraction_ifs")
+        _missing = [n for n in _need
+                    if state.tracers is None or n not in state.tracers]
+        if _missing:
+            raise ValueError(
+                f"radiation 'ecrad_ifs' needs the tracers {_need}; missing "
+                f"{_missing}.")
+        if cos_sza_col is None:
+            raise ValueError("radiation 'ecrad_ifs' needs cos(solar zenith).")
+        land = land_fraction_for_columns(grid_or_mesh, ncol)
+        if land is None:
+            raise ValueError(
+                "radiation 'ecrad_ifs' needs the lane's land fraction "
+                "(grid.land_frac, RADIATION_SCHEME's PLAND_SEA_MASK).")
+        for _k in ("model_seconds", "model_start_day_of_month"):
+            if forcing is None or forcing.get(_k) is None:
+                raise ValueError(
+                    f"radiation 'ecrad_ifs' needs forcing[{_k!r}] (McICA "
+                    "seed time, vote S3a).")
+        packed = None
+        if not full_call:
+            packed = None if phys_state is None else phys_state.ecrad_carry
+            if packed is None:
+                raise ValueError(
+                    "radiation 'ecrad_ifs' held step without a carry "
+                    "(PhysicsState.ecrad_carry); the first step of a run "
+                    "must be a full radiation step.")
+        _col = lambda x: x.data.reshape(ncol, nlev)  # noqa: E731
+        q_r, q_s = _col(state.tracers["q_r"]), _col(state.tracers["q_s"])
+        alb = (jnp.broadcast_to(jnp.asarray(_rcfg.sfc_albedo, T_col.dtype), (ncol,))
+               if alb_col is None else jnp.broadcast_to(alb_col, (ncol,)))
+        alb_dir = (alb if ocn_frac_col is None
+                   else cesm_direct_surface_albedo(alb, ocn_frac_col, cos_sza_col))
+        emis = (jnp.broadcast_to(jnp.asarray(_rcfg.sfc_emissivity, T_col.dtype), (ncol,))
+                if emis_col is None else jnp.broadcast_to(emis_col, (ncol,)))
+        land = jnp.asarray(land, T_col.dtype).reshape(ncol)
+        if column_mesh is not None:
+            from legoesm.parallel.column_shard import shard_columns
+            q_r, q_s, alb, alb_dir, emis, land = (
+                shard_columns(x, column_mesh)
+                for x in (q_r, q_s, alb, alb_dir, emis, land))
+            if packed is not None:
+                packed = shard_columns(packed, column_mesh)
+        sources = _ecrad_ifs_sources(full_call, tsi, eccf, o3_vmr_col,
+                                     ghg_vmr, T_col.dtype)
+        aerosol = None
+        if full_call:
+            # IFS 49r1 NAERMACC=1 aerosols (user 2026-11-04 item 3, votes
+            # C1-C12): the day's column mass / cumulative fraction from the
+            # driver, the traced RADACT + profile half here, with the
+            # half-level T the step hands ecRad (C9a) and its sharpness (C10a)
+            from legoesm.atmosphere.physics.radiation.ecrad_ifs import (
+                ifs_aerosol)
+            _aer = {k: None if forcing is None else forcing.get(k)
+                    for k in ("ecrad_aerosol_column_mass",
+                              "ecrad_aerosol_cum_fraction")}
+            for _k, _v in _aer.items():
+                if _v is None:
+                    raise ValueError(
+                        f"radiation 'ecrad_ifs' needs forcing[{_k!r}] (the IFS "
+                        "CAMS aerosol climatology, ecrad_ifs_aerosol_file).")
+            cm = jnp.asarray(_aer["ecrad_aerosol_column_mass"], T_col.dtype)
+            if column_mesh is not None:
+                cm = shard_columns(cm, column_mesh)
+            aerosol = ifs_aerosol.macc_inputs(
+                cm, jnp.asarray(_aer["ecrad_aerosol_cum_fraction"], T_col.dtype),
+                p_half_col,
+                _lane.half_level_temperature(T_col, p_full_col, p_half_col,
+                                             T_sfc_col),
+                cfg.sharpness)
+        dT, fl, carry = _lane.step(
+            cfg, sources, full_call=full_call, packed_carry=packed,
+            T=T_col, p_full=p_full_col, p_half=p_half_col, T_skin=T_sfc_col,
+            lat=lat_col, lon=lon_col, q=q_v_col, q_liquid=q_cloud_col,
+            q_ice=q_ice_col, q_rain=q_r, q_snow=q_s, cloud_fraction=cf_col,
+            land_fraction=land, mu0=cos_sza_col, albedo_dif=alb,
+            albedo_dir=alb_dir, emissivity=emis,
+            iday=forcing["model_start_day_of_month"],
+            elapsed_s=forcing["model_seconds"], g=constants.g,
+            c_pd=constants.c_pd, aerosol=aerosol)
+        tend = _pack_hydrostatic_tendencies(
+            dT.reshape(shape_3d), state, shape_3d, shape_2d,
+            sw_net_sfc=fl["sw_net_sfc"], lw_net_sfc=fl["lw_net_sfc"],
+            sw_up_toa=fl["sw_up_toa"], lw_up_toa=fl["lw_up_toa"],
+            sw_down_toa=fl["sw_down_toa"], sw_down_sfc=fl["sw_down_sfc"],
+            lw_down_sfc=fl["lw_down_sfc"],
+            sw_up_toa_clr=(fl["sw_up_toa_clr"]
+                           if radiation_config.clear_sky_diag else None),
+            lw_up_toa_clr=(fl["lw_up_toa_clr"]
+                           if radiation_config.clear_sky_diag else None))
+        return tend, carry
+
+    return run
+
 
 # MPAS uses the same unified hydrostatic radiation function.
 _make_mpas_radiation = _make_hydrostatic_radiation
@@ -1991,6 +2466,7 @@ def _make_nonhydrostatic_radiation(
 
     Signature: (state, grid, height_coord, terrain_metric) -> NonHydrostaticTendencies
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "nonhydrostatic")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
@@ -2313,7 +2789,10 @@ def _mc3d_plane_heating(
     key = _t_base
     dT_dt_sw, _sfc_sw, _tod = plane_adapter.compute_plane_sw_heating(
         tau_td, ssa_td, g_td, incident_flux, grid, z_half_td, rho_total,
-        mu0=mu0, albedo=gray_cfg.sfc_albedo, config=mc_cfg, key=key,
+        mu0=mu0, albedo=gray_cfg.sfc_albedo,
+        # incident_flux is the unattenuated flux at the domain top, so all of
+        # it is the direct beam (microhh tod_inc_diffuse = 0).
+        diffuse_frac=0.0, config=mc_cfg, key=key,
         rayleigh_frac_td=rayleigh_td, mie_lut_cdf=mie_lut_cdf,
         mie_lut_ang=mie_lut_ang, band_of_gpt=band_of_gpt, r_eff_td=r_eff_td)
 
@@ -2374,6 +2853,7 @@ def _make_plane_radiation(
     Signature: ``(state, grid, height_coord, terrain_metric) ->
     PlaneNonHydrostaticTendencies``.
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "plane")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
@@ -2560,6 +3040,7 @@ def _make_mpas_nh_radiation(
     Signature: ``(state, mesh, height_coord, terrain_metric) ->
     MPASNonHydrostaticTendencies``.
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "MPAS non-hydrostatic")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
@@ -2763,6 +3244,7 @@ def _make_spectral_pe_radiation(
     the activation-storage relief that lets the production AIMIP
     run finish on a single GPU.
     """
+    _refuse_hydrostatic_only_cloud_options(radiation_config, "spectral")
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
     # CAM6 ``cam6_clubb`` cloud fraction takes its liquid fraction from the
@@ -2825,6 +3307,9 @@ def _make_spectral_pe_radiation(
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
+        )
+        _aer_volc_ext = (
+            forcing.get("aerosol_sw_volc") if forcing is not None else None
         )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
 
@@ -2954,6 +3439,7 @@ def _make_spectral_pe_radiation(
                 _cf_ovr = _cf_ovr.reshape(T_col.shape)
         _conv_mf_col = None
         _conv_icwmr_col = None
+        _mf_cf_col = _mf_qc_col = None
         if _cam6_cf_active and phys_state is not None:
             _conv_mf_col = getattr(phys_state, "conv_mass_flux_up", None)
             _conv_icwmr_col = getattr(phys_state, "conv_icwmr", None)
@@ -2961,6 +3447,11 @@ def _make_spectral_pe_radiation(
                 _conv_mf_col = _conv_mf_col.reshape(ncol, nlev + 1)
             if _conv_icwmr_col is not None:
                 _conv_icwmr_col = _conv_icwmr_col.reshape(T_col.shape)
+            # CAM7 CLUBB-MF plume cloud (lagged carry, read only when the
+            # cloud config's hookup is on).
+            if getattr(radiation_config.cloud_config, "clubb_mf_cloud", False):
+                _mf_cf_col = phys_state.mf_cloudfrac.reshape(T_col.shape)
+                _mf_qc_col = phys_state.mf_qc.reshape(T_col.shape)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -2989,10 +3480,13 @@ def _make_spectral_pe_radiation(
             tsi=_tsi_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
+            aerosol_sw_volc=_aer_volc_ext,
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            mf_cloudfrac=_mf_cf_col,
+            mf_qc=_mf_qc_col,
             column_mesh=column_mesh,
             clubb_config=clubb_config,
         )

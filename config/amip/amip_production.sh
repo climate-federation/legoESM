@@ -172,7 +172,7 @@ fi
 # Without this flag the run trips the loud scalar-fallback warning (PR #1540)
 # and reproduces the pseudo-mountain climate. Opt-out is DELIBERATE only.
 if [[ -n "${AMIP_SSO}" ]]; then
-  AMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
+  AMIP_PATH_FLAGS+=( --default-subgrid-orography-file "${AMIP_SSO}" )
 fi
 
 # Refuse at job start, before any compile or step time is spent, when the

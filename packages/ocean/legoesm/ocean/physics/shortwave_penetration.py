@@ -95,9 +95,6 @@ __param_spec__ = {
     "ShortwavePenetrationConfig": {
         "scheme_key": "ocean.sw_penetration",
         "excluded": {
-            "scheme": "discrete NEMO/reference algorithm selector",
-            "water_type": "discrete Jerlov optical class",
-            "rgb_chl_profile": "discrete NEMO chlorophyll-profile selector",
             "nemo_time_step_s": "NEMO qsr_ext_lev discrete initialization input",
         },
         "params": {
@@ -170,6 +167,11 @@ class ShortwavePenetrationConfig(NamedTuple):
     nemo_time_step_s : float or None
         Whole-step ``rDt`` used by NEMO's ``qsr_ext_lev`` initialization.
         Required by ``nemo_qsr_2bd``; absent for the generic Jerlov scheme.
+    nemo_qsr_kbb_live_stretch : bool
+        For ``nemo_qsr_2bd``, select main's live Kbb stretch in the shared
+        physics pipeline and its source-identical Jacobian at RK3 stage 3.
+        ``False`` preserves the lane-certified static pipeline and Kbb
+        thickness-quotient association.  Other schemes ignore this field.
     """
     scheme: str = "jerlov_2band"
     water_type: str = "II"
@@ -177,6 +179,7 @@ class ShortwavePenetrationConfig(NamedTuple):
     rgb_ir_extinction_m: float = 0.35   # NEMO rn_si0 [m]
     rgb_chl_profile: str = "morel_berthon"
     nemo_time_step_s: float | None = None
+    nemo_qsr_kbb_live_stretch: bool = True
 
 
 SHORTWAVE_PENETRATION_SCHEMES = (
@@ -451,6 +454,103 @@ def _nemo_rgb_class_row(chl: jnp.ndarray) -> jnp.ndarray:
     return jnp.clip(itab - 1.0, 0.0, 60.0).astype(jnp.int32)
 
 
+def _nemo_qsr_rgb_attenuation_coeffs(
+    chl_surface: jnp.ndarray,
+    gdepw_bottom_live: jnp.ndarray,
+    dtype,
+):
+    """Shared ``traqsr.f90:327-353,382-384`` chlorophyll-to-RGB table lookup."""
+    table = jnp.asarray(_RGB_ATTENUATION_BGR, dtype=dtype)
+    chl_z = _nemo_morel_berthon_chl_column(chl_surface, gdepw_bottom_live)
+    row = _nemo_rgb_class_row(chl_z)
+    coeffs = table[row]
+    return table, coeffs[..., 0], coeffs[..., 1], coeffs[..., 2]
+
+
+def _nemo_qsr_rgb_surface_bands(
+    sw_down: jnp.ndarray,
+    config: ShortwavePenetrationConfig,
+):
+    """Shared ``traqsr.f90:367-374`` surface band partition."""
+    sr = nemo_source_round
+    dtype = sw_down.dtype
+
+    def c(value: float) -> jnp.ndarray:
+        return jnp.asarray(value, dtype=dtype)
+
+    rn_abs = c(config.rgb_ir_fraction)
+    r1_si0 = sr(c(1.0) / c(config.rgb_ir_extinction_m))
+    visible_fraction = sr(c(1.0) - rn_abs)
+    zz0 = rn_abs
+    zz1 = sr(visible_fraction / c(3.0))
+    ze0 = sr(zz0 * sw_down)
+    zeR = sr(zz1 * sw_down)
+    zeG = sr(zz1 * sw_down)
+    zeB = sr(zz1 * sw_down)
+    return rn_abs, r1_si0, zz1, ze0, zeR, zeG, zeB
+
+
+def _nemo_qsr_rgb_attenuate_level(
+    ze0_k: jnp.ndarray,
+    zeR_k: jnp.ndarray,
+    zeG_k: jnp.ndarray,
+    zeB_k: jnp.ndarray,
+    ze3t: jnp.ndarray,
+    r1_si0: jnp.ndarray,
+    r1_LB: jnp.ndarray,
+    r1_LG: jnp.ndarray,
+    r1_LR: jnp.ndarray,
+):
+    """Shared ``traqsr.f90:388-390`` four-band level attenuation."""
+    sr = nemo_source_round
+    zze0 = sr(ze0_k * precision_exp(sr(sr(-ze3t) * r1_si0)))
+    zzeR = sr(zeR_k * precision_exp(sr(sr(-ze3t) * r1_LR)))
+    zzeG = sr(zeG_k * precision_exp(sr(sr(-ze3t) * r1_LG)))
+    zzeB = sr(zeB_k * precision_exp(sr(sr(-ze3t) * r1_LB)))
+    total0 = sr(sr(sr(zze0 + zzeB) + zzeG) + zzeR)
+    return zze0, zzeR, zzeG, zzeB, total0
+
+
+def nemo_fraqsr_1lev(
+    sw_down: jnp.ndarray,
+    chl_surface: jnp.ndarray,
+    e3t_1_live: jnp.ndarray,
+    gdepw_2_live: jnp.ndarray,
+    wmask_2: jnp.ndarray,
+    config: ShortwavePenetrationConfig,
+) -> jnp.ndarray:
+    """Literal ``fraqsr_1lev`` from NEMO ``traqsr.f90:327-402`` (`jk = 1`)."""
+    sr = nemo_source_round
+    sw_down = jnp.asarray(sw_down, dtype=jnp.float64)
+    dtype = sw_down.dtype
+    chl_surface = jnp.asarray(chl_surface, dtype=dtype)
+    e3t_1_live = jnp.asarray(e3t_1_live, dtype=dtype)
+    gdepw_2_live = jnp.asarray(gdepw_2_live, dtype=dtype)
+    wmask_2 = jnp.asarray(wmask_2, dtype=dtype)
+
+    _, k_blue, k_green, k_red = _nemo_qsr_rgb_attenuation_coeffs(
+        chl_surface, gdepw_2_live[..., jnp.newaxis], dtype
+    )
+    _, r1_si0, _, ze0, zeR, zeG, zeB = _nemo_qsr_rgb_surface_bands(
+        sw_down, config
+    )
+    _, _, _, _, total0 = _nemo_qsr_rgb_attenuate_level(
+        ze0,
+        zeR,
+        zeG,
+        zeB,
+        e3t_1_live,
+        r1_si0,
+        k_blue[..., 0],
+        k_green[..., 0],
+        k_red[..., 0],
+    )
+    zzeT = sr(total0 * wmask_2)
+    one = jnp.asarray(1.0, dtype=dtype)
+    safe_qsr = jnp.where(sw_down != 0.0, sw_down, one)
+    return jnp.where(sw_down != 0.0, sr(one - sr(zzeT / safe_qsr)), one)
+
+
 def _nemo_qsr_rgb_tendency(
     sw_down: jnp.ndarray,
     chl_surface: jnp.ndarray,
@@ -472,23 +572,15 @@ def _nemo_qsr_rgb_tendency(
     def c(value: float) -> jnp.ndarray:
         return jnp.asarray(value, dtype=dtype)
 
-    table = jnp.asarray(_RGB_ATTENUATION_BGR, dtype=dtype)
-    chl_z = _nemo_morel_berthon_chl_column(chl_surface, gdepw_bottom_live)
-    row = _nemo_rgb_class_row(chl_z)
-    coeffs = table[row]
-    k_blue, k_green, k_red = coeffs[..., 0], coeffs[..., 1], coeffs[..., 2]
+    table, k_blue, k_green, k_red = _nemo_qsr_rgb_attenuation_coeffs(
+        chl_surface, gdepw_bottom_live, dtype
+    )
 
     rho0_csw = sr(c(rho_0) * c(c_sw))
     r1_rho0_csw = sr(c(1.0) / rho0_csw)
-    rn_abs = c(config.rgb_ir_fraction)
-    r1_si0 = sr(c(1.0) / c(config.rgb_ir_extinction_m))
-    visible_fraction = sr(c(1.0) - rn_abs)
-    zz0 = rn_abs
-    zz1 = sr(visible_fraction / c(3.0))
-    ze0 = sr(zz0 * sw_down)
-    zeR = sr(zz1 * sw_down)
-    zeG = sr(zz1 * sw_down)
-    zeB = sr(zz1 * sw_down)
+    rn_abs, r1_si0, zz1, ze0, zeR, zeG, zeB = _nemo_qsr_rgb_surface_bands(
+        sw_down, config
+    )
     zeT = sw_down
 
     # ``tra_qsr_init`` uses the minimum chlorophyll class for the deepest
@@ -536,12 +628,9 @@ def _nemo_qsr_rgb_tendency(
     def level_step(carry, inputs):
         ze0_k, zeR_k, zeG_k, zeB_k, zeT_k = carry
         jk, ze3t, r1_LB, r1_LG, r1_LR, wmask = inputs
-        zze0 = sr(ze0_k * precision_exp(sr(sr(-ze3t) * r1_si0)))
-        zzeR = sr(zeR_k * precision_exp(sr(sr(-ze3t) * r1_LR)))
-        zzeG = sr(zeG_k * precision_exp(sr(sr(-ze3t) * r1_LG)))
-        zzeB = sr(zeB_k * precision_exp(sr(sr(-ze3t) * r1_LB)))
-
-        total0 = sr(sr(sr(zze0 + zzeB) + zzeG) + zzeR)
+        zze0, zzeR, zzeG, zzeB, total0 = _nemo_qsr_rgb_attenuate_level(
+            ze0_k, zeR_k, zeG_k, zeB_k, ze3t, r1_si0, r1_LB, r1_LG, r1_LR
+        )
         totalR = sr(sr(zzeR + zzeG) + zzeB)
         totalG = sr(zzeG + zzeB)
         zzeT = jnp.where(
@@ -555,7 +644,10 @@ def _nemo_qsr_rgb_tendency(
             ),
         )
         delta = sr(zeT_k - zzeT)
-        increment = sr(sr(r1_rho0_csw * delta) / ze3t)
+        # Gradient-only: 1 below the blue level (discarded by the where) and
+        # on zero-thickness dry levels (masked downstream).
+        increment = sr(sr(r1_rho0_csw * delta)
+                       / jnp.where((jk <= nkB) & (ze3t != 0.0), ze3t, c(1.0)))
         increment = jnp.where(jk <= nkB, increment, c(0.0))
         next_carry = (
             jnp.where(jk <= nk0, zze0, ze0_k),
@@ -768,6 +860,63 @@ def shortwave_penetration_sweeney_tendency(
     sc2 = _poly(c, _SWEENEY_SC2_COEFFS)[..., jnp.newaxis]
     I_face = v1 * jnp.exp(z / sc1) + v2 * jnp.exp(z / sc2)
     return _absorbed_tendency_from_faces(I_face, sw_visible, wet, dz_live, rho_0, c_sw)
+
+
+# --- Ohlmann (2003, J. Climate 16, 1337-1351, doi:10.1175/1520-0442(2003)16<1337:ORHICM>2.0.CO;2) ---
+# Chlorophyll-dependent double exponential for the transmission normalised to the NET shortwave just beneath the
+# surface (his Eq. 2a and Eq. 5): Tr(z) = A1 exp(-B1 z) + A2 exp(-B2 z), valid below 2 m. A1 + A2 < 1; the remainder
+# is absorbed above about 2 m and goes to the top cell. Table 1a of the paper (chl in mg m-3, B in m-1), read first
+# hand from the PDF (6 November 2026). The paper tabulates 0.01 to 3.0 mg m-3 only; MOM6 MOM_opacity.F90
+# (init_ohlmann_table, commit 0e9a561) and CESM-POP add rows at 0.001, 0.005 and 4 to 10 mg m-3 "provided by
+# C. Ohlmann", which are not in the paper and are not used here. Within 0.01 to 3.0 the MOM6 rows equal Table 1a.
+# Parameters between rows: linear interpolation in chl, as the paper recommends ("simple linear interpolation
+# between successive tabled quantities"); chl is clamped to 0.01 to 3.0. The paper's functional fits (Eqs. 6a to
+# 6d) are for Table 1b, carry round-off (their own note), and print A2 with +0.010 where Fig. 3 has -0.016, so the
+# table is used.
+OHLMANN_CHL = (0.01, 0.02, 0.03, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.60,
+               0.70, 0.80, 0.90, 1.00, 1.50, 2.00, 2.50, 3.00)
+OHLMANN_A1 = (0.4488, 0.4563, 0.4622, 0.4715, 0.4877, 0.4993, 0.5084, 0.5159, 0.5223, 0.5278,
+              0.5326, 0.5369, 0.5408, 0.5474, 0.5529, 0.5576, 0.5615, 0.5649, 0.5757, 0.5802, 0.5808, 0.5788)
+OHLMANN_A2 = (0.2940, 0.2894, 0.2858, 0.2800, 0.2703, 0.2628, 0.2571, 0.2523, 0.2481, 0.2444,
+              0.2411, 0.2382, 0.2356, 0.2309, 0.2269, 0.2235, 0.2206, 0.2181, 0.2106, 0.2089, 0.2113, 0.2167)
+OHLMANN_B1 = (0.0319, 0.0355, 0.0384, 0.0434, 0.0532, 0.0612, 0.0681, 0.0743, 0.0800, 0.0853,
+              0.0902, 0.0949, 0.0993, 0.1077, 0.1154, 0.1227, 0.1294, 0.1359, 0.1640, 0.1876, 0.2082, 0.2264)
+OHLMANN_B2 = (0.3306, 0.3433, 0.3537, 0.3705, 0.4031, 0.4262, 0.4456, 0.4621, 0.4763, 0.4889,
+              0.4999, 0.5100, 0.5191, 0.5347, 0.5477, 0.5588, 0.5682, 0.5764, 0.6042, 0.6206, 0.6324, 0.6425)
+
+
+def ohlmann_parameters(chl):
+    """(A1, A2, B1, B2) of Ohlmann (2003) Table 1a at ``chl`` [mg m-3], linear in chl between rows, clamped."""
+    chl = jnp.asarray(chl)
+    c = jnp.clip(chl, OHLMANN_CHL[0], OHLMANN_CHL[-1])
+    xp = jnp.asarray(OHLMANN_CHL, dtype=c.dtype)
+    return tuple(jnp.interp(c, xp, jnp.asarray(t, dtype=c.dtype))
+                 for t in (OHLMANN_A1, OHLMANN_A2, OHLMANN_B1, OHLMANN_B2))
+
+
+def shortwave_penetration_ohlmann_tendency(
+    sw_net: jnp.ndarray,
+    chl: jnp.ndarray,
+    dz_live: jnp.ndarray,
+    wet_cell: jnp.ndarray,
+    rho_0: float = _RHO_0_DEFAULT,
+    c_sw: float = _C_SW_DEFAULT,
+) -> jnp.ndarray:
+    """Ohlmann (2003) penetration of the NET surface shortwave ``sw_net`` (...,) [W/m2] for surface ``chl`` (...,).
+
+    The flux fraction at the surface face is 1; at every deeper interface it is A1 exp(-B1 z) + A2 exp(-B2 z), so
+    the top cell takes 1 - Tr(z1), which holds the near-surface remainder 1 - A1 - A2 (Ohlmann's scheme is not
+    valid above 2 m; MOM6 likewise puts that part in the first layer). The light reaching the seabed is deposited
+    in the deepest wet cell, as the other kernels do. The column total equals ``sw_net``.
+    """
+    dz_live = jnp.asarray(dz_live)
+    wet = jnp.asarray(wet_cell, dtype=dz_live.dtype)
+    sw_net = jnp.asarray(sw_net, dtype=dz_live.dtype)
+    A1, A2, B1, B2 = (p[..., jnp.newaxis] for p in ohlmann_parameters(jnp.asarray(chl, dtype=dz_live.dtype)))
+    depth = jnp.cumsum(dz_live, axis=-1)                                       # (..., nlev), > 0
+    Tr = A1 * jnp.exp(-B1 * depth) + A2 * jnp.exp(-B2 * depth)
+    I_face = jnp.concatenate([jnp.ones_like(dz_live[..., :1]), Tr], axis=-1)    # (..., nlev+1)
+    return _absorbed_tendency_from_faces(I_face, sw_net, wet, dz_live, rho_0, c_sw)
 
 
 def apply_shortwave_penetration(

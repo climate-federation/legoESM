@@ -586,44 +586,6 @@ class TestOceanTendencies:
         assert float(jnp.max(jnp.abs(tend.du_dt.data[active]))) > 0.0
 
 
-class TestVerticalAdvection:
-    """Tests for vertical upwind advection."""
-
-    def test_upward_flow_uses_deeper_donor(self, ocean_z_coord):
-        """Upward flow should use deeper donor and zero-gradient at bottom."""
-        field = ocean_z_coord.z_full_ref[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
-        jac = jnp.ones((1, 1, 1))
-        w_half = jnp.ones((1, 1, 1, ocean_z_coord.n_levels + 1))
-
-        adv = _vertical_advection_ocean(field, w_half, ocean_z_coord, jac)
-
-        assert jnp.allclose(adv[..., :-1], -1.0, atol=1e-6)
-        assert float(adv[0, 0, 0, -1]) == pytest.approx(0.0, abs=1e-8)
-
-    def test_downward_flow_uses_shallower_donor(self, ocean_z_coord):
-        """Downward flow should use shallower donor and zero-gradient at surface."""
-        field = ocean_z_coord.z_full_ref[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
-        jac = jnp.ones((1, 1, 1))
-        w_half = -jnp.ones((1, 1, 1, ocean_z_coord.n_levels + 1))
-
-        adv = _vertical_advection_ocean(field, w_half, ocean_z_coord, jac)
-
-        assert float(adv[0, 0, 0, 0]) == pytest.approx(0.0, abs=1e-8)
-        assert jnp.allclose(adv[..., 1:], 1.0, atol=1e-6)
-
-    def test_vertical_advection_jacobian_scaling(self, ocean_z_coord):
-        """Advection magnitude should use physical w and physical dz."""
-        J = 2.0
-        jac = jnp.full((1, 1, 1), J)
-        # Field linear in physical depth z = J * z*.
-        field = (J * ocean_z_coord.z_full_ref)[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
-        w_half = jnp.ones((1, 1, 1, ocean_z_coord.n_levels + 1))
-
-        adv = _vertical_advection_ocean(field, w_half, ocean_z_coord, jac)
-        assert jnp.allclose(adv[..., :-1], -1.0, atol=1e-6)
-        assert float(adv[0, 0, 0, -1]) == pytest.approx(0.0, abs=1e-8)
-
-
 class TestFluxFormVerticalMomentumAdvection:
     """Tests for ``flux_form_vertical_momentum_advection`` (issue #171)."""
 

@@ -1,8 +1,8 @@
 """Generate tests/atmosphere/oracle_fixtures/rrtmgp_cloud_optics.npz.
 
-Oracle: RTE+RRTMGP v1.8 ``mo_cloud_optics_rrtmgp%cloud_optics`` (LUT path) run on
-the bundled LUTs (cloudysky_lw.nc and cloudysky_sw.nc = rrtmgp-data v1.8.2
-rrtmgp-clouds-{lw,sw}.nc), ice roughness 2 (medium):
+Oracle: RTE+RRTMGP ``mo_cloud_optics_rrtmgp%cloud_optics`` (LUT path) run on the
+bundled LUTs (rrtmgp-clouds-{lw,sw}-bnd.nc, byte-identical to rrtmgp-data v1.9.2),
+ice roughness 2 (medium):
   * LW: into a ``ty_optical_props_1scl`` -> absorption optical depth (no scattering),
     the RRTMGP reference / CAM6 RRTMG LW cloud treatment;
   * SW: into a ``ty_optical_props_2str``, then ``delta_scale`` (rrtmgp_allsky.F90).
@@ -18,9 +18,9 @@ paths (``subcolumns.in_cloud_paths``).  Sizes are pre-clipped to the LUT range f
 the oracle (RRTMGP raises out of range; legoESM clips) -- documented contract
 difference.
 
-usage (compute node, JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu, PYTHONPATH incl. packages):
-    bash build.sh <rte-rrtmgp@v1.8> <conda env> <build dir>
-    python make_fixture.py <build dir>/oracle_driver <rte-rrtmgp@v1.8> <rrtmgp-data@v1.8.2> <out.npz>
+usage (from this directory, compute node, JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu, PYTHONPATH incl. packages):
+    bash ../rrtmgp_faithfulness/build.sh <rte-rrtmgp> <build dir> .
+    python make_fixture.py <build dir>/oracle_driver <rte-rrtmgp> <rrtmgp-data> <out.npz>
 """
 import hashlib
 import json
@@ -139,8 +139,8 @@ def main():
 
     out = {}
     for tag in ("lw", "sw"):
-        lut_path = os.path.join(LUTDIR, f"cloudysky_{tag}.nc")
-        up = os.path.join(DATA, f"rrtmgp-clouds-{tag}.nc")
+        lut_path = os.path.join(LUTDIR, f"rrtmgp-clouds-{tag}-bnd.nc")
+        up = os.path.join(DATA, f"rrtmgp-clouds-{tag}-bnd.nc")
         h = [hashlib.sha256(open(f, "rb").read()).hexdigest() for f in (lut_path, up)]
         assert h[0] == h[1], f"bundled {tag} table is not rrtmgp-data {up}"
         out[f"sha256_{tag}"] = h[0]
@@ -170,7 +170,7 @@ def main():
 
     sha = lambda p: subprocess.run(["git", "-C", p, "rev-parse", "HEAD"],  # noqa: E731
                                    capture_output=True, text=True).stdout.strip()
-    tagof = lambda p: subprocess.run(["git", "-C", p, "describe", "--tags"],  # noqa: E731
+    tagof = lambda p: subprocess.run(["git", "-C", p, "describe", "--tags", "--always"],  # noqa: E731
                                      capture_output=True, text=True).stdout.strip()
     meta = dict(
         oracle=f"rte-rrtmgp {tagof(RTE)} {sha(RTE)}",
@@ -178,7 +178,7 @@ def main():
                     "ice size = CAM6 deffi (micro_mg2_0.F90:2795, cam_cesm2_1_rel_60)",
         rrtmgp_data=f"{tagof(DATA)} {sha(DATA)}",
         legoesm=sha(REPO),
-        generator="scripts/validate/oracle/rrtmgp_cloud_optics/{build.sh,oracle_driver.F90,make_fixture.py}",
+        generator="scripts/validate/oracle/rrtmgp_cloud_optics/{oracle_driver.F90,make_fixture.py}",
         columns=names)
     np.savez_compressed(OUT, cpl=cpl, cpi=cpi, r_liq=r_liq, r_ice=r_ice, meta=json.dumps(meta), **out)
     print("FIXTURE_DONE", OUT, os.path.getsize(OUT), "bytes")

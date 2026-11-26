@@ -3,7 +3,7 @@
 Faithful port of OpenIFS (github.com/ecmwf-ifs/openifs @ 8f6f722f73,
 OpenIFS 48r1.1) ``ifs-source/arpifs/phys_ec/{cumastrn,cudlfsn,cuddrafn,
 cuflxn,cudtdqn,cubidiag,cududv}.F90``; the updraught routines are in
-:mod:`._ifs_cuascent`, the thermodynamics in :mod:`._ifs_cuthermo`.
+:mod:`._ifs_cuascent`, the thermodynamics in :mod:`legoesm.atmosphere.physics._ifs_thermo`.
 
 Configuration ported (sucumf.F90 defaults, the deterministic ECMWF physics):
 LMFPEN = LMFSCV = LMFMID = LMFDD = LMFDUDV = LMFDSNOW = LMFWETB = LMFGLAC =
@@ -18,6 +18,47 @@ Arrays are 1-based padded (see :mod:`._ifs_cuascent`).  ``land`` is the
 LDLAND flag as a fraction: every ``IF(LDLAND)`` is evaluated as
 ``land*A + (1-land)*B``, which is the source exactly for land in {0, 1}
 (legoESM's existing convention for fractional land; a decision is pending).
+
+Differentiability (RULE 5, #2281, user decision 2026-11-12: partial).  With
+``IfsTunables.hard_switches`` False (the host default,
+BechtoldConfig.ifs_hard_switches) the elementwise switches on traced state --
+the closure's floors, caps and branch selections -- take the C1 forms of
+:class:`legoesm.atmosphere.physics._ifs_smooth.IfsSmooth`, window 0.01 x a
+scale of the switched quantity (``_S_*`` below); True gives OpenIFS's exact
+switches (the oracle match).  Division guards and safety floors
+(RMFCMIN, ZEPS_MF, ZMFS_MIN, ZDQMIN_FLOOR) stay hard.  #2281 part 1 smooths
+the closure, part 2 the ascent (:mod:`._ifs_cuascent`, CUADJTQ/FOEALFCU in
+:mod:`.._ifs_thermo`); part 3 the downdraught (CUDDRAFN entrainment and
+buoyancy bounds, the DD-top humidity and freezing/melting selects), CUFLXN
+(melt cap, detrained-precipitation caps, sub-cloud evaporation bounds and
+wet-bulb deficit, the negative-flux fixer -- smooth and conservative, the
+added amount to OpenIFS's sink) and the post-CUFLXN fixers (detrainment-rate
+consistency, cloud-top detrained-liquid fixer).
+KNOWN DIFFERENCE, kept hard in both modes: the level/flag structure.  Cloud
+base and top, departure level, downdraught top and base, the cloud type
+KTYPE, LDCUM/LDDRAF and every level mask built from them are chosen from
+traced buoyancy, pressure and humidity and read through integer gathers;
+their gradients are zero or undefined at a level change.  Part 3 adds to this
+list: the CUDLFSN departure pick, the CUDDRAFN termination test (zeroes the
+downdraught flux), IDBAS, and the two min-over-levels limiters (downdraught
+rescale ZMFS, momentum limiter); also hard, as division guards / safety
+floors: ZTD_MIN/MAX, ZRFL_MIN and the PLUDE < 0 floor (fires on no fixture
+column; its PLUDE feeds both the humidity tendency and the detrained
+condensate, so it moves no water).  Smoothing them is
+a soft-level rewrite (a new scheme), not done.
+KNOWN DIFFERENCE, the cloud-top negative-humidity fixer (cumastrn.F90:
+1159-1180, #2594, owner decision 2026-11-24): OpenIFS adds the humidity
+deficit ZFAC to the detrained condensate PLUDE, which drives q MORE negative
+(the humidity tendency carries -PLUDE), and rescales PLUDELI by the updated
+PLUDE, so PLUDELI1+PLUDELI2 falls short of PLUDE by ZFAC**2/PLUDE_new (a column
+energy leak, and a water leak where CLOUDSC reads PLUDELI).  The default
+removes ZFAC from PLUDE and PLUDELI in proportion (water and energy neutral);
+``IfsTunables.openifs_cloud_top_fixer`` = True (BechtoldConfig.
+ifs_openifs_cloud_top_fixer) gives OpenIFS's form.  The fixer fires on no
+oracle fixture column, so the oracle match is the same in both forms.
+Gap of the smooth default
+against the oracle per fixture column: tests/atmosphere/
+test_bechtold_ifs_oracle.py (``_SWITCH_GAP``).
 """
 from __future__ import annotations
 
@@ -30,7 +71,8 @@ import numpy as np
 from legoesm.core.smooth import smooth_max
 
 from .mass_flux import ifs_ztaures
-from ._ifs_cuthermo import cuadjtq, foealfcu, foeewmcu, foelhmcu
+from .._ifs_smooth import IfsSmooth
+from .._ifs_thermo import cuadjtq, foealfcu, foeewmcu, foelhmcu
 from ._ifs_cuascent import (
     cuascn, cubasen, cuinin, kget, kset, sdiv, spow, ssqrt,
     RMFCMIN, RDEPTHS, RMFLIA, RMFCFL, ENTRORG, DETRPEN, ENTSHALP, RPRCON, ZDNOPRC,
@@ -147,6 +189,42 @@ ZBIDIAG_EPS = 1.0e-35  # cubidiag.F90:72,:76
 NJKT1_P, NJKT2_P, NJKT3_P = 350.0e2, 60.0e2, 950.0e2
 NJKT5_P, NJKT6_P, NJKT7_P = 500.0e2, 700.0e2, 100.0e2
 
+# --- RULE 5 smooth-window widths (#2281; IfsSmooth, ifs_hard_switches=False):
+# w = 0.01 x a scale of the switched quantity (user rule, as CLOUDSC), the
+# scale = 2nd percentile of |x| > 1e-14 over the oracle fixture's 24 columns
+# per quantity class (scripts/validate/oracle/bechtold_ifs/switch_scales.py);
+# O(1) ratios against a traced bound use 0.01 x the bound.  The P2 includes
+# values of lanes the scheme discards (as the CLOUDSC scales do). ---
+_W_REL = 0.01
+_S_MF = 1.0e-3         # [kg m-2 s-1] mass flux
+_S_DH = 95.6           # [J/kg] cloud-base moist static energy excess
+_S_HEAT = 4.71e-8      # [kg m-1 s-3] ZHEAT summand (buoyancy x g x mass flux)
+_S_CAPE = 0.218        # [J/kg]
+_S_TIME = 112.0        # [s] adjustment time scale
+_S_VEL = 0.841         # [m/s] mean updraught velocity
+_S_GEO = 812.0         # [m2 s-2] geopotential depth
+_S_PRES = 354.0        # [Pa] departure-level pressure depth
+# omega is 0 in every fixture column (no sample): 0.01 x |ZOMEGA_RES| instead
+_S_OMEGA = abs(ZOMEGA_RES)   # [Pa/s]
+_W_MF, _W_DH, _W_HEAT, _W_CAPE, _W_TIME, _W_VEL, _W_GEO, _W_PRES, _W_OMEGA = (
+    _W_REL * x for x in (_S_MF, _S_DH, _S_HEAT, _S_CAPE, _S_TIME, _S_VEL,
+                         _S_GEO, _S_PRES, _S_OMEGA))
+_W_SATFR = _W_REL * ZSATFR_MAX  # O(1) ratio: 0.01 x |threshold|
+# part 3 (fluxes, evaporation, positivity): x = distance to the switch point
+_S_DDEN = 7.87e-7          # [kg m-2 s-1] downdraught entrainment vs its bounds
+_S_DDBUO = 3.44e-3         # [1] downdraught buoyancy / T
+_S_SQ = 4.94e-10            # [kg m-2 s-1] -PMFD(IDBAS) - 0.5 PMFU(IDBAS)
+_S_QDEF = 1.63e-6          # [kg/kg] saturation deficit
+_S_TFRZ = 1.87          # [K] temperature - RTT
+_S_PFLX = 2.27e-7         # [kg m-2 s-1] precipitation fluxes and their caps
+_S_RHM = 1.53e-2           # [1] cloud-layer RH - ZRHM_MIN
+_S_RATE = 5.77e-8          # [kg m-2 s-1] detrainment-rate consistency
+_S_DDQF = 2.65e-7          # [kg m-2 s-1] downdraught-top moisture flux test
+_S_LUDE = 5.89e-9       # [kg m-2 s-1] cloud-top detrained-liquid fixer
+_W_DDEN, _W_DDBUO, _W_SQ, _W_QDEF, _W_TFRZ, _W_PFLX, _W_RHM, _W_RATE, _W_DDQF, _W_LUDE = (
+    _W_REL * x for x in (_S_DDEN, _S_DDBUO, _S_SQ, _S_QDEF, _S_TFRZ, _S_PFLX, _S_RHM,
+                         _S_RATE, _S_DDQF, _S_LUDE))
+
 
 class IfsTunables(NamedTuple):
     """Run-set CUMASTRN constants a host may override; defaults are sucumf's."""
@@ -163,6 +241,15 @@ class IfsTunables(NamedTuple):
     # run's BechtoldConfig.ifs_shallow_nosupply / ifs_shallow_supply_width_w_m2.
     shallow_nosupply: str = "first_guess"
     shallow_supply_width_w_m2: float = 1.0
+    # RULE 5 (#2281): True = OpenIFS's exact elementwise switches (the
+    # source, this NamedTuple's default); the host passes its run's
+    # BechtoldConfig.ifs_hard_switches (default False = the C1 smooth forms).
+    hard_switches: bool = True
+    # Cloud-top negative-humidity fixer (cumastrn.F90:1159-1180, #2594).
+    # False = corrected: the deficit is taken out of the detrained condensate
+    # PLUDE.  True = OpenIFS as written (adds it to PLUDE: q more negative).
+    # The host passes BechtoldConfig.ifs_openifs_cloud_top_fixer.
+    openifs_cloud_top_fixer: bool = True
 
 
 SHALLOW_NOSUPPLY_MODES = ("zero", "first_guess")
@@ -230,7 +317,7 @@ def njkt_levels(K, pap):
 # CUDLFSN (cudlfsn.F90:173-276), LPHYLIN = .FALSE.
 # ---------------------------------------------------------------------------
 def cudlfsn(th, K, kcbot, kctop, ldcum, ptenh, pqenh, pten, pqsen, pgeo, pgeoh,
-            paph, ptu, pqu, pmfub, prfl, ptd, pqd, pmfd, pmfds, pmfdq, pdmfdp):
+            paph, ptu, pqu, pmfub, prfl, ptd, pqd, pmfd, pmfds, pmfdq, pdmfdp, sm):
     lev = jnp.arange(K + 1)
     rcpd, retv = th.RCPD, th.RETV
     zhsk = rcpd * pten + pgeo + foelhmcu(th, pten) * pqsen
@@ -247,7 +334,7 @@ def cudlfsn(th, K, kcbot, kctop, ldcum, ptenh, pqenh, pten, pqsen, pgeo, pgeoh,
         s = dict(s)
         llo2 = (ldcum & (s["prfl"] > 0.0) & ~s["lddraf"] & (jk < kcbot)
                 & (jk > kctop) & (jk >= ikhsmin))
-        twb, qwb = cuadjtq(th, 2, kget(paph, jk), kget(ptenh, jk), kget(pqenh, jk), llo2)
+        twb, qwb = cuadjtq(th, 2, kget(paph, jk), kget(ptenh, jk), kget(pqenh, jk), llo2, sm=sm)
         zttest = 0.5 * (kget(ptu, jk) + twb)
         zqtest = 0.5 * (kget(pqu, jk) + qwb)
         zbuo = zttest * (1.0 + retv * zqtest) - kget(ptenh, jk) * (1.0 + retv * kget(pqenh, jk))
@@ -273,7 +360,7 @@ def cudlfsn(th, K, kcbot, kctop, ldcum, ptenh, pqenh, pten, pqsen, pgeo, pgeoh,
 # CUDDRAFN (cuddrafn.F90:156-296)
 # ---------------------------------------------------------------------------
 def cuddrafn(th, K, lddraf, ptenh, pqenh, pgeo, pgeoh, paph, prfl, ptd, pqd,
-             pmfu, pmfd, pmfds, pmfdq, pdmfdp, njkt3):
+             pmfu, pmfd, pmfds, pmfdq, pdmfdp, njkt3, sm):
     rg, rcpd, retv = th.RG, th.RCPD, th.RETV
     zrg = 1.0 / rg
     f = ptenh.dtype
@@ -297,9 +384,9 @@ def cuddrafn(th, K, lddraf, ptenh, pqenh, pgeo, pgeoh, paph, prfl, ptd, pqd,
                            / (paph[K + 1] - kget(paph, itopde)), zdmfde)
         zdz = -(kget(pgeoh, jk - 1) - kget(pgeoh, jk)) * zrg
         en = zdmfen + s["zoentr"] * zdz * mfd1
-        en = jnp.maximum(en, ZDD_MIX_MIN * mfd1)
-        en = jnp.maximum(en, -ZDD_DET_MAX * kget(pmfu, jk) - (mfd1 - zdmfde))
-        en = jnp.minimum(en, 0.0)
+        en = sm.max(en, ZDD_MIX_MIN * mfd1, _W_DDEN)
+        en = sm.max(en, -ZDD_DET_MAX * kget(pmfu, jk) - (mfd1 - zdmfde), _W_DDEN)
+        en = -sm.pos(-en, _W_DDEN)     # bounded: en <= 0 (entrainment only)
         zdmfen = jnp.where(lowp, zdmfen, en)
         mfd = mfd1 + zdmfen - zdmfde
         zseen = (rcpd * kget(ptenh, jk - 1) + kget(pgeoh, jk - 1)) * zdmfen
@@ -313,7 +400,7 @@ def cuddrafn(th, K, lddraf, ptenh, pqenh, pgeo, pgeoh, paph, prfl, ptd, pqd,
         td = (zmfdsk * inv - kget(pgeoh, jk)) / rcpd
         td = jnp.maximum(ZTD_MIN, jnp.minimum(ZTD_MAX, td))
         zcond = qd
-        td, qd = cuadjtq(th, 2, kget(paph, jk), td, qd, llo2)
+        td, qd = cuadjtq(th, 2, kget(paph, jk), td, qd, llo2, sm=sm)
         zcond = zcond - qd
         zbuo = td * (1.0 + retv * qd) - kget(ptenh, jk) * (1.0 + retv * kget(pqenh, jk))
         rain = (s["prfl"] > 0.0) & (kget(pmfu, jk) > 0.0)
@@ -323,7 +410,7 @@ def cuddrafn(th, K, lddraf, ptenh, pqenh, pgeo, pgeoh, paph, prfl, ptd, pqd,
         zbuo = jnp.where(stop, 0.0, zbuo)
         dmfdp = -mfd * zcond
         zbuoyz = zbuo / kget(ptenh, jk)
-        zbuoyz = jnp.minimum(zbuoyz, 0.0)
+        zbuoyz = -sm.pos(-zbuoyz, _W_DDBUO)   # bounded: <= 0
         zdzg = -(kget(pgeo, jk - 1) - kget(pgeo, jk))
         zbuoy = s["zbuoy"] + zbuoyz * zdzg
         zoentr = rg * zbuoyz * 0.5 / (1.0 + zbuoy)
@@ -343,13 +430,49 @@ def cuddrafn(th, K, lddraf, ptenh, pqenh, pgeo, pgeoh, paph, prfl, ptd, pqd,
     return jax.lax.fori_loop(0, K - 2, body, st)
 
 
+def _cap_min(sm, a, b, w):
+    """Smooth min(a, b) floored at 0, for a >= 0: pos(b) - pos(b - a).
+    Exactly 0 where a = 0 or b <= 0 (b - pos(b - a) is not: the C1 positive
+    part sits below x on 0 < x < w, so it gave up to 4w/27 with nothing to
+    cap -- e.g. snow melted below freezing; codex review, vote 4 2026-11-19);
+    0 <= result <= max(b, 0); result <= a + 4w/27 (pos has slope up to 4/3);
+    max(min(a, b), 0) at the hard limit.  Only the smooth branches call it."""
+    bp = sm.pos(b, w)
+    return bp - sm.pos(b - a, w)
+
+
+def _nonneg_precip(sm, r1, s1, dpmel):
+    """Smooth, conservative form of CUFLXN's negative-flux fixers (:427-438,
+    :489-500).  Total T = r1 + s1 becomes pos(T); the added amount pos(T) - T
+    is returned as ``deficit`` for the caller's sink (PDMFDP above, PDMFUP
+    below cloud base, as OpenIFS).  It is >= 0 at the hard limit; inside the
+    window 0 < T < w the C1 positive part sits below T, so it is down to
+    -4w/27 there (water handed back to the same sink; r2 + s2 - deficit = T
+    still holds exactly).  pos(T) is split in proportion to pos(r1),
+    pos(s1), so r2 + s2 = pos(T) exactly; at the hard limit this is the three
+    OpenIFS branches, except the all-negative branch of the first (fall)
+    loop with detrained precipitation SN1 + SN2 > 0: OpenIFS resets
+    PDMFDP = -(PMFLXR + PMFLXS + PDMFUP) while SN1 + SN2 stay detrained, so
+    that much water appears from nothing; here the sink takes -(r1 + s1),
+    which closes (fires on no fixture column; the exact branch keeps
+    OpenIFS's form).  Melting goes with the surviving flux; it is dropped
+    only for T < 0 (OpenIFS keeps it at T = 0)."""
+    t_new = sm.pos(r1 + s1, _W_PFLX)
+    pr = sm.pos(r1, _W_PFLX)
+    ps = sm.pos(s1, _W_PFLX)
+    ok = pr + ps > 0.0
+    r2 = t_new * sdiv(pr, pr + ps, ok) * ok
+    s2 = t_new - r2
+    return r2, s2, t_new - (r1 + s1), dpmel * sm.on(r1 + s1, 0.0, _W_PFLX, strict=False)
+
+
 # ---------------------------------------------------------------------------
 # CUFLXN (cuflxn.F90:193-510), LPHYLIN = LDTDKMF = .FALSE.
 # ---------------------------------------------------------------------------
 def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
            ldcum, kcbot, kctop, kdtop, ktype, lddraf, pmfu, pmfd, pmfus, pmfds,
            pmfuq, pmfdq, pmful, plude, pludeli1, pludeli2, plrain, pdmfup, pdmfdp,
-           plglac, pmfude_rate, pmfdde_rate):
+           plglac, pmfude_rate, pmfdde_rate, sm):
     rg, rcpd, rtt = th.RG, th.RCPD, th.RTT
     lev = jnp.arange(K + 1)
     f = pten.dtype
@@ -398,7 +521,7 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
     zzp = jnp.where(ktype == 3, zzp * zzp, zzp)
     mfu_b = kget(pmfu, ikb)
     pmfu = kset(pmfu, ik, mfu_b * zzp, ldcum)
-    pmfus = kset(pmfus, ik, (kget(pmfus, ikb) - foelhmcu(th, kget(ptenh, ikb)) * kget(pmful, ikb)) * zzp, ldcum)
+    pmfus = kset(pmfus, ik, (kget(pmfus, ikb) - foelhmcu(th, kget(ptenh, ikb), sm) * kget(pmful, ikb)) * zzp, ldcum)
     pmfuq = kset(pmfuq, ik, (kget(pmfuq, ikb) + kget(pmful, ikb)) * zzp, ldcum)
     pmful = kset(pmful, ik, 0.0, ldcum)
     # :316-329 sequential: the SQRT test reads PMFU(IDBAS), which this loop
@@ -411,8 +534,8 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
         mu, mus, muq, mul = c
         on = ldcum & (jk > kcbot + 1)
         zzp_ = zzp_all[jk]
-        sq = (idbas >= K - 1) & (-kget(pmfd, idbas) > 0.5 * kget(mu, idbas))
-        zzp_ = jnp.where(sq, ssqrt(zzp_), zzp_)
+        sq = (idbas >= K - 1) * sm.gt(-kget(pmfd, idbas), 0.5 * kget(mu, idbas), _W_SQ)
+        zzp_ = sm.sel(sq, ssqrt(zzp_), zzp_)
         zzp_ = jnp.where(ktype == 3, zzp_ * zzp_, zzp_)
         return (kset(mu, jk, kget(mu, ikb1) * zzp_, on), kset(mus, jk, kget(mus, ikb1) * zzp_, on),
                 kset(muq, jk, kget(muq, ikb1) * zzp_, on), kset(mul, jk, 0.0, on))
@@ -454,40 +577,61 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
         dmfup = kget(pdmfup, jk)
         s["prain"] = jnp.where(on, s["prain"] + dmfup, s["prain"])
         tk, qk, qsk, pk = kget(pten, jk), kget(pqen, jk), kget(s["pqsen"], jk), kget(pap, jk)
-        ztwetb = tk - jnp.maximum(0.0, qsk - qk) * (ZTW1 + ZTW2 * (pk - ZTW3) - ZTW4 * (tk - ZTW5))
+        ztwetb = tk - sm.pos(qsk - qk, _W_QDEF) * (ZTW1 + ZTW2 * (pk - ZTW3) - ZTW4 * (tk - ZTW5))
         zten = ztwetb   # LMFWETB: ZWETB = 1
         rk = kget(s["pmflxr"], jk)
         sk = kget(s["pmflxs"], jk)
-        melt = on & (sk > 0.0) & (zten > rtt)
         zcons1 = zcons1a * (1.0 + ZMELT_DT * (zten - rtt))
         zfac = zcons1 * (kget(paph, jk + 1) - kget(paph, jk))
-        zsnmlt = jnp.minimum(sk, zfac * (zten - rtt))
-        dpmel = jnp.where(melt, zsnmlt, 0.0)
-        qsn = foeewmcu(th, zten - zsnmlt / jnp.where(melt, zfac, 1.0)) / pk
-        s["pqsen"] = kset(s["pqsen"], jk, qsn, melt)
-        zalfaw = foealfcu(th, zten)
+        if sm.hard:
+            melt = on & (sk > 0.0) & (zten > rtt)
+            zsnmlt = sm.min(sk, zfac * (zten - rtt), _W_PFLX)
+            dpmel = jnp.where(melt, zsnmlt, 0.0)
+            qsn = foeewmcu(th, zten - zsnmlt / jnp.where(melt, zfac, 1.0)) / pk
+        else:
+            # bounded: 0 <= melt <= snow flux (zero without snow or below RTT)
+            # melt only above RTT (zfac < 0 for T < RTT - 1/ZMELT_DT would otherwise "melt")
+            zsnmlt = zfac * sm.pos(zten - rtt, _W_TFRZ)
+            dpmel = _cap_min(sm, zsnmlt, sk, _W_PFLX)
+            melt = sm.on(sk, 0.0, _W_PFLX)
+            melt = melt * sm.on(zten, rtt, _W_TFRZ)
+            # dpmel > 0 only where zfac > 0 (hard division guard, as OpenIFS's gate)
+            qsn = foeewmcu(th, zten - dpmel / jnp.where(zfac > 0.0, zfac, 1.0), sm) / pk
+        s["pqsen"] = kset(s["pqsen"], jk, sm.sel(melt, qsn, kget(s["pqsen"], jk)), on)
+        zalfaw = foealfcu(th, zten, sm)
         dmfdp = kget(s["pdmfdp"], jk)
-        frz = (tk <= rtt) & (zalfaw > 0.0)
-        # ZGLAC = 0 (LMFGLAC): the PDMFUP term of :410 vanishes.
-        s["plglac"] = kset(s["plglac"], jk, kget(s["plglac"], jk) + zalfaw * dmfdp, on & frz)
-        zalfaw = jnp.where(frz, 0.0, zalfaw)
+        # ZGLAC = 0 (LMFGLAC): the PDMFUP term of :410 vanishes.  The ZALFAW > 0
+        # conjunct of :408 only skips adding zero, so one switch: T <= RTT.
+        frz = sm.le(tk, rtt, _W_TFRZ)
+        s["plglac"] = kset(s["plglac"], jk, kget(s["plglac"], jk) + frz * zalfaw * dmfdp, on)
+        zalfaw = (1.0 - frz) * zalfaw
         dsn = jk <= kcbot          # LMFDSNOW
         sn2 = kget(plrain, jk + 1) * kget(pmfude_rate, jk)
         sn1 = sn2 * zalfaw
         sn2 = sn2 * (1.0 - zalfaw)
-        sn1 = jnp.minimum(sn1, zalfaw * (dmfup + dmfdp))
-        sn2 = jnp.minimum(sn2, (1.0 - zalfaw) * (dmfup + dmfdp) - dpmel)
-        sn1 = jnp.where(dsn, jnp.maximum(sn1, 0.0), 0.0)
-        sn2 = jnp.where(dsn, jnp.maximum(sn2, 0.0), 0.0)
+        av1 = zalfaw * (dmfup + dmfdp)
+        av2 = (1.0 - zalfaw) * (dmfup + dmfdp) - dpmel
+        if sm.hard:
+            sn1 = sm.min(sn1, av1, _W_PFLX)
+            sn2 = sm.min(sn2, av2, _W_PFLX)
+        else:   # bounded: detrained snow/rain never exceed what is available
+            sn1 = _cap_min(sm, sn1, av1, _W_PFLX)
+            sn2 = _cap_min(sm, sn2, av2, _W_PFLX)
+        sn1 = jnp.where(dsn, sm.pos(sn1, _W_PFLX), 0.0)
+        sn2 = jnp.where(dsn, sm.pos(sn2, _W_PFLX), 0.0)
         r1 = rk + zalfaw * (dmfup + dmfdp) + dpmel - sn1
         s1 = sk + (1.0 - zalfaw) * (dmfup + dmfdp) - dpmel - sn2
-        allneg = r1 + s1 < 0.0
-        rneg = ~allneg & (r1 < 0.0)
-        sneg = ~allneg & ~rneg & (s1 < 0.0)
-        dmfdp_n = jnp.where(allneg, -(rk + sk + dmfup), dmfdp)
-        r2 = jnp.where(allneg, 0.0, jnp.where(rneg, 0.0, jnp.where(sneg, r1 + s1, r1)))
-        s2 = jnp.where(allneg, 0.0, jnp.where(rneg, s1 + r1, jnp.where(sneg, 0.0, s1)))
-        dpmel = jnp.where(allneg, 0.0, dpmel)
+        if sm.hard:
+            allneg = r1 + s1 < 0.0
+            rneg = ~allneg & (r1 < 0.0)
+            sneg = ~allneg & ~rneg & (s1 < 0.0)
+            dmfdp_n = jnp.where(allneg, -(rk + sk + dmfup), dmfdp)
+            r2 = jnp.where(allneg, 0.0, jnp.where(rneg, 0.0, jnp.where(sneg, r1 + s1, r1)))
+            s2 = jnp.where(allneg, 0.0, jnp.where(rneg, s1 + r1, jnp.where(sneg, 0.0, s1)))
+            dpmel = jnp.where(allneg, 0.0, dpmel)
+        else:
+            r2, s2, deficit, dpmel = _nonneg_precip(sm, r1, s1, dpmel)
+            dmfdp_n = dmfdp + deficit
         s["pmflxr"] = kset(s["pmflxr"], jk + 1, r2, on)
         s["pmflxs"] = kset(s["pmflxs"], jk + 1, s2, on)
         s["pdpmel"] = kset(s["pdpmel"], jk, dpmel, on)
@@ -502,7 +646,7 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
     ikb, ikt = kcbot, kctop
     zrhm = 0.5 * (kget(pqen, ikb) / kget(pqsen, ikb) + kget(pqen, ikt) / kget(pqsen, ikt))
     zrcucov = jnp.where(ktype >= 2,
-                        RCUCOV * (1.0 + (jnp.maximum(ZRHM_MIN, zrhm) - ZRHM_MIN) / ZRHM_SCALE),
+                        RCUCOV * (1.0 + (sm.max(zrhm, ZRHM_MIN, _W_RHM) - ZRHM_MIN) / ZRHM_SCALE),
                         RCUCOV * ZRCUCOV_DEEP)
 
     # evaporation below cloud base, :463-508
@@ -518,13 +662,13 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
         qsk = kget(pqsen, jk)
         qk = kget(pqen, jk)
         arg = jnp.sqrt(kget(paph, jk) / paph[K + 1]) / RCVRFACTOR * zrfl / zrcucov
-        zdrfl1 = rcpecons * jnp.maximum(0.0, qsk - qk) * zrcucov * spow(arg, ZEVAP_EXP) * dp
+        zdrfl1 = rcpecons * sm.pos(qsk - qk, _W_QDEF) * zrcucov * spow(arg, ZEVAP_EXP) * dp
         zrnew = zrfl - zdrfl1
-        zrmin = zrfl - zrcucov * jnp.maximum(0.0, zrhebc * qsk - qk) * zcons2 * dp
-        zrnew = jnp.maximum(zrnew, zrmin)
-        zrfln = jnp.maximum(zrnew, 0.0)
-        zdrfl = jnp.minimum(0.0, zrfln - zrfl)
-        zalfaw = jnp.where(kget(pten, jk) < rtt, 0.0, foealfcu(th, kget(pten, jk)))
+        zrmin = zrfl - zrcucov * sm.pos(zrhebc * qsk - qk, _W_QDEF) * zcons2 * dp
+        zrnew = sm.max(zrnew, zrmin, _W_PFLX)
+        zrfln = sm.pos(zrnew, _W_PFLX)
+        zdrfl = -sm.pos(zrfl - zrfln, _W_PFLX)    # bounded: <= 0 (evaporation only)
+        zalfaw = sm.sel(sm.lt(kget(pten, jk), rtt, _W_TFRZ), 0.0, foealfcu(th, kget(pten, jk), sm))
         dmfdp = kget(s["pdmfdp"], jk)
         zpdr = zalfaw * dmfdp
         zpds = (1.0 - zalfaw) * dmfdp
@@ -533,13 +677,17 @@ def cuflxn(th, K, dt, pten, pqen, pqsen, ptenh, pqenh, paph, pap, pgeoh, land,
         r1 = rk + zpdr + dpmel + zdrfl * rk * zdenom
         s1 = sk + zpds - dpmel + zdrfl * sk * zdenom
         dmfup = kget(s["pdmfup"], jk) + zdrfl
-        allneg = r1 + s1 < 0.0
-        rneg = ~allneg & (r1 < 0.0)
-        sneg = ~allneg & ~rneg & (s1 < 0.0)
-        dmfup = jnp.where(allneg, dmfup - (r1 + s1), dmfup)
-        r2 = jnp.where(allneg, 0.0, jnp.where(rneg, 0.0, jnp.where(sneg, r1 + s1, r1)))
-        s2 = jnp.where(allneg, 0.0, jnp.where(rneg, s1 + r1, jnp.where(sneg, 0.0, s1)))
-        dpmel_n = jnp.where(allneg, 0.0, dpmel)
+        if sm.hard:
+            allneg = r1 + s1 < 0.0
+            rneg = ~allneg & (r1 < 0.0)
+            sneg = ~allneg & ~rneg & (s1 < 0.0)
+            dmfup = jnp.where(allneg, dmfup - (r1 + s1), dmfup)
+            r2 = jnp.where(allneg, 0.0, jnp.where(rneg, 0.0, jnp.where(sneg, r1 + s1, r1)))
+            s2 = jnp.where(allneg, 0.0, jnp.where(rneg, s1 + r1, jnp.where(sneg, 0.0, s1)))
+            dpmel_n = jnp.where(allneg, 0.0, dpmel)
+        else:
+            r2, s2, deficit, dpmel_n = _nonneg_precip(sm, r1, s1, dpmel)
+            dmfup = dmfup + deficit
         a = on & has
         b = on & ~has
         s["pmflxr"] = kset(s["pmflxr"], jk + 1, jnp.where(a, r2, 0.0), on)
@@ -688,6 +836,7 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     tuple of :func:`njkt_levels`; ``pgaw`` the Gaussian weight PGAW (ZDX =
     2*RA*SQRT(RPI*PGAW), :728).  Returns :class:`CumastrnOut`."""
     rg, rcpd, retv, rlvtt = th.RG, th.RCPD, th.RETV, th.RLVTT
+    sm = IfsSmooth(tun.hard_switches)
     njkt1, njkt2, njkt3, njkt5, njkt6, njkt7 = njkt
     lev = jnp.arange(K + 1)
     zcons2 = RMFCFL / (rg * dt)
@@ -700,11 +849,12 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
 
     # 2. CUININ, :436-445
     ztenh, zqenh, _zqsenh, zuu, zvu = cuinin(
-        th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2)
+        th, K, pten, pqen, pqsen, puen, pven, pgeo, paph, pgeoh, njkt2, sm=sm)
     zud, zvd, ztd, zqd = zuu, zvu, ztenh, zqenh
     # 3. CUBASEN, :450-461 (ZKMFL = 0)
     b = cubasen(th, K, ztenh, zqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
-                pten, pqen, pqsen, pgeo, land, njkt1, njkt2, njkt6, entrorg=tun.entrorg)
+                pten, pqen, pqsen, pgeo, land, njkt1, njkt2, njkt6, entrorg=tun.entrorg,
+                sm=sm)
     ldcum, kcbot, ictop0, idpl = b["ldcum"], b["kcbot"], b["kctop"], b["kdpl"]
     # sub-cloud budgets, :463-479
     zkhfl = -pahfs_sfc - rlvtt * pqhfl_sfc
@@ -718,11 +868,14 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     ikb = kcbot
     zmfmax = (kget(paph, ikb) - kget(paph, ikb - 1)) * zcons2
     zqumqe = kget(b["pqu"], ikb) + kget(b["plu"], ikb) - kget(zqenh, ikb)
+    # ZDQMIN_FLOOR (1e-10) guards the first-guess ZDH denominator: a hard
+    # safety floor (vote 2026-11-14), never approached by 0.01 q
     zdqmin = jnp.maximum(ZDQMIN_FRAC * kget(zqenh, ikb), ZDQMIN_FLOOR)
     zdh = rcpd * (kget(b["ptu"], ikb) - kget(ztenh, ikb)) + rlvtt * zqumqe
-    zdh = rg * jnp.maximum(zdh, ZDH_DQ * zdqmin)
+    zdh = rg * sm.max(zdh, ZDH_DQ * zdqmin, _W_DH)
+    # sh_ok stays hard: its False side removes the shallow cloud (A4, below)
     sh_ok = zdhpbl > 0.0
-    zmfub_sh = jnp.where(sh_ok, jnp.minimum(sdiv(zdhpbl, zdh, sh_ok), zmfmax),
+    zmfub_sh = jnp.where(sh_ok, sm.min(sdiv(zdhpbl, zdh, sh_ok), zmfmax, _W_MF),
                          zmfmax * ZMFUB_DEEP)
     zmfub = jnp.where(ldcum, jnp.where(ktype == 1, zmfmax * ZMFUB_DEEP, zmfub_sh), 0.0)
     ldcum = ldcum & ~((ktype == 2) & ~sh_ok)
@@ -732,7 +885,7 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
                pap, paph, pvervel, b["pwubase"], ldcum, ktype, b["klab"], b["ptu"],
                b["pqu"], b["plu"], zmfub, kcbot, idpl, njkt7, rprcon=tun.rprcon,
                zdnoprc=tun.zdnoprc, entrorg=tun.entrorg, detrpen=tun.detrpen,
-               entshalp=tun.entshalp)
+               entshalp=tun.entshalp, sm=sm)
     ztenh, zqenh = a["ptenh"], a["pqenh"]
     ldcum, ktype, kcbot, kctop = a["ldcum"], a["ktype"], a["kcbot"], a["kctop"]
     ptu, pqu, plu, plrain = a["ptu"], a["pqu"], a["plu"], a["plrain"]
@@ -749,10 +902,10 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
 
     # 5. downdraught, LMFDD, :674-709
     d = cudlfsn(th, K, kcbot, kctop, ldcum, ztenh, zqenh, pten, pqsen, pgeo, pgeoh,
-                paph, ptu, pqu, zmfub, zrfl, ztd, zqd, zero, zero, zero, zero)
+                paph, ptu, pqu, zmfub, zrfl, ztd, zqd, zero, zero, zero, zero, sm)
     lddraf, idtop = d["lddraf"], d["kdtop"]
     d = cuddrafn(th, K, lddraf, ztenh, zqenh, pgeo, pgeoh, paph, d["prfl"], d["ptd"],
-                 d["pqd"], pmfu, d["pmfd"], d["pmfds"], d["pmfdq"], d["pdmfdp"], njkt3)
+                 d["pqd"], pmfu, d["pmfd"], d["pmfds"], d["pmfdq"], d["pdmfdp"], njkt3, sm)
     ztd, zqd, pmfd, zmfds, zmfdq = d["ptd"], d["pqd"], d["pmfd"], d["pmfds"], d["pmfdq"]
     zdmfdp, pmfdde_rate = d["pdmfdp"], d["pmfdde_rate"]
 
@@ -762,9 +915,9 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     rng2 = (lev >= njkt2) & (lev <= K)
     llo3 = deep & rng2 & (lev <= kcbot) & (lev > kctop)
     tup, qup, gup = _up(pten), _up(pqen), _up(pgeo)
-    zheat = jnp.sum(jnp.where(llo3, jnp.maximum(
-        0.0, ((tup - pten + (gup - pgeo) * zorcpd) / ztenh + retv * (qup - pqen))
-        * (rg * (pmfu + pmfd))), 0.0))
+    zheat = jnp.sum(jnp.where(llo3, sm.pos(
+        ((tup - pten + (gup - pgeo) * zorcpd) / ztenh + retv * (qup - pqen))
+        * (rg * (pmfu + pmfd)), _W_HEAT), 0.0))
     zdzp = pap - _up(pap)
     zcape = jnp.sum(jnp.where(llo3, ((ptu - ztenh) / ztenh + retv * (pqu - zqenh) - plu)
                               * zdzp, 0.0))
@@ -777,31 +930,38 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     ztaures = ifs_ztaures(zdx)
     ikd, ikb, ik = idpl, kcbot, kctop
     ztau = ((kget(pgeoh, ik) - kget(pgeoh, ikb))
-            / ((ZTAU_W0 + jnp.minimum(ZTAU_WMAX, pwmean)) * rg) * ztaures * RTAUA)
+            / ((ZTAU_W0 + sm.min(pwmean, ZTAU_WMAX, _W_VEL)) * rg) * ztaures * RTAUA)
     zxtau = ztau
-    llo1 = paph[K + 1] - kget(paph, ikd) < ZPBL_DP
+    llo1 = sm.lt(paph[K + 1] - kget(paph, ikd), ZPBL_DP, _W_PRES)
     zduten = ZDUTEN0 + ssqrt(0.5 * (kget(puen, ikb) ** 2 + kget(pven, ikb) ** 2
                                   + kget(puen, njkt3) ** 2 + kget(pven, njkt3) ** 2))
-    ztaupbl = jnp.minimum(ZDCYC_DZ, kget(pgeoh, ikb) - pgeoh[K + 1]) / (rg * zduten)
+    ztaupbl = sm.min(kget(pgeoh, ikb) - pgeoh[K + 1], ZDCYC_DZ, _W_GEO) / (rg * zduten)
     # LDLAND as a land fraction: exact for land in {0, 1}
-    zcapdcycl = jnp.where(llo1, land * (zcappbl * ztau / ztaures)
-                          + (1.0 - land) * (zcappbl * ztaupbl), 0.0)
+    zcapdcycl = sm.sel(llo1, land * (zcappbl * ztau / ztaures)
+                       + (1.0 - land) * (zcappbl * ztaupbl), 0.0)
     zdqcv = zdqcv * rlvtt / kget(pgeoh, ik) * zxtau / jnp.maximum(ZTAURES_MIN, ztaures) * tun.rcapqadv
     zsatfr = zsatfr / (paph[K + 1] - kget(paph, ik))
     zcape2 = tun.rcapqadv * zcape2 + (1.0 - tun.rcapqadv) * zcape
-    zcapdcycl = jnp.maximum(zcapdcycl, -2.0 * zcape2)
-    br = (zsatfr <= ZSATFR_MAX) | (kget(pvervel, njkt5) < ZOMEGA_RES)
-    zcape_c = jnp.where(br, jnp.maximum(RMINCAPE * zcape, zcape2 - zcapdcycl + zdqcv),
-                        jnp.maximum(RMINCAPE * zcape, zcape - zcapdcycl))
-    zcape_c = jnp.minimum(zcape_c, ZCAPE_MAX)
-    zheat_c = jnp.maximum(ZHEAT_MIN, zheat)
-    zxtau_c = jnp.maximum(ZXTAU_MIN, jnp.minimum(ZXTAU_MAX, zxtau))
-    zmfub1 = jnp.maximum((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN)   # ZFACCA = 1
+    zcapdcycl = sm.max(zcapdcycl, -2.0 * zcape2, _W_CAPE)
+    # (A | B) as 1 - (1 - A)(1 - B): exact for hard 0/1 weights
+    br = 1.0 - ((1.0 - sm.le(zsatfr, ZSATFR_MAX, _W_SATFR))
+                * (1.0 - sm.lt(kget(pvervel, njkt5), ZOMEGA_RES, _W_OMEGA)))
+    zcape_c = sm.sel(br, sm.max(zcape2 - zcapdcycl + zdqcv, RMINCAPE * zcape, _W_CAPE),
+                     sm.max(zcape - zcapdcycl, RMINCAPE * zcape, _W_CAPE))
+    zcape_c = sm.min(zcape_c, ZCAPE_MAX, _W_CAPE)
+    zheat_c = sm.max(zheat, ZHEAT_MIN, _W_HEAT)
+    zxtau_c = sm.max(sm.min(zxtau, ZXTAU_MAX, _W_TIME), ZXTAU_MIN, _W_TIME)
+    zmfub1 = sm.max((zcape_c * zmfub) / (zheat_c * zxtau_c), ZMFUB1_MIN, _W_MF)   # ZFACCA = 1
     zmfmax = (kget(paph, ikb) - kget(paph, ikb - 1)) * zcons2
-    zmfub1 = jnp.where(deep, jnp.minimum(zmfub1, zmfmax), zmfub)
+    zmfub1 = jnp.where(deep, sm.min(zmfub1, zmfmax, _W_MF), zmfub)
     # shallow and mid-level, :881-936
     pmfd_b = kget(pmfd, ikb)
-    zeps = jnp.where(pmfd_b < 0.0, -pmfd_b / jnp.maximum(zmfub, ZEPS_MF), 0.0)
+    # a ratio to the traced base flux: window 0.01 x ZMFUB (mid-level base
+    # fluxes, ~1e-6, sit far below the mass-flux class scale); floored at
+    # 0.01 x the division guard so a non-convecting lane's window stays > 0
+    w_mfub = jnp.hypot(_W_REL * zmfub, _W_REL * ZEPS_MF)
+    zeps = (sm.pos(-pmfd_b, w_mfub)
+            / jnp.maximum(zmfub, ZEPS_MF))   # ZEPS_MF: division guard
     zqumqe = (kget(pqu, ikb) + kget(plu, ikb) - zeps * kget(zqd, ikb)
               - (1.0 - zeps) * kget(zqenh, ikb))
     zdh = (rcpd * (kget(ptu, ikb) - zeps * kget(ztd, ikb) - (1.0 - zeps) * kget(ztenh, ikb))
@@ -809,7 +969,7 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     zdh2 = (rcpd * (kget(ptu, ikb - 1) - zeps * kget(ztd, ikb - 1)
                     - (1.0 - zeps) * kget(ztenh, ikb - 1)) + rlvtt * zqumqe)
     zdh = 0.5 * (zdh + zdh2)
-    zdh = rg * jnp.maximum(zdh, ZDH_MIN * rcpd)
+    zdh = rg * sm.max(zdh, ZDH_MIN * rcpd, _W_DH)
     # KNOWN DIFFERENCE (RULE 5 / departure from OpenIFS, main #2253, user
     # decision 2026-10-28) when tun.shallow_nosupply == "zero": a column first
     # triggered deep and reclassified shallow with no sub-cloud supply keeps
@@ -826,14 +986,17 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
         supply = smooth_max(zdhpbl, 0.0,
                             sharpness=float("inf") if w == 0.0 else 1.0 / (rg * w))
     m2 = supply / zdh
-    weak = (m2 > ZSHAL_MF * zmfmax / RMFCFL) & (zdh < ZSHAL_DH * rg * rcpd)
-    m2 = jnp.where(weak, supply / (ZSHAL_DH2 * rcpd * rg), m2)
+    weak = (sm.gt(m2, ZSHAL_MF * zmfmax / RMFCFL, _W_MF)
+            * sm.lt(zdh, ZSHAL_DH * rg * rcpd, rg * _W_DH))
+    m2 = sm.sel(weak, supply / (ZSHAL_DH2 * rcpd * rg), m2)
     if tun.shallow_nosupply == "first_guess":
+        # the source's own branch: kept exact (the default "zero" mode smooths it)
         m2 = jnp.where(zdhpbl > 0.0, m2, zmfub)                    # :905 / :912
-    m2 = jnp.minimum(m2, zmfmax)
-    m3 = jnp.maximum(zmfub, ZMID_MF * zkhfl / kget(pgeoh, ikb)) * (1.0 + zeps)
-    m3 = jnp.where(kget(pgeoh, ikb) < ZMID_GEO, jnp.minimum(m3, zmfmax / (ZMID_CFL * RMFCFL)),
-                   jnp.minimum(m3, zmfmax))
+    m2 = sm.min(m2, zmfmax, _W_MF)
+    m3 = sm.max(ZMID_MF * zkhfl / kget(pgeoh, ikb), zmfub, w_mfub) * (1.0 + zeps)
+    m3 = sm.sel(sm.lt(kget(pgeoh, ikb), ZMID_GEO, _W_GEO),
+                sm.min(m3, zmfmax / (ZMID_CFL * RMFCFL), _W_MF),
+                sm.min(m3, zmfmax, _W_MF))
     zmfub1 = jnp.where(ldcum & (ktype == 2), m2, zmfub1)
     zmfub1 = jnp.where(ldcum & (ktype == 3), m3, zmfub1)
     # rescale DD fluxes, :940-953
@@ -850,10 +1013,23 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
         on = ldcum & (jk >= kctop - 1)
         zdz_ = (paph[K + 1] - kget(paph, jk)) / (paph[K + 1] - kget(paph, kcbot))
         mu = kset(mu, jk, kget(mu, kcbot) * zdz_, on & (jk > kcbot))
-        zmfmx = jnp.minimum((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA)
+        zmfmx = sm.min((kget(paph, jk) - kget(paph, jk - 1)) * zcons2, RMFLIA, _W_MF)
         mk = kget(mu, jk)
-        hit = on & (mk * zm > zmfmx)
-        zm = jnp.where(hit, jnp.maximum(jnp.minimum(zm, sdiv(zmfmx, mk, hit)), ZMFS_MIN), zm)
+        if sm.hard:
+            hit = on & (mk * zm > zmfmx)
+            zm = jnp.where(hit, jnp.maximum(jnp.minimum(zm, sdiv(zmfmx, mk, hit)), ZMFS_MIN), zm)
+        else:
+            # chained C1 min over levels (vote V5-l); window 0.01 x the traced
+            # bound.  mk > 0 and the RMFCMIN floor on the divisor are division
+            # guards (an fp32 overflow of the bound would turn the window and
+            # the gradient into inf/NaN); below RMFCMIN the bound is far above
+            # zm, so min(zm, r) is exactly zm.  ZMFS_MIN stays a hard safety
+            # floor, applied where the cap is engaged (m < zm), as the hard
+            # path applies it where the cap is hit.
+            ok = on & (mk > 0.0)
+            r = zmfmx / jnp.maximum(mk, RMFCMIN)
+            m = sm.min(zm, r, _W_REL * r)
+            zm = jnp.where(ok & (m < zm), jnp.maximum(m, ZMFS_MIN), zm)
         return mu, zm
 
     pmfu, zmfs = jax.lax.fori_loop(0, K - 1, lim, (pmfu, zmfs0))
@@ -875,7 +1051,7 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     fx = cuflxn(th, K, dt, pten, pqen, pqsen, ztenh, zqenh, paph, pap, pgeoh, land,
                 ldcum, kcbot, kctop, idtop, ktype, lddraf, pmfu, pmfd, zmfus, zmfds,
                 zmfuq, zmfdq, zmful, plude, pludeli1, pludeli2, plrain, zdmfup, zdmfdp,
-                zlglac, pmfude_rate, pmfdde_rate)
+                zlglac, pmfude_rate, pmfdde_rate, sm)
     lddraf, ktype = fx["lddraf"], fx["ktype"]
     pmfu, pmfd, zmfus, zmfds = fx["pmfu"], fx["pmfd"], fx["pmfus"], fx["pmfds"]
     zmfuq, zmfdq, zmful = fx["pmfuq"], fx["pmfdq"], fx["pmful"]
@@ -888,17 +1064,17 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     # rate / precipitation consistency, :1121-1141 (JK = 2..KLEV-1)
     r = (lev >= 2) & (lev <= K - 1)
     zer = -pmfd + _up(pmfd) + pmfdde_rate
-    pmfdde_rate = jnp.where(r & lddraf & (lev >= idtop - 1) & (zer < 0.0),
-                            pmfdde_rate - zer, pmfdde_rate)
+    pmfdde_rate = jnp.where(r & lddraf & (lev >= idtop - 1),
+                            pmfdde_rate + sm.pos(-zer, _W_RATE), pmfdde_rate)
     cud = r & ldcum & (lev >= kctop - 1)
     zer = pmfu - _nx(pmfu) + pmfude_rate
-    pmfude_rate = jnp.where(cud & (zer < 0.0), pmfude_rate - zer, pmfude_rate)
+    pmfude_rate = jnp.where(cud, pmfude_rate + sm.pos(-zer, _W_RATE), pmfude_rate)
     zdmfup = jnp.where(cud, pmflxr[1:] + pmflxs[1:] - pmflxr[:-1] - pmflxs[:-1], zdmfup)
     zdmfdp = jnp.where(cud, 0.0, zdmfdp)
     # downdraught top humidity, :1145-1157 (RMFSOLTQ > 0)
     ikd = jnp.minimum(idtop + 1, K)
-    pmfd = kset(pmfd, idtop, ZDDTOP_Q * kget(pmfd, ikd),
-              lddraf & (kget(zmfdq, idtop) < ZDDTOP_Q * kget(zmfdq, ikd)))
+    ddq = sm.lt(kget(zmfdq, idtop), ZDDTOP_Q * kget(zmfdq, ikd), _W_DDQF)
+    pmfd = kset(pmfd, idtop, sm.sel(ddq, ZDDTOP_Q * kget(pmfd, ikd), kget(pmfd, idtop)), lddraf)
     # negative humidities near cloud top, :1161-1188 (JK = 2..KLEV)
     rk = (lev >= 2) & (lev <= K)
     near = rk & ldcum & (lev >= kctop - 1) & (lev < kcbot)
@@ -906,11 +1082,34 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     zmfa = (_nx(zmfuq) + _nx(zmfdq) - zmfuq - zmfdq + _nx(zmful) - zmful + zdmfup
             - psnde1 - psnde2)
     zmfa = (zmfa - plude) * zdzt
-    lim2 = near & (pqen + zmfa < 0.0) & (plude > 0.0)
-    zfacl = jnp.minimum(-(pqen + zmfa) / zdzt, plude)
-    plude_n = jnp.where(lim2, plude + zfacl, plude)
-    pludeli1 = jnp.where(lim2, pludeli1 + zfacl * sdiv(pludeli1, plude_n, lim2), pludeli1)
-    pludeli2 = jnp.where(lim2, pludeli2 + zfacl * sdiv(pludeli2, plude_n, lim2), pludeli2)
+    if sm.hard:
+        lim2 = near & (pqen + zmfa < 0.0) & (plude > 0.0)
+        zfacl = sm.min(-(pqen + zmfa) / zdzt, plude, _W_LUDE)
+    else:   # bounded: 0 <= ZFAC <= PLUDE, zero unless q + ZMFA < 0 and PLUDE > 0
+        zneed = sm.pos(-(pqen + zmfa) / zdzt, _W_LUDE)
+        zfacl = _cap_min(sm, zneed, plude, _W_LUDE)
+        lim2 = near
+    if tun.openifs_cloud_top_fixer:
+        # OpenIFS :1171-1173 as written: ADDS ZFAC to PLUDE, so the humidity
+        # (tendency -PLUDE) goes more negative, and scales PLUDELI by the
+        # updated PLUDE, so PLUDELI1+PLUDELI2 - PLUDE = -ZFAC**2/PLUDE_new
+        # (energy and, via CLOUDSC's PLUDELI, water leak).  KNOWN DIFFERENCE,
+        # #2594: reachable only through this switch.
+        plude_n = jnp.where(lim2, plude + zfacl, plude)
+        pdiv = lim2 & (plude_n != 0.0)
+        pludeli1 = jnp.where(lim2, pludeli1 + zfacl * sdiv(pludeli1, plude_n, pdiv), pludeli1)
+        pludeli2 = jnp.where(lim2, pludeli2 + zfacl * sdiv(pludeli2, plude_n, pdiv), pludeli2)
+    else:
+        # Corrected (#2594, owner decision 2026-11-24): ZFAC (<= PLUDE) of the
+        # detrained condensate stays vapour -- q + ZMFA rises to 0 (or by
+        # PLUDE*ZDZ when capped) -- and PLUDELI1/2 shrink in proportion, so
+        # PLUDELI1 + PLUDELI2 = PLUDE still holds: water (q + condensate) and
+        # the column frozen moist static energy are unchanged by the fixer.
+        plude_n = jnp.where(lim2, plude - zfacl, plude)
+        pdiv = lim2 & (plude != 0.0)
+        frac = jnp.where(pdiv, sdiv(plude_n, plude, pdiv), 1.0)   # exactly 0 when emptied
+        pludeli1 = pludeli1 * frac
+        pludeli2 = pludeli2 * frac
     negl = near & (plude_n < 0.0)
     plude = jnp.where(negl, 0.0, plude_n)
     pludeli1 = jnp.where(negl, 0.0, pludeli1)
@@ -1055,6 +1254,12 @@ def cumastrn(th, dt, pgaw, T, q, u, v, plitot, omega, qsat, ahfs, qhfl, p_full,
             f"unknown shallow-closure no-supply scheme "
             f"shallow_nosupply={tun.shallow_nosupply!r}; choose one of "
             f"{SHALLOW_NOSUPPLY_MODES}.")
+    if not isinstance(tun.hard_switches, bool):
+        raise ValueError(
+            f"hard_switches must be a python bool (static), got {tun.hard_switches!r}.")
+    if not isinstance(tun.openifs_cloud_top_fixer, bool):
+        raise ValueError("openifs_cloud_top_fixer must be a python bool (static), "
+                         f"got {tun.openifs_cloud_top_fixer!r}.")
     if not tun.shallow_supply_width_w_m2 >= 0.0:
         raise ValueError(
             "shallow_supply_width_w_m2 must be >= 0 (0 = hard max(ZDHPBL, 0)), "

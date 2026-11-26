@@ -1315,7 +1315,7 @@ def _build_tiled_pad(mesh, ndim, halo=1, with_offsets=False):
     pos_j = jnp.asarray(tables.offs_pos)
     n_rounds = len(tables.perms)
 
-    def _pad_body(tile, offsets):
+    def _pad_schedule(tile, offsets):
         # tile: (n_loc, n_loc[, C]) — a SINGLE device's local block.
         n_loc = tile.shape[0]
         n = kt * n_loc
@@ -1344,7 +1344,7 @@ def _build_tiled_pad(mesh, ndim, halo=1, with_offsets=False):
         halo_strips = jnp.zeros_like(strips)
         for r in range(n_rounds):
             send_buf = strips[send_edge_j[r, my_id]]
-            received = jax.lax.ppermute(send_buf, AXES, tables.perms[r])
+            received = (yield send_buf, tables.perms[r])
             tgt = recv_tgt_j[r, my_id][None]
             halo_strips = halo_strips.at[tgt].set(
                 received[None], mode="drop")
@@ -1370,14 +1370,10 @@ def _build_tiled_pad(mesh, ndim, halo=1, with_offsets=False):
                 idx = (slice(None),) * sx + (sl,)
                 return arr[idx]
 
-            lo_from_jbwd = jax.lax.ppermute(
-                _take(we, slice(-g, None)), AXES, j_fwd)
-            hi_from_jfwd = jax.lax.ppermute(
-                _take(we, slice(None, g)), AXES, j_bwd)
-            lo_from_ibwd = jax.lax.ppermute(
-                _take(sn, slice(-g, None)), AXES, i_fwd)
-            hi_from_ifwd = jax.lax.ppermute(
-                _take(sn, slice(None, g)), AXES, i_bwd)
+            lo_from_jbwd = yield _take(we, slice(-g, None)), j_fwd
+            hi_from_jfwd = yield _take(we, slice(None, g)), j_bwd
+            lo_from_ibwd = yield _take(sn, slice(-g, None)), i_fwd
+            hi_from_ifwd = yield _take(sn, slice(None, g)), i_bwd
             we_pad = jnp.concatenate(
                 [lo_from_jbwd, we, hi_from_jfwd], axis=sx)
             sn_pad = jnp.concatenate(
@@ -1446,18 +1442,13 @@ def _build_tiled_pad(mesh, ndim, halo=1, with_offsets=False):
             def _ends(e, lo):
                 s = final[e]              # (2, n_loc[, C]) = (depth, j)
                 return s[:, :h] if lo else s[:, -h:]
-        diag_recv = [
-            jax.lax.ppermute(diag_send[c], AXES, diag_perms[c])
-            for c in range(4)
-        ]
-        sl_jf = jax.lax.ppermute(
-            jnp.stack([_ends(0, False), _ends(1, False)]), AXES, j_fwd)
-        sl_jb = jax.lax.ppermute(
-            jnp.stack([_ends(0, True), _ends(1, True)]), AXES, j_bwd)
-        sl_if = jax.lax.ppermute(
-            jnp.stack([_ends(2, False), _ends(3, False)]), AXES, i_fwd)
-        sl_ib = jax.lax.ppermute(
-            jnp.stack([_ends(2, True), _ends(3, True)]), AXES, i_bwd)
+        diag_recv = []
+        for c in range(4):
+            diag_recv.append((yield diag_send[c], diag_perms[c]))
+        sl_jf = yield jnp.stack([_ends(0, False), _ends(1, False)]), j_fwd
+        sl_jb = yield jnp.stack([_ends(0, True), _ends(1, True)]), j_bwd
+        sl_if = yield jnp.stack([_ends(2, False), _ends(3, False)]), i_fwd
+        sl_ib = yield jnp.stack([_ends(2, True), _ends(3, True)]), i_bwd
         # Per corner (lo,lo),(lo,hi),(hi,lo),(hi,hi): the W/E-row
         # sliver candidate and the S/N-col sliver candidate.
         sliv_we = (sl_jf[0], sl_jb[0], sl_jf[1], sl_jb[1])
@@ -1514,6 +1505,31 @@ def _build_tiled_pad(mesh, ndim, halo=1, with_offsets=False):
                 padded = padded.at[rs, cs].set(blk)
         return padded
 
+    def _pad_body(tile, offsets):
+        # Static Python schedules are exhausted during tracing, not on device.
+        # Run the SAME stencil body for each dtype, issuing a tuple of buffers
+        # at each matching. Never concatenate fields of different dtypes.
+        is_bundle = isinstance(tile, tuple)
+        schedules = [_pad_schedule(t, offsets)
+                     for t in (tile if is_bundle else (tile,))]
+        pending = [next(schedule) for schedule in schedules]
+        while True:
+            buffers, perms = zip(*pending)
+            assert all(perm == perms[0] for perm in perms)
+            received = jax.lax.ppermute(
+                buffers if is_bundle else buffers[0], AXES, perms[0])
+            if not is_bundle:
+                received = (received,)
+            pending, outputs = [], []
+            for schedule, value in zip(schedules, received):
+                try:
+                    pending.append(schedule.send(value))
+                except StopIteration as done:
+                    outputs.append(done.value)
+            if outputs:
+                assert not pending  # every dtype follows the same schedule
+                return tuple(outputs) if is_bundle else outputs[0]
+
     return _pad_body, in_sp, in_sp_data
 
 
@@ -1548,7 +1564,9 @@ def make_tiled_pad_body(mesh, ndim, halo=1, with_offsets=False):
 
     Takes one device's local ``(n_loc, n_loc[, C])`` tile plus optional
     replicated ``offsets`` and returns the ``(n_loc+2h, ...)`` padded
-    block via ``lax.ppermute`` directly.  A nested ``shard_map`` (what
+    block via ``lax.ppermute`` directly. A tuple of equal-spatial-shape
+    buffers is also accepted: each keeps its dtype and follows the same
+    matching schedule, with tuple operands at every permutation. A nested ``shard_map`` (what
     the operators' ``explicit_pad_halo`` SPMD branch does) is illegal
     inside an outer ``shard_map``, so the stage routes its metric/state
     pads through THIS body instead.  Bit-identical to the wrapped
@@ -1559,7 +1577,33 @@ def make_tiled_pad_body(mesh, ndim, halo=1, with_offsets=False):
     return _pad_body
 
 
-def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True):
+def bundled_tiled_pad(scalar_body, fields, offsets):
+    """Pad independently ready local fields through the shared tiled body.
+
+    Equal-dtype channels share a buffer; mixed pressure precision keeps
+    separate buffers, without casting. Spatial axes and field order survive.
+    A scalar field may carry just one channel (not one copy per level).
+    """
+    groups = {}
+    for i, field in enumerate(fields):
+        groups.setdefault(field.dtype, []).append(i)
+    buffers = tuple(jnp.concatenate([fields[i] for i in indices], axis=-1)
+                    for indices in groups.values())
+    padded = scalar_body(buffers[0] if len(buffers) == 1 else buffers, offsets)
+    if len(buffers) == 1:
+        padded = (padded,)
+    out = [None] * len(fields)
+    for indices, buf in zip(groups.values(), padded):
+        start = 0
+        for i in indices:
+            width = fields[i].shape[-1]
+            out[i] = buf[..., start:start + width]
+            start += width
+    return tuple(out)
+
+
+def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True, *,
+                               halo_grouping="current"):
     """Tiled VECTOR halo pad for use inside the tiled tendency stage.
 
     Grid-aligned wind components rotate across cube-face seams, so a
@@ -1578,9 +1622,14 @@ def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True):
     interior; *_padded: (n_loc+2h,...) via mesh.tiled_padded_block) —
     supplied by the stage from the stacked metrics.  Orthogonal
     rotation only (no duogrid / non-orthogonality) for the first cut.
+    ``halo_grouping="bundled"`` packs geographic east+north in one scalar
+    pad; the default ``"current"`` retains independent component pads.
     """
+    if halo_grouping not in ("current", "bundled"):
+        raise ValueError(f"unknown halo_grouping {halo_grouping!r}")
     scalar_body = make_tiled_pad_body(
-        mesh, ndim, halo=halo, with_offsets=with_offsets)
+        mesh, 4 if halo_grouping == "bundled" and ndim == 3 else ndim,
+        halo=halo, with_offsets=with_offsets)
 
     def _vbody(u_tile, v_tile, cos_angle, sin_angle,
                cos_angle_padded, sin_angle_padded, offsets):
@@ -1596,8 +1645,18 @@ def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True):
         u_east = cos_angle * u_tile - sin_angle * v_tile
         v_north = sin_angle * u_tile + cos_angle * v_tile
         # 2. scalar tiled pad of each geographic component.
-        u_east_pad = scalar_body(u_east, offsets)
-        v_north_pad = scalar_body(v_north, offsets)
+        if halo_grouping == "bundled":
+            # Same geographic rotation and scalar pad; only channels grouped.
+            if ndim == 3:
+                east, north = bundled_tiled_pad(
+                    scalar_body, (u_east[..., None], v_north[..., None]), offsets)
+                u_east_pad, v_north_pad = east[..., 0], north[..., 0]
+            else:
+                u_east_pad, v_north_pad = bundled_tiled_pad(
+                    scalar_body, (u_east, v_north), offsets)
+        else:
+            u_east_pad = scalar_body(u_east, offsets)
+            v_north_pad = scalar_body(v_north, offsets)
         # 3. geographic -> grid with the PADDED angle (inverse of step 1).
         cap, sap = cos_angle_padded, sin_angle_padded
         if u_east_pad.ndim == cap.ndim + 1:

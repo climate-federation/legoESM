@@ -34,7 +34,7 @@ GRID_CONFIGS = {
             vertical_coord="hybrid", p_top_Pa=200.0, stretching=2.0,
         ),
         dycore=DycoreConfig(
-            model_type="hydrostatic", discretization="cdgrid",
+            model_type="hydrostatic", discretization="fv3_duo",
             energy_fixer=False,  # HS benchmark: no fixer (F15b vote V4)
             dt=600.0, hyperdiff_scale=1.0, div_damp_scale=1.0,
             conservation_fixer=True, fix_mass=True,

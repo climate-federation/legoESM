@@ -1,0 +1,13 @@
+# Production deck in single precision, with the multilayer land step and the
+# microphysics kept in double precision (land_compute_precision: fp64,
+# microphysics_compute_precision: fp64).  Target: AMIP on one consumer GPU.
+#
+# Land: in plain fp32 the two-leaf canopy solve fails to converge in 43% of
+# land columns on the first step and the run blows up within a day.
+# Microphysics: user ruling 2026-08, microphysics stays fp64.
+# Everything else is amip_production.yaml.  Production stays fp64 until the
+# paired one-year fp32-vs-fp64 gate passes.
+include: amip_production.yaml
+precision: fp32
+land_compute_precision: fp64
+microphysics_compute_precision: fp64

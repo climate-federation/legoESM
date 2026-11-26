@@ -82,8 +82,10 @@ P_SFC = 101_480.0
 
 SCHEMES = (
     "sbm", "dca", "kuo", "mass_flux", "edmf",
-    "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
+    "zhang_mcfarlane", "kain_fritsch", "emanuel", "bechtold",
 )
+# tiedtke (WRF port) needs the dynamics q_v tendency, omega and lagged
+# turbulence inputs this offline column lacks (vote V16a).
 
 
 def build_state(nlev: int, ncol: int):

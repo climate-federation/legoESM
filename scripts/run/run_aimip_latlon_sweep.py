@@ -72,7 +72,7 @@ SWEEP_SPACE = {
     # so it trains. clubb may be prognostic (needs a clubb_moments carry, not
     # seeded) -> may fail-isolate. mynn25 is not a run_amip --turbulence choice.
     "turbulence": [
-        "smagorinsky", "holtslag_boville", "ysu", "clubb_lite", "clubb",
+        "smagorinsky", "holtslag_boville", "ysu", "clubb",
         "edmf", "tke",
     ],
     # hines is the baseline. mcfarlane and lindzen are orographic — with no

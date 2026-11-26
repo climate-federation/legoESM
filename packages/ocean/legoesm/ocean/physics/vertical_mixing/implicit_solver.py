@@ -339,8 +339,14 @@ def _nemo_ordered_solve(
     if rhs.ndim < 1 or rhs.shape[-1] < 1:
         raise ValueError("NEMO literal tridiagonal solve needs at least one row")
     nlev = rhs.shape[-1]
+
+    def pivot(d):
+        # Gradient-only: a zero pivot (dry column) divides by 1; its forward
+        # inf/NaN is masked by every caller, but the reverse pass would not be.
+        return jnp.where(d == 0.0, jnp.ones_like(d), d)
+
     if nlev == 1:
-        return rhs / diagonal
+        return rhs / pivot(diagonal)
 
     diag_inputs = tuple(jnp.moveaxis(x, -1, 0) for x in (
         lower[..., 1:], diagonal[..., 1:], upper[..., :-1]))
@@ -349,7 +355,7 @@ def _nemo_ordered_solve(
         current_lower, current_diagonal, previous_upper = operands
         product = jax.lax.optimization_barrier(
             current_lower * previous_upper)
-        quotient = jax.lax.optimization_barrier(product / previous)
+        quotient = jax.lax.optimization_barrier(product / pivot(previous))
         current = jax.lax.optimization_barrier(
             current_diagonal - quotient)
         return current, current
@@ -366,7 +372,7 @@ def _nemo_ordered_solve(
         source, current_lower, previous_diagonal = operands
         # NEMO writes division before multiplication in both routines.
         quotient = jax.lax.optimization_barrier(
-            current_lower / previous_diagonal)
+            current_lower / pivot(previous_diagonal))
         product = jax.lax.optimization_barrier(
             _round_the_multiply(quotient * previous))
         current = jax.lax.optimization_barrier(source - product)
@@ -376,7 +382,7 @@ def _nemo_ordered_solve(
     work = jnp.concatenate(
         [rhs[..., :1], jnp.moveaxis(work_rows, 0, -1)], axis=-1)
 
-    terminal = work[..., -1] / eliminated[..., -1]
+    terminal = work[..., -1] / pivot(eliminated[..., -1])
     reverse_inputs = tuple(
         jnp.moveaxis(x[..., :-1][..., ::-1], -1, 0)
         for x in (work, upper, eliminated))
@@ -387,7 +393,7 @@ def _nemo_ordered_solve(
             _round_the_multiply(current_upper * next_value))
         numerator = jax.lax.optimization_barrier(source - product)
         current = jax.lax.optimization_barrier(
-            numerator / current_diagonal)
+            numerator / pivot(current_diagonal))
         return current, current
 
     _, reverse_rows = jax.lax.scan(
@@ -495,8 +501,15 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     *,
     return_matrix_trace: bool = False,
     rounded_thickness: bool = False,
+    K_2: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Literal NEMO ``trazdf`` content matrix and paired ordered solves."""
+    """Literal NEMO ``trazdf`` content matrix and paired ordered solves.
+
+    ``K_2`` (salt's avs under ln_zdfddm, trazdf.f90:175,198-213) builds the
+    second tracer's own matrix; None shares the first's (avs = avt).
+    """
+    if K_2 is not None and K_2.shape != K.shape:
+        raise ValueError("K_2 must match K")
     if content_rhs_1.shape != content_rhs_2.shape:
         raise ValueError("tracer content RHS arrays must share shape")
     if content_rhs_1.shape != e3t_after.shape or wet.shape != e3t_after.shape:
@@ -526,6 +539,10 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     else:
         out_1 = nemo_ordered_tridiagonal_solve(
             lower, diagonal, upper, content_rhs_1) * wet_f
+    if K_2 is not None:
+        lower, diagonal, upper = nemo_tracer_tridiagonal(
+            K_2, e3t_after, e3w_now, dt, wet, implicit_w=implicit_w,
+            dtype=content_rhs_1.dtype, rounded_thickness=rounded_thickness)
     out_2 = nemo_ordered_tridiagonal_solve(
         lower, diagonal, upper, content_rhs_2) * wet_f
     if return_matrix_trace:
@@ -681,8 +698,11 @@ def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
     implicit_w: jax.Array | None = None,
     return_matrix_trace: bool = False,
     rounded_thickness: bool = False,
+    K_2: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Static production dispatch for the paired tracer ZDF application."""
+    if evaluation == "shared_thomas" and K_2 is not None:
+        raise ValueError("K_2 requires evaluation='nemo_literal'")
     if evaluation == "shared_thomas" and implicit_w is not None:
         raise ValueError("implicit_w requires evaluation='nemo_literal'")
     if evaluation == "shared_thomas" and rounded_thickness:
@@ -698,7 +718,7 @@ def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
             content_rhs_1, content_rhs_2, K, dz_after, e3w_now, dt, wet,
             implicit_w=implicit_w,
             return_matrix_trace=return_matrix_trace,
-            rounded_thickness=rounded_thickness)
+            rounded_thickness=rounded_thickness, K_2=K_2)
     raise ValueError(
         "unknown ZDF tracer solver evaluation "
         f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")

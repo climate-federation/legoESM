@@ -181,14 +181,16 @@ def make_les_microphysics_fn(micro_config: MicrophysicsConfig,
                              ref: SpectralRefState, dz: float, dt: float):
     """Build the swappable microphysics adapter for the spectral LES.
 
-    Returns ``micro(theta, tracers) -> (dtheta_dt, dtracers_dt, precip_sfc)``
+    Returns ``micro(theta, tracers, w=None) -> (dtheta_dt, dtracers_dt,
+    precip_sfc)``
     with LES shapes ``(ny,nx,nz)`` / ``(ny,nx,nz,nt)`` / ``(ny,nx)`` (bottom-up;
     the top-down flip happens inside). Apply forward-Euler OUTSIDE
     ``spectral_les_plane.step`` (mirrors the CRM's radiation/microphysics
     cadence pattern; keeps the dycore step scheme-agnostic).
 
     ``dz`` is the (uniform) LES layer thickness, ``dt`` the LES step (used by
-    the scheme's sedimentation positivity limiter).
+    the scheme's sedimentation positivity limiter).  ``w`` (cell-centred,
+    bottom-up) is read by ``thompson`` only, which refuses without it.
     """
     scheme_name, micro_fn, scheme_config = get_microphysics_fn(micro_config)
     if scheme_name == "ml_emulator":
@@ -212,7 +214,7 @@ def make_les_microphysics_fn(micro_config: MicrophysicsConfig,
                          "the dry driver instead.")
     min_slots = min_tracer_slots(scheme_name, scheme_config)
 
-    def micro(theta, tracers):
+    def micro(theta, tracers, w=None):
         ny, nx, nz = theta.shape
         nt = tracers.shape[-1]
         if nt < min_slots:
@@ -252,8 +254,12 @@ def make_les_microphysics_fn(micro_config: MicrophysicsConfig,
             N_s=(slot(9) if nt > 9 else None),
             N_g=(slot(10) if nt > 10 else None),
         )
+        # WRF Thompson reads the resolved w: cell-centred (ny, nx, nz) on the
+        # LES grid, bottom-up like theta; None -> the scheme refuses.
+        w_kw = ({"w": None if w is None else flip(w).reshape(ncol, nz)}
+                if scheme_name == "thompson" else {})
         out = micro_fn(T_col, slot(0), hyd, p_full, p_half, rho, dz_col, dt,
-                       scheme_config)
+                       scheme_config, **w_kw)
 
         # Latent heating → θ tendency via the reference Exner; flip back.
         dth = (out.dT_dt / exner).reshape(ncol, nz)

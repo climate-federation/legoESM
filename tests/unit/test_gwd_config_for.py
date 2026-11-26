@@ -69,10 +69,8 @@ def test_hines_scalars_reach_the_leaf():
     got = gwd_config_for(_cfg(
         gravity_wave_drag="hines",
         hines_total_rms_wind=1.2,
-        hines_Fmax=0.05,
     ))
     assert got.hines.total_rms_wind == 1.2
-    assert got.hines.Fmax == 0.05
 
 
 def test_composite_scheme_carries_both_tuned_leaves():
@@ -128,16 +126,14 @@ def test_cli_round_trip():
     parser = build_arg_parser()
     d = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert d.hines_total_rms_wind == 2.0
-    assert d.hines_Fmax == 0.1
+    assert d.hines_total_rms_wind == 1.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
-        "--hines-total-rms-wind", "1.2", "--hines-fmax", "0.05",
+        "--hines-total-rms-wind", "1.2",
         "--mcfarlane-k-wave", "1.0e-4",
     ]), parser))
     assert cfg.hines_total_rms_wind == 1.2
-    assert cfg.hines_Fmax == 0.05
     assert cfg.mcfarlane_k_wave == 1.0e-4
     assert gwd_config_for(cfg).hines.total_rms_wind == 1.2
 
@@ -203,14 +199,12 @@ def test_physics_state_seed_honours_a_nested_override():
 @pytest.mark.parametrize("field,bad", [
     ("hines_total_rms_wind", -1.0),
     ("hines_total_rms_wind", 0.0),
-    ("hines_Fmax", -0.1),
     ("mcfarlane_k_wave", float("inf")),
     ("mcfarlane_directional_spread", -1.0),
 ])
 def test_validate_strict_rejects_nonpositive_or_nonfinite(field, bad):
-    """A negative Fmax makes clip(drag, 0, Fmax) return the NEGATIVE cap at
-    every level (constant spurious drag, no error); a non-positive launch rms
-    wind silently disables the scheme.  Neither may reach the kernel."""
+    """A non-positive launch rms wind silently disables the scheme; it may not
+    reach the kernel."""
     with pytest.raises(ValueError, match=field):
         _cfg(gravity_wave_drag="hines", **{field: bad}).validate_strict()
 

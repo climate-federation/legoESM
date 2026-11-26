@@ -688,6 +688,7 @@ def build_global_flexible_model_config() -> LatLonCGridOceanConfig:
         A_h_lat_scaling=True,                       # cos¹(lat) scaling
         A_h_cos_power=1,
         lateral_viscosity_operator="flux_divergence",
+        lateral_viscosity_mask_levels="surface",
         momentum_advection="flux_form",
         momentum_flux_scheme="centered",
         vertical_momentum_scheme="centered_full",

@@ -128,7 +128,8 @@ from legoesm.core.fv3_native_mapz import (
     W_MIN_MAPZ,
     ppm_profile_is_unported,
 )
-from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
+from legoesm.core.fv3_phase3d_common import (
+    remap_kscan_unroll, require_uniform_float_jax)
 
 __all__ = [
     "CONSV_MIN", "T_MIN", "W_MAX_MAPZ", "W_MIN_MAPZ",
@@ -210,7 +211,7 @@ def _gather_k(a, idx):
     return a[jnp.arange(a.shape[0]), j]
 
 
-def _first_bracket_scan(x, lo_t, hi_t, start, nidx: int):
+def _first_bracket_scan(x, lo_t, hi_t, start, nidx: int, *, unroll: int = 1):
     """First ``idx`` in ``[start, nidx]`` with ``lo[idx] <= x <= hi[idx]``.
 
     THE interval-location primitive of this module: the rezone's source
@@ -240,7 +241,8 @@ def _first_bracket_scan(x, lo_t, hi_t, start, nidx: int):
         return (found | hit, jnp.where(hit, idx, sel)), None
 
     init = (jnp.zeros(x.shape, bool), jnp.zeros(x.shape, _IDX))
-    (found, sel), _ = lax.scan(_step, init, (idxs, lo_t, hi_t))
+    (found, sel), _ = lax.scan(_step, init, (idxs, lo_t, hi_t),
+                               unroll=unroll)
     return found, sel
 
 
@@ -953,7 +955,8 @@ def _rezone(q4, dp1, pe1, pe2, km: int, kn: int, dp2=None, *,
 
         # --- locate the top edge: first l >= k0 with pe1(l) <= pe2(k)
         #     <= pe1(l+1)  (:1415-1417), sequential, first match wins.
-        found, ell = _first_bracket_scan(pe2k, pe1_l_t, pe1_r_t, k0, km)
+        found, ell = _first_bracket_scan(pe2k, pe1_l_t, pe1_r_t, k0, km,
+                                         unroll=remap_kscan_unroll())
 
         pe1_l = _gather_k(pe1[:, 1:km + 1], ell - 1)      # pe1(l)
         pe1_r = _gather_k(pe1[:, 2:km + 2], ell - 1)      # pe1(l+1)
@@ -1024,7 +1027,8 @@ def _rezone(q4, dp1, pe1, pe2, km: int, kn: int, dp2=None, *,
 
         (qsum, _, k0m), _ = lax.scan(
             _m_step, (qsum0, jnp.zeros((im,), bool), k0),
-            (ms, pe1_l_t, pe1_r_t, dp1_t, q1_t, q2_t, q3_t, q4_t))
+            (ms, pe1_l_t, pe1_r_t, dp1_t, q1_t, q2_t, q3_t, q4_t),
+            unroll=remap_kscan_unroll())
 
         # The contained-cell branch RETURNS at fv3_native_mapz.py:624
         # WITHOUT ever dividing by the target thickness, so forming this

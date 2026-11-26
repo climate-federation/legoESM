@@ -1126,7 +1126,7 @@ def test_plane_crm_driver_rejects_nan_inf_numeric_args(
         "--nx", "12", "--ny", "12", "--nlev", "20",
         "--dx", "2000.0", "--dt", "5.0",
         "--days", "0.0005",
-        "--no-radiation",
+        "--no-radiation", "--semi-implicit-acoustic",
         flag, value,
         "--output", str(tmp_path / f"rce_bad_{flag.strip('-')}"),
     ]
@@ -1213,7 +1213,7 @@ def test_plane_crm_driver_rejects_nan_rad_interval_with_clean_exit(tmp_path):
         sys.executable, str(DRIVER),
         "--nx", "12", "--ny", "12", "--nlev", "20",
         "--dx", "2000.0", "--dt", "5.0",
-        "--days", "0.0005",
+        "--days", "0.0005", "--semi-implicit-acoustic",
         "--rad-call-interval-s", "nan",
         "--output", str(tmp_path / "rce_nan"),
     ]
@@ -1368,7 +1368,6 @@ def test_plane_crm_production_scale_132x132_one_hour_envelope(tmp_path):
     )
 
 
-@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
 def test_plane_crm_dt20_van_leer_stability_smoke(tmp_path):
     """iter-183 regression: the new production combination
     (dt=20 + Van Leer + beta=0.2) must run stably with radiation.

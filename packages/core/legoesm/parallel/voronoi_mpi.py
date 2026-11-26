@@ -216,6 +216,21 @@ def reduce_partition_metrics(local: dict) -> dict:
     return out
 
 
+# Complete halo rings the MPAS flux-FCT tracer transport needs on the MPI lane:
+# the limiter factor on an owned edge reads the antidiffusive fluxes on every
+# edge of the neighbouring halo cell, whose low-order bounds take the cells
+# beyond.  MEASURED in the ENSO fork (Di Carlo, d7d10936ef; level 4, ERA5
+# start): one complete ring (halo depth 2) gave q_v off by 2.6e-8 relative
+# after one dynamics step, two (depth 3) matched serial to 5e-16.
+_FLUX_FCT_COMPLETE_RINGS = 2
+
+
+def required_halo_depth(tracer_horizontal_scheme: str) -> int:
+    """Halo depth (cell rings) the MPAS step needs: 3 for ``flux_fct`` (two
+    complete rings), else the default 2."""
+    return _FLUX_FCT_COMPLETE_RINGS + 1 if tracer_horizontal_scheme == "flux_fct" else 2
+
+
 def make_voronoi_partition_layout(
     global_mesh: VoronoiMesh,
     rank: int,
@@ -919,6 +934,14 @@ def make_voronoi_mpi_step(
     )
     if config is None:
         config = model.config
+    if (getattr(config, "tracer_horizontal_scheme", "advective") == "flux_fct"
+            and layout.complete_cell_rings < _FLUX_FCT_COMPLETE_RINGS):
+        raise ValueError(
+            f"flux_fct tracer transport needs {_FLUX_FCT_COMPLETE_RINGS} complete "
+            f"halo rings, this layout certifies {layout.complete_cell_rings} "
+            "(0 = not certified); build it with initialize_voronoi_mpi("
+            "halo_depth=required_halo_depth('flux_fct')), or owned-cell q "
+            "differs from serial along the partition cut")
 
     local_mesh = layout.local_mesh
     owned_mask = layout.owned_mask_cells
@@ -927,7 +950,7 @@ def make_voronoi_mpi_step(
     # class as the passed-in instance (``type(model)``) — so this substrate
     # ``parallel`` module never imports the atmosphere component yet still drives
     # the exact MPAS tendency the global model would.  ``.tendencies(state)``
-    # forwards to ``mpas_hydrostatic_tendencies(state, mesh, sigma_coord, config)``
+    # forwards to ``mpas_model_tendencies(state, mesh, sigma_coord, config)``
     # with the matching defaults (physics_tendency=None, dt=0.0).
     local_model = type(model)(local_mesh, sigma_coord, config)
     # The floors' conserving tracer clamp weights columns by THIS
@@ -1101,16 +1124,19 @@ def make_voronoi_mpi_step(
                 })
             return new
 
-    def _mpi_tendency_fn(state: MPASHydrostaticState) -> MPASHydrostaticState:
+    def _mpi_tendency_fn(state: MPASHydrostaticState,
+                         dt) -> MPASHydrostaticState:
         """Exchange halos then compute tendencies on local mesh.
 
         Returns a tendency-shaped ``MPASHydrostaticState`` (carrying tracer
         ADVECTION tendencies under the same tracer keys) so the pytree RK
         integrator advances moisture mass-consistently with u/T/p_s —
-        mirroring the serial ``_step_jit.dyn_tendency_fn``.
+        mirroring the serial ``_step_jit.dyn_tendency_fn``, which passes the
+        step ``dt`` too: the flux-FCT tracer limiter divides by it, so the
+        default ``dt=0.0`` made every limited tracer non-finite.
         """
         state_ex = _exchange_mpas_state(state)
-        tend = local_model.tendencies(state_ex)
+        tend = local_model.tendencies(state_ex, dt=dt)
         new = MPASHydrostaticState(
             u=state.u.replace(data=tend.du_dt.data),
             T=state.T.replace(data=tend.dT_dt.data),
@@ -1148,7 +1174,8 @@ def make_voronoi_mpi_step(
         # would otherwise leave p_s in fp64 (carry-dtype instability).
         state = cast_pytree(state, None, "compute")
         state_new = dispatch_integrator(
-            state, _mpi_tendency_fn, dt, config.time_integrator,
+            state, lambda s: _mpi_tendency_fn(s, dt), dt,
+            config.time_integrator,
         )
         if getattr(config, "energy_fixer", False):
             # Dycore energy fixer, mirroring the serial ``_step_jit`` (F15):
@@ -1178,11 +1205,17 @@ def make_voronoi_mpi_step(
         # ocean/land was forced with zero surface flux (the serial path exported
         # it, the MPI bypass did not).
         sfc_diag = (None, None, None)
+        # Budget-ledger stage references (#1311, #2171): name bindings only;
+        # the snapshots are built at the end iff the physics carried rows.
+        _state_postdyn = state_new
+        _led_phys_rows = None
         if physics_fn is not None:
             # Column-local physics needs no neighbor cells -> skip the exchange.
             state_phys_in = (
                 state_new if _phys_col_local
                 else _exchange_mpas_state(state_new))
+            from legoesm.core.state import with_dyn_tendencies
+            phys_state = with_dyn_tendencies(phys_state, state, state_new, dt)
             _pr = physics_fn(
                 state_phys_in, local_mesh, sigma_coord,
                 phys_state=phys_state, forcing=forcing,
@@ -1194,6 +1227,7 @@ def make_voronoi_mpi_step(
                 _pt, phys_state_out = _pr[0], _pr[1]
             else:
                 _pt = _pr
+            _led_phys_rows = getattr(_pt, "ledger_rows", None)
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)
@@ -1243,6 +1277,7 @@ def make_voronoi_mpi_step(
         # finalised first, the clamp conserves against the final p_s exactly.
         # (Owned cells + allreduce — correct under the cell partition, unlike
         # the model's internal fixer which would double-count halo cells.)
+        _state_postphys = state_new
         if config.fix_mass:
             _pre_mf = state_new
             state_new = _fix_mass_mpi(
@@ -1265,6 +1300,7 @@ def make_voronoi_mpi_step(
 
         # Floors: temperature and tracer non-negativity (advection is not
         # positive-definite; clamp before tracers feed saturation).
+        _state_postfix = state_new
         if config.T_min > 0:
             T_clipped = jnp.maximum(state_new.T.data, config.T_min)
             state_new = state_new._replace(
@@ -1303,7 +1339,10 @@ def make_voronoi_mpi_step(
                 area=_owned_area,
                 # GLOBAL mean cell area as the (partition-independent) scale
                 area_ref=_total_area_global / layout.partition.nCells_global,
-                sum_fn=_mpi_owned_sum)
+                sum_fn=_mpi_owned_sum,
+                # column local, so identical on every decomposition
+                condensate_from_vapour=getattr(
+                    config, "positivity_condensate_from_vapour", True))
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
@@ -1314,9 +1353,27 @@ def make_voronoi_mpi_step(
         # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
         # dtype (the exact mass correction is load-bearing). No-op wherever
         # storage == accumulate, i.e. every mode except mixed.
+        # Per-column ledger (#2171): column-local, so the rank's rows equal
+        # the serial rows of its cells (halo rows ride along; the writer
+        # gathers the owned ones).  No filter sits between physics and the
+        # fixer on this lane, so post-physics doubles as pre-fixer.
+        _led_step = None
+        if _led_phys_rows is not None:
+            from legoesm.diagnostics.process_ledger import (
+                step_ledger_from_stages,
+            )
+            _led_step = step_ledger_from_stages(
+                _led_phys_rows,
+                (state, _state_postdyn, _state_postphys, _state_postphys,
+                 _state_postfix, state_new),
+                sigma_coord.dsigma, dt,
+                level_weight=getattr(config, "budget_ledger_level_weight",
+                                     None),
+                layer_dp=sigma_coord.layer_thickness_dp)
+
         return (finalize_to_storage(
                     cast_pytree(state_new, None, "storage")),
-                phys_state_out, sfc_diag)
+                phys_state_out, sfc_diag, _led_step)
 
     logger.info(
         "Voronoi MPI step ready: rank=%d/%d, %d owned cells, %d local cells",
@@ -1338,7 +1395,11 @@ def make_voronoi_mpi_step(
             refuse_unthreaded_stateful_physics(
                 physics_fn, phys_state,
                 where="make_voronoi_mpi_step(return_phys_state=True)")
-            _state_out, _phys_out, _sfc = _step(state, dt, forcing, phys_state)
+            _state_out, _phys_out, _sfc, _led = _step(
+                state, dt, forcing, phys_state)
+            # Same eager-only side channel as the serial model (gh-417).
+            if _led is None or not isinstance(_led, jax.core.Tracer):
+                model._step_ledger = _led
             # Publish the surface-flux diagnostic on the model so ``_run_column``
             # stashes it into ``_carry_aux`` for the coupler — the coupled
             # MPI-voronoi path otherwise forced the ocean/land with zero surface

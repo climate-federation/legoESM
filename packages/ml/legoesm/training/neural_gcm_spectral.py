@@ -950,14 +950,14 @@ def make_turbulence_only_spectral_physics(dt,
     # prognostic TKE from the floor on EVERY call — a silently different
     # closure, not the one named (codex). Refuse rather than run it wrong;
     # threading the carry is the fix if one of these is ever wanted here.
-    _STATEFUL = ("tke", "mynn25", "clubb", "clubb_lite", "edmf")
+    _STATEFUL = ("tke", "mynn25", "clubb", "clubb_lite", "edmf", "ysu")
     if turb.scheme in _STATEFUL:
         raise ValueError(
             f"make_turbulence_only_spectral_physics: {turb.scheme!r} is a "
             f"PROGNOSTIC scheme and this builder threads no PhysicsState, so "
             f"its carry would be re-seeded from the floor every step. Use a "
             f"stateless scheme (e.g. 'smagorinsky', 'louis', "
-            f"'holtslag_boville', 'ysu') or thread the carry first.")
+            f"'holtslag_boville') or thread the carry first.")
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme="none"),
@@ -1185,8 +1185,10 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
     # Refuse configs whose explicit advection is unstable (the T63 dt=1800
     # blowup class): the CI deck gate cannot see ad-hoc YAMLs or CLI dt
     # overrides, so the bound is enforced where the integrator is built.
-    from legoesm.atmosphere.dynamics.gcm.spectral_pe import check_advective_cfl
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        check_advective_cfl, refuse_semi_implicit_hybrid)
     check_advective_cfl(int(grid.n_max), dt, pe_config)
+    refuse_semi_implicit_hybrid(pe_config, sigma_coord)
 
     if not pe_config.semi_implicit:
         def _integrate_explicit(state, tendency_fn):
@@ -2114,6 +2116,13 @@ def spectral_amip_rollout(
     ``make_aimip_classical_spectral_physics(..., split_rad=True)``; both forward
     the optional ``phys_state`` / ``forcing`` kwargs used here.
     """
+    if sizing_phys_state.sfclay is not None:
+        # R4 vote J4: this rollout hands the SAME physics state to every step,
+        # so the WRF surface-layer carry of turbulence=ysu would restart each step.
+        raise ValueError(
+            "spectral_amip_rollout does not thread the physics state between steps; "
+            "turbulence='ysu' carries the WRF surface-layer state (PhysicsState.sfclay) "
+            "and is refused here.")
     integrator_name = pe_config.time_integrator
     # #817: explicit dispatch_integrator, or the semi-implicit SSP-RK3-SI step
     # (precomputed ONCE, outside the scan) when pe_config.semi_implicit.

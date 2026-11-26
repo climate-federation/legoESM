@@ -194,7 +194,7 @@ fi
 # Subgrid orography (see AMIP_SSO above, #1514).  Appended like the Levante
 # twin so an empty AMIP_SSO is an explicit opt-out rather than a silent drop.
 if [[ -n "${AMIP_SSO}" ]]; then
-  AMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
+  AMIP_PATH_FLAGS+=( --default-subgrid-orography-file "${AMIP_SSO}" )
 fi
 if [[ -n "${AMIP_LAND_MASK}" ]]; then
   AMIP_PATH_FLAGS+=( --land-mask-file "${AMIP_LAND_MASK}" )
@@ -214,6 +214,18 @@ if [[ "${AMIP_VOLCANIC_LW:-1}" == "1" ]]; then
 fi
 if [[ -n "${AMIP_SSO}" ]]; then
   CMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
+fi
+
+# The CMIP decks with an atmosphere-owned surface (cmip_ocean_slab.yaml and
+# cmip_ocean_3D.yaml): the atmosphere land model's paths, verbatim from
+# AMIP_PATH_FLAGS.  Kept out of CMIP_PATH_FLAGS so a deck without an
+# atmosphere land model does not pick up a land mask.
+CMIP_LAND_PATH_FLAGS=(
+  --surfdata "${AMIP_SURFDATA}"
+  --clm-surfdata-path "${CLM_SURFDATA}"
+)
+if [[ -n "${AMIP_LAND_MASK}" ]]; then
+  CMIP_LAND_PATH_FLAGS+=( --land-mask-file "${AMIP_LAND_MASK}" )
 fi
 
 # Warn (don't fail) on a missing local input so a Stage-0 flat-topo smoke still works.

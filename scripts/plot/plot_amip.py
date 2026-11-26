@@ -15,12 +15,23 @@ from pathlib import Path
 import matplotlib
 import numpy as np
 
+from legoesm.diagnostics.energy_budget import (
+    TOA_MINUS_DE_DT_KEY, read_toa_minus_dE_dt,
+)
+
+
+def _upgrade_legacy(data: dict, source: str) -> dict:
+    v = read_toa_minus_dE_dt(data, source=source)
+    if v is not None:
+        data[TOA_MINUS_DE_DT_KEY] = v
+    return data
+
 
 def load_timeseries(run_dir: Path) -> dict[str, np.ndarray]:
     """Load timeseries.npz, falling back to incremental chunks."""
     ts_path = run_dir / "timeseries.npz"
     if ts_path.exists():
-        return dict(np.load(ts_path))
+        return _upgrade_legacy(dict(np.load(ts_path)), str(ts_path))
 
     # Try incremental chunks
     incr_dir = run_dir / "timeseries_incremental"
@@ -32,7 +43,9 @@ def load_timeseries(run_dir: Path) -> dict[str, np.ndarray]:
                 data = np.load(c)
                 for k in data.files:
                     merged.setdefault(k, []).append(data[k])
-            return {k: np.concatenate(v) for k, v in merged.items()}
+            return _upgrade_legacy(
+                {k: np.concatenate(v) for k, v in merged.items()},
+                str(incr_dir))
 
     print(f"ERROR: no timeseries.npz found in {run_dir}", file=sys.stderr)
     sys.exit(1)
@@ -92,7 +105,7 @@ def plot_conservation(data: dict[str, np.ndarray], ax_grid):
     checks = [
         ("dry_mass_ps", "Sfc pressure [Pa]"),
         ("moisture_residual", "Moisture residual [mm/day]"),
-        ("energy_residual", "Energy residual [W/m$^2$]"),
+        ("energy_toa_minus_dE_dt", "TOA $-$ dE/dt [W/m$^2$]"),
     ]
     for ax, (key, label) in zip(ax_grid, checks):
         if key in data and data[key].size > 0:

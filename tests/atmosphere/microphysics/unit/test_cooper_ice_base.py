@@ -15,7 +15,6 @@ import numpy as np
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.config import (
     MorrisonConfig,
-    ThompsonConfig,
     P3Config,
     __param_spec__,
 )
@@ -24,13 +23,12 @@ from legoesm.atmosphere.physics.microphysics.config import (
 def test_p3_thompson_n_i0_match_cooper_base():
     """All three Cooper-nucleation schemes use the canonical 5/m^3 base."""
     assert MorrisonConfig().N_i0 == 5.0   # already-correct sibling (reference)
-    assert ThompsonConfig().N_i0 == 5.0
     assert P3Config().N_i0 == 5.0
 
 
 def test_n_i0_spec_bounds_bracket_cooper_base():
     """Trainable bounds bracket the canonical base, not the 1000x-too-high band."""
-    for name in ("MorrisonConfig", "ThompsonConfig", "P3Config"):
+    for name in ("MorrisonConfig", "P3Config"):
         bounds = tuple(__param_spec__[name]["params"]["N_i0"]["bounds"])
         assert bounds == (1.0, 50.0), f"{name} N_i0 bounds = {bounds}"
 

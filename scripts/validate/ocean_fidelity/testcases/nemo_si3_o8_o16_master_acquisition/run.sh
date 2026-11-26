@@ -1,0 +1,770 @@
+#!/usr/bin/env bash
+# SI3 O8--O16 MASTER ACQUISITION -- OPERATOR EXECUTION ONLY.
+# Default is read-only preflight. Only explicit --run invokes makenemo/NEMO.
+set -Eeuo pipefail
+
+export PATH=${O8O16_PATH_PREFIX:+$O8O16_PATH_PREFIX:}/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
+readonly PY=${PYTHON_BIN:-/home/dbalwada/legoESM/.venv/bin/python3}
+readonly O17_EXTENDED=${O17_EXTENDED:-0}
+[[ "$O17_EXTENDED" == 0 || "$O17_EXTENDED" == 1 ]] || { printf 'REFUSE: O17_EXTENDED must be 0 or 1\n' >&2; exit 64; }
+
+readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
+readonly NEMO_SOURCE_ROOT=${NEMO_SOURCE_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
+readonly SOURCE_CFG=${SOURCE_CFG:-ORCA2_SAS_ICE}
+readonly SOURCE_EXP=${SOURCE_EXP:-EXPREF}
+readonly BASE_BLD=${BASE_BLD:-$NEMO_ROOT/cfgs/ORCA2_SAS_ICE_O7_REF/BLD}
+readonly SAS_PPSRC=$BASE_BLD/ppsrc/nemo
+readonly REAL_SAS_FIXTURE=${O8O16_REAL_SAS_FIXTURE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round13/refused/oracle_o7_orca2_sas_ice_20261025T172428Z_rc2_3061284}
+readonly REF_CFG=${REF_CFG:-ORCA2_SAS_ICE_O8O16_REF}
+readonly REC_CFG=${REC_CFG:-ORCA2_SAS_ICE_O8O16_REC}
+readonly EVIDENCE_ROOT=${EVIDENCE_ROOT:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18}
+EVIDENCE=${EVIDENCE:-$EVIDENCE_ROOT/oracle_o8_o16_master}
+readonly REFUSED_DIR=${REFUSED_DIR:-$EVIDENCE_ROOT/refused}
+export PYTHONPATH="$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/ice:$REPO/packages/atmosphere:$REPO/packages/land:$REPO/packages/coupler:$REPO/packages/driver"
+read -r DERIVED_O17_RECORD_BYTES DERIVED_O17_DISK_KB <<< \
+  "$("$PY" "$here/../nemo_si3_o17_record_budget.py" --shell)"
+[[ "$DERIVED_O17_RECORD_BYTES" =~ ^[0-9]+$ && "$DERIVED_O17_DISK_KB" =~ ^[0-9]+$ ]] \
+  || { printf 'REFUSE: O17 record budget calculator failed\n' >&2; exit 64; }
+readonly DERIVED_O17_RECORD_BYTES DERIVED_O17_DISK_KB
+if [[ "$O17_EXTENDED" == 1 ]]; then
+  readonly DEFAULT_RUN_TIMEOUT_SEC=21600 DEFAULT_DISK_KB=$DERIVED_O17_DISK_KB
+else
+  readonly DEFAULT_RUN_TIMEOUT_SEC=14400 DEFAULT_DISK_KB=150000000
+fi
+readonly RUN_TIMEOUT_SEC=${RUN_TIMEOUT_SEC:-$DEFAULT_RUN_TIMEOUT_SEC}
+readonly MIN_FREE_RAM_GB=${MIN_FREE_RAM_GB:-150}
+readonly MIN_FREE_DISK_KB=${MIN_FREE_DISK_KB:-$DEFAULT_DISK_KB}
+readonly MAX_EVIDENCE_DISK_KB=${MAX_EVIDENCE_DISK_KB:-$DEFAULT_DISK_KB}
+readonly ORCA2_BUNDLE=${ORCA2_BUNDLE:-/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0.tar.gz}
+readonly ORCA2_BUNDLE_SHA256=${ORCA2_BUNDLE_SHA256:-5d47eab85c591fe0fd7e63a80892f3264b6387edf93cbb975a71b2f2f5fdf1a4}
+readonly SAS_BUNDLE=${SAS_BUNDLE:-/data/abyssal/dbalwada/nemo-testcases-l4/inputs/SAS_v5.0.0_download/SAS_v5.0.0.tar.gz}
+readonly SAS_BUNDLE_SHA256=${SAS_BUNDLE_SHA256:-ee00646832ea89f468d0f01bf537ed231d21f23bba77ab1a9aab26147ecec6cf}
+readonly GATE=$here/../nemo_si3_o8_o16_master_gate.py
+readonly PASSIVITY=$here/../nemo_si3_o8_o16_master_passivity.py
+readonly O17_PASSIVITY=$here/../nemo_si3_o17_master_passivity.py
+readonly READSET=$here/../nemo_si3_o8_o16_readset.py
+readonly EXTENTS=$here/../../orca2_l4/nemo_acquisition_extents.py
+readonly DECK_LOG=$here/../nemo_si3_o7_orca2_sas_acquisition/ocean.output.excerpt
+readonly WRITER=$here/o8_o16_master_writer.F90
+readonly O17_WRITER=$here/o17_master_writer.F90
+readonly STUB_NEMO=$here/stub_nemo.sh
+readonly STUB_MPIRUN=$here/stub_mpirun.sh
+readonly PROD=$NEMO_ROOT/cfgs/$SOURCE_CFG/$SOURCE_EXP
+readonly SHARED=$NEMO_ROOT/cfgs/SHARED
+readonly REF_ROOT=$NEMO_ROOT/cfgs/$REF_CFG
+readonly REC_ROOT=$NEMO_ROOT/cfgs/$REC_CFG
+UNITS=(icestp icethd icethd_do icethd_da icethd_sal icethd_pnd icethd_zdf_bl99 icealb iceupdate)
+if [[ "$O17_EXTENDED" == 1 ]]; then
+  UNITS+=(icedyn_adv_pra icedyn icesbc sbcblk)
+fi
+readonly UNITS
+readonly MASTER_BYTES=$($PY "$GATE" --size | $PY -c 'import json,sys; print(json.load(sys.stdin)["master_bytes_worst_case"])')
+readonly MASTER_GIB=$($PY "$GATE" --size | $PY -c 'import json,sys; print("%.2f" % json.load(sys.stdin)["master_gib_worst_case"])')
+readonly O17_RECORD_BYTES_GATE=${O17_RECORD_BYTES_GATE:-$DERIVED_O17_RECORD_BYTES}
+if [[ "$O17_EXTENDED" == 1 ]]; then
+  printf 'O17_RECORD_BYTES_EXACT_MAX: %s\n' "$O17_RECORD_BYTES_GATE"
+  printf 'O17_UNIFIED_DISK_BUDGET_KIB: %s\n' "$MAX_EVIDENCE_DISK_KB"
+fi
+export O8O16_GATE=$GATE O8O16_PY=$PY O8O16_REAL_SAS_FIXTURE=$REAL_SAS_FIXTURE
+
+mode=${1:---preflight-only}; arg=${2:-}
+case "$mode" in
+  --preflight-only) PREFLIGHT_JSON=$arg ;;
+  --run|--admit-existing) [[ -z "$arg" ]] || EVIDENCE=$arg ;;
+  --move-aside-builds) [[ -z "$arg" ]] || { printf 'REFUSE: --move-aside-builds takes no path\n' >&2; exit 64; } ;;
+  *) printf 'REFUSE: usage: %s [--preflight-only|--run|--admit-existing|--move-aside-builds] [path]\n' "$0" >&2; exit 64 ;;
+esac
+
+ACTIVE_RUN=""; ACTIVE_SCRATCH=""; CREATED_REF=0; CREATED_REC=0; RUN_STARTED_EPOCH=0; ACQUISITION_STOPPED_EPOCH=0
+cleanup() {
+  local rc=$?
+  [[ -z "$ACTIVE_SCRATCH" || ! -d "$ACTIVE_SCRATCH" ]] || printf 'PREFLIGHT_SCRATCH_RETAINED: %s\n' "$ACTIVE_SCRATCH" >&2
+  if [[ "$rc" -ne 0 ]]; then
+    mkdir -p "$REFUSED_DIR"
+    if [[ -n "$ACTIVE_RUN" && -d "$ACTIVE_RUN" ]]; then
+      local dst="$REFUSED_DIR/$(basename "$ACTIVE_RUN")_$(date -u +%Y%m%dT%H%M%SZ)_rc${rc}_$$"
+      mv "$ACTIVE_RUN" "$dst"; printf 'REFUSE_RETAINED: %s\n' "$dst" >&2
+    fi
+    [[ "$CREATED_REF" -eq 0 || ! -d "$REF_ROOT" ]] || printf 'REFUSE_BUILD_RETAINED: %s\n' "$REF_ROOT" >&2
+    [[ "$CREATED_REC" -eq 0 || ! -d "$REC_ROOT" ]] || printf 'REFUSE_BUILD_RETAINED: %s\n' "$REC_ROOT" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+trap 'printf "REFUSE: command failed at line %s; evidence is retained\n" "$LINENO" >&2' ERR
+
+refuse() { printf 'REFUSE: %s\n' "$*" >&2; return 1; }
+ram_gate() { local n; n=$(free -g | awk '/^Mem:/ {print $7}'); [[ -n "$n" && "$n" -ge "$1" ]] || refuse "available RAM ${n:-unknown} GB below $1 GB"; }
+disk_gate() { local p=$1 n; while [[ ! -e "$p" ]]; do p=$(dirname "$p"); done; n=$(df -Pk "$p" | awk 'NR==2 {print $4}'); [[ -n "$n" && "$n" -ge "$2" ]] || refuse "free disk ${n:-unknown} KB below $2 KB"; }
+
+render_deck() {
+  local dir=$1
+  mkdir -p "$dir"
+  cp "$PROD/namelist_cfg" "$dir/namelist_cfg"
+  cp "$PROD/namelist_ice_cfg" "$dir/namelist_ice_cfg"
+  cp -L "$SHARED/namelist_ref" "$dir/namelist_ref"
+  cp -L "$SHARED/namelist_ice_ref" "$dir/namelist_ice_ref"
+  "$PY" - "$dir/namelist_cfg" <<'PY'
+import pathlib,re,sys
+p=pathlib.Path(sys.argv[1]); s=p.read_text()
+s,n=re.subn(r"(^\s*nn_itend\s*=\s*)[^!,\n]+",r"\g<1>100 ",s,count=1,flags=re.I|re.M)
+if n != 1: raise SystemExit("STATUS PLANT-FIRED: cannot set nn_itend=100")
+m=re.search(r"(^\s*&namrun\b[\s\S]*?)(^\s*/\s*$)",s,re.I|re.M)
+if not m: raise SystemExit("STATUS PLANT-FIRED: cannot find &namrun")
+s=s[:m.start(2)]+"   nn_stock = 100\n   nn_write = -1\n"+s[m.start(2):]
+p.write_text(s)
+PY
+  cmp -s "$PROD/namelist_ice_cfg" "$dir/namelist_ice_cfg" || refuse 'production ice namelist was modified'
+  ! grep -Eiq 'ln_zdf_chkcvg\s*=|O8|O9|O16' "$dir/namelist_ice_cfg" || refuse 'ice namelist contains an acquisition overlay'
+}
+
+verify_namelists() {
+  local dir=$1 plant=${2:-none}
+  "$PY" - "$dir" "$plant" <<'PY'
+import re,sys
+from pathlib import Path
+d=Path(sys.argv[1]); plant=sys.argv[2]
+def groups(text):
+    out={}; group=None
+    for raw in text.splitlines():
+        code=raw.split('!',1)[0].strip()
+        m=re.match(r'&([A-Za-z0-9_]+)',code)
+        if m: group=m.group(1).lower(); out.setdefault(group,set()); continue
+        if code.startswith('/'): group=None; continue
+        if group and '=' in code: out[group].add(re.sub(r'\(.*\)$','',code.split('=',1)[0].strip()).lower())
+    return out
+for stem in ('namelist','namelist_ice'):
+    cfg=(d/f'{stem}_cfg').read_text(); ref=(d/f'{stem}_ref').read_text()
+    if plant == 'misspelled' and stem == 'namelist': cfg=re.sub(r'(&namrun)',r'\1\n nn_writ=-1',cfg,count=1,flags=re.I)
+    if plant == 'misplaced' and stem == 'namelist': cfg=re.sub(r'(&namdom)',r'\1\n nn_write=-1',cfg,count=1,flags=re.I)
+    got,want=groups(cfg),groups(ref)
+    owners={n:{g for g,names in want.items() if n in names} for names in want.values() for n in names}
+    for g,names in got.items():
+        if g not in want: raise SystemExit(f'STATUS PLANT-FIRED: unknown group {g}')
+        for n in names:
+            if n not in want[g]: raise SystemExit(f'STATUS PLANT-FIRED: {n} staged in &{g}; owners={sorted(owners.get(n,set()))}')
+cfg_text=(d/'namelist_cfg').read_text(); ref_text=(d/'namelist_ref').read_text()
+def last_int(name):
+    cfg=re.findall(rf'^\s*{name}\s*=\s*(-?\d+)',cfg_text,re.I|re.M)
+    ref=re.findall(rf'^\s*{name}\s*=\s*(-?\d+)',ref_text,re.I|re.M)
+    return int((cfg or ref)[-1])
+for name,want in {'nn_it000':1,'nn_itend':100,'nn_stock':100,'nn_write':-1,'nn_fsbc':1}.items():
+    if last_int(name)!=want: raise SystemExit(f'STATUS PLANT-FIRED: {name} != {want}')
+print('PASS_UNMODIFIED_100_STEP_DECK')
+PY
+}
+
+patch_real_sources() {
+  local out=$1 unit
+  mkdir -p "$out"
+  for unit in "${UNITS[@]}"; do
+    if [[ "$unit" == sbcblk ]]; then
+      cp "$NEMO_SOURCE_ROOT/src/OCE/SBC/$unit.F90" "$out/$unit.F90"
+    else
+      cp "$NEMO_SOURCE_ROOT/src/ICE/$unit.F90" "$out/$unit.F90"
+    fi
+    # O17's insertions are line-numbered against pristine NEMO; apply them
+    # before the contextual O8--O16 patch when both observe icestp.F90.
+    if [[ "$O17_EXTENDED" == 1 && -f "$here/${unit}_o17.patch" ]]; then
+      patch --batch --fuzz=0 "$out/$unit.F90" "$here/${unit}_o17.patch" >/dev/null
+    fi
+    if [[ "$O17_EXTENDED" == 1 && -f "$here/${unit}_o8_o16_o17.patch" ]]; then
+      patch --batch --fuzz=0 "$out/$unit.F90" "$here/${unit}_o8_o16_o17.patch" >/dev/null
+    elif [[ -f "$here/${unit}_o8_o16.patch" ]]; then
+      patch --batch --fuzz=0 "$out/$unit.F90" "$here/${unit}_o8_o16.patch" >/dev/null
+    fi
+  done
+}
+
+preprocess_sources() {
+  local source=$1 out=$2 unit
+  mkdir -p "$out"
+  for unit in "${UNITS[@]}"; do
+    cpp -Dkey_nosignedzero -P -traditional -Dkey_si3 -Dkey_linssh -Dkey_vco_1d3d -Dkey_RK3 \
+      -I"$BASE_BLD/../WORK" "$source/$unit.F90" > "$out/$unit.f90"
+  done
+}
+
+placement_gate() {
+  local dir=$1 plant=${2:-none}
+  "$PY" - "$dir" "$plant" "$O17_EXTENDED" <<'PY'
+import sys
+from pathlib import Path
+d=Path(sys.argv[1]); plant=sys.argv[2]; o17=sys.argv[3]=='1'
+checks={
+'icethd_do.f90':[('SUBROUTINE ice_thd_frazil','CALL o8o16_frazil(1'),('CALL o8o16_frazil(1','fraz_frac(:,:) = 0._wp'),('fraz_frac(:,:) = 0._wp','CALL o8o16_frazil(2')],
+'icethd.f90':[('CALL ice_thd_frazil','CALL o8o16_global(21)'),('CALL o8o16_global(21)','DO jl = 1, jpl'),('dh_s_tot  (1:npti) = 0._wp','CALL o8o16_category(3'),('dh_snowice(1:npti) = 0._wp','CALL o8o16_category(3'),('CALL o8o16_category(3','CALL ice_thd_zdf'),('CALL ice_thd_zdf','CALL o8o16_category(4'),("CALL ice_cons2D  (1, 'icethd'",'CALL o8o16_global(10)'),('CALL o8o16_global(10)','CALL ice_thd_pnd'),('CALL ice_thd_pnd','CALL o8o16_global(11)'),('CALL ice_itd_rem','CALL o8o16_global(12)'),('CALL ice_thd_do','CALL o8o16_global(13)'),('CALL ice_cor( kt , 2 )','CALL o8o16_global(14)')],
+'icethd_zdf_bl99.f90':[('END DO  ! End of the do while iterative procedure','CALL o8o16_picard')],
+'icethd_da.f90':[('READ(numnam_ice_cfg','CALL o8o16_da_config')],
+'icethd_sal.f90':[('IF( nn_icesal /= 4 )','CALL o8o16_salinity_config')],
+'icethd_pnd.f90':[('IF( ioptio /= 1 )','CALL o8o16_pond_config')],
+'icestp.f90':[('CALL ice_thd','CALL o8o16_update(18)'),('CALL o8o16_update(18)','CALL ice_var_glo2eqv'),('CALL ice_var_agg','CALL o8o16_update(15)'),('CALL o8o16_update(15)','CALL ice_update_flx'),('CALL ice_update_flx','CALL o8o16_update(16)')],
+'icealb.f90':[('READ(numnam_ice_cfg','CALL o8o16_albedo_config')],
+'iceupdate.f90':[('SUBROUTINE ice_update_tau','CALL o8o16_tau(19'),('CALL o8o16_tau(19','IF( MOD( kt-1, nn_fsbc )'),('vtau(ji,jj) =','CALL o8o16_tau(20'),('CALL o8o16_tau(20',"CALL timing_stop('iceupdate')")],
+}
+if o17:
+    checks.update({
+      'icestp.f90': checks['icestp.f90'] + [('CALL o17_state(22)','CALL ice_sbc_tau'),('CALL ice_thd','CALL o17_state(27)'),('CALL ice_update_tau','CALL o17_state(28)')],
+      'icedyn.f90': [('CALL o17_dyn_masks','CALL ice_dyn_rhg'),('CALL ice_dyn_rhg','CALL o17_state(23)'),('CALL o17_state(23)','CALL ice_dyn_adv'),('CALL ice_dyn_adv','CALL o17_state(24)'),('CALL ice_dyn_rdgrft','CALL o17_state(25)'),('CALL ice_cor       ( kt , 1 )','CALL o17_state(26)')],
+      'icedyn_adv_pra.f90': [('CALL o17_prather(29','IF( kt == nit000'),('END DO ! jt','CALL o17_prather(30')],
+      'icesbc.f90': [('IF( .NOT. ln_icedH ) THEN','CALL o17_state(31)'),('CALL o17_state(31)','END SUBROUTINE ice_flx_other')],
+      'sbcblk.f90': [('CALL o17_raw_blk1','! treshold for outputs'),('CALL o17_raw_blk2','zcoef_dqlw =')],
+    })
+for file,pairs in checks.items():
+    text=(d/file).read_text()
+    for i,(a,b) in enumerate(pairs):
+        ai=text.find(a); bi=text.find(b,ai+1)
+        if plant == 'misplace' and file=='icethd_do.f90' and i==0: ai=bi+1
+        if ai<0 or bi<0 or ai>=bi: raise SystemExit(f'STATUS PLANT-FIRED: placement {file}: {a} !< {b}')
+print('PASS_REAL_PPSRC_PLACEMENT')
+PY
+}
+
+expect_refusal() { if "$@" >/dev/null 2>&1; then refuse "plant did not refuse: $*"; fi; }
+
+snapshot_cfg_digests() {
+  local out=$1; shift
+  "$PY" - "$out" "$@" <<'PY'
+import hashlib,json,os,sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+out=Path(sys.argv[1]); roots=[]
+for raw in sys.argv[2:]:
+    root=Path(raw)
+    if root.is_dir() and str(root.resolve()) not in {str(p.resolve()) for p in roots}:
+        roots.append(root)
+entries=[]
+for root in roots:
+    for base,dirs,names in os.walk(root,followlinks=False):
+        dirs.sort(); names.sort()
+        for name in names:
+            path=Path(base)/name
+            if path.is_file():
+                key=f'{root.resolve()}::{path.relative_to(root)}'
+                entries.append((key,path))
+def digest(entry):
+    key,path=entry
+    with path.open('rb') as stream:
+        return key,hashlib.file_digest(stream,'sha256').hexdigest()
+with ThreadPoolExecutor(max_workers=4) as pool:
+    files=dict(pool.map(digest,entries))
+out.write_text(json.dumps(files,sort_keys=True)+'\n')
+PY
+}
+
+verify_cfg_digests() {
+  local snapshot=$1 plant=${2:-none}
+  "$PY" - "$snapshot" "$plant" <<'PY'
+import hashlib,json,sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+snapshot=Path(sys.argv[1]); plant=sys.argv[2]; before=json.loads(snapshot.read_text())
+if plant == 'cfg-digest' and before:
+    key=next(iter(before)); before={key:'0'*64}
+def digest(item):
+    key,want=item
+    root,rel=key.split('::',1); path=Path(root)/rel
+    if not path.is_file(): raise SystemExit(f'STATUS PLANT-FIRED: protected cfg file vanished: {path}')
+    with path.open('rb') as stream:
+        got=hashlib.file_digest(stream,'sha256').hexdigest()
+    return path,want,got
+with ThreadPoolExecutor(max_workers=4) as pool:
+    results=pool.map(digest,before.items())
+    for path,want,got in results:
+        if got != want: raise SystemExit(f'STATUS PLANT-FIRED: protected cfg digest changed: {path}')
+print('PASS_EXISTING_CFG_DIGESTS_UNCHANGED')
+PY
+}
+
+production_flags() {
+  awk -F'= ' '/^export FFLAGS = / {print $2; exit}' "$BASE_BLD/Makefile"
+}
+
+compile_real_bounds_fixture() {
+  local scratch=$1 run=$scratch/bounds_run unit obj
+  local flags_text; flags_text=$(production_flags)
+  read -r -a flags <<< "$flags_text"
+  mkdir -p "$scratch/bounds_mod" "$scratch/bounds_obj" "$run/o8_o16_master_records"
+  [[ "$O17_EXTENDED" == 0 ]] || mkdir -p "$run/o17_master_records"
+  "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" \
+    --fixture-include "$scratch/generated_bounds_allocations.inc" > "$scratch/extents.json"
+  mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$BASE_BLD/inc" -J"$scratch/bounds_mod" \
+    "$WRITER" -o "$scratch/bounds_obj/o8_o16_master_writer.o"
+  if [[ "$O17_EXTENDED" == 1 ]]; then
+    mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
+      -J"$scratch/bounds_mod" "$O17_WRITER" -o "$scratch/bounds_obj/o17_master_writer.o"
+  fi
+  for unit in "${UNITS[@]}"; do
+    mpif90 -c "${flags[@]}" -fcheck=bounds -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
+      -J"$scratch/bounds_mod" "$scratch/patched_ppsrc/$unit.f90" -o "$scratch/bounds_obj/$unit.o"
+  done
+  mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch" -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
+    -J"$scratch/bounds_mod" "$here/real_bounds_driver.F90" -o "$scratch/bounds_obj/real_bounds_driver.o"
+  local base_objects=()
+  for obj in "$BASE_BLD"/obj/*.o; do
+    case $(basename "$obj") in
+      nemo.o|icestp.o|icethd.o|icethd_do.o|icethd_da.o|icethd_sal.o|icethd_pnd.o|icethd_zdf_bl99.o|icealb.o|iceupdate.o) ;;
+      icedyn_adv_pra.o|icedyn.o|icesbc.o|sbcblk.o)
+        [[ "$O17_EXTENDED" == 1 ]] || base_objects+=("$obj") ;;
+      *) base_objects+=("$obj") ;;
+    esac
+  done
+  local link_flags; link_flags=$(awk -F'= ' '/^export LDFLAGS = / {print $2; exit}' "$BASE_BLD/Makefile")
+  # shellcheck disable=SC2086
+  mpif90 -o "$scratch/real_bounds_fixture" "$scratch/bounds_obj"/*.o \
+    "${base_objects[@]}" $link_flags
+  (cd "$run" && "$scratch/real_bounds_fixture")
+  "$PY" - "$run/o8_o16_master_records" <<'PY'
+import importlib.util,sys
+from pathlib import Path
+import numpy as np
+root=Path(sys.argv[1]); gate=Path(__import__('os').environ['O8O16_GATE'])
+spec=importlib.util.spec_from_file_location('bounds_gate',gate); mod=importlib.util.module_from_spec(spec)
+sys.modules[spec.name]=mod; spec.loader.exec_module(mod)
+r1=mod.read_master_record(root/mod.record_name(1,1,rank=7)); r2=mod.read_master_record(root/mod.record_name(2,1,rank=7))
+assert np.signbit(r1['fields']['qlead'][0,0])
+assert np.unique(r1['fields']['qlead']).size > 2
+assert {'qlead','at_i','u_ice','v_ice','umask_k1','vmask_k1','utau_ice','vtau_ice','smask0','hi_max'} == set(r1['fields'])
+assert np.all(r2['fields']['ht_i_new']==0) and np.all(r2['fields']['fraz_frac']==0)
+records=[mod.read_master_record(p) for p in sorted(root.glob('*.bin'))]
+assert {r['meta']['kind'] for r in records} == set(mod.KINDS)
+assert len(records) == len(mod.KINDS)
+assert all(r['meta']['rank'] == 7 for r in records)
+k8=next(r for r in records if r['meta']['kind']==8)
+assert k8['fields']['o_i'][0] == 808.0
+assert 'a_i_b' not in k8['fields'] and 'h_i_b' not in k8['fields']
+assert k8['scalars']['rn_beta']==0.9 and k8['scalars']['rn_dmin']==8.0
+k3=next(r for r in records if r['meta']['kind']==3)
+assert all(np.all(k3['fields'][field.name] == 0.0) for field in mod.DH_DIAGS)
+k21=next(r for r in records if r['meta']['kind']==21)
+assert k21['fields']['oa_i'][0,0,0] == 809.0
+k15=next(r for r in records if r['meta']['kind']==15)
+assert k15['scalars']['rn_alb_sdry']==0.85 and k15['scalars']['rn_alb_hpiv']==1.0
+k13=next(r for r in records if r['meta']['kind']==13)
+assert np.all(k13['fields']['sst_m']==714.5)
+k20=next(r for r in records if r['meta']['kind']==20)
+assert set(k20['fields']) == {'utau','vtau','taum'}
+assert all(name not in k20['fields'] for name in ('rCdU_ice','qt_atm_oi','qt_oce_ai'))
+k3=next(r for r in records if r['meta']['kind']==3)
+assert all(name not in k3['fields'] for name in ('qcn_ice_top','qcn_ice_bot','qtr_ice_bot'))
+print('PASS_REAL_PATCHED_WRITER_LAYOUT')
+PY
+}
+
+same_program_fixture() {
+  local scratch=$1 new=$scratch/same_new expected=$scratch/expected_ppsrc unit name
+  local flags_text; flags_text=$(production_flags)
+  read -r -a flags <<< "$flags_text"
+  mkdir -p "$new"
+  cp -a "$BASE_BLD/ppsrc" "$BASE_BLD/obj" "$new/"
+  cp "$BASE_BLD/arch_nemo.fcm" "$BASE_BLD/cpp.fcm" "$BASE_BLD/bld.cfg" "$new/"
+  for name in arch_nemo.fcm cpp.fcm bld.cfg; do
+    "$PY" - "$new/$name" "$REF_CFG" PREFLIGHT_O8O16_REC <<'PY'
+import sys
+from pathlib import Path
+p=Path(sys.argv[1]); text=p.read_text().replace(sys.argv[2],sys.argv[3]); p.unlink(); p.write_text(text)
+PY
+  done
+  patch_real_sources "$scratch/same_raw"
+  preprocess_sources "$scratch/same_raw" "$expected"
+  mkdir -p "$scratch/same_mod"
+  cp "$WRITER" "$new/ppsrc/nemo/o8_o16_master_writer.f90"
+  mpif90 -c -cpp "${flags[@]}" -I"$BASE_BLD/inc" -J"$scratch/same_mod" \
+    "$WRITER" -o "$new/obj/o8_o16_master_writer.o"
+  if [[ "$O17_EXTENDED" == 1 ]]; then
+    cp "$O17_WRITER" "$new/ppsrc/nemo/o17_master_writer.f90"
+    mpif90 -c -cpp "${flags[@]}" -I"$scratch/same_mod" -I"$BASE_BLD/inc" \
+      -J"$scratch/same_mod" "$O17_WRITER" -o "$new/obj/o17_master_writer.o"
+  fi
+  for unit in "${UNITS[@]}"; do
+    rm -f -- "$new/ppsrc/nemo/$unit.f90" "$new/obj/$unit.o"
+    cp "$expected/$unit.f90" "$new/ppsrc/nemo/$unit.f90"
+    mpif90 -c "${flags[@]}" -I"$scratch/same_mod" -I"$BASE_BLD/inc" \
+      -J"$scratch/same_mod" "$new/ppsrc/nemo/$unit.f90" -o "$new/obj/$unit.o"
+  done
+  local o17_gate=(); [[ "$O17_EXTENDED" == 0 ]] || o17_gate=(--o17-extended)
+  "$PY" "$GATE" --same-program "$new" --reference-bld "$BASE_BLD" --patch-dir "$here" \
+    --expected-ppsrc-dir "$expected" --new-cfg PREFLIGHT_O8O16_REC --reference-cfg "$REF_CFG" \
+    "${o17_gate[@]}" \
+    > "$scratch/same_program.json"
+  expect_refusal "$PY" "$GATE" --same-program "$new" --reference-bld "$BASE_BLD" \
+    --patch-dir "$here" --expected-ppsrc-dir "$expected" --new-cfg PREFLIGHT_O8O16_REC \
+    --reference-cfg "$REF_CFG" "${o17_gate[@]}" --plant same-program
+  printf 'PASS_OBSERVER_FREE_SAME_PROGRAM\n'
+}
+
+stub_driver_fixture() {
+  # O8O16_DRIVER_TRUNCATION_POINT: cutting run.sh here leaves this function unclosed.
+  local scratch=$1 root=$scratch/stub_nemo_root bundles=$scratch/stub_bundles
+  local evidence=$scratch/stub_evidence refused=$scratch/stub_refused fail_evidence=$scratch/stub_failure
+  mkdir -p "$root/cfgs/$SOURCE_CFG/EXPREF" "$root/cfgs/SHARED" "$bundles/orca" "$bundles/sas" "$scratch/stub_bin"
+  ln -s "$STUB_MPIRUN" "$scratch/stub_bin/mpirun"
+  cp "$PROD/namelist_cfg" "$root/cfgs/$SOURCE_CFG/EXPREF/namelist_cfg"
+  cp "$PROD/namelist_ice_cfg" "$root/cfgs/$SOURCE_CFG/EXPREF/namelist_ice_cfg"
+  cp -L "$SHARED/namelist_ref" "$root/cfgs/SHARED/namelist_ref"
+  cp -L "$SHARED/namelist_ice_ref" "$root/cfgs/SHARED/namelist_ice_ref"
+  printf 'stub input\n' > "$bundles/orca/dummy.nc"; printf 'stub input\n' > "$bundles/sas/dummy_sas.nc"
+  tar -czf "$bundles/orca.tar.gz" -C "$bundles/orca" .
+  tar -czf "$bundles/sas.tar.gz" -C "$bundles/sas" .
+  local orca_sha sas_sha; orca_sha=$(sha256sum "$bundles/orca.tar.gz"); orca_sha=${orca_sha%% *}
+  sas_sha=$(sha256sum "$bundles/sas.tar.gz"); sas_sha=${sas_sha%% *}
+  local envs=(env -u O8O16_STOP_BEFORE_BUILD O8O16_PATH_PREFIX="$scratch/stub_bin" O8O16_DRIVER_FIXTURE_ACTIVE=1 O8O16_CFG_DIGEST_PARENT=1 \
+    NEMO_EXE_OVERRIDE="$STUB_NEMO" NEMO_ROOT="$root" \
+    NEMO_SOURCE_ROOT="$NEMO_SOURCE_ROOT" BASE_BLD="$BASE_BLD" \
+    REF_CFG=STUB_O8O16_REF REC_CFG=STUB_O8O16_REC REFUSED_DIR="$refused" MIN_FREE_RAM_GB=1 \
+    MIN_FREE_DISK_KB=1 ORCA2_BUNDLE="$bundles/orca.tar.gz" ORCA2_BUNDLE_SHA256="$orca_sha" \
+    SAS_BUNDLE="$bundles/sas.tar.gz" SAS_BUNDLE_SHA256="$sas_sha")
+  bash -n "$0"; bash -n "$STUB_NEMO"
+  awk '{print} /O8O16_DRIVER_TRUNCATION_POINT/ {exit}' "$0" > "$scratch/run_truncated.sh"
+  expect_refusal bash -n "$scratch/run_truncated.sh"
+  "${envs[@]}" EVIDENCE="$evidence" "$0" --run
+  cmp -s "$REAL_SAS_FIXTURE/record_2step/output.namelist.dyn" \
+    "$evidence/record_100step/output.namelist.dyn" \
+    || refuse 'stub did not copy the admitted real SAS output.namelist.dyn'
+  "$PY" "$GATE" --verify-sas-drag "$evidence/record_100step/output.namelist.dyn" \
+    --ppsrc "$SAS_PPSRC" >/dev/null
+  "${envs[@]}" EVIDENCE="$evidence" "$0" --admit-existing
+  expect_refusal "${envs[@]}" EVIDENCE="$evidence" "$0" --run
+  "${envs[@]}" "$0" --move-aside-builds
+  mv "$evidence" "$refused/success_evidence"
+  expect_refusal "${envs[@]}" O8O16_STUB_FAIL=1 EVIDENCE="$fail_evidence" "$0" --run
+  find "$refused" -maxdepth 1 -type d -name 'stub_failure_*_rc*' | grep -q . \
+    || refuse 'stub failure evidence was not retained'
+  [[ -d "$root/cfgs/STUB_O8O16_REF" && -d "$root/cfgs/STUB_O8O16_REC" ]] \
+    || refuse 'stub failure builds were not retained'
+  "${envs[@]}" "$0" --move-aside-builds
+  if [[ "$O17_EXTENDED" == 1 ]]; then
+    [[ -f "${O17_STUB_FAIL_SCORE_JSON:-}" ]] || refuse 'O17 stub plant needs O17_STUB_FAIL_SCORE_JSON'
+    if "${envs[@]}" O17_STUB_SCORE_JSON="$O17_STUB_FAIL_SCORE_JSON" EVIDENCE="$scratch/stub_score_fail" \
+      "$0" --run > "$scratch/stub_score_fail.log" 2>&1; then
+      refuse 'stub driver admitted a FAIL O17 score'
+    fi
+    grep -q 'O17 scorer did not produce a PASS report' "$scratch/stub_score_fail.log" \
+      || refuse 'FAIL O17 score was refused for another reason'
+    "${envs[@]}" "$0" --move-aside-builds
+  fi
+  printf 'PASS_100_STEP_STUB_DRIVER_RETENTION\n'
+}
+
+run_preflight() {
+  local scratch rung plant
+  local -a cfg_roots
+  if [[ "$O17_EXTENDED" == 1 && ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 0 ]]; then
+    # Step 10's stub driver needs both real-scorer reports; fail before the long steps.
+    [[ -f "${O17_STUB_SCORE_JSON:-}" && -f "${O17_STUB_FAIL_SCORE_JSON:-}" ]] \
+      || refuse 'stub run needs the real scorer report O17_STUB_SCORE_JSON'
+  fi
+  scratch=$(mktemp -d); ACTIVE_SCRATCH=$scratch
+  cfg_roots=("$NEMO_ROOT/cfgs" "$NEMO_SOURCE_ROOT/cfgs" "$(dirname "$(dirname "$BASE_BLD")")")
+  if [[ ${O8O16_CFG_DIGEST_PARENT:-0} == 0 ]]; then
+    snapshot_cfg_digests "$scratch/cfg_digests.json" "${cfg_roots[@]}"
+    expect_refusal verify_cfg_digests "$scratch/cfg_digests.json" cfg-digest
+  fi
+  printf 'PREFLIGHT 1/10 schema, sizes, signed zero, checksum and truncation plants\n'
+  "$PY" "$GATE" --schema > "$scratch/schema.json"
+  "$PY" "$GATE" --size > "$scratch/size.json"
+  "$PY" "$GATE" --self-test > "$scratch/self.json"
+  for plant in header truncation swapped-field one-bit category-dh; do expect_refusal "$PY" "$GATE" --self-test --plant "$plant"; done
+  printf 'PREFLIGHT 2/10 source-derived read-sets, every rung projection and plants\n'
+  "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" > "$scratch/readsets.json"
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-sst_m
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-qlead
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-rn_hinew
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-snwice_mass
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-nn_snwfra
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-rmw-sfx_lam
+  "$PY" "$GATE" --verify-category-freshness --ppsrc "$SAS_PPSRC" > "$scratch/category_freshness.json"
+  expect_refusal "$PY" "$GATE" --verify-category-freshness --ppsrc "$SAS_PPSRC" \
+    --plant previous-category-stale
+  printf 'PASS_SOURCE_DERIVED_READ_SETS\n'
+  for rung in O8 O9 O10 O11 O12 O13 O14 O15 O16; do
+    "$PY" "$GATE" --projection-self-test "$rung" >/dev/null
+    expect_refusal "$PY" "$GATE" --projection-self-test "$rung" --plant missing-step
+    expect_refusal "$PY" "$GATE" --projection-self-test "$rung" --plant foreign-kind
+  done
+  expect_refusal "$PY" "$GATE" --projection-self-test O9 --plant wrong-category
+  printf 'PREFLIGHT 3/10 exact unmodified production namelist and group plants\n'
+  render_deck "$scratch/deck"; verify_namelists "$scratch/deck"
+  expect_refusal verify_namelists "$scratch/deck" misspelled
+  expect_refusal verify_namelists "$scratch/deck" misplaced
+  printf 'PREFLIGHT 4/10 original-source patch, real cpp ppsrc placement and misplacement plant\n'
+  patch_real_sources "$scratch/patched"
+  preprocess_sources "$scratch/patched" "$scratch/patched_ppsrc"
+  placement_gate "$scratch/patched_ppsrc"
+  expect_refusal placement_gate "$scratch/patched_ppsrc" misplace
+  printf 'PREFLIGHT 5/10 production-flag writer/patched-source compile and FP census plant\n'
+  "$PY" "$PASSIVITY" > "$scratch/passivity.json"
+  if [[ "$O17_EXTENDED" == 1 ]]; then "$PY" "$O17_PASSIVITY" > "$scratch/o17_passivity.json"; fi
+  "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" > "$scratch/extents.json"
+  for plant in missing-allocation writer-mode dummy-actual; do
+    expect_refusal "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" --plant "$plant"
+  done
+  expect_refusal "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" \
+    --fixture-include "$scratch/planted_allocations.inc" --plant fixture-allocation
+  printf 'PREFLIGHT 6/10 real writer and all patched units under production flags plus -fcheck=bounds\n'
+  compile_real_bounds_fixture "$scratch"
+  printf 'PREFLIGHT 7/10 observer-free same-program comparison and plant\n'
+  same_program_fixture "$scratch"
+  printf 'PREFLIGHT 8/10 source-derived SAS time level, drag default/call tree and allocation evidence\n'
+  grep -q '"sas_time_level": 2' "$scratch/self.json"
+  grep -q '"rCdU_ice_shape": \[' "$scratch/extents.json"
+  "$PY" "$GATE" --verify-sas-drag "$REAL_SAS_FIXTURE/record_2step/output.namelist.dyn" \
+    --ppsrc "$SAS_PPSRC" > "$scratch/sas_drag.json"
+  for plant in drag-default-true drag-init-call drag-output-fabricated; do
+    expect_refusal "$PY" "$GATE" --verify-sas-drag \
+      "$REAL_SAS_FIXTURE/record_2step/output.namelist.dyn" --ppsrc "$SAS_PPSRC" --plant "$plant"
+  done
+  printf 'PREFLIGHT 9/10 memory/disk and global wall-clock gate logic\n'
+  ram_gate 1; disk_gate "$EVIDENCE" 1024
+  grep -q 'remaining_timeout' "$0"
+  grep -q 'REFUSE_RETAINED' "$0"
+  printf 'PREFLIGHT 10/10 generated driver: syntax/refusal/admission/retention/move-aside with 100-step stub NEMO\n'
+  if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 0 ]]; then stub_driver_fixture "$scratch"; fi
+  if [[ ${O8O16_CFG_DIGEST_PARENT:-0} == 0 ]]; then
+    verify_cfg_digests "$scratch/cfg_digests.json"
+  else
+    printf 'PASS_EXISTING_CFG_DIGESTS_UNCHANGED: delegated to outer preflight\n'
+  fi
+  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":56}\n' > "$PREFLIGHT_JSON"; fi
+  printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (%s GiB)\n' "$MASTER_BYTES" "$MASTER_GIB"
+  rm -rf -- "$scratch"; ACTIVE_SCRATCH=""
+}
+
+move_builds_aside() {
+  local dst="$REFUSED_DIR/builds_$(date -u +%Y%m%dT%H%M%SZ)_$$" moved=0
+  mkdir -p "$dst"
+  if [[ -d "$REF_ROOT" ]]; then mv "$REF_ROOT" "$dst/$REF_CFG"; moved=$((moved+1)); fi
+  if [[ -d "$REC_ROOT" ]]; then mv "$REC_ROOT" "$dst/$REC_CFG"; moved=$((moved+1)); fi
+  [[ "$moved" -gt 0 ]] || refuse 'no retained O8-O16 build exists to move aside'
+  printf 'BUILDS_MOVED_ASIDE: %s\n' "$dst"
+}
+
+required_preflight() {
+  if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 1 && ${O8O16_CFG_DIGEST_PARENT:-0} == 1 ]]; then
+    printf 'PASS_STUB_PREFLIGHT_DELEGATED_TO_OUTER_GATE\n'
+  else
+    run_preflight
+  fi
+}
+
+admit() {
+  [[ -f "$EVIDENCE/manifest/run_manifest.json" ]] || refuse 'missing pre-run manifest'
+  "$PY" "$GATE" --admit-existing "$EVIDENCE"
+}
+
+# Acquisition profiles extend this admitted framework without copying its
+# traps, resource gates, retained-refusal policy, or argument parser.
+if [[ -n "${O8O16_PROFILE_SCRIPT:-}" ]]; then
+  [[ -r "$O8O16_PROFILE_SCRIPT" ]] || refuse "profile is unreadable: $O8O16_PROFILE_SCRIPT"
+  # shellcheck source=/dev/null
+  source "$O8O16_PROFILE_SCRIPT"
+  c_profile_main "$mode"
+  exit 0
+fi
+
+if [[ "$mode" == --move-aside-builds ]]; then move_builds_aside; exit 0; fi
+if [[ "$mode" == --preflight-only ]]; then run_preflight; exit 0; fi
+if [[ "$mode" == --admit-existing ]]; then required_preflight; admit; printf 'ACQUISITION_ADMITTED: %s\n' "$EVIDENCE"; exit 0; fi
+
+# Operator-only --run begins here.
+if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} != 1 ]]; then
+  [[ -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] \
+    || refuse '--run requires a clean committed tree'
+fi
+readonly COMMIT=$(git -C "$REPO" rev-parse HEAD)
+RUN_STARTED_EPOCH=$(date +%s)
+[[ ! -e "$REF_ROOT" && ! -e "$REC_ROOT" && ! -e "$EVIDENCE" ]] || refuse 'target config/evidence already exists; use --move-aside-builds after a refusal'
+required_preflight
+ram_gate "$MIN_FREE_RAM_GB"; disk_gate "$EVIDENCE" "$MIN_FREE_DISK_KB"
+if [[ ${O8O16_STOP_BEFORE_BUILD:-0} == 1 ]]; then
+  # Preflight of the exact --run path: everything above ran; nothing below may.
+  printf 'DRY_RUN_STOPPED_BEFORE_BUILD_AND_NEMO: %s\n' "$EVIDENCE"
+  exit 0
+fi
+mkdir -p "$EVIDENCE/input" "$EVIDENCE/manifest/production_deck" "$EVIDENCE/manifest/binaries" "$EVIDENCE/manifest/per_rung"
+ACTIVE_RUN=$EVIDENCE
+for pair in "$ORCA2_BUNDLE:$ORCA2_BUNDLE_SHA256" "$SAS_BUNDLE:$SAS_BUNDLE_SHA256"; do
+  file=${pair%%:*}; want=${pair##*:}; got=$(sha256sum "$file"); [[ ${got%% *} == "$want" ]] || refuse "bundle checksum $file"
+done
+tar -xzf "$ORCA2_BUNDLE" --strip-components=1 -C "$EVIDENCE/input"
+tar -xzf "$SAS_BUNDLE" --strip-components=1 -C "$EVIDENCE/input"
+cp "$PROD/namelist_cfg" "$EVIDENCE/manifest/production_deck/namelist_cfg"
+cp "$PROD/namelist_ice_cfg" "$EVIDENCE/manifest/production_deck/namelist_ice_cfg"
+cp -L "$SHARED/namelist_ref" "$EVIDENCE/manifest/production_deck/namelist_ref"
+cp -L "$SHARED/namelist_ice_ref" "$EVIDENCE/manifest/production_deck/namelist_ice_ref"
+
+build_target() {
+  local cfg=$1 instrument=$2 root=$NEMO_ROOT/cfgs/$1 unit name flags_text link_flags
+  [[ ${O8O16_STOP_BEFORE_BUILD:-0} == 0 ]] || refuse 'dry run reached build_target'
+  [[ "$cfg" == "$REF_CFG" ]] && CREATED_REF=1 || CREATED_REC=1
+  mkdir -p "$root"
+  cp -a "$BASE_BLD" "$root/BLD"
+  for name in arch_nemo.fcm cpp.fcm bld.cfg; do
+    "$PY" - "$root/BLD/$name" "$(basename "$(dirname "$BASE_BLD")")" "$cfg" <<'PY'
+import sys
+from pathlib import Path
+p=Path(sys.argv[1]); text=p.read_text().replace(sys.argv[2],sys.argv[3]); p.unlink(); p.write_text(text)
+PY
+  done
+  if [[ "$instrument" -eq 1 ]]; then
+    mkdir -p "$root/MY_SRC" "$root/BLD/ppsrc/nemo" "$root/BLD/obj" "$root/BLD/inc"
+    patch_real_sources "$root/MY_SRC"
+    cp "$WRITER" "$root/MY_SRC/o8_o16_master_writer.F90"
+    preprocess_sources "$root/MY_SRC" "$root/BLD/ppsrc/nemo"
+    cp "$WRITER" "$root/BLD/ppsrc/nemo/o8_o16_master_writer.f90"
+    flags_text=$(production_flags); read -r -a flags <<< "$flags_text"
+    mpif90 -c -cpp "${flags[@]}" -I"$root/BLD/inc" -J"$root/BLD/inc" \
+      "$WRITER" -o "$root/BLD/obj/o8_o16_master_writer.o"
+    if [[ "$O17_EXTENDED" == 1 ]]; then
+      cp "$O17_WRITER" "$root/MY_SRC/o17_master_writer.F90"
+      cp "$O17_WRITER" "$root/BLD/ppsrc/nemo/o17_master_writer.f90"
+      mpif90 -c -cpp "${flags[@]}" -I"$root/BLD/inc" -I"$BASE_BLD/inc" -J"$root/BLD/inc" \
+        "$O17_WRITER" -o "$root/BLD/obj/o17_master_writer.o"
+    fi
+    for unit in "${UNITS[@]}"; do
+      mpif90 -c "${flags[@]}" -I"$root/BLD/inc" -I"$BASE_BLD/inc" -J"$root/BLD/inc" \
+        "$root/BLD/ppsrc/nemo/$unit.f90" -o "$root/BLD/obj/$unit.o"
+    done
+    link_flags=$(awk -F'= ' '/^export LDFLAGS = / {print $2; exit}' "$BASE_BLD/Makefile")
+    # shellcheck disable=SC2086
+    mpif90 -o "$root/BLD/bin/nemo.exe" "$root/BLD"/obj/*.o $link_flags
+  fi
+  [[ -x "$root/BLD/bin/nemo.exe" ]] || refuse "$cfg lacks nemo.exe"
+  if [[ -n "${NEMO_EXE_OVERRIDE:-}" ]]; then
+    cp "$NEMO_EXE_OVERRIDE" "$root/BLD/bin/nemo.exe"
+    chmod +x "$root/BLD/bin/nemo.exe"
+  fi
+}
+
+build_target "$REF_CFG" 0; build_target "$REC_CFG" 1
+mkdir -p "$EVIDENCE/manifest/expected_ppsrc"
+patch_real_sources "$EVIDENCE/manifest/expected_raw"
+preprocess_sources "$EVIDENCE/manifest/expected_raw" "$EVIDENCE/manifest/expected_ppsrc"
+"$PY" "$GATE" --same-program "$REC_ROOT/BLD" --reference-bld "$REF_ROOT/BLD" \
+  --patch-dir "$here" --expected-ppsrc-dir "$EVIDENCE/manifest/expected_ppsrc" \
+  --new-cfg "$REC_CFG" --reference-cfg "$REF_CFG" \
+  $([[ "$O17_EXTENDED" == 1 ]] && printf '%s' --o17-extended) \
+  > "$EVIDENCE/manifest/same_program.json"
+cp "$REF_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.ref"
+cp "$REC_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.rec"
+
+# Checklist 9: manifest and every source digest exist before either integration.
+"$PY" - "$EVIDENCE" "$REPO" "$here" "$COMMIT" "$MASTER_BYTES" "$O17_EXTENDED" \
+  "$O17_RECORD_BYTES_GATE" "$MAX_EVIDENCE_DISK_KB" "$RUN_TIMEOUT_SEC" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+ev,repo,here,commit=Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3]),sys.argv[4]
+sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+sources=[here/'run.sh',here/'stub_nemo.sh',here/'stub_mpirun.sh',here.parent/'nemo_si3_o8_o16_master_gate.py',here.parent/'nemo_si3_o8_o16_master_passivity.py',here.parent/'nemo_si3_o8_o16_readset.py',here.parent/'nemo_si3_o17_record_budget.py',here.parents[1]/'orca2_l4/nemo_acquisition_extents.py']+sorted(here.glob('*.F90'))+sorted(here.glob('*.patch'))
+deck=ev/'manifest/production_deck'
+nemo=Path('/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo')
+manifest={
+ 'producer_commit':commit,'binary_sha256':{'reference':sha(ev/'manifest/binaries/nemo.ref'),'record':sha(ev/'manifest/binaries/nemo.rec')},
+ 'source_sha256':{str(p.relative_to(repo)):sha(p) for p in sources},
+ 'nemo_source_sha256':{unit:sha(nemo/f'{unit}.f90') for unit in ('nemogcm','zdfdrg','icestp','icethd','icethd_do','icethd_da','icethd_sal','icethd_pnd','icethd_zdf_bl99','icealb','iceupdate','icedyn_adv_pra','icedyn','icesbc','sbcblk')},
+ 'deck_sha256':{p.name:sha(p) for p in sorted(deck.iterdir())},
+ 'forcing_disposition':'O7_EXACT_PRODUCTS_TO_O8_O16',
+ 'dynamics_disposition':'PRODUCTION_DECK_ON_EXCLUDED_FROM_PROJECTIONS',
+ 'record_schema_sha256':sha(here.parent/'nemo_si3_o8_o16_master_gate.py'),
+ 'estimated_master_bytes':int(sys.argv[5]),'max_evidence_disk_kib':int(sys.argv[8]),
+ 'wall_clock_budget_seconds':int(sys.argv[9]),
+ 'retention':'raw master and manifests immutable until O8-O16 all admit; per-rung manifests reference relative paths without copying',
+ 'steps':100,'ranks':1,'ice_namelist':'UNMODIFIED_PRODUCTION','ln_zdf_chkcvg_overlay':False,
+}
+if sys.argv[6]=='1':
+ manifest.update({
+  'o17_extended':True,
+  'o17_record_bytes_gate':int(sys.argv[7]),
+  'o17_record_kinds':{
+   '22':'step_entry','23':'after_rheology','24':'after_advection','25':'after_rdgrft',
+   '26':'after_dyn_cor','27':'after_thermo','28':'step_exit','29':'prather_entry',
+   '30':'prather_exit','31':'after_flx_other','32':'raw_blk1','33':'raw_blk2',
+   '34':'tau_private_exit'},
+  'o17_labels':['GIVEN-NEMO-ENTRY','INDEPENDENT'],
+ })
+(ev/'manifest/run_manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+PY
+
+remaining_timeout() {
+  local elapsed remaining
+  elapsed=$(( $(date +%s) - RUN_STARTED_EPOCH )); remaining=$(( RUN_TIMEOUT_SEC - elapsed ))
+  [[ "$remaining" -gt 0 ]] || refuse "global wall-clock budget ${RUN_TIMEOUT_SEC}s exhausted"
+  printf '%s\n' "$remaining"
+}
+
+stage_run() {
+  local cfg=$1 dir=$2 record=$3 root=$NEMO_ROOT/cfgs/$1 f
+  mkdir -p "$dir"; [[ "$record" -eq 0 ]] || mkdir -p "$dir/o8_o16_master_records"
+  [[ "$record" -eq 0 || "$O17_EXTENDED" == 0 ]] || mkdir -p "$dir/o17_master_records"
+  render_deck "$dir"; verify_namelists "$dir"
+  for f in "$EVIDENCE/input"/*.nc; do ln -s "$f" "$dir/$(basename "$f")"; done
+  cp "$root/BLD/bin/nemo.exe" "$dir/nemo"
+  local remaining; remaining=$(remaining_timeout)
+  (cd "$dir" && printf 'RUN_STARTED\n' > run.user.time.log && timeout "$remaining" mpirun -np 1 --oversubscribe ./nemo > run.user.stdout.log 2>&1 && printf 'MPIRUN_RC=0\nRUN DONE\n' >> run.user.time.log)
+  ! grep -Eiq 'E[[:space:]]+R[[:space:]]+R[[:space:]]+O[[:space:]]+R|ABORT' "$dir/ocean.output" "$dir/run.user.stdout.log" || refuse "fatal token in $dir"
+  "$PY" "$GATE" --verify-sas-drag "$dir/output.namelist.dyn" --ppsrc "$SAS_PPSRC" >/dev/null
+  touch "$dir/NEMO_RUN_COMPLETE"
+}
+
+stage_run "$REF_CFG" "$EVIDENCE/reference_100step" 0
+stage_run "$REC_CFG" "$EVIDENCE/record_100step" 1
+(cd "$EVIDENCE" && find record_100step/o8_o16_master_records \
+  $([[ "$O17_EXTENDED" == 1 ]] && printf '%s' record_100step/o17_master_records) \
+  -type f -print0 | sort -z | xargs -0 sha256sum > manifest/records.sha256)
+for rung in O8 O9 O10 O11 O12 O13 O14 O15 O16; do
+  "$PY" "$GATE" --read-projection "$rung" --records "$EVIDENCE/record_100step/o8_o16_master_records" > "$EVIDENCE/manifest/per_rung/$rung.json"
+done
+# Composition scoring is admission work, outside the NEMO acquisition clock.
+ACQUISITION_STOPPED_EPOCH=$(date +%s)
+if [[ "$O17_EXTENDED" == 1 ]]; then
+  if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 1 ]]; then
+    # Stub NEMO writes no scoreable trajectory.  The outer O17 preflight scored a
+    # writer-shaped synthetic record with the real scorer; its report is used verbatim.
+    [[ -f "${O17_STUB_SCORE_JSON:-}" ]] || refuse 'stub run needs the real scorer report O17_STUB_SCORE_JSON'
+    cp "$O17_STUB_SCORE_JSON" "$EVIDENCE/manifest/o17_score.json"
+    score_steps=0
+  else
+    "$PY" "$here/../nemo_si3_o17_composition_scorer.py" \
+      --evidence "$EVIDENCE" --labels INDEPENDENT GIVEN-NEMO-ENTRY \
+      > "$EVIDENCE/manifest/o17_score.json" || true
+    score_steps=100
+  fi
+  "$PY" - "$EVIDENCE/manifest/o17_score.json" "$score_steps" <<'PY' \
+    || refuse 'O17 scorer did not produce a PASS report'
+import json,sys
+report=json.load(open(sys.argv[1])); want=int(sys.argv[2])
+labels=report.get('labels',{})
+ok=(report.get('status')=='PASS' and set(labels)=={'INDEPENDENT','GIVEN-NEMO-ENTRY'}
+    and all(v.get('status')=='PASS' for v in labels.values())
+    and report.get('production_entry')=='legoesm.ice.si3_o17.si3_o17_step'
+    and len(report.get('steps',[]))>=2 and (want==0 or report['steps']==list(range(1,want+1))))
+sys.exit(0 if ok else 1)
+PY
+fi
+"$PY" - "$EVIDENCE" "$RUN_STARTED_EPOCH" "$ACQUISITION_STOPPED_EPOCH" "$MASTER_BYTES" \
+  "$MAX_EVIDENCE_DISK_KB" "$RUN_TIMEOUT_SEC" "$O17_EXTENDED" "$O17_RECORD_BYTES_GATE" \
+  "${O8O16_DRIVER_FIXTURE_ACTIVE:-0}" <<'PY'
+import json,os,sys
+from pathlib import Path
+root=Path(sys.argv[1]); started=int(sys.argv[2]); stopped=int(sys.argv[3]); schema=int(sys.argv[4]); max_disk=int(sys.argv[5]); max_wall=int(sys.argv[6])
+o17_extended=sys.argv[7]=='1'; o17_gate=int(sys.argv[8]); stub=sys.argv[9]=='1'
+record_bytes=sum(p.stat().st_size for p in (root/'record_100step/o8_o16_master_records').glob('*.bin'))
+o17_bytes=sum(p.stat().st_size for p in (root/'record_100step/o17_master_records').glob('*.bin'))
+disk_kib=sum(p.stat().st_size for p in root.rglob('*') if p.is_file())//1024+1
+wall=stopped-started
+if not 0 < record_bytes <= schema: raise SystemExit('REFUSE: measured O8--O16 records exceed schema budget')
+if o17_extended and not stub and not 0 < o17_bytes <= o17_gate: raise SystemExit('REFUSE: measured O17 records exceed schema budget')
+if not 0 < disk_kib <= max_disk: raise SystemExit('REFUSE: measured evidence exceeds disk budget')
+if not 0 <= wall <= max_wall: raise SystemExit('REFUSE: acquisition exceeds wall-clock budget')
+usage={'record_bytes':record_bytes,'o17_record_bytes':o17_bytes,'evidence_disk_kib':disk_kib,'wall_clock_seconds':wall,
+       'schema_record_bytes_gate':schema,'evidence_disk_kib_gate':max_disk,'wall_clock_seconds_gate':max_wall}
+(root/'manifest/resource_usage.json').write_text(json.dumps(usage,indent=2,sort_keys=True)+'\n')
+PY
+touch "$EVIDENCE/RUN_COMPLETE"
+admit
+printf 'ACQUISITION_DONE: %s\n' "$EVIDENCE"

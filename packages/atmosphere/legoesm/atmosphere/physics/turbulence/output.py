@@ -112,3 +112,13 @@ class TurbulenceOutput(NamedTuple):
     relvar: jax.Array | None = None
     Kh_iface: jax.Array | None = None
     wp2_iface: jax.Array | None = None
+    # CLOUD ICE tendency [kg/kg/s], (ncol, nlev): WRF MYNN-EDMF's ``dqi``
+    # (turbulence=mynn25 on a lane with an ice tracer).  None otherwise; a lane
+    # that cannot route a non-None value must refuse (it would destroy ice).
+    # Appended LAST (positional ABI).
+    dq_i_dt: jax.Array | None = None
+    # CAM7 CLUBB-MF plume cloud fraction [-] and in-cloud condensate [kg/kg],
+    # (ncol, nlev) top-down, sub-cycle mean (prognostic CLUBB with clubb_mf
+    # only; None otherwise).  Appended LAST.
+    mf_cloudfrac: jax.Array | None = None
+    mf_qc: jax.Array | None = None

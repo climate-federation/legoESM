@@ -132,7 +132,7 @@ from jax import lax
 
 from legoesm import constants
 from legoesm.core.smooth import sigmoid_switch, smooth_relu
-from legoesm.thermo import saturation_vapor_pressure
+from legoesm.thermo import latent_heat_vaporization, saturation_vapor_pressure
 
 
 __all__ = (
@@ -305,10 +305,9 @@ def _tlift_moist(T, qs, p_hpa, gz, T_nk, q_nk, gz_nk, *, c_l, tlift_floor_sharpn
     cpd = constants.c_pd
     rv = constants.R_v
     eps = constants.epsilon
-    cpvmcl = c_l - constants.c_pv
     ah0 = ((cpd * (1.0 - q_nk) + c_l * q_nk) * T_nk
-           + q_nk * (constants.L_v - cpvmcl * (T_nk - constants.T_freeze)) + gz_nk)
-    alv = constants.L_v - cpvmcl * (T - constants.T_freeze)
+           + q_nk * latent_heat_vaporization(T_nk, c_l) + gz_nk)
+    alv = latent_heat_vaporization(T, c_l)
     tg = T
     qg = qs
     for _ in range(_TLIFT_NEWTON_ITERS):
@@ -465,7 +464,6 @@ def emanuel_mixing_tendencies(
     rv = constants.R_v
     epsi = 1.0 / constants.epsilon
     g = constants.g
-    cpvmcl = c_l - cpv
 
     # ---- surface-FIRST, hPa -------------------------------------------------
     Tf = T[:, ::-1]
@@ -483,7 +481,7 @@ def emanuel_mixing_tendencies(
     gz = jnp.concatenate([jnp.zeros((ncol, 1), dtype), jnp.cumsum(dgz, axis=-1)], axis=-1)
     cpn = cpd * (1.0 - qf) + cpv * qf
     h = Tf * cpn + gz
-    lv = constants.L_v - cpvmcl * (Tf - constants.T_freeze)
+    lv = latent_heat_vaporization(Tf, c_l)
     hm = (cpd * (1.0 - qf) + c_l * qf) * (Tf - Tf[:, :1]) + lv * qf + gz
 
     # IHMIN: first level of the minimum HM among levels where HM decreases

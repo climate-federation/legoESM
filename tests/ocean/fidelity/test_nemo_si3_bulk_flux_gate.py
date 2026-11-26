@@ -75,12 +75,13 @@ def test_selector_is_single_orca1_identity() -> None:
 
 def test_positive_subnormal_snow_uses_nemo_nonzero_branch() -> None:
     from legoesm import constants
+    from legoesm.ice.config import SI3_HARD_SWITCHES
     from legoesm.ice.sea_ice import _nemo_si3_ice_albedo
 
     tiny = jnp.asarray(np.nextafter(np.float64(0.0), np.float64(1.0)))
     args = (jnp.asarray(constants.T_freeze), jnp.asarray(0.586), tiny, jnp.asarray(0.81))
-    faithful = _nemo_si3_ice_albedo(*args)
-    ablated = _nemo_si3_ice_albedo(*args, _preserve_subnormal_snow=False)
+    faithful = _nemo_si3_ice_albedo(*args, land_mask=1.0, switches=SI3_HARD_SWITCHES)
+    ablated = _nemo_si3_ice_albedo(*args, land_mask=1.0, switches=SI3_HARD_SWITCHES, _preserve_subnormal_snow=False)
     assert np.asarray(faithful) != np.asarray(ablated)
 
 

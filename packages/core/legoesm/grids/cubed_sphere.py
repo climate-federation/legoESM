@@ -2209,23 +2209,25 @@ def compute_padded_half_metrics_ed(
 def compute_padded_angle_ed(n: int, halo: int = 1) -> jax.Array:
     """gnomonic_ed counterpart of :func:`legoesm.grids.halo.compute_padded_angle`.
 
-    Grid angle on the padded grid, ``(6, n+2*halo, n+2*halo)`` — per-face
-    i-direction centered-difference angle (identical formula to the equiangular
-    builder) of the definition-A padded CENTRES (CONSISTENT with grid.lon/lat).
+    Grid angle on the padded grid, ``(6, n+2*halo, n+2*halo)``: FV3's
+    ``get_center_vect`` i-direction (:func:`fv3_cell_angle_from_corners`, same
+    as the equiangular builder) on the padded gnomonic_ed corners, projected
+    at the definition-A padded CENTRES (CONSISTENT with grid.lon/lat).
     Angle is face-dependent (equatorial faces 0-3 share one value; polar 4-5
     differ by π — a real N/S orientation flip, present in the equiangular grid).
     """
-    lon6, lat6 = gnomonic_ed_padded_centers(n, halo)  # (6, n_big, n_big)
-    all_angle = []
-    for f in range(6):
-        lon, lat = lon6[f], lat6[f]
-        dlon_dx = lon[2:, 1:-1] - lon[:-2, 1:-1]
-        dlat_dx = lat[2:, 1:-1] - lat[:-2, 1:-1]
-        dlon_dx = jnp.where(dlon_dx > jnp.pi, dlon_dx - 2 * jnp.pi, dlon_dx)
-        dlon_dx = jnp.where(dlon_dx < -jnp.pi, dlon_dx + 2 * jnp.pi, dlon_dx)
-        cos_lat_ext = jnp.cos(lat[1:-1, 1:-1])
-        all_angle.append(jnp.arctan2(dlat_dx, dlon_dx * cos_lat_ext))
-    return jnp.stack(all_angle, axis=0)
+    from legoesm.grids.halo import fv3_cell_angle_from_corners
+    # the SAME corner construct gnomonic_ed_padded_centers uses (its
+    # create-numbering depends on the extent), then strip the extra ring
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    alpha = float(jnp.arcsin(rsq3))
+    dely = 2.0 * alpha / n
+    n_big = n + 2 * halo + 2
+    kc = jnp.arange(n_big + 1, dtype=jnp.float64)
+    theta_c = -alpha - (halo + 1) * dely + kc * dely
+    lo, la = _gnomonic_ed_6face_from_theta(theta_c, alpha)   # (6, n_big+1, ...)
+    lon6, lat6 = gnomonic_ed_padded_centers(n, halo)          # (6, n_big, n_big)
+    return fv3_cell_angle_from_corners(lo, la, lon6, lat6)[:, 1:-1, 1:-1]
 
 
 def _compute_exact_cell_areas_ed(n: int, radius: float) -> jax.Array:

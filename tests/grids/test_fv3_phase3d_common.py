@@ -428,3 +428,19 @@ def test_batched_gs_is_cached_by_identity_of_gs6_and_flags6():
     ctx.flags6 = tuple(_fake_flags6())   # equal values, new tuple
     v3 = common.build_batched_gs(ctx)
     assert v3 is not v1
+
+
+@pytest.mark.parametrize("getter,name,gpu_default", [
+    (common.remap_kscan_unroll, "LEGOESM_FV3_REMAP_UNROLL", 40),
+    (common.geopk_kscan_unroll, "LEGOESM_FV3_GEOPK_UNROLL", 8)])
+def test_kscan_unroll_backend_default_env_override_and_gate(getter, name, gpu_default, monkeypatch):
+    monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(common.jax, "default_backend", lambda: "cpu")
+    assert getter() == 1
+    monkeypatch.setattr(common.jax, "default_backend", lambda: "gpu")
+    assert getter() == gpu_default
+    monkeypatch.setenv(name, "3")
+    assert getter() == 3
+    monkeypatch.setenv(name, "0")
+    with pytest.raises(ValueError, match=name):
+        getter()

@@ -20,8 +20,8 @@ _FORCING_DESTS = (
     "aerosol_forcing", "aerosol_file", "aerosol_ccn_file", "aerosol_reference_aod",
     "volcanic_aerosol_file", "volcanic_aerosol_scale", "volcanic_aerosol_lw",
 )
-# run_amip-only: solar_s0 (gray-radiation constant), aerosol_ccn (a physics
-# switch, not a forcing input).
+# Not forcing inputs: solar_s0 (gray-radiation constant), aerosol_ccn (a
+# physics switch).  Both parsers carry them (shared parser since P5a).
 _AMIP_ONLY = {"solar_s0", "aerosol_ccn"}
 _PREFIXES = ("ozone_", "solar_", "ghg_", "aerosol_", "volcanic_")
 
@@ -35,7 +35,7 @@ def test_forcing_flags_match_run_amip_defaults_and_choices():
     # symmetric: a ninth ozone/solar flag added to either runner must be
     # added to the other (solar_s0 is run_amip's gray-radiation constant)
     amip_set = {d for d in amip if d.startswith(_PREFIXES)} - _AMIP_ONLY
-    coupled_set = {d for d in coupled if d.startswith(_PREFIXES)}
+    coupled_set = {d for d in coupled if d.startswith(_PREFIXES)} - _AMIP_ONLY
     assert amip_set == coupled_set == set(_FORCING_DESTS)
     for dest in _FORCING_DESTS:
         assert dest in coupled, dest
@@ -56,14 +56,24 @@ def test_forcing_flags_round_trip():
             args.solar_spectral_band_order) == ("TSI", "SSI_frac", "rrtmg_sw")
 
 
-def test_forcing_args_reach_the_atm_config():
-    """``main`` builds the atmosphere ``ExperimentConfig`` inline; the only
-    place the parsed forcing can be lost is that keyword list, so pin it on
-    the source of the function that runs (``run_coupled.main``)."""
+def _atm_builder_source():
+    """Source of the function that builds the coupled atmosphere config: since
+    P5a that is run_amip.build_config_from_args, reached through
+    run_coupled._coupled_atm_config (pinned here so a re-inlined builder in
+    run_coupled.main would be noticed)."""
     import inspect
 
-    from scripts.run import run_coupled
-    src = inspect.getsource(run_coupled.main)
+    from scripts.run import run_amip, run_coupled
+    assert "_coupled_atm_config(args)" in inspect.getsource(run_coupled.main)
+    assert "build_config_from_args(args)" in inspect.getsource(
+        run_coupled._coupled_atm_config)
+    return inspect.getsource(run_amip.build_config_from_args)
+
+
+def test_forcing_args_reach_the_atm_config():
+    """The only place the parsed forcing can be lost is the builder's keyword
+    list, so pin it on the source of the builder that runs."""
+    src = _atm_builder_source()
     for dest in _FORCING_DESTS:
         assert f"{dest}=args.{dest}," in src, dest
 
@@ -94,15 +104,12 @@ _TERRAIN = {   # run_coupled/run_amip dest -> ExperimentConfig field
 
 
 def test_terrain_flags_match_run_amip_and_reach_the_atm_config():
-    import inspect
-
-    from scripts.run import run_coupled
     amip, coupled = _actions(amip_parser()), _actions(coupled_parser())
     for dest in _TERRAIN:
         assert dest in coupled, dest
         assert coupled[dest].default == amip[dest].default, dest
         assert coupled[dest].type == amip[dest].type, dest
-    src = inspect.getsource(run_coupled.main)
+    src = _atm_builder_source()
     for dest, field in _TERRAIN.items():
         assert f"{field}=args.{dest}," in src, dest
     # the vertical coordinate that must hold the terrain (#1029)

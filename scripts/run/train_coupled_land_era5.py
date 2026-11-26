@@ -110,6 +110,7 @@ def setup_driver(args):
         days=1, dataset="analytical", radiation="gray",
         land_mask_path=args.land_mask_file,
         use_multilayer_land=True,
+        ml_pipeline=True,
         multilayer_n_layers=args.n_layers, multilayer_soil_depth=args.soil_depth,
         # fp64 is REQUIRED for the backward: stiff clay van-Genuchten soils
         # (n_vg~1.09 -> m~0.083) make Se**(-1/m) and its reverse-mode derivative
@@ -174,7 +175,8 @@ def main():
     lat_rad = np.asarray(ad.flatten_2d(driver.grid.lat)).reshape(-1)
     lon_rad = np.asarray(ad.flatten_2d(driver.grid.lon)).reshape(-1)
     lat_deg, lon_deg = np.degrees(lat_rad), np.degrees(lon_rad)
-    cmap = load_clm_surface(download_clm_surfdata(), lat_deg, lon_deg)
+    cmap = load_clm_surface(download_clm_surfdata(), lat_deg, lon_deg,
+                            vg_air_entry_m=pipe.land_ml_cfg.hydraulics.vg_air_entry_m)
     pft = jnp.asarray(cmap["pft_fractions"])                     # (ncol, 17)
     skt_target = jnp.asarray(load_era5_skt_columns(lat_deg, lon_deg, args.era5_npz),
                              dtype=jnp.float32)

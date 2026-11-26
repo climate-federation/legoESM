@@ -113,7 +113,7 @@ def _first_differing_byte(left: Path, right: Path, *, plant: bool = False) -> in
 
 
 def _bulk_location(offset: int) -> dict[str, object]:
-    sibling = Path(__file__).with_name("nemo_si3_bulk_flux_gate.py")
+    sibling = Path(__file__).with_name("nemo_si3_o7_lane_bulk_flux_gate.py")
     spec = importlib.util.spec_from_file_location("_bulk_schema", sibling)
     require(spec is not None and spec.loader is not None, "bulk schema import")
     module = importlib.util.module_from_spec(spec)

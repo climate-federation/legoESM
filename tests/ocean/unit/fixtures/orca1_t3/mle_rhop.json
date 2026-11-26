@@ -1,0 +1,53 @@
+{
+ "records": [
+  {
+   "rank": "0028",
+   "kind": "mism",
+   "ji": [
+    38,
+    43
+   ],
+   "jj": [
+    32,
+    37
+   ],
+   "mig0": 108,
+   "mjg0": 318
+  },
+  {
+   "rank": "0025",
+   "kind": "mism",
+   "ji": [
+    23,
+    28
+   ],
+   "jj": [
+    36,
+    41
+   ],
+   "mig0": 237,
+   "mjg0": 274
+  },
+  {
+   "rank": "0005",
+   "kind": "rand",
+   "ji": [
+    58,
+    63
+   ],
+   "jj": [
+    27,
+    32
+   ],
+   "mig0": 272,
+   "mjg0": 73
+  }
+ ],
+ "recorder_cfg": "nemo_5.0.1/cfgs/ORCA1_T3MLE (tier3/mle, MY_SRC t3 recorder, kt 17281, day-30 restart)",
+ "harness": "tier3/mle/port_mle.py load/geometry/coordinate/state",
+ "nemo": "NEMO 5.0.1 ORCA1 32 ranks",
+ "legoesm_base": "ee8534602b",
+ "measured": "job 11022259 (probe.py): all 32 ranks, NEMO interior wet, fold row excluded: TEOS-10 rho_pot vs NEMO rhop max rel 8.9e-16; ML level 64915/64915 (Wright base 62152/64915, rho rel 2.0e-4)",
+ "spread_note": "tier3/mle spread.json: inml_mle 0.0 (exact) over 20 seeds; rhop is a recorded NEMO output of eos_insitu_pot on recorded T/S",
+ "layout": "p<n>_* arrays in legoESM layout (lat=jj, lon=ji[, k]); ji/jj = 1-based NEMO local tile indices (inclusive); mig0/mjg0 = global index of the first point"
+}

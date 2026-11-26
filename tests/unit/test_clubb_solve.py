@@ -159,21 +159,21 @@ def test_penta_jit_and_grad():
     assert jnp.all(jnp.isfinite(jax.grad(loss)(rhs)))
 
 
-@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
-                    reason="CLUBB-JAX reference tree not present")
-def test_penta_matches_clubb_reference():
-    """Bit-exact vs CLUBB penta_lu_solve_jax (verbatim algorithm port).
+def test_clubb_solves_are_the_lapack_routines():
+    """CAM runs CLUBB with penta/tridiag_solve_method = lapack: the CLUBB solves
+    must be the dgbsv/dgtsv transcriptions bit for bit, including row swaps."""
+    from legoesm.timestepping.banded import lapack_band_solve
+    from legoesm.timestepping.tridiagonal import thomas_solve
 
-    The reference is ``jit``-compiled; JIT mine too so XLA fuses both identically
-    (eager vs jitted float reassociation otherwise differs at round-off).
-    """
-    if str(_CLUBB_JAX_ROOT) not in sys.path:
-        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
-    from clubb_jax.src.CLUBB_core.penta_lu_solver import penta_lu_solve_jax
-
-    lhs, rhs = _penta_system(ng=4, n=25, seed=7)
+    rng = np.random.default_rng(11)
+    lhs = jnp.asarray(rng.standard_normal((5, 2, 13)))     # not dominant: pivots
+    rhs = jnp.asarray(rng.standard_normal((2, 13)))
+    np.testing.assert_array_equal(np.asarray(penta_solve(lhs, rhs)),
+                                  np.asarray(lapack_band_solve(lhs, rhs, 2, 2)))
+    tri = jnp.asarray(rng.standard_normal((3, 2, 13)))
     np.testing.assert_array_equal(
-        np.asarray(jax.jit(penta_solve)(lhs, rhs)), np.asarray(penta_lu_solve_jax(lhs, rhs)))
+        np.asarray(tridiag_solve(tri, rhs)),
+        np.asarray(thomas_solve(tri[2], tri[1], tri[0], rhs, "lapack_dgtsv")))
 
 
 if __name__ == "__main__":

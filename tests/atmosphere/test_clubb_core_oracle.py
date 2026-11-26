@@ -350,3 +350,46 @@ def test_gradient_is_finite_on_the_implemented_columns(fix_impl):
         for g in grads:
             assert np.all(np.isfinite(np.asarray(g))), case
         assert all(float(jnp.max(jnp.abs(g))) > 0.0 for g in grads), case
+
+
+# ---- host cloud fraction: CAM's call order on the 2025 core oracle ----------
+
+_CF_TOL = 1.0e-12  # campaign bar (user 2026-11-02): 1e-12 fp64 or the oracle's own spread
+
+
+def _host_cloud_frac_errors(fx, case, cfg):
+    """Worst field-normalised error over steps of the cloud fraction the core
+    hands the host for the step leaving s_n vs the oracle's closure on s_n."""
+    gr, forcing, env = _inputs(fx, case)
+    impl = bool(fx.get("meta/l_implemented", False))
+    host_dx = jnp.asarray(fx[f"{case}/host_dx"]) if impl else None
+    worst = 0.0
+    for n in range(int(fx["meta/n_steps"])):
+        st, rcm = _state(fx, case, n)
+        o = _step(st, rcm, forcing, env, gr, cfg, diag_extra=("cloud_frac",),
+                  l_implemented=impl, host_dx=host_dx)
+        v, ref = np.asarray(o["diag/cloud_frac"]), fx[f"{case}/s{n}/cloud_frac"]
+        assert np.all(np.isfinite(v)) and np.all(np.isfinite(ref)), (case, n)
+        worst = max(worst, float(np.max(np.abs(v - ref))
+                                 / max(np.max(np.abs(ref)), 1e-300)))
+    return worst
+
+
+@pytest.mark.parametrize("case", [
+    "bomex", "dycoms2_rf01", "arm", "wangara", "mpace_b", "bomex_dz100",
+    "arm_dz160", "bomex_dryut", "arm_dryut"])
+def test_host_cloud_fraction_is_the_pre_advance_closure(fix, case):
+    """CAM hands the host the closure's cloud_frac from BEFORE the advance
+    (CLUBB_CESM r8099 advance_clubb_core_module.F90:1404-1418 -> clubb_intr.F90
+    :1993).  In the 2025 core oracle (clubb_release 54403a04, closure after the
+    advance) that is the oracle's cloud_frac on the state the step starts from."""
+    err = _host_cloud_frac_errors(fix, case, _CFG)
+    print(f"HOST_CF {case}: {err:.3e}")
+    assert err <= _CF_TOL, (case, err)
+
+
+@pytest.mark.parametrize("case", _IMPL_CASES)
+def test_host_cloud_fraction_is_the_pre_advance_closure_implemented(fix_impl, case):
+    err = _host_cloud_frac_errors(fix_impl, case, _CFG_HARD)
+    print(f"HOST_CF_IMPL {case}: {err:.3e}")
+    assert err <= _CF_TOL, (case, err)

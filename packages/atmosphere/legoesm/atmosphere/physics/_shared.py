@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 from legoesm.core.operators_3d import fv_flux_divergence_3d
 from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
+from legoesm.core.profile_metrics import safe_sqrt
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.gaussian import sh_synthesis_3d, vordiv_from_uv_3d
 
@@ -686,10 +687,11 @@ def louis_stability_functions(
         ``km *= 1 - 2·cb·Ri·zucf``, ``zucf`` as ``u`` above with
         ``cons5 = 3·cb·cc`` (ICON runs ``cb = cc = 5``, i.e. ``b = c = 5``,
         ``b_heat = 1.5·b``).
-      * The only addition to the oracle algebra is the pre-existing ``1e-10``
-        inside ``sqrt(|Ri| + 1e-10)`` (keeps the reverse-mode derivative finite
-        at Ri = 0, where the oracle never evaluates this branch); it moves
-        ``f`` by a relative ~1e-11 on the oracle fixture.
+      * ``sqrt(|Ri|)`` is the oracle's exactly: the double-``where``
+        :func:`legoesm.core.profile_metrics.safe_sqrt` (value 0 and gradient 0
+        at Ri = 0, where the oracle never evaluates this branch).  The former
+        additive ``sqrt(|Ri| + 1e-10)`` moved K_m, K_h by up to 3e-11 relative
+        on the oracle fixture (F4 spread harness: oracle 1-ulp spread 1.2e-15).
 
     NOT-YET-FAITHFUL legacy path (``z_full_pair`` omitted;
     used ONLY by YSU's free-atmosphere local-K branch, whose own oracle is a
@@ -730,7 +732,7 @@ def louis_stability_functions(
 
     # Unstable branch — denominator shared between momentum and heat.
     Ri_neg = jnp.minimum(Ri, 0.0)
-    sqrt_abs_ri = jnp.sqrt(jnp.abs(Ri_neg) + 1e-10)
+    sqrt_abs_ri = safe_sqrt(jnp.abs(Ri_neg))  # ICON SQRT(ABS(zri)); finite AD at 0
     if z_full_pair is None:
         geom = 1.0 / (dz ** 2 + 1e-10)  # legacy (YSU) geometry, see docstring
     else:

@@ -95,3 +95,29 @@ def test_native_types_passthrough(tmp_path):
     p.write_text("alpha: 3.0\nflag: true\n")
     out = load_yaml_config(str(p), _parser())
     assert out["alpha"] == 3.0 and out["flag"] is True
+
+
+def _choices_parser():
+    p = argparse.ArgumentParser()
+    p.add_argument("--law", choices=["a", "b"], default=None)
+    p.add_argument("--scheme", choices=["a", "b"], default="a")
+    return p
+
+
+def test_null_unsets_a_choices_key_whose_default_is_none(tmp_path):
+    base = tmp_path / "base.yaml"
+    base.write_text("law: b\n")
+    child = tmp_path / "child.yaml"
+    child.write_text("include: base.yaml\nlaw: null\n")
+    assert load_yaml_config(str(child), _choices_parser()) == {"law": None}
+    # a later layer can still re-set the key
+    grand = tmp_path / "grand.yaml"
+    grand.write_text("include: child.yaml\nlaw: a\n")
+    assert load_yaml_config(str(grand), _choices_parser()) == {"law": "a"}
+
+
+def test_null_still_rejected_for_a_choices_key_with_a_real_default(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("scheme: null\n")
+    with pytest.raises(SystemExit, match="flag default is None"):
+        load_yaml_config(str(p), _choices_parser())

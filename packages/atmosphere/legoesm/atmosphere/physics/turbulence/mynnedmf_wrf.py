@@ -25,10 +25,11 @@ by zero or take a log/root of an invalid argument, it is evaluated on a safe
 argument (``_sel``), which leaves every selected value unchanged.  The oracle
 has no smoothing knobs on this path.
 
-**NOT RULE 5 COMPLIANT** (user decision 2026-10-28): every switch on traced
-state, including the PBL-height first crossing, is hard at the default; there
-is no recorded default gap and no gradient test through a switch.  This is an
-unwired, opt-in kernel; it must be smoothed before any lane uses it (#2231).
+**Hard switches kept** (user decision 2026-10-28, approved exception for the
+WRF ports): every switch on traced state, including the PBL-height first
+crossing, is hard as in the oracle; there is no recorded default gap and no
+gradient test through a switch (#2231).  Routed as ``turbulence: mynn25``
+through :mod:`.mynn_wrf_adapter` (R3, 2026-11-03).
 
 Constants: the scheme's own (module_bl_mynnedmf_common.F90) are module-level
 constants below; the host physical constants that module USEs from WRF's
@@ -106,9 +107,9 @@ _CP = _C.c_pd
 _R_D = _C.R_d
 _R_V = _C.R_v
 _RCP = _C.R_d / _C.c_pd
-_XLV = _C.L_v
-_XLF = _C.L_f
-_XLS = _C.L_s
+_XLV = _C.L_v  # latent-ok: WRF MYNN oracle constant
+_XLF = _C.L_f  # latent-ok: WRF MYNN oracle constant
+_XLS = _C.L_s  # latent-ok: WRF MYNN oracle constant
 _P608 = _C.R_v / _C.R_d - 1.0
 _EP_2 = _C.R_d / _C.R_v
 _RVOVRD = _C.R_v / _C.R_d

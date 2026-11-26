@@ -89,6 +89,7 @@ _PINNED = {
     "outer_integrator": "ab2",
     "ab2_scope": "total",
     "lateral_viscosity_operator": "flux_divergence",
+    "lateral_viscosity_mask_levels": "surface",
     "A_h_lat_scaling": False,
     "C_smag": 0.0,
     "barotropic_implicit_theta_eta": 1.0,

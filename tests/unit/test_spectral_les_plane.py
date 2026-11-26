@@ -13,8 +13,11 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
+from pathlib import Path
 
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH as W
 
 jax.config.update("jax_enable_x64", True)
 
@@ -55,6 +58,127 @@ def test_spectral_derivative_exact_single_mode():
     df = sl.ddx(f, g)
     ref = jnp.broadcast_to((kx * jnp.cos(kx * x))[None, :, None], (ny, nx, nz))
     np.testing.assert_allclose(np.asarray(df), np.asarray(ref), atol=1e-9)
+
+
+def test_div_h_equals_ddx_plus_ddy():
+    """``div_h`` (one inverse FFT) == ``ddx(fx) + ddy(fy)`` (two) to round-off."""
+    g = _grid()
+    rng = np.random.default_rng(3)
+    fx, fy = (jnp.asarray(rng.standard_normal((g.cfg.ny, g.cfg.nx, g.cfg.nz)))
+              for _ in range(2))
+    np.testing.assert_allclose(np.asarray(sl.div_h(fx, fy, g)),
+                               np.asarray(sl.ddx(fx, g) + sl.ddy(fy, g)),
+                               rtol=1e-12, atol=1e-12)
+
+
+def test_grad_h_equals_ddx_and_ddy():
+    g = _grid()
+    f = jnp.asarray(np.random.default_rng(4).standard_normal(
+        (g.cfg.ny, g.cfg.nx, g.cfg.nz + 1)))
+    gx, gy = sl.grad_h(f, g)
+    np.testing.assert_allclose(np.asarray(gx), np.asarray(sl.ddx(f, g)),
+                               rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(np.asarray(gy), np.asarray(sl.ddy(f, g)),
+                               rtol=1e-14, atol=1e-14)
+
+
+def _rand_uvw(g, seed=11):
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    r = np.random.default_rng(seed)
+    u, v = (jnp.asarray(0.3 * r.standard_normal((ny, nx, nz))) for _ in range(2))
+    w = jnp.asarray(0.2 * r.standard_normal((ny, nx, nz + 1)))
+    return u, v, w.at[..., 0].set(0.0).at[..., -1].set(0.0)
+
+
+@pytest.mark.parametrize("kw", [dict(), dict(smagorinsky_dynamic=True),
+                                dict(sgs_model="vreman", c_vreman=0.07)],
+                         ids=["smagorinsky", "lasd", "vreman"])
+def test_shared_velocity_gradients_leave_every_consumer_unchanged(kw):
+    """rhs computes the horizontal velocity derivatives once and passes them
+    (``hg``) to advection / eddy viscosity / buoyancy factor / SGS force; each
+    must return what it computes on its own (native staggering: w at faces)."""
+    g = _grid_cfg(div_damping_coeff=0.05, **kw)   # coeff only read by the damping
+    u, v, w = _rand_uvw(g)
+    hg = sl.horizontal_velocity_gradients(u, v, w, g)
+    ref_hg = dict(dudx=sl.ddx(u, g), dudy=sl.ddy(u, g), dvdx=sl.ddx(v, g),
+                  dvdy=sl.ddy(v, g), dwdx_f=sl.ddx(w, g), dwdy_f=sl.ddy(w, g))
+    assert hg.keys() == ref_hg.keys()
+    for k in ref_hg:                                  # independent oracle
+        np.testing.assert_allclose(np.asarray(hg[k]), np.asarray(ref_hg[k]),
+                                   rtol=1e-14, atol=1e-14)
+    th = 300.0 + 0.5 * u
+    nu_t = sl.eddy_viscosity(u, v, w, g)
+    pairs = [(sl.advection(u, v, w, g), sl.advection(u, v, w, g, hg)),
+             (sl._divergence_damping(u, v, w, g),
+              sl._divergence_damping(u, v, w, g, hg)),
+             ((nu_t,), (sl.eddy_viscosity(u, v, w, g, hg),)),
+             ((sl.sgs_buoyancy_factor(th, None, u, v, w, g),),
+              (sl.sgs_buoyancy_factor(th, None, u, v, w, g, hg),)),
+             (sl.sgs_and_wall(u, v, w, nu_t, g, (3.0, 0.0)),
+              sl.sgs_and_wall(u, v, w, nu_t, g, (3.0, 0.0), hg=hg))]
+    for ref, got in pairs:
+        for a, b in zip(ref, got):
+            assert float(jnp.max(jnp.abs(a))) > 0.0
+            np.testing.assert_allclose(np.asarray(b), np.asarray(a),
+                                       rtol=1e-14, atol=1e-14)
+
+
+_GOLDEN = Path(__file__).parent / "fixtures" / "les_rhs_pre_shared_gradients.npz"
+_GOLDEN_KW = {"smagorinsky": dict(), "lasd": dict(smagorinsky_dynamic=True),
+              "vreman": dict(sgs_model="vreman", c_vreman=0.07)}
+
+
+def _golden_outputs(kw):
+    """rhs + each gradient consumer on a small x64 grid, through the PUBLIC
+    pre-sharing call signatures (no ``hg``), so the same function generated the
+    fixture on the pre-change code (commit aecb5e2)."""
+    g = _grid_cfg(nx=8, ny=8, nz=8, div_damping_coeff=0.05, **kw)
+    u, v, w = _rand_uvw(g)
+    th = 300.0 + 0.5 * u
+    nu_t = sl.eddy_viscosity(u, v, w, g)
+    out = dict(zip(("Ru", "Rv", "Rw", "ustar"),
+                   sl.rhs(u, v, w, g, (3.0, 0.0), 1e-4)[:4]))
+    out.update(zip(("Cu", "Cv", "Cw"), sl.advection(u, v, w, g)))
+    out["nu_t"] = nu_t
+    out["f_buoy"] = sl.sgs_buoyancy_factor(th, None, u, v, w, g)
+    out.update(zip(("Fu", "Fv", "Fw"), sl.sgs_and_wall(u, v, w, nu_t, g,
+                                                       (3.0, 0.0))[:3]))
+    out.update(zip(("dRu", "dRv", "dRw"), sl._divergence_damping(u, v, w, g)))
+    return {k: np.asarray(a) for k, a in out.items()}
+
+
+@pytest.mark.parametrize("name", list(_GOLDEN_KW))
+def test_shared_gradients_match_pre_change_golden(name):
+    """Independent oracle for the gradient sharing: outputs equal those the
+    pre-sharing code produced (fixture), so a wrong derivative mapping inside a
+    consumer fails here even though hg / no-hg agree with each other."""
+    ref = np.load(_GOLDEN)
+    got = _golden_outputs(_GOLDEN_KW[name])
+    for k, a in got.items():
+        np.testing.assert_allclose(a, ref[f"{name}/{k}"], rtol=1e-12,
+                                   atol=1e-13, err_msg=f"{name}/{k}")
+
+
+def test_rhs_transform_count_with_shared_gradients():
+    """One LASD + 3/2-dealiased rhs call: velocity gradients 3 fwd + 6 inv
+    (were 18 + 18), dealias 9 pads/truncates, LASD 21 + 42, SGS divergence
+    6 + 3 -> 39 forward + 60 inverse."""
+    from jax.extend.core import jaxprs_in_params
+
+    def count(j):
+        n = [0, 0]
+        for e in j.eqns:
+            if e.primitive.name == "fft":
+                n[e.params["fft_type"].name.startswith("I")] += 1
+            for sj in jaxprs_in_params(e.params):
+                a, b = count(sj)
+                n[0] += a; n[1] += b
+        return n
+
+    g = _grid_cfg(smagorinsky_dynamic=True)
+    u, v, w = _rand_uvw(g)
+    jx = jax.make_jaxpr(lambda u, v, w: sl.rhs(u, v, w, g, (3.0, 0.0), 1e-4))(u, v, w)
+    assert count(jx.jaxpr) == [39, 60]
 
 
 def test_rotational_advection_conserves_energy():
@@ -264,14 +388,14 @@ def test_most_surface_flux_signs_and_limits():
     un = _neutral_ustar(U, z1, z0)
 
     # Neutral: θ_air == T_sfc.
-    us, ths, q0, cd = sl.most_surface_flux(U, 265.0, 265.0, z1, z0, thref)
+    us, ths, q0, cd = sl.most_surface_flux(U, 265.0, 265.0, z1, z0, thref, zeta_cap_width=W)
     assert abs(float(q0)) < 1e-9
     assert abs(float(ths)) < 1e-9
     assert abs(float(us) - un) < 1e-6
     assert abs(float(cd) - (un / U) ** 2) < 1e-9
 
     # Stable: warmer air over a cooled surface ⇒ w'θ' < 0, u_* and Cd suppressed.
-    us_s, ths_s, q0_s, cd_s = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref)
+    us_s, ths_s, q0_s, cd_s = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, zeta_cap_width=W)
     assert float(q0_s) < 0.0                         # downward (cooling) heat flux
     assert float(ths_s) > 0.0
     assert float(us_s) < un                          # stability reduces u_*
@@ -283,7 +407,7 @@ def test_most_surface_flux_is_differentiable():
     """Reverse-mode AD through the surface-layer solve (legoESM end-to-end AD
     goal): d q0 / d T_sfc is finite and non-zero in the stable regime."""
     def q0_of_tsfc(t_sfc):
-        return sl.most_surface_flux(4.0, 265.0, t_sfc, 2.0, 0.1, 265.0)[2]
+        return sl.most_surface_flux(4.0, 265.0, t_sfc, 2.0, 0.1, 265.0, zeta_cap_width=W)[2]
 
     g = jax.grad(q0_of_tsfc)(263.0)
     assert bool(jnp.isfinite(g)) and abs(float(g)) > 0.0
@@ -298,12 +422,107 @@ def test_most_surface_flux_reuses_shared_psi(monkeypatch):
     re-derived inline ψ would ignore the patch and this test would fail."""
     z1, z0, thref, U = 2.0, 0.1, 265.0, 4.0
     # Strongly stable input — a faithful solver gives u_* well below neutral.
-    us_real = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref)[0])
+    us_real = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref, zeta_cap_width=W)[0])
     un = _neutral_ustar(U, z1, z0)
     assert us_real < 0.95 * un                       # stability correction active
 
-    monkeypatch.setattr(sl, "psi_m", lambda z: jnp.zeros_like(jnp.asarray(z)))
-    monkeypatch.setattr(sl, "psi_h", lambda z: jnp.zeros_like(jnp.asarray(z)))
-    us_patched = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref)[0])
+    monkeypatch.setattr(sl, "psi_m", lambda z, **kw: jnp.zeros_like(jnp.asarray(z)))
+    monkeypatch.setattr(sl, "psi_h", lambda z, **kw: jnp.zeros_like(jnp.asarray(z)))
+    us_patched = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref, zeta_cap_width=W)[0])
     # ψ≡0 ⇒ pure neutral log-law, regardless of the (strong) stratification.
     assert abs(us_patched - un) < 1e-6
+
+
+# --- smooth |zeta| cap in the MOST surface layer (RULE 5) --------------------
+# Inputs (wind, dtheta, z1) + hard-clip outputs (u*, theta*, q0, cd_eff) from the
+# pre-change code, and the default-minus-hard gap per state.  States: GABLS1-like
+# (zeta 0.003), saturated (12.6), four inside the cap ramp (11.1 = the 5.8 %
+# heat-flux maximum of the 9600-state sweep, 8.6 (no gap), 9.6, 10.6), and the state
+# where the hard-clip heat flux has a slope kink in the surface temperature
+# (bisected on the jump of d q0/d T_s; its hard output is the width-0 path, which
+# reproduces the six pre-change states exactly).
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+from jax.test_util import check_grads  # noqa: E402
+
+_CAP_FILE = Path(__file__).parent / "fixtures" / "les_most_zeta_cap_gap.npz"
+
+
+def _cap_outputs(width):
+    ref = np.load(_CAP_FILE)
+    th = float(ref["theta_ref"])
+    return np.array([[float(o) for o in sl.most_surface_flux(
+        jnp.asarray(spd), jnp.asarray(th + dth), jnp.asarray(th), z1,
+        float(ref["z0"]), th, zeta_cap_width=width)]
+        for spd, dth, z1 in ref["inputs"]])
+
+
+def test_most_surface_flux_hard_limit_reproduces_the_clip():
+    np.testing.assert_array_equal(_cap_outputs(0.0), np.load(_CAP_FILE)["hard"])
+
+
+def test_most_surface_flux_default_gap_per_state():
+    ref = np.load(_CAP_FILE)
+    gap = _cap_outputs(W) - ref["hard"]
+    np.testing.assert_allclose(gap, ref["gap"], rtol=1e-6, atol=1e-12)
+    assert np.abs(gap).max() > 1e-6
+
+
+def test_most_surface_flux_check_grads_inside_the_cap_ramp():
+    ref = np.load(_CAP_FILE)
+    spd, dth, z1 = ref["inputs"][6]          # on a kink of the hard clip
+    th = float(ref["theta_ref"])
+
+    def q0(t_sfc, width=W):
+        return sl.most_surface_flux(spd, th + dth, t_sfc, z1, float(ref["z0"]), th,
+                                    zeta_cap_width=width)[2]
+    t0 = jnp.asarray(th)
+    check_grads(q0, (t0,), order=2, modes=("fwd", "rev"), eps=1e-6)
+    assert float(jax.grad(q0)(t0)) != 0.0
+    with pytest.raises(AssertionError):      # the hard clip is not smooth here
+        check_grads(lambda t: q0(t, 0.0), (t0,), order=2, modes=("fwd", "rev"),
+                    eps=1e-6)
+
+
+@pytest.mark.parametrize("mod_cfg", ["spectral", "pseudo"])
+def test_les_configs_carry_the_cap_width(mod_cfg):
+    from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pip
+    dims = dict(nx=4, ny=4, nz=6, Lx=400.0, Ly=400.0, Lz=400.0)
+    cfg = (sl.SpectralLESConfig(**dims) if mod_cfg == "spectral"
+           else pip.PseudoIncompressibleConfig(**dims))
+    assert cfg.most_zeta_cap_width == W
+
+
+def test_both_les_cores_pass_the_config_width(monkeypatch):
+    """The spectral rhs and the pseudo-incompressible surface hand the config's
+    most_zeta_cap_width to most_surface_flux."""
+    from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as pip
+    seen = []
+    real = sl.most_surface_flux
+
+    def spy(*a, zeta_cap_width):
+        seen.append(zeta_cap_width)
+        return real(*a, zeta_cap_width=zeta_cap_width)
+    monkeypatch.setattr(sl, "most_surface_flux", spy)
+    monkeypatch.setattr(pip, "most_surface_flux", spy)
+    dims = dict(nx=4, ny=4, nz=6, Lx=400.0, Ly=400.0, Lz=400.0)
+    g = sl.make_grid(sl.SpectralLESConfig(**dims, most_zeta_cap_width=1.25),
+                     dtype=jnp.float64)
+    sh = (4, 4, 6)
+    u = jnp.full(sh, 3.0)
+    sl.rhs(u, jnp.zeros(sh), jnp.zeros((4, 4, 7)), g, (3.0, 0.0), 1e-4,
+           theta=jnp.full(sh, 265.0), t_sfc=jnp.asarray(263.0))
+    pcfg = pip.PseudoIncompressibleConfig(**dims, surface="most_cooling",
+                                          most_zeta_cap_width=0.75)
+    pg = pip.make_grid(pcfg, dtype=jnp.float64)
+    pip._surface_state(u, jnp.zeros(sh), jnp.full(sh, 265.0), pg,
+                       pip.PseudoIncompressibleForcing(t_sfc=jnp.asarray(263.0)))
+    assert seen == [1.25, 0.75], seen
+
+
+if __name__ == "__main__":
+    base = dict(np.load(_CAP_FILE))
+    base["gap"] = _cap_outputs(W) - base["hard"]
+    np.savez(_CAP_FILE, **base)
+    print("wrote", _CAP_FILE)

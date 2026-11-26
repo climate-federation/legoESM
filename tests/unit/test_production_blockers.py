@@ -194,11 +194,14 @@ class TestPhysicsSchemeConfig:
         assert cfg.autoconv_q_c_crit == 8.0e-4
         assert cfg.autoconv_pe_max == 0.8
 
-    def test_tiedtke_autoconversion_threads_to_config(self):
+    def test_tiedtke_autoconversion_refused(self):
+        """The WRF Tiedtke port closes its own precipitation: the split is
+        refused, never silently dropped."""
+        import pytest
         from legoesm.driver.physics_pipeline import _resolve_convection
-        _fn, cfg = _resolve_convection(ExperimentConfig(
-            convection="tiedtke", convective_precip_split="autoconversion"))
-        assert cfg.precip_split_scheme == "autoconversion"
+        with pytest.raises(ValueError, match="autoconversion split"):
+            _resolve_convection(ExperimentConfig(
+                convection="tiedtke", convective_precip_split="autoconversion"))
 
     def test_bechtold_default_split_is_constant(self):
         # default stays "constant" -> no silent behaviour change from the feature

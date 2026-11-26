@@ -10,8 +10,10 @@ import math as _math
 from pathlib import Path
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 
+from legoesm.core.bulk_flux import GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH
 from legoesm.diagnostics.cloud_overlap import maximum_random_overlap
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import (
@@ -43,6 +45,20 @@ def _frozen_condensate(state):
             d = tr[k].data
             total = d if total is None else total + d
     return total
+
+
+def _most_2m_impl(*args, **kwargs):
+    from legoesm.core.bulk_flux import compute_most_fluxes
+    return compute_most_fluxes(*args, return_2m=True, **kwargs)
+
+
+# The 2 m diagnostic runs on the host every interval.  Called eagerly, the
+# Obukhov loop inside was traced with a fresh closure and recompiled at every
+# call, and each executable kept its code mapping until a long MPAS run failed
+# with LLVM "Cannot allocate memory".  One cached jit, options static.
+_most_2m_jit = jax.jit(_most_2m_impl, static_argnames=(
+    "scheme", "stability_scheme", "unstable_scheme", "most_zeta_cap_width",
+    "gfs_unstable_join_width"))
 
 
 # Sidecar key carrying the CMOR lat sampling stamp (see CFWriter append guard).
@@ -299,6 +315,9 @@ class DiagnosticCollector:
         vcoord=None,
         surface_stability_scheme: str = "dyer1974",
         surface_bulk_scheme: str = "constant",
+        surface_unstable_scheme: str = "native",
+        surface_most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH,
+        surface_gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH,
         clubb_config=None,
         cmip_drs_tree: bool = False,
         cmip_institution_id: str = "CU",
@@ -317,6 +336,9 @@ class DiagnosticCollector:
         # similarity profile, so it keeps the historical coare3 profile —
         # which also keeps the default byte-identical.
         self.surface_stability_scheme = surface_stability_scheme
+        self.surface_unstable_scheme = surface_unstable_scheme
+        self.surface_most_zeta_cap_width = surface_most_zeta_cap_width
+        self.surface_gfs_unstable_join_width = surface_gfs_unstable_join_width
         # surface_bulk_scheme="none": no surface layer exists, so the 2 m
         # temperature (and its daily extremes) is not produced at all rather
         # than published from a profile of an exchange that never happens.
@@ -744,7 +766,7 @@ class DiagnosticCollector:
         import jax.numpy as jnp
         return jnp.asarray(p_s)[..., None] * jnp.asarray(self.dsigma)
 
-    def _interp_to_plev19(self, field_3d, p_s) -> np.ndarray | None:
+    def _interp_to_plev19(self, field_3d, p_s, bracket=None) -> np.ndarray | None:
         """Interpolate a 3-D field from model levels to CMIP6 plev19.
 
         Parameters
@@ -753,12 +775,24 @@ class DiagnosticCollector:
             Field on model levels.
         p_s : array, shape (...)
             Surface pressure [Pa].
+        bracket : tuple, optional
+            ``_plev19_bracket(p_s)`` for this same *p_s*; pass it to reuse one
+            bracket across several fields of one sample (bit-identical).
 
         Returns (..., 19) numpy array on CMIP6 standard pressure levels,
         or None if sigma_full is not available.
         """
-        p_s_np = np.asarray(p_s)
+        if bracket is None:
+            bracket = self._plev19_bracket(p_s)
+        idx_lo, idx_hi, alpha = bracket
         field_np = np.asarray(field_3d)
+        f_lo = np.take_along_axis(field_np, idx_lo, axis=-1)
+        f_hi = np.take_along_axis(field_np, idx_hi, axis=-1)
+        return f_lo + alpha * (f_hi - f_lo)
+
+    def _plev19_bracket(self, p_s):
+        """Per-column bracketing levels and log-p weights of plev19 for *p_s*."""
+        p_s_np = np.asarray(p_s)
 
         # Model pressure at each level, from the ACTUAL vertical coordinate:
         # p_k = A_k p_ref + B_k p_s (hybrid) or sigma_k p_s (pure sigma).
@@ -795,18 +829,17 @@ class DiagnosticCollector:
         idx_hi = np.clip(idx_hi, 1, p_model.shape[-1] - 1)
         idx_lo = idx_hi - 1
 
-        f_lo = np.take_along_axis(field_np, idx_lo, axis=-1)
-        f_hi = np.take_along_axis(field_np, idx_hi, axis=-1)
         lp_lo = np.take_along_axis(log_p_model, idx_lo, axis=-1)
         lp_hi = np.take_along_axis(log_p_model, idx_hi, axis=-1)
 
         log_pt = log_plev.reshape((1,) * p_s_np.ndim + (n_target,))
         denom = np.where(lp_hi == lp_lo, 1.0, lp_hi - lp_lo)
         alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
-        return f_lo + alpha * (f_hi - f_lo)
+        return idx_lo, idx_hi, alpha
 
     def _tas_2m(self, state, q_v, sst, sic, T_ice, u_low=None, v_low=None,
-                *, T_land=None, q_land=None, land_fraction=None):
+                *, T_land=None, q_land=None, land_fraction=None,
+                T2m_land=None):
         """2 m air temperature for CMIP ``tas`` from the MOST surface-layer
         similarity profile (interpolate the lowest model level down to 2 m).
         Returns the lowest-level T when the surface inputs (SST / sigma) are
@@ -821,6 +854,14 @@ class DiagnosticCollector:
         land branch uses the same MOST profile anchored on the land skin; do
         not read the result as a sub-canopy screen temperature.
 
+        ``T2m_land`` (keyword-only, optional) is the land scheme's OWN 2 m air
+        temperature (two-leaf canopy: CLM5 ``t_ref2m`` from its roughness,
+        displacement, Obukhov length and canopy-air node).  Where it is finite
+        it REPLACES the profile above on the land leg, which runs the ocean
+        bulk law (Charnock roughness, no displacement) over the land skin.
+        Non-finite entries (held columns, schemes that solve none) keep that
+        profile.
+
         ``u_low`` / ``v_low`` override the lowest-level winds (lets the MPAS
         path pass the reconstructed CELL winds from
         ``reconstruct_cell_velocity`` instead of the edge-normal ``state.u``,
@@ -831,13 +872,27 @@ class DiagnosticCollector:
         import jax.numpy as jnp
         from legoesm import constants
         from legoesm.thermo import saturation_mixing_ratio
-        from legoesm.core.bulk_flux import compute_most_fluxes
         u_low = state.u.data[..., -1] if u_low is None else u_low
         v_low = state.v.data[..., -1] if v_low is None else v_low
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         p_s = state.p_s.data
         p_low = jnp.asarray(self._p_full(p_s))[..., -1]
         rho_low = p_low / (constants.R_d * T_low)
+        # The lowest model level sits at z_low above the surface (about 60 m
+        # on L32), not at 10 m, and the similarity laws integrate POTENTIAL
+        # temperature (CESM camsrfexch hands shr_flux_atmOcn zbot = zm(pver)
+        # and thbot = T exner).  Handing them the level as 10 m and T as theta
+        # published a 2 m value about g z_low / c_p ~ 0.6 K too cold over sea
+        # (measured with this port's own tref at SST 301 K, z_low 60 m).  The
+        # height is the same hypsometric half-thickness the flux path uses
+        # (compute_layer_dz: R T_v dp / (g p_mid), midpoint = half of it) and
+        # the theta pairing is the flux path's surface_reference_state.
+        from legoesm.core.bulk_flux import surface_reference_state
+        from legoesm.thermo import virtual_temperature
+        dp_low = jnp.asarray(self._dp(p_s))[..., -1]
+        z_low = 0.5 * constants.R_d * virtual_temperature(T_low, q_low) * dp_low / (
+            constants.g * p_low)
+        theta_low, _ = surface_reference_state(T_low, 10.0, z_low)
         # Similarity profile matched to the experiment's surface fluxes:
         # SAME bulk scheme (constant -> the historical coare3 stand-in, see
         # __init__) and SAME stable-branch selector (codex 2026-08-02: a
@@ -866,20 +921,25 @@ class DiagnosticCollector:
                 # CESM shr_flux_atmOcn's own ``tref`` diagnostic (2 m).
                 from legoesm.core.bulk_flux import compute_sam_oceflx_fluxes
                 *_, T_2m = compute_sam_oceflx_fluxes(
-                    u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
-                    z_bot=10.0, variant="cesm", return_2m=True,
-                    t_bot=T_low,
+                    u_low, v_low, theta_low, q_low, T_sfc, q_sfc, rho_low,
+                    z_bot=z_low, variant="cesm", return_2m=True,
+                    t_bot=T_low, zeta_cap_width=self.surface_most_zeta_cap_width,
                 )
                 return T_2m
-            *_, T_2m = compute_most_fluxes(
-                u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+            *_, T_2m = _most_2m_jit(
+                u_low, v_low, theta_low, q_low, T_sfc, q_sfc, rho_low,
+                z_ref=z_low,
                 scheme=(self.tas_profile_scheme
                         if self.tas_profile_scheme != "large_yeager_cesm"
                         else "large_yeager"),
-                return_2m=True,
                 stability_scheme=self.surface_stability_scheme,
+                unstable_scheme=self.surface_unstable_scheme,
+                most_zeta_cap_width=self.surface_most_zeta_cap_width,
+                gfs_unstable_join_width=self.surface_gfs_unstable_join_width,
             )
-            return T_2m
+            # The MOST branch integrates theta down to z_diag; CESM's tref
+            # applies the same potential-to-temperature step (0.01 K/m x 2 m).
+            return T_2m - (constants.g / constants.c_pd) * 2.0
 
         T_sfc_sea = blend_surface_temperature(sst, sic, T_ice)
         q_sfc_sea = saturation_mixing_ratio(T_sfc_sea, p_s)
@@ -901,17 +961,30 @@ class DiagnosticCollector:
         q_sfc_land = (saturation_mixing_ratio(T_land, p_s) if q_land is None
                       else q_land)
         T_2m_land = _profile_to_2m(T_land, q_sfc_land, ocean=False)
+        if T2m_land is not None:
+            T2m_land = jnp.asarray(T2m_land, dtype=T_2m_land.dtype)
+            T_2m_land = jnp.where(jnp.isfinite(T2m_land), T2m_land, T_2m_land)
         T_2m_sea = _profile_to_2m(T_sfc_sea, q_sfc_sea, ocean=True)
         f_land = jnp.clip(jnp.asarray(land_fraction, dtype=T_2m_land.dtype),
                           0.0, 1.0)
         return f_land * T_2m_land + (1.0 - f_land) * T_2m_sea
 
+    def _cloud_config_for(self, cloud_fraction):
+        """The collector's cloud config, with the cloud-fraction override over
+        the WHOLE column when an advected prognostic fraction (IFS CLOUDSC)
+        is handed in, as radiation applies it (votes VC24, VC40)."""
+        if (cloud_fraction is None
+                or getattr(self._cloud_config, "scheme", None) == "cam6_clubb"):
+            return self._cloud_config
+        return self._cloud_config._replace(clubb_cf_override_p_min_pa=0.0)
+
     def _cam6_cloud_kwargs(self, cloud_fraction, conv_mass_flux_up,
                            conv_icwmr, lat_deg, p_s, ncol, nlev):
         """Extra ``compute_cloud_properties`` kwargs for cloud_scheme
         'cam6_clubb': the CLUBB cloud fraction + deep-convection carries, lat
-        [rad] and interface pressures.  Empty (byte-identical call) for every
-        other scheme; a cam6 run without the carry raises here rather than
+        [rad] and interface pressures.  For any other scheme: the advected
+        IFS cloud fraction as the override when one is handed in (VC40), else
+        empty (byte-identical call); a cam6 run without the carry raises here rather than
         silently scoring an RH cloud cover the radiation never used.
 
         SAMPLING: the carry handed in is the one written by THIS step's
@@ -922,7 +995,13 @@ class DiagnosticCollector:
         what radiation integrated -- the same convention the conv_precip
         convective cover and the RH schemes' clt already follow."""
         if getattr(self._cloud_config, "scheme", None) != "cam6_clubb":
-            return {}
+            if cloud_fraction is None:
+                return {}
+            # IFS CLOUDSC's advected cloud fraction (vote VC40), applied
+            # over the whole column as radiation applies it (VC24, see
+            # _cloud_config_for)
+            return dict(cloud_fraction_override=jnp.reshape(
+                jnp.asarray(cloud_fraction), (ncol, nlev)))
         if (cloud_fraction is None or conv_mass_flux_up is None
                 or conv_icwmr is None or lat_deg is None):
             raise ValueError(
@@ -999,7 +1078,9 @@ class DiagnosticCollector:
             p_full,
             jnp.reshape(q_v, (ncol, nlev)),
             dp,
-            self._cloud_config,
+            # Cover only: the in-cloud optic never moves the fraction.
+            self._cloud_config_for(cloud_fraction)._replace(
+                cloud_optics_inhomogeneity="constant", cloud_inhomogeneity_factor=1.0),
             q_cloud=jnp.reshape(q_c, (ncol, nlev)),
             q_ice=q_ice_col,
             **self._cam6_cloud_kwargs(
@@ -1722,6 +1803,9 @@ class DiagnosticCollector:
         hfls=None,
         evspsbl=None,
         prsn=None,
+        tauu=None,
+        tauv=None,
+        prc=None,
         rsutcs=None,
         rlutcs=None,
         rsds=None,
@@ -1734,6 +1818,7 @@ class DiagnosticCollector:
         zg=None,
         tos=None,
         wap=None,
+        o3=None,
         flux_interval_days=None,
         include_state=True,
     ) -> bool:
@@ -1921,7 +2006,7 @@ class DiagnosticCollector:
         # the PHASE-2 commits between the two calendar bins.
         _FLUX_2D = ("pr", "prsn", "rlut", "rsut", "rsdt", "hfss", "hfls",
                     "evspsbl", "rsutcs", "rlutcs", "rsds", "rsus", "rlds", "rlus",
-                    "rtmt")
+                    "rtmt", "tauu", "tauv", "prc")
         # Daily copies of fed 2-D fields (CMIP6 ``day``/``CFday``/``Oday``,
         # placed by ``_DAILY_VARIABLE_REMAP``); the flux ones are the
         # ``_FLUX_2D`` members, binned at the interval midpoint like monthly.
@@ -1955,6 +2040,7 @@ class DiagnosticCollector:
         tas_field = None if tas is None else np.asarray(tas, dtype=_f64)
         ts_field = None if ts is None else np.asarray(ts, dtype=_f64)
         q_v_np = None if q_v is None else np.asarray(q_v, dtype=_f64)
+        o3_np = None if o3 is None else np.asarray(o3, dtype=_f64)
         q_c_np = None if q_c is None else np.asarray(q_c, dtype=_f64)
         q_i_np = None if q_i is None else np.asarray(q_i, dtype=_f64)
         u_east_np = None if u_east is None else np.asarray(u_east, dtype=_f64)
@@ -1971,6 +2057,9 @@ class DiagnosticCollector:
         hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
         evspsbl_np = None if evspsbl is None else np.asarray(evspsbl, dtype=_f64)
         prsn_np = None if prsn is None else np.asarray(prsn, dtype=_f64)
+        tauu_np = None if tauu is None else np.asarray(tauu, dtype=_f64)
+        tauv_np = None if tauv is None else np.asarray(tauv, dtype=_f64)
+        prc_np = None if prc is None else np.asarray(prc, dtype=_f64)
         rsutcs_np = None if rsutcs is None else np.asarray(rsutcs, dtype=_f64)
         rlutcs_np = None if rlutcs is None else np.asarray(rlutcs, dtype=_f64)
         rsds_np = None if rsds is None else np.asarray(rsds, dtype=_f64)
@@ -2009,6 +2098,9 @@ class DiagnosticCollector:
             ("hfls", hfls_np, (_ncol,)),
             ("evspsbl", evspsbl_np, (_ncol,)),
             ("prsn", prsn_np, (_ncol,)),
+            ("tauu", tauu_np, (_ncol,)),
+            ("tauv", tauv_np, (_ncol,)),
+            ("prc", prc_np, (_ncol,)),
             ("rsutcs", rsutcs_np, (_ncol,)),
             ("rlutcs", rlutcs_np, (_ncol,)),
             ("rsds", rsds_np, (_ncol,)),
@@ -2021,6 +2113,7 @@ class DiagnosticCollector:
             ("tos", tos_np, (_ncol,)),
             ("zg", zg_np, (_ncol, _nlev)),
             ("q_v", q_v_np, (_ncol, _nlev)),
+            ("o3", o3_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
             ("u_east", u_east_np, (_ncol, _nlev)),
@@ -2066,6 +2159,9 @@ class DiagnosticCollector:
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
                 ('prsn', prsn_np),   # CMOR kg/m2/s — the frozen part of pr
+                ('tauu', tauu_np),   # CMOR Pa, positive down (stress on the surface)
+                ('tauv', tauv_np),
+                ('prc', prc_np),     # CMOR kg/m2/s — the convective part of pr
                 ('psl', psl),
                 ('rlut', rlut_np),
                 ('rsut', rsut_np),
@@ -2107,6 +2203,15 @@ class DiagnosticCollector:
                 r = self._regrid_to_latlon_2d(cwv_field)
                 if r is not None:
                     fields_2d['prw'] = r
+            if include_state and o3_np is not None:
+                # IFS Cariolle ozone tracer column [DU] (vote O3a): the same
+                # column integral as prw, over kg/m2 per Dobson unit.
+                toz = np.asarray(column_water_vapor(
+                    o3_np, p_s_np, self.dsigma, dp=self._dp(p_s_np))) / (
+                    _c.DU_molec_m2 * _c.M_o3 / _c.N_A)
+                r = self._regrid_to_latlon_2d(toz)
+                if r is not None:
+                    fields_2d['toz_ifs'] = r
             # Total cloud cover: the SAME shared reduction the cube/lat-lon
             # ``collect`` path uses, so the MPAS lane cannot report a
             # different cloud cover for an identical state.  Skipped (not
@@ -2160,7 +2265,7 @@ class DiagnosticCollector:
                 )
                 _p_full_cl = jnp.asarray(self._p_full(p_s_np))
                 _dp_cl = jnp.asarray(self._dp(p_s_np))
-                _mass_cfg = self._cloud_config._replace(
+                _mass_cfg = self._cloud_config_for(cloud_fraction)._replace(
                     cloud_optics_inhomogeneity="constant",
                     cloud_inhomogeneity_factor=1.0,
                     cloud_partial_coverage_optics="none",
@@ -2214,6 +2319,8 @@ class DiagnosticCollector:
             # 3-D fields: model levels → plev19, then regrid.  The plev
             # interpolation is column-wise and works unchanged on native
             # (nCells, nlev) with p_s (nCells,).
+            _bracket = (self._plev19_bracket(p_s_np) if include_state
+                        else None)
             for _name, _src in (
                 ('ta', T_np),
                 ('hus', q_v_np),
@@ -2225,10 +2332,11 @@ class DiagnosticCollector:
                 # continuity guess made downstream from monthly-mean winds.
                 ('wap', None if wap is None else np.asarray(wap)),
                 ('zg', zg_np),
+                ('o3_ifs', o3_np),
             ):
                 if _src is None or not include_state:
                     continue
-                _plev = self._interp_to_plev19(_src, p_s_np)
+                _plev = self._interp_to_plev19(_src, p_s_np, _bracket)
                 if _plev is None:
                     continue
                 r = self._regrid_to_latlon_3d(_plev)
@@ -2642,7 +2750,7 @@ class DiagnosticCollector:
             energy_toa_net=np.array(self.energy_tracker.toa_net),
             energy_column=np.array(self.energy_tracker.column_energy),
             energy_dE_dt=np.array(self.energy_tracker.dE_dt),
-            energy_residual=np.array(self.energy_tracker.residual),
+            energy_toa_minus_dE_dt=np.array(self.energy_tracker.toa_minus_dE_dt),
             moisture_column_water=np.array(self.moisture_tracker.column_water),
             moisture_precip_rate=np.array(self.moisture_tracker.precip_rate),
             moisture_evap_rate=np.array(self.moisture_tracker.evap_rate),

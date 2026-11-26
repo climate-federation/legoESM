@@ -428,6 +428,23 @@ class TestTreguierKappaNemoNative:
         np.testing.assert_array_equal(np.asarray(grad), [0.0, 0.0, 0.25])
         assert bool(jnp.isfinite(grad).all())
 
+    def test_source_ordered_inverse_timescale_gradient_is_finite_at_zero(self):
+        """The L3 source-ordered ``sqrt(zah / zhw)`` uses the safe VJP."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _nemo_sqrt_nonnegative_forward_exact,
+        )
+        from legoesm.core.source_rounding import nemo_source_round
+
+        def inverse_timescale(ratio):
+            # The two source-rounding calls are the literal L3 association.
+            return nemo_source_round(_nemo_sqrt_nonnegative_forward_exact(
+                nemo_source_round(ratio)))
+
+        ratio = jnp.asarray(0.0, dtype=jnp.float64)
+        got = jax.jit(jax.grad(inverse_timescale))(ratio)
+        assert bool(jnp.isfinite(got))
+        assert float(got) == 0.0
+
     def test_literal_column_reduction_is_left_fold_jittable_and_red(self):
         from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
             _nemo_treguier_left_reductions,

@@ -68,7 +68,8 @@ def test_the_orca2_card_reads_real_maps_and_says_so() -> None:
     # the decay scales alone.
     assert float(forcing.ebot.min()) == 0.0
     assert float(forcing.hcri_inv.min()) > 0.0
-    # The deck's salt/heat differentials are declared, not silently dropped.
-    assert "internal_wave_salt_heat_differential" in card.unmeasured_features
-    assert "double_diffusive_salt_heat_split" in card.unmeasured_features
+    # Round 313: both salt/heat differentials are built (namelist_cfg:393, :424).
+    assert (iwm.form, iwm.tsdiff) == ("nemo_literal", True)
+    assert "internal_wave_salt_heat_differential" not in card.unmeasured_features
+    assert "double_diffusive_salt_heat_split" not in card.unmeasured_features
     assert "internal_wave_mixing" not in card.unmeasured_features

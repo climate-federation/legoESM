@@ -205,7 +205,8 @@ def nemo_qco_live_face_geometry_from_operands(
     hv_0,
     area_t,
     area_u,
-    area_v, r3_native=None,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
+    area_v, r3_native=None, *, grid=None, north_fold=False,
+    fold_exchange_ratios=False,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
 ):
     """Build live native-face QCO geometry in NEMO source association.
 
@@ -238,7 +239,14 @@ def nemo_qco_live_face_geometry_from_operands(
 
     weighted_eta = b(area_t * eta)
     num_u = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
-    num_v = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
+    if north_fold:
+        if grid is None:
+            raise ValueError("north_fold=True needs the grid")
+        from legoesm.grids.operators_latlon_cgrid import north_neighbor_T
+        weighted_eta_north = north_neighbor_T(weighted_eta, grid)
+    else:
+        weighted_eta_north = jnp.roll(weighted_eta, -1, axis=0)
+    num_v = b(half * b(weighted_eta + weighted_eta_north))
     wet_u = (hu_0 > 0.0).astype(dtype)
     wet_v = (hv_0 > 0.0).astype(dtype)
     r1_hu0 = b(wet_u / (hu_0 + one - wet_u))
@@ -246,7 +254,11 @@ def nemo_qco_live_face_geometry_from_operands(
     r1_area_u = b(one / area_u)
     r1_area_v = b(one / area_v)
     r3u = b(b(num_u * r1_hu0) * r1_area_u) if r3_native is None else r3_native[0]
-    r3v = b(b(num_v * r1_hv0) * r1_area_v) if r3_native is None else r3_native[1]
+    r3u, r3v = _nemo_ratio_fold_exchange(
+        r3u,
+        b(b(num_v * r1_hv0) * r1_area_v)
+        if r3_native is None else r3_native[1],
+        grid, fold_exchange_ratios)
     one_plus_r3u = b(one + r3u)
     one_plus_r3v = b(one + r3v)
     e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))
@@ -376,7 +388,7 @@ def nemo_ldf_reference_e3f(z_coord):
     return reference
 
 
-def _nemo_qco_r1_area_f(raw, geom_grid, dtype):
+def nemo_qco_r1_area_f(raw, geom_grid, dtype):
     b, one = lax.optimization_barrier, jnp.asarray(1.0, dtype=dtype)
     e1f = None if raw is None else getattr(raw, "e1f", None)
     e2f = None if raw is None else getattr(raw, "e2f", None)
@@ -455,8 +467,10 @@ def nemo_e3f_0vor_from_tmask(e3t_0, tmask, dry_vertex_fill, *,
 
 
 def nemo_qco_live_vorticity_e3f_cgrid(
-    eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None, reference_e3f=None,
-    r3f_override=None, return_ratio=False, apply_fe3mask=True, source_associated=False,
+    eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None,
+    reference_e3f=None, r3f_native=None, return_r3f=False,
+    r3f_override=None, return_ratio=False, apply_fe3mask=True,
+    source_associated=False,
 ):
     """Build literal NEMO ``e3f_vor(Kmm)`` from the card's own mesh.
 
@@ -518,19 +532,22 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
     # Preserve NEMO's native F-layout operand and stored-reciprocal boundary
     # on cards that carry its raw mesh.
-    r1_area_f = _nemo_qco_r1_area_f(raw, geom_grid, dtype)
+    r1_area_f = nemo_qco_r1_area_f(raw, geom_grid, dtype)
     r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
-    if r3f_override is not None:
-        supplied = jnp.asarray(r3f_override, dtype=dtype)
+    if r3f_native is not None and r3f_override is not None:
+        raise ValueError("r3f_native and r3f_override are mutually exclusive")
+    supplied_r3f = r3f_native if r3f_native is not None else r3f_override
+    if supplied_r3f is not None:
+        supplied = jnp.asarray(supplied_r3f, dtype=dtype)
         if supplied.shape != r3f.shape:
             raise ValueError(
-                "r3f_override must use NEMO's native A2D F layout with "
+                "supplied r3f must use NEMO's native A2D F layout with "
                 f"shape {r3f.shape}; got {supplied.shape}")
         r3f = supplied
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
     # On ORCA's T fold this is the same F-origin permutation as e3f_0vor.
-    r3f = nemo_t_fold_f_owned(r3f, grid) if r3f_override is None else r3f  # handed-in: as given
+    r3f = nemo_t_fold_f_owned(r3f, grid) if supplied_r3f is None else r3f
     # dommsk.F90:146-198 freezes fe3mask from the four-T-cell free-slip
     # mask.  The later lateral-slip/strait changes at :207-243 affect fmask
     # only.  domzgr_substitute.h90:48,130 therefore consumes fe3mask here;
@@ -545,7 +562,8 @@ def nemo_qco_live_vorticity_e3f_cgrid(
             "reference_e3f must be the native A2D F-point thickness with "
             f"shape {e3f0vor.shape}; got {reference.shape}")
     e3f_native = b(reference * b(one + r3f[..., None] * (fe3mask if apply_fe3mask else jnp.ones_like(fe3mask))))
-
+    if return_r3f:
+        return r3f
     # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
     # south/west rows are inert walls for this closed-box identity.
     with_south = lat_faces_from_north(e3f_native, south=e3f_native[:1])
@@ -789,7 +807,8 @@ def nemo_qco_live_face_geometry_cgrid(
     area_u,
     area_v,
     *,
-    include_reciprocals=False, r3_native=None,
+    include_reciprocals=False, r3_native=None, grid=None,
+    north_fold=False, fold_exchange_ratios=False,
 ):
     """NEMO ``e3u/e3v(Kmm)`` on legoESM's redundant west/south C-grid faces.
 
@@ -835,7 +854,9 @@ def nemo_qco_live_face_geometry_cgrid(
     """
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
-        hu_0, hv_0, area_t, area_u, area_v, r3_native,
+        hu_0, hv_0, area_t, area_u, area_v, r3_native, grid=grid,
+        north_fold=north_fold,
+        fold_exchange_ratios=fold_exchange_ratios,
     )
     one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
     result = (
@@ -864,6 +885,10 @@ def nemo_qco_live_face_thicknesses(
     e3v_0,
     umask3,
     vmask3,
+    *,
+    grid=None,
+    r3_native=None,
+    preserve_north_fold: bool = False,
 ):
     """Build NEMO QCO live ``e3u/e3v`` on its native east/north faces.
 
@@ -874,9 +899,29 @@ def nemo_qco_live_face_thicknesses(
     source association measured by the DINO fidelity instruments.
     """
     dtype = jnp.asarray(e3u_0).dtype
+    if r3_native is not None and preserve_north_fold:
+        fold = None if grid is None else getattr(grid, "fold", None)
+        if fold is not None and bool(getattr(fold, "is_active", False)):
+            # The WS-RK3 stored ratios are source-identical off the fold
+            # (stprk3_stg.f90:216-217), but their native last V row was built
+            # before ldf's T-pivot face exchange.  Keep the existing
+            # fold-aware domqco construction for the final native U/V row;
+            # only the ordinary rows consume the stored Kmm ratios.
+            current = nemo_qco_live_face_geometry_from_operands(
+                eta, e3u_0, e3v_0, umask3, vmask3,
+                *nemo_qco_mesh_operands(z_coord, dtype), grid=grid,
+                north_fold=True,
+            )
+            r3_native = (
+                jnp.asarray(r3_native[0], dtype=dtype).at[-1].set(
+                    current.r3u[-1]),
+                jnp.asarray(r3_native[1], dtype=dtype).at[-1].set(
+                    current.r3v[-1]),
+            )
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
-        *nemo_qco_mesh_operands(z_coord, dtype),
+        *nemo_qco_mesh_operands(z_coord, dtype), r3_native, grid=grid,
+        north_fold=grid is not None,
     )
     return geom.e3u, geom.e3v
 
@@ -982,6 +1027,10 @@ class OceanZStarCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    # Raw NEMO dummy-bottom T-cell thickness e3t_0(jpk), shape (...).
+    # It is separate from the n_levels live slots in nemo_e3t_0 and is read
+    # only by a card-selected literal TKE mixing-length sweep.
+    nemo_e3t_jpk: jnp.ndarray | None = None
 
 
 def create_ocean_z_star(
@@ -1082,8 +1131,7 @@ def create_ocean_z_star(
 def create_z_star_from_thicknesses(
     dz_ref_m, t_depth_ref_m=None, *, nemo_gdept_0_m=None,
     nemo_gdepw_0_m=None, nemo_e3t_0_m=None, nemo_e3w_0_m=None,
-    nemo_e3w_source="mesh_reference",
-    allow_single_level: bool = False,
+    nemo_e3w_source="mesh_reference", allow_single_level: bool = False,
     nemo_hu_0_m=None, nemo_hv_0_m=None, nemo_e1e2t_m=None,
     nemo_e1e2u_m=None, nemo_e1e2v_m=None,
     nemo_e2u_m=None, nemo_e1v_m=None,
@@ -1482,12 +1530,17 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    # NEMO e3f_0 at the vertex stagger (domain_cfg), the coastal zcur
+    # thickness of lateral_viscosity_file_coastal="nemo_fmask".
+    nemo_e3f_0: jnp.ndarray | None = None
     # NEMO ldf_dyn_init's READ coefficient (nn_ahm_ijk_t = -30,
     # ldfdyn.f90:348-353): the whole 3-D lateral momentum viscosity, already
     # exchanged and masked as that routine leaves it.  ``nemo_ldf_ahmt`` is on
-    # the T grid, ``nemo_ldf_ahmf`` on legoESM's vertex layout.  Only the
-    # lateral_viscosity_coefficient_source="nemo_ahm_3d_file" arm reads them;
-    # every other card leaves them None and is bit-identical.
+    # the T grid (* tmask), ``nemo_ldf_ahmf`` on the model's vertex stagger
+    # (* fmask; on the OMIP cards the rn_shlat fmask, so a coastal F point
+    # carries 2*ahmf for no-slip).  Read by the lat-lon
+    # lateral_viscosity_coefficient_source="nemo_ahm_3d_file" arm and by the
+    # MPAS NEMO-viscosity operator; every other card leaves them None.
     nemo_ldf_ahmt: jnp.ndarray | None = None
     nemo_ldf_ahmf: jnp.ndarray | None = None; nemo_r3t_stored_product: bool = False  # card-selected, see _nemo_r3t_product  # noqa: E501,E702
     # Card-selected: the WS-RK3 stage faces read NEMO's raw face mesh
@@ -1496,6 +1549,9 @@ class OceanPartialCellCoordinate(NamedTuple):
     # it moved the kt=1-10 NEMO-record distance further, so every other card
     # keeps the reconstructed source (user decision 2026-10-17).
     nemo_stage_faces_raw_mesh: bool = False
+
+    nemo_e3t_jpk: jnp.ndarray | None = None
+
 
 
 def create_partial_cell_coordinate(
@@ -1700,6 +1756,7 @@ def create_partial_cell_coordinate(
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
+        nemo_e3t_jpk=getattr(z_coord, "nemo_e3t_jpk", None),
         nemo_stage_faces_raw_mesh=getattr(z_coord, "nemo_stage_faces_raw_mesh", False) is True,  # noqa: E501
     )
 
@@ -1783,6 +1840,7 @@ def create_full_step_coordinate(
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
+        nemo_e3t_jpk=getattr(z_coord, "nemo_e3t_jpk", None),
         nemo_stage_faces_raw_mesh=getattr(z_coord, "nemo_stage_faces_raw_mesh", False) is True,  # noqa: E501
     )
 
@@ -2027,52 +2085,6 @@ def compute_ocean_jacobian(
     return water_col / z_coord.H_max
 
 
-def upwind_vertical_gradient(
-    field: jnp.ndarray,
-    dz_half: jnp.ndarray,
-    w: jnp.ndarray,
-    *,
-    eps: float = 1.0e-12,
-) -> jnp.ndarray:
-    """Compute first-order upwind d(field)/dz at full levels.
-
-    Assumes levels are indexed surface-to-bottom (k=0 at surface).
-    Caller must use consistent coordinates: both ``dz_half`` and ``w``
-    should be in the same vertical coordinate (physical z or z*).
-
-    Parameters
-    ----------
-    field : array
-        Field at full levels, shape (..., nlev).
-    dz_half : array
-        Full-level spacing [m], shape (..., nlev-1). Positive.
-    w : array
-        Vertical velocity [m/s], shape (..., nlev).
-        Only its sign is used (upwind direction). Positive = upward.
-    eps : float
-        Small denominator guard for spacing.
-
-    Returns
-    -------
-    array : Upwind vertical gradient d(field)/dz, shape (..., nlev).
-    """
-    inv_dz_half = 1.0 / jnp.maximum(dz_half, eps)
-    df = (field[..., :-1] - field[..., 1:]) * inv_dz_half
-
-    # Pad along trailing axis instead of allocating a fresh ``zeros``
-    # buffer + concatenate.  Single Pad HLO op each.  This helper
-    # fires once per scan step inside ``vertical_advection_ocean`` for
-    # u, v, T, S, and every tracer — so 4-6 zero-broadcast concats
-    # per RHS evaluation in the hot loop.
-    pad_axes = ((0, 0),) * (df.ndim - 1)
-    # Upward flow (w>0): donor is deeper cell -> (f[k] - f[k+1]) / dz.
-    grad_up = jnp.pad(df, (*pad_axes, (0, 1)))
-    # Downward flow (w<0): donor is shallower cell -> (f[k-1] - f[k]) / dz.
-    grad_down = jnp.pad(df, (*pad_axes, (1, 0)))
-
-    return jnp.where(w > 0.0, grad_up, grad_down)
-
-
 # ---------------------------------------------------------------------------
 # Vertical velocity diagnosis and advection (shared across ocean dycores)
 # ---------------------------------------------------------------------------
@@ -2160,31 +2172,25 @@ def diagnose_w_from_flux_div(flux_div_k, z_coord=None,
 
 
 def vertical_advection_ocean(field, w_half, z_coord, jacobian):
-    """Vertical advection ``-w * d(field)/dz`` with upwind scheme.
+    """Continuity-paired upwind vertical tracer tendency on z-star layers.
 
-    Parameters
-    ----------
-    field : array, shape (..., nlev)
-        Quantity being advected.
-    w_half : array, shape (..., nlev+1)
-        Vertical velocity on half levels.
-    z_coord : OceanZStarCoordinate
-        Vertical coordinate (provides ``dz_half_ref``).
-    jacobian : array, shape (...)
-        Dynamic z-star Jacobian.
-
-    Returns
-    -------
-    tendency : array, shape (..., nlev)
+    Levels run surface to bottom; w is positive upward. The shared flux
+    helper closes surface/bottom faces and gates partial-cell rock faces.
+    With its upward flux divergence D, dh/dt = -D(1) = diff(w) on wet
+    closed columns, and h*dq/dt + q*dh/dt = -D(q) telescopes exactly.
+    This is the vertical split only, not a full-model transport budget.
+    Pairing assumes healthy layer thickness above the existing 1e-10 floor.
     """
-    w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
-    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
-    dz_half = z_coord.dz_half_ref * jac_safe
-    grad = upwind_vertical_gradient(field, dz_half, w_full)
-
-    # Vertical advection calculation
-
-    return -w_full * grad
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        h_ref = z_coord.h_partial
+        active = z_coord.is_active
+    else:
+        h_ref = z_coord.dz_ref
+        active = None
+    h = h_ref * jacobian[..., jnp.newaxis]
+    tracer_div = flux_form_vertical_tracer_advection(field, w_half, active)
+    volume_div = flux_form_vertical_tracer_advection(jnp.ones_like(field), w_half, active)
+    return (-tracer_div + field * volume_div) / jnp.maximum(h, 1.0e-10)
 
 
 def flux_form_vertical_momentum_advection(
@@ -2211,9 +2217,7 @@ def flux_form_vertical_momentum_advection(
     ----------
     1. Interior interface-upwind (consistent with the tracer path).
     2. Rigid-lid boundary by construction: ``F[0] = F[nlev] = 0``.
-       No artificial momentum injection from the boundary via the
-       "hard zero at k=0 and k=nlev-1" pathology that the old
-       ``vertical_advection_ocean`` cell-upwind gradient has.
+       No artificial momentum injection from the boundary.
     3. Column momentum flux identity: for any ``w_half`` with
        ``w_half[0] = w_half[nlev] = 0`` (closed column), the sum of
        ``(tendency * h_u)`` over the column is exactly zero.
@@ -2423,6 +2427,7 @@ def nemo_advective_vertical_momentum_advection(
     face_area: jnp.ndarray,
     face_active: jnp.ndarray | None = None,
     bottom_face_mask_mode: str = "min_rule",
+    nemo_written_association: bool = False,
 ) -> jnp.ndarray:
     """NEMO-faithful ADVECTIVE-form vertical momentum advection (dynzad.F90).
 
@@ -2530,6 +2535,8 @@ def nemo_advective_vertical_momentum_advection(
     w_interior = w_area_half[..., 1:nlev]           # (..., nlev-1)
     du_interior = u[..., :-1] - u[..., 1:]           # u[k-1] - u[k], k=1..nlev-1
     G_interior = 2.0 * w_interior * du_interior
+    if nemo_written_association:
+        G_interior = nemo_source_round(G_interior)        # zzWdzU (dynzad.f90:119)
 
     if bottom_face_mask_mode == "min_rule" and face_active is not None:
         active_above = face_active[..., :-1]    # cell k-1 for k=1..nlev-1
@@ -2555,7 +2562,14 @@ def nemo_advective_vertical_momentum_advection(
     # tendency is zero — but 0 (masked G) * inf (1/0 area) is nan, not 0,
     # without the floor.
     face_area_safe = jnp.maximum(face_area, 1.0e-10)
-    tend = -0.25 / (face_area_safe * h_u_safe) * (G_top + G_bot)
+    if nemo_written_association:
+        # dynzad.f90:123-124: Krhs - 0.25*r1_e1e2u/e3u * (zWdzU + zzWdzU),
+        # r1_e1e2u = 1/e1e2u stored (domhgr.f90:170); every product rounded.
+        coef = nemo_source_round(
+            nemo_source_round(0.25 * (1.0 / face_area_safe)) / h_u_safe)
+        tend = -nemo_source_round(coef * nemo_source_round(G_top + G_bot))
+    else:
+        tend = -0.25 / (face_area_safe * h_u_safe) * (G_top + G_bot)
     if bottom_face_mask_mode == "nemo_faithful" and face_active is not None:
         # dynzdf.F90:121 -- ``puu(Kaa) = (puu(Kbb) + rDt*Krhs) * umask(ji,jj,jk)``:
         # the ONLY masking NEMO applies to this term, keyed on the cell's
@@ -2709,6 +2723,9 @@ def adaptive_implicit_vertical_momentum_advection(
     cu_max: float = _AIMP_CU_MAX,
     face_active: jnp.ndarray | None = None,
     explicit_scheme: str = "upwind",
+    w_area_half: jnp.ndarray | None = None,
+    face_area: jnp.ndarray | None = None,
+    bottom_face_mask_mode: str = "min_rule",
 ) -> jnp.ndarray:
     """Adaptive-implicit vertical momentum advection (Shchepetkin 2015).
 
@@ -2777,9 +2794,20 @@ def adaptive_implicit_vertical_momentum_advection(
         tend_exp = nemo_up3_vertical_momentum_advection(
             u, w_exp, h, face_active=face_active,
         )
+    elif explicit_scheme == "nemo_advective":
+        # NEMO ln_dynadv_vec + ln_zad_Aimp: dynzad (centered advective, full u)
+        # on the explicit share of the e1e2t-weighted w; the implicit share
+        # goes to the upwind solve below, as dynzdf does with wi.
+        if w_area_half is None or face_area is None:
+            raise ValueError(
+                "explicit_scheme='nemo_advective' needs w_area_half and face_area")
+        tend_exp = nemo_advective_vertical_momentum_advection(
+            u, (1.0 - zcff) * w_area_half, h, face_area, face_active=face_active,
+            bottom_face_mask_mode=bottom_face_mask_mode,
+        )
     else:
         raise ValueError(
-            "explicit_scheme must be 'upwind' or 'nemo_up3', got "
+            "explicit_scheme must be 'upwind', 'nemo_up3' or 'nemo_advective', got "
             f"{explicit_scheme!r}")
     u_exp = u + dt * tend_exp
 
@@ -3107,3 +3135,17 @@ def _nemo_r3t_product(product, z_coord):
     if getattr(z_coord, "nemo_r3t_stored_product", False) is not True:
         return product      # identity test: a traced flag reads as off, never raises
     return nemo_source_round(product)
+
+
+def _nemo_ratio_fold_exchange(r3u, r3v, grid, selected):
+    """NEMO's ``lbc_lnk`` sign +1 of the stage ratios (stprk3_stg.f90:169):
+    with a fold grid the pivot V row becomes the mirrored row below instead of
+    the stencil over the wrapped southern row.  None = no exchange."""
+    if not selected:
+        return r3u, r3v
+    if grid is None:
+        raise ValueError("fold_exchange_ratios=True needs the grid")
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import nemo_een_ratio_fold_exchange
+
+    # ponytail: the shared exchange also folds an F ratio; this caller has none
+    return nemo_een_ratio_fold_exchange(r3u, r3v, r3v, grid, True)[:2]

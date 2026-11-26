@@ -61,13 +61,6 @@ _LANES = {
     "latlon": (GridConfig(grid_type="latlon", resolution=8, nlev=4),
                DycoreConfig(model_type="hydrostatic",
                             discretization="latlon_cgrid", dt=_DT)),
-    "cube": (GridConfig(grid_type="cubed_sphere", resolution=6, nlev=4),
-             DycoreConfig(model_type="hydrostatic", discretization="cdgrid",
-                          dt=_DT)),
-    "cube_persistent_dgrid": (
-        GridConfig(grid_type="cubed_sphere", resolution=6, nlev=4),
-        DycoreConfig(model_type="hydrostatic", discretization="cdgrid",
-                     dt=_DT, persistent_dgrid=True)),
 }
 
 

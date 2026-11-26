@@ -1,0 +1,19 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -67,0 +68,2 @@
++   USE l4_r120_een_v_fraction, ONLY : r120_een_v_fraction_init, &
++      & r120_een_v_fraction_store, r120_een_v_fraction_dump ! round-120 write-only northern V fractions
+@@ -1473,0 +1476 @@
++      CALL r120_een_v_fraction_init
+@@ -1699,0 +1703,9 @@
++               CALL r120_een_v_fraction_store(ji, jj, jk, &
++                  & ff_f(ji,jj+1), e3f_0vor(ji,jj+1,jk), r3f(ji,jj+1), fe3mask(ji,jj+1,jk), &
++                  & ff_f(ji,jj), e3f_0vor(ji,jj,jk), r3f(ji,jj), fe3mask(ji,jj,jk), &
++                  & ff_f(ji-1,jj), e3f_0vor(ji-1,jj,jk), r3f(ji-1,jj), fe3mask(ji-1,jj,jk), &
++                  & zpvo_ne, &
++                  & ff_f(ji,jj), e3f_0vor(ji,jj,jk), r3f(ji,jj), fe3mask(ji,jj,jk), &
++                  & ff_f(ji-1,jj), e3f_0vor(ji-1,jj,jk), r3f(ji-1,jj), fe3mask(ji-1,jj,jk), &
++                  & ff_f(ji-1,jj+1), e3f_0vor(ji-1,jj+1,jk), r3f(ji-1,jj+1), fe3mask(ji-1,jj+1,jk), &
++                  & zpvo_nw)
+@@ -1734,0 +1746 @@
++         CALL r120_een_v_fraction_dump(mbkv)

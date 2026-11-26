@@ -1,5 +1,24 @@
 # legoESM Claude Memory
 
+## RULE 0 — CONSERVATION OF MASS, ENERGY AND MOMENTUM. THE STRICTEST RULE.
+User directive 2026-10-11: *"Mass, energy and momentum conservations should be
+the strictest rules."* Outranks every other rule in this file, including speed,
+brevity and convergence.
+
+- **No change may create or destroy mass, energy or momentum** — no cap, clip,
+  floor, limiter, fallback or "hold" that removes or adds a quantity without
+  routing it to an explicit sink/source in the same budget. A capped water
+  amount goes somewhere (dew, runoff, store); its latent heat goes somewhere.
+- **Every physics/numerics change states its budget and proves it closes**:
+  name the conserved quantities it touches, and add a test asserting
+  `in - out - d(storage) = 0` to round-off (`JAX_ENABLE_X64=1`), shown to FAIL
+  when the fix is reverted.
+- **Exchanged fluxes carry the same value and sign at both ends of a coupling.**
+- **A known non-conserving path (fallback, held column, clamp) is a defect**:
+  report it with its measured size the moment it is found, never absorb it.
+- Speed or convergence fixes that touch a solver must show the conserved
+  totals are unchanged (to round-off) before and after.
+
 ## RULE 1 — CONCISE AND CLEAR. THE DEFAULT, EVERY REPLY.
 User directive 2026-08-21: *"Be concise and clear — make this a default."*
 Eleventh ask. Default, not mode.
@@ -296,8 +315,21 @@ rule (target: empty), not a disclosure that discharges it. FAILURE 2026-10-16:
 radiation stage 1 shipped a band-list check tolerance and an fp32 tiny-path
 guard behaviour, both labelled "formatting only", neither asked.
 
+**2026-11-03 — WHO ANSWERS: DETAIL CHOICES GO TO A VOTE, NOT THE USER.** User:
+*"For such detailed question do not ask me but check with [GLM] and codex and
+use the majority of votes. Just ask me big picture / important questions such
+as on design or main directions."* Every side decision above is still never
+made silently, but a DETAIL choice (tolerance, guard, edge case, test value,
+cache key, refusal scope, error-vs-fallback) is put to GLM
+(`mcp__zai__ask_glm`) and codex, batched in one prompt each, plus the author's
+own vote; majority of the three decides. Record each choice with its three
+votes in the commit/PR body. The USER is asked only about design, main
+direction, scope, and anything they named as their call. Precedence: this
+replaces "ask the user" for detail choices everywhere in this section and in
+the STOP-AND-ASK list; for design/direction the user rule stands unchanged.
+
 MECHANICAL CHECK, end of every task: print list of choices made, each one line,
-marked ASKED or UNASKED. Empty UNASKED list = target. Anything on UNASKED list
+marked ASKED (user), VOTED (GLM/codex/author majority, votes shown) or UNASKED. Empty UNASKED list = target. Anything on UNASKED list
 offered for revert in same message. Worked example, five from 2026-08-21 that
 prompted this rule: routing each case's droplet number into single-column arm;
 allocating zero graupel field in every column running microphysics; which
@@ -305,6 +337,21 @@ campaign cases got registered and using ARM cumulus case as stand-in for another
 campaign's regime; pinning forcing downloads to fixed versions and checksums;
 turning missing variable name into hard error. Every one defensible. None asked.
 That the error.
+
+**2026-11-03 REFINEMENT — DETAIL DECISIONS GO TO A VOTE, NOT THE USER.** User,
+repeated three times in one day: *"For detailed questions do not ask me but
+check with him [GLM] and codex and use the majority of votes. Just ask me big
+picture / important questions such as on design or main directions."*
+- **Detail side decision** (names, tolerances, guards, edge cases, file
+  locations, minor scope trims, which diagnostic next): author's pick + GLM vote
+  + codex vote, majority of three wins. Never silent: record each voter's pick
+  in the commit, and mark the item VOTED on the end-of-task list (VOTED counts
+  as discharged, like ASKED).
+- **Still ASK the user:** model design, main direction, production defaults and
+  config changes (RULE 3), which experiments/compute to launch, data source,
+  what is trained or scored, anything changing comparability of results.
+- Unsure which class → big picture → ask.
+- Subagent briefs must state this rule.
 
 ## Operating Mode
 - **TERSE BY DEFAULT.** Drop articles/filler/pleasantries/hedging; fragments fine. Report `[thing] [state] [next]`, not prose. No restating what was just done, no feature tours, no explaining a simplification at more length than the code. Numbers/tables over narration. Full prose ONLY when asked for it (report/walkthrough), or for security warnings, irreversible-action confirmations, and multi-step sequences where fragments risk misread. Code/commits/PRs/docstrings: written normally.

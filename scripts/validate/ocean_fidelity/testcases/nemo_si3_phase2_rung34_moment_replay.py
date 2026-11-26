@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import math
+
 import argparse
 import hashlib
 import importlib.util
@@ -12,19 +14,17 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
+import legoesm.ice.transport as ice_transport
 import netCDF4
 import numpy as np
-import legoesm.ice.transport as ice_transport
 from legoesm.core.precision import PrecisionPolicy, get_policy
 from legoesm.ice.dynamics import si3_cgrid_aevp_solver
-from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
+from legoesm.ice.fidelity import nemo_rheo_testcase_recipe_lane as recipe
 from legoesm.ice.transport import (
     SI3_PRATHER_MOMENT_NAMES,
     advect_si3_prather_2d,
     si3_prather_pack_intensives,
 )
-
-from legoesm import constants
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 RESTART_ROOT = ROOT.parent / "round8" / "oracle_active_restarts"
@@ -151,6 +151,7 @@ def _make_jit_stepper(card):
             ice_volume_index=recipe.ICE_RHEO_TRACERS.index("v_i"),
             concentration_index=recipe.ICE_RHEO_TRACERS.index("a_i"),
             subcycles=card.subcycles,
+            limit_sharpness_scale=math.inf,
         )
 
     return jax.jit(advance)
@@ -295,8 +296,8 @@ def run_replay(
     with netCDF4.Dataset(root / "mesh_mask.nc") as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in gate.MESH_FIELDS}
     with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    card = recipe.build_ice_rheo_card(entry, mesh, ocean_temperature_k)
+        sst_m = np.asarray(dataset["sst"][0])
+    card = recipe.build_ice_rheo_card(entry, mesh, sst_m)
     require(
         get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
         "fp64/scalar-libm policy required",
@@ -365,7 +366,7 @@ def run_replay(
 
     forcing = recipe._forcing_for_state(card, state, TARGET_RESTART)
     dynamics = si3_cgrid_aevp_solver(
-        state.dynamics, forcing, card.metrics, card.dynamics_config
+        state.dynamics, forcing, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
     )
     lego_u = np.asarray(dynamics.u_ice_u)
     lego_v = np.asarray(dynamics.v_ice_v)
@@ -436,7 +437,7 @@ def run_replay(
         },
         "between_advection_moment_handling": {
             "status": "EXACTLY-UNCHANGED",
-            "source": "nemo_rheo_testcase_recipe.py:646-704",
+            "source": "nemo_rheo_testcase_recipe_lane.py:646-704",
             "input_transport_moment_sha256": input_moment_hash,
         },
         "plant": {

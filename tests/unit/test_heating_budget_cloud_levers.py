@@ -49,3 +49,13 @@ def test_launch_argv_drops_the_mpi_flag(tmp_path, monkeypatch):
     assert "--distributed" not in argv
     assert argv[:2] == ["--config", "x.yaml"]
     assert argv[argv.index("--days") + 1] == "1"
+
+
+def test_replace_deck_swaps_the_one_config_value():
+    argv = ["--config", "config/amip/amip_production.yaml", "--days", "1"]
+    out = hb.replace_deck(argv, "config/amip/amip_production_prognostic_nc.yaml")
+    assert out == ["--config", "config/amip/amip_production_prognostic_nc.yaml", "--days", "1"]
+    assert argv[1] == "config/amip/amip_production.yaml"          # input untouched
+    for bad in (["--days", "1"], ["--config", "a", "--config", "b"], ["--config"]):
+        with pytest.raises(SystemExit, match="exactly one --config"):
+            hb.replace_deck(bad, "x.yaml")

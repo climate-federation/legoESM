@@ -1,0 +1,33 @@
+# legoESM experiment template — BENCH performance benchmark, harness lane.
+#
+# Same NEMO-BENCH-inspired experiment as `bench.yaml` (Irrmann et al. 2022,
+# GMD 15, 1567-1582, Sect. 2.2), but the `setup:` block carries the harness
+# keys (#2113), so it routes to scripts/run/run_bench.py instead of the fixed
+# CI-sized matrix case: resolution preset (sizes + first-guess dt), step
+# budget (NEMO nn_itend), JIT warmup steps, timing-JSONL record. Every key is
+# explicit at run_bench.py's default. Optional: `grid: tripole` (synthetic
+# fold lane) with `n_lat`, `levels` (-> --nlev) and `dt_seconds` (-> --dt,
+# overrides the preset's dt; the exception, not the rule). Results are
+# physically MEANINGLESS by design; use only for benchmarking.
+experiment:
+  tier: tier1
+  complexity: primitive_equation
+  extent: global
+  maturity: structurally_validated
+  description: >
+    NEMO-BENCH-inspired performance benchmark through the standalone BENCH
+    harness (presets, step budget, warmup, timing JSONL). Flat-bottom
+    all-ocean box, zero analytic forcing, per-point unique ICs. Stability-gated
+    only — results are physically meaningless by design.
+  data: []
+  conservation_gates: []
+model:
+  name: "ocean-bench-harness"
+  type: ocean_only
+setup:
+  name: bench
+  grid: latlon
+  preset: orca1_like
+  steps: 1000
+  warmup_steps: 5
+  timing_jsonl: timing_bench.jsonl

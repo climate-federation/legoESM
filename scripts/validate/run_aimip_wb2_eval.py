@@ -456,6 +456,7 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
                     aimip_legacy_owned_fields(cloud_scheme=_cloud)
                     | aimip_inactive_fields(
                         cloud_scheme=_cloud, microphysics=_micro, gwd=_gwd,
+                        turbulence=str(cfg.get("aimip_turbulence", "louis")),
                         subgrid_orography=getattr(
                             grid, "subgrid_topo_stddev", None) is not None))),
             )

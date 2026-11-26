@@ -85,6 +85,7 @@ from legoesm.grids.vertical import (
     create_height_coordinate_from_z_half,
     create_stretched_height_coordinate,
 )
+from legoesm.parallel.staggered_init import staggered_first_call
 
 
 # JAX x64 toggle happens at IMPORT TIME (before argparse). Two paths:
@@ -494,6 +495,27 @@ def _make_land_radiation_refresh_fn(
     return refresh_fn
 
 
+def _with_fp64_tracers(fn):
+    """Mixed precision: feed ``fn`` the tracer stack in fp64. Morrison's
+    saturation adjustment forms q_v = (q_v + q_c) - q_c_new, which in fp32
+    rounds at the vapour scale and creates water (measured: total-water drift
+    5.9e-6/h -> 4e-8/h over 1 h of RCEMIP1 with fp64 inputs here)."""
+    def wrapped(state, *rest):
+        return fn(state._replace(tracers=state.tracers.replace(
+            data=state.tracers.data.astype(jnp.float64))), *rest)
+    return wrapped
+
+
+def _in_fp64(fn):
+    """Mixed precision: run ``fn`` on an fp64 copy of the state (radiation:
+    fp32 radiation is the dominant fp32 error, theta' 9e-3 vs 1e-6 at 1 h)."""
+    def wrapped(state, *rest):
+        return fn(jax.tree.map(lambda a: a.astype(jnp.float64)
+                               if jnp.issubdtype(a.dtype, jnp.floating) else a,
+                               state), *rest)
+    return wrapped
+
+
 def make_rcemip_physics(
     grid, height_coord, terrain_metric,
     radiation_config: RadiationConfig | None,
@@ -502,6 +524,7 @@ def make_rcemip_physics(
     surface_flux: bool = True,
     T_sfc: float = 300.0, p_sfc: float = 101480.0,
     ls_forcing_physics=None,
+    mixed_precision: bool = False,
 ):
     """Compose RCEMIP physics_fn — surface + radiation + microphysics.
 
@@ -524,13 +547,13 @@ def make_rcemip_physics(
             T_sfc=T_sfc, p_sfc=p_sfc,
         ))
     if radiation_config is not None:
-        physics_fns.append(_plane_radiation_physics_with_sst(
-            radiation_config, grid, T_sfc,
-        ))
+        rad = _plane_radiation_physics_with_sst(radiation_config, grid, T_sfc)
+        physics_fns.append(_in_fp64(rad) if mixed_precision else rad)
     if microphysics_config is not None:
-        physics_fns.append(make_microphysics_physics(
+        mic = make_microphysics_physics(
             microphysics_config, model_type="plane", dt=dt,
-        ))
+        )
+        physics_fns.append(_with_fp64_tracers(mic) if mixed_precision else mic)
     if ls_forcing_physics is not None:
         physics_fns.append(ls_forcing_physics)
 
@@ -551,6 +574,7 @@ def split_rad_from_other_physics(
     surface_flux: bool = True,
     T_sfc: float = 300.0, p_sfc: float = 101480.0,
     ls_forcing_physics=None,
+    mixed_precision: bool = False,
 ):
     """Build TWO separate physics callables for the gated-radiation pattern.
 
@@ -576,9 +600,10 @@ def split_rad_from_other_physics(
             T_sfc=T_sfc, p_sfc=p_sfc,
         ))
     if microphysics_config is not None:
-        non_rad_fns.append(make_microphysics_physics(
+        mic = make_microphysics_physics(
             microphysics_config, model_type="plane", dt=dt,
-        ))
+        )
+        non_rad_fns.append(_with_fp64_tracers(mic) if mixed_precision else mic)
     if ls_forcing_physics is not None:
         non_rad_fns.append(ls_forcing_physics)
 
@@ -595,6 +620,8 @@ def split_rad_from_other_physics(
         rad_physics_fn = _plane_radiation_physics_with_sst(
             radiation_config, grid, T_sfc,   # RAD-7: SST surface boundary
         )
+        if mixed_precision:
+            rad_physics_fn = _in_fp64(rad_physics_fn)
     return non_rad_physics_fn, rad_physics_fn
 
 
@@ -1024,7 +1051,12 @@ def _build_radiation_config(
     clouds: bool = True,
     insolation: str = "rcemip",
     t_sfc: float = 300.0,
+    column_chunk_size: int = 0,
 ) -> RadiationConfig | None:
+    if column_chunk_size > 0 and scheme != "rrtmgp":
+        raise ValueError(
+            f"--radiation-column-chunk {column_chunk_size} only applies to "
+            f"--radiation rrtmgp (got {scheme!r}); drop the flag.")
     if scheme == "none":
         return None
     if scheme not in ("gray", "rrtmgp"):
@@ -1052,7 +1084,8 @@ def _build_radiation_config(
     # RAD-1-ice): ice r_eff stays 30 µm; SAM uses T-dependent 6–250 µm.
     if scheme == "rrtmgp":
         from legoesm.atmosphere.physics.clouds.config import CloudConfig
-        rrtmgp_kwargs = {"include_clouds": clouds}
+        rrtmgp_kwargs = {"include_clouds": clouds,
+                         "column_chunk_size": column_chunk_size}
         if s0 is not None:
             rrtmgp_kwargs["S_0"] = s0
         # RAD-4: SAM RCEMIP trace-gas concentrations. gSAM (RCEMIP1/prm,
@@ -1343,6 +1376,9 @@ def _apply_hard_saturation_drain(state, hc, dt, threshold, max_heating_K=5.0):
         hard_saturation_drain,
     )
     T, p, _, _ = live_thermo(state, hc)
+    # This lane heats with constant L_v (documented convention); the drain solves
+    # and caps with the same coefficient.
+    lcp = constants.L_v / constants.c_pd
     tr = state.tracers.data
     if tr.shape[-1] < 2:
         # Nowhere to put the condensate: a single-tracer (vapour-only) state
@@ -1372,7 +1408,7 @@ def _apply_hard_saturation_drain(state, hc, dt, threshold, max_heating_K=5.0):
     dq = jnp.where(
         T >= constants.T_freeze,
         hard_saturation_drain(T, tr[..., 0], p, dt, hard_threshold=threshold,
-                              hard_max_heating_K=max_heating_K),
+                              hard_max_heating_K=max_heating_K, l_over_cp=lcp),
         0.0,
     ) * dt
     # Slot 1 is cloud water in every layout this driver builds (q_v, q_c, q_r
@@ -1385,8 +1421,7 @@ def _apply_hard_saturation_drain(state, hc, dt, threshold, max_heating_K=5.0):
     # c_pd*T + L_v*q_v. Swapping in exner_live moves that by ~2 %, not by 1.4;
     # real correction is a ~29 % cut to the latent heating, which is a lane
     # re-tuning and out of scope here. See the docstring.
-    theta_p = (state.theta_prime.data
-               + (constants.L_v / constants.c_pd) * dq / hc.exner_ref)
+    theta_p = (state.theta_prime.data + lcp * dq / hc.exner_ref)
     # Field.replace (dataclass-style), state._replace (NamedTuple) — the two
     # carry DIFFERENT APIs; mixing them up is an AttributeError at the first
     # jit call, not at trace time.
@@ -1493,6 +1528,118 @@ def cfl_guard(dt, dx, dz_min, n_acoustic_substeps=6, c_s=350.0, label="run"):
             f"{label}: dt={dt} s vs min_dz={dz_min:.0f} m exceeds the measured "
             f"vertical stability limit (dt≲{0.08 * dz_min:.1f} s) — reduce dt.",
             stacklevel=3)
+
+
+def build_rcemip_height_coord(args, p_sfc_rcemip, dtype):
+    """Height coordinate the driver builds from ``args``: ``(hc, snd, q_sfc)``.
+
+    ``snd`` is the tabulated sounding (``None`` unless ``--sounding``)."""
+    try:
+        q_sfc_rce = wing2018_q_sfc(args.T_sfc)
+    except ValueError:
+        # Off-protocol SST (sensitivity sweeps, land RCE with a custom T): keep
+        # the RCE300 q0 rather than inventing an unpublished one, but SAY that
+        # the near-surface RH is then off-protocol.
+        q_sfc_rce = WING_Q_SFC_DEFAULT
+        print(f"  WARN: SST={args.T_sfc} K is not an RCEMIP case (295/300/305);"
+              f" using the 300 K q0={WING_Q_SFC_DEFAULT} kg/kg, so the initial"
+              f" near-surface RH is NOT the protocol's ~80 %.")
+    # --sounding: initialise from a TABULATED SAM sounding instead of the
+    # analytic Wing form.  gSAM's own RCEMIP1 deck ships one sounding per SST
+    # (CASES/RCEMIP1/snd_rcemip_{295,300,305}s6.11.2, `snd` == the 300 K one),
+    # and that file is NOT the Wing analytic profile: it has a ~7.47 K/km
+    # tropospheric lapse and a stratosphere that WARMS with height, where the
+    # analytic form uses 6.70 K/km and an isothermal cap.  No analytic-constant
+    # choice can represent the second difference, so the faithful RCEMIP1 IC has
+    # to read the table — exactly as BOMEX/RICO/DYCOMS/GATE already do.
+    #
+    # Reuses the SHARED reader + setup (no second parser, no second IC builder):
+    #   read_sam_snd -> extend_sounding_to_top -> build_sam_case_height_coord
+    #                                          -> build_sam_case_initial_state
+    # so the θ (potential temperature) and q [g/kg -> kg/kg] unit conventions
+    # are handled in exactly one place for every SAM-deck case.
+    snd = None
+
+    def theta_ref_fn(z):
+        return _rcemip_theta_profile(z, T_sfc=args.T_sfc, q_sfc=q_sfc_rce)
+
+    # --sam-grd is checked FIRST so it cannot be silently outranked by another
+    # coordinate flag; build_sam_grd_height_coord refuses the --sounding pair
+    # rather than picking a winner.
+    if args.sam_grd is not None:
+        hc = build_sam_grd_height_coord(args, p_sfc_rcemip, theta_ref_fn, dtype)
+    elif args.sounding is not None:
+        snd, hc = build_sounding_height_coord(args, p_sfc_rcemip, dtype)
+    elif args.stretched_vertical:
+        hc = create_stretched_height_coordinate(
+            args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
+            theta_ref_fn=theta_ref_fn,
+        )
+    else:
+        hc = create_height_coordinate(
+            args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
+            theta_ref_fn=theta_ref_fn,
+        )
+    if args.precision == "mixed":
+        # Built in fp64 (x64 is on), stored in fp32 like the rest of the state.
+        hc = hc._replace(**{
+            k: v.astype(jnp.float32) for k, v in hc._asdict().items()
+            if isinstance(v, jax.Array) and jnp.issubdtype(v.dtype, jnp.floating)})
+    return hc, snd, q_sfc_rce
+
+
+# RCEMIP1 surface pressure [Pa] (Wing et al. 2018: 1014.8 hPa).
+P_SFC_RCEMIP = 101480.0
+
+
+def microphysics_n_tracers(microphysics):
+    """Tracer slot count the driver allocates for ``--microphysics``."""
+    if microphysics == "morrison":
+        # slot [9] = prognostic snow number, [10] = prognostic graupel number
+        # ⇒ fully double-moment M2005 (snow + graupel).
+        return 11
+    elif microphysics in ("seifert_beheng", "p3", "thompson", "fast_sbm"):
+        # fast_sbm (FSBM-2): q_v,q_c,q_r + N_c,N_r live, ice slots zero ⇒ 9.
+        return 9
+    else:
+        return 3
+
+
+def build_dycore_config(args):
+    """The driver's ``CompressibleEulerConfig`` from resolved ``args``
+    (``args.hyperdiff`` must already be resolved, see ``main``)."""
+    return CompressibleEulerConfig(
+        sponge_coeff=args.sponge_coeff,
+        sponge_width=args.sponge_width,
+        sponge_w_only=True,               # SAM damping.f90: damp w only
+        sponge_profile_shape="sam_rational",  # SAM zzz/(1+zzz) taper
+
+        hyperdiff_coeff=args.hyperdiff,
+        hyperdiff_rho_coeff=args.hyperdiff,
+        hyperdiff_w_coeff=args.hyperdiff,
+        semi_implicit_acoustic=args.semi_implicit,
+        n_acoustic_substeps=args.n_acoustic_substeps,
+        acoustic_off_centering=args.off_centering,
+        implicit_buoyancy=args.implicit_buoyancy,
+        si_w_vertical_filter_nu=args.si_w_filter_nu,
+        substep_horizontal_acoustic=args.substep_horizontal_acoustic,
+        horizontal_advection_scheme=args.advection,
+        horizontal_momentum_advection_scheme=args.momentum_advection,
+        vertical_tracer_advection=args.vertical_tracer_advection,
+        acoustic_theta_advection=args.acoustic_theta_advection,
+        use_coriolis=(args.coriolis_mode != "none"),
+        fix_mass=True, anchor_mass_to_initial=True,
+        smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
+        smagorinsky_wall_damping=args.smag_wall_damping,  # False=SAM CRM; True=LES
+        smagorinsky_delta_max=args.smag_delta_max,  # SAM 1000 m horiz length cap
+        smagorinsky_stability_length=args.smag_stability_length,  # SAM dosmagor
+        # weakly-stable Deardorff smix limit (default off = pure Cs form)
+        vertical_theta_diffusion=args.vertical_theta_diffusion,
+        sgs_vertical_diffusion=args.sgs_vertical,
+        turbulence_closure=args.turbulence_closure,
+        molecular_viscosity=args.molecular_viscosity,
+        mixed_precision=(args.precision == "mixed"),
+    )
 
 
 def parse_args(argv=None):
@@ -1691,7 +1838,7 @@ def parse_args(argv=None):
                         "extrema ⇒ no cold drift. Decoupled from the implicit "
                         "w-solve. Recommended van_leer for long RCE; validate then "
                         "promote to default.")
-    p.add_argument("--precision", choices=["float32", "float64"],
+    p.add_argument("--precision", choices=["float32", "float64", "mixed"],
                    default="float64",
                    help="fp32 ~5-9x faster than fp64 on consumer GPU "
                         "(fp64 ALU 1:32 ratio); fp32 sufficient for RCE.")
@@ -1703,6 +1850,12 @@ def parse_args(argv=None):
                         "RRTMGP). Gated mode (interval>1) applies cached "
                         "radiation tendency as forward Euler increments "
                         "between recomputes — standard SAM/WRF/CM1 practice.")
+    p.add_argument("--radiation-column-chunk", type=int, default=0,
+                   help="RRTMGP column-chunk block size (0 = off). >0 maps the "
+                        "rrtmgp solve over fixed-size column blocks, bounding "
+                        "its XLA scratch memory and compile time. Numerically "
+                        "exact (columns are independent); must divide the "
+                        "rank's column count.")
     p.add_argument("--radiation", choices=["gray", "rrtmgp", "none"],
                    default="rrtmgp",
                    help="Radiation scheme. DEFAULT rrtmgp = RRTM (the faithful "
@@ -2007,7 +2160,12 @@ def main():
             "LEGOESM_RCEMIP_PLANE_FP32=1 .venv/bin/python "
             "scripts/run_rcemip_plane.py --precision float32 ..."
         )
-    dtype = jnp.float32 if args.precision == "float32" else jnp.float64
+    if args.precision == "mixed" and _os.environ.get("LEGOESM_RCEMIP_PLANE_FP32") == "1":
+        raise SystemExit(
+            "--precision mixed needs x64 ON: unset LEGOESM_RCEMIP_PLANE_FP32 "
+            "(its fp64 parts — radiation, microphysics inputs, mass-fixer sums — "
+            "would silently run in fp32).")
+    dtype = jnp.float64 if args.precision == "float64" else jnp.float32
     grid = create_plane_grid(
         nx=args.nx, ny=args.ny, nlev=args.nlev,
         dx=args.dx, dy=args.dx, dtype=dtype,
@@ -2020,7 +2178,7 @@ def main():
     # sensible-heat flux has the WRONG SIGN (cools the air toward a
     # ~236 K cold-biased equilibrium instead of warming toward SST).
     # With p_sfc set: exner_sfc=1.003, T_lowest=301 K, flux correct.
-    p_sfc_rcemip = 101480.0
+    p_sfc_rcemip = P_SFC_RCEMIP
     # Reference θ(z) MUST track the RCEMIP sounding, NOT the constant-θ=300
     # default. A constant potential temperature is ISENTROPIC, and an
     # isentropic atmosphere reaches exner=0 (p=T=0) at z=c_p·θ/g ≈ 30.7 km
@@ -2040,52 +2198,7 @@ def main():
     # --T-sfc: with the SST-derived T_v0 (Wing Eq. 3), pairing the 300 K
     # q0 with a 295 K SST rebuilds the supersaturated-IC bug at the other
     # two RCEMIP SSTs.
-    try:
-        q_sfc_rce = wing2018_q_sfc(args.T_sfc)
-    except ValueError:
-        # Off-protocol SST (sensitivity sweeps, land RCE with a custom T): keep
-        # the RCE300 q0 rather than inventing an unpublished one, but SAY that
-        # the near-surface RH is then off-protocol.
-        q_sfc_rce = WING_Q_SFC_DEFAULT
-        print(f"  WARN: SST={args.T_sfc} K is not an RCEMIP case (295/300/305);"
-              f" using the 300 K q0={WING_Q_SFC_DEFAULT} kg/kg, so the initial"
-              f" near-surface RH is NOT the protocol's ~80 %.")
-    # --sounding: initialise from a TABULATED SAM sounding instead of the
-    # analytic Wing form.  gSAM's own RCEMIP1 deck ships one sounding per SST
-    # (CASES/RCEMIP1/snd_rcemip_{295,300,305}s6.11.2, `snd` == the 300 K one),
-    # and that file is NOT the Wing analytic profile: it has a ~7.47 K/km
-    # tropospheric lapse and a stratosphere that WARMS with height, where the
-    # analytic form uses 6.70 K/km and an isothermal cap.  No analytic-constant
-    # choice can represent the second difference, so the faithful RCEMIP1 IC has
-    # to read the table — exactly as BOMEX/RICO/DYCOMS/GATE already do.
-    #
-    # Reuses the SHARED reader + setup (no second parser, no second IC builder):
-    #   read_sam_snd -> extend_sounding_to_top -> build_sam_case_height_coord
-    #                                          -> build_sam_case_initial_state
-    # so the θ (potential temperature) and q [g/kg -> kg/kg] unit conventions
-    # are handled in exactly one place for every SAM-deck case.
-    snd = None
-
-    def theta_ref_fn(z):
-        return _rcemip_theta_profile(z, T_sfc=args.T_sfc, q_sfc=q_sfc_rce)
-
-    # --sam-grd is checked FIRST so it cannot be silently outranked by another
-    # coordinate flag; build_sam_grd_height_coord refuses the --sounding pair
-    # rather than picking a winner.
-    if args.sam_grd is not None:
-        hc = build_sam_grd_height_coord(args, p_sfc_rcemip, theta_ref_fn, dtype)
-    elif args.sounding is not None:
-        snd, hc = build_sounding_height_coord(args, p_sfc_rcemip, dtype)
-    elif args.stretched_vertical:
-        hc = create_stretched_height_coordinate(
-            args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
-            theta_ref_fn=theta_ref_fn,
-        )
-    else:
-        hc = create_height_coordinate(
-            args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
-            theta_ref_fn=theta_ref_fn,
-        )
+    hc, snd, q_sfc_rce = build_rcemip_height_coord(args, p_sfc_rcemip, dtype)
     tm = make_flat_plane_terrain_metric(grid, hc)
     # This driver DEFINES cfl_guard (run_gate_plane.py calls it as rcp.cfl_guard)
     # but never called it on its own config. On the uniform dz=330 m grid that
@@ -2093,37 +2206,7 @@ def main():
     # difference between a run and a day-1.5 blow-up, so wire it in here too.
     cfl_guard(args.dt, args.dx, float(jnp.min(hc.dz)),
               n_acoustic_substeps=args.n_acoustic_substeps, label="RCEMIP1")
-    cfg = CompressibleEulerConfig(
-        sponge_coeff=args.sponge_coeff,
-        sponge_width=args.sponge_width,
-        sponge_w_only=True,               # SAM damping.f90: damp w only
-        sponge_profile_shape="sam_rational",  # SAM zzz/(1+zzz) taper
-
-        hyperdiff_coeff=args.hyperdiff,
-        hyperdiff_rho_coeff=args.hyperdiff,
-        hyperdiff_w_coeff=args.hyperdiff,
-        semi_implicit_acoustic=args.semi_implicit,
-        n_acoustic_substeps=args.n_acoustic_substeps,
-        acoustic_off_centering=args.off_centering,
-        implicit_buoyancy=args.implicit_buoyancy,
-        si_w_vertical_filter_nu=args.si_w_filter_nu,
-        substep_horizontal_acoustic=args.substep_horizontal_acoustic,
-        horizontal_advection_scheme=args.advection,
-        horizontal_momentum_advection_scheme=args.momentum_advection,
-        vertical_tracer_advection=args.vertical_tracer_advection,
-        acoustic_theta_advection=args.acoustic_theta_advection,
-        use_coriolis=(args.coriolis_mode != "none"),
-        fix_mass=True, anchor_mass_to_initial=True,
-        smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
-        smagorinsky_wall_damping=args.smag_wall_damping,  # False=SAM CRM; True=LES
-        smagorinsky_delta_max=args.smag_delta_max,  # SAM 1000 m horiz length cap
-        smagorinsky_stability_length=args.smag_stability_length,  # SAM dosmagor
-        # weakly-stable Deardorff smix limit (default off = pure Cs form)
-        vertical_theta_diffusion=args.vertical_theta_diffusion,
-        sgs_vertical_diffusion=args.sgs_vertical,
-        turbulence_closure=args.turbulence_closure,
-        molecular_viscosity=args.molecular_viscosity,
-    )
+    cfg = build_dycore_config(args)
     # DYCORE-ROBUST (iter-61, ROOT CAUSE): with substep_horizontal_acoustic OFF the
     # HORIZONTAL acoustic mode is integrated at the OUTER dt and a perturbed θ' IC
     # blows up to NaN at finite amplitude. The full Skamarock-Klemp split
@@ -2141,6 +2224,7 @@ def main():
     radiation_config = _build_radiation_config(
         args.radiation, update_interval_steps=args.radiation_interval,
         clouds=args.clouds, insolation=args.insolation, t_sfc=args.T_sfc,
+        column_chunk_size=args.radiation_column_chunk,
     )
     if args.land:
         radiation_config = _with_land_radiation_surface(
@@ -2155,6 +2239,9 @@ def main():
     if args.no_physics:
         physics_fn = None
         rad_physics_fn = None
+    elif args.land and args.precision == "mixed":
+        raise SystemExit("--precision mixed is not wired for --land (its "
+                         "host-side radiation/surface path was not measured).")
     elif args.land:
         # LAND mode carries radiation and surface fluxes as host-side
         # forward-Euler slow increments with dynamic T_s.  Keep the dycore
@@ -2183,6 +2270,7 @@ def main():
             microphysics_config=microphysics_config,
             dt=args.dt, T_sfc=args.T_sfc, p_sfc=p_sfc_rcemip,
             surface_flux=not args.no_surface_flux,
+            mixed_precision=(args.precision == "mixed"),
         )
         sim_refresh_s = args.radiation_interval * args.dt
         print(f"  RADIATION GATED: refresh every {args.radiation_interval} "
@@ -2206,6 +2294,7 @@ def main():
             dt=args.dt,
             T_sfc=args.T_sfc, p_sfc=p_sfc_rcemip,
             surface_flux=not args.no_surface_flux,
+            mixed_precision=(args.precision == "mixed"),
         )
         rad_physics_fn = None
 
@@ -2221,15 +2310,7 @@ def main():
     # The microphysics integration validates the slot count at JIT time
     # and raises ValueError if too few — but we allocate generously
     # here to surface schema errors at parse time, not deep in JIT.
-    if args.microphysics == "morrison":
-        # slot [9] = prognostic snow number, [10] = prognostic graupel number
-        # ⇒ fully double-moment M2005 (snow + graupel).
-        n_tracers = 11
-    elif args.microphysics in ("seifert_beheng", "p3", "thompson", "fast_sbm"):
-        # fast_sbm (FSBM-2): q_v,q_c,q_r + N_c,N_r live, ice slots zero ⇒ 9.
-        n_tracers = 9
-    else:
-        n_tracers = 3
+    n_tracers = microphysics_n_tracers(args.microphysics)
     if snd is not None:
         # Shared SAM-deck IC builder: u/v/q_v interpolated from the sounding,
         # θ' = θ_snd − θ_ref (≈0, θ_ref IS the sounding) + the same bottom-level
@@ -2408,14 +2489,28 @@ def main():
                     )
                 land_sfc_flux_jit = jax.jit(_land_sfc_flux_wrapper)
 
+    _state_dtypes = jax.tree.map(lambda a: a.dtype, state)
+
+    def _hold_dtypes(st):
+        # Mixed precision: host-side increments (gated radiation, clip, drain)
+        # may come back in fp64; keep each field's storage dtype.
+        if args.precision != "mixed":
+            return st
+        return jax.tree.map(lambda a, d: a.astype(d), st, _state_dtypes)
+
+    def _step_once(st):
+        return model.step(_hold_dtypes(st), dt=args.dt, physics_fn=physics_fn)
+
     for i in range(_start_step, args.steps):
+        state = _hold_dtypes(state)
         if args.land:
             if land_rad_refresh_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
             ):
-                cached_rad_tend, cached_land_rad_sfc = land_rad_refresh_jit(
-                    state, land_T_sfc,
-                )
+                cached_rad_tend, cached_land_rad_sfc = (
+                    staggered_first_call(land_rad_refresh_jit, state, land_T_sfc)
+                    if cached_rad_tend is None
+                    else land_rad_refresh_jit(state, land_T_sfc))
             if cached_rad_tend is not None:
                 state = apply_radiation_forward_euler(
                     state, cached_rad_tend, args.dt,
@@ -2438,17 +2533,26 @@ def main():
                 args.land_albedo,
                 land_emissivity,
             )
-            state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+            # First step compiles the step: block, then return the freed compile
+            # heap to the OS (the only trim when radiation runs inside the step).
+            state = (staggered_first_call(_step_once, state) if i == _start_step
+                     else _step_once(state))
         else:
             if rad_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
             ):
-                cached_rad_tend = rad_jit(state)
+                # First refresh: return the compile's freed heap to the OS.
+                cached_rad_tend = (staggered_first_call(rad_jit, state)
+                                   if cached_rad_tend is None
+                                   else rad_jit(state))
             if cached_rad_tend is not None:
                 state = apply_radiation_forward_euler(
                     state, cached_rad_tend, args.dt,
                 )
-            state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+            # First step compiles the step: block, then return the freed compile
+            # heap to the OS (the only trim when radiation runs inside the step).
+            state = (staggered_first_call(_step_once, state) if i == _start_step
+                     else _step_once(state))
         # POSITIVITY GUARD (CRM-dycore campaign, codex-reviewed): keep the water
         # tracers >=0 in the STATE after each step, matching run_rce_mpi_long.
         # The advective-form tracer advection under strong div(u) — e.g. a
