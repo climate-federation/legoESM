@@ -2403,11 +2403,11 @@ def _run_substep_loop(
             ) * mask
             # The damping moves volume, so it must reach the tracers: adding
             # div(F) to eta is the continuity update of the transport
-            # G = -F/dt_s.  Book G with this substep's transport weight so the
-            # tail-sum identity div(Hu_avg) == (eta_old - eta_avg)/dt still
-            # holds; without it the flux-form tracer step sees transports that
-            # disagree with the new layer thicknesses and a uniform tracer
-            # (T, S and every passive tracer) drifts locally.
+            # G = -F/dt_s, booked with this substep's transport weight so
+            # div(Hu_avg) == (eta_old - eta_avg)/dt keeps holding (except where
+            # the eta floor or an open-boundary ring rewrites eta, which book
+            # no transport).  Unbooked, the tracer step saw transports that
+            # disagreed with the new layer thicknesses and uniform tracers drift.
             Hu_sum_new = Hu_sum_new - w_tr_i * (flux_x / dt_s).astype(dtype)
             Hv_sum_new = Hv_sum_new - w_tr_i * (flux_y / dt_s).astype(dtype)
             if local_subcycle_clamp:

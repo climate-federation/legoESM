@@ -431,8 +431,8 @@ def test_rk3_stage_transport_fold_exchanges_changes_a_full_tripole_ws_rk3_step()
             on_u.view(np.uint64) != off_u.view(np.uint64)) == 27
         assert np.count_nonzero(
             on_v.view(np.uint64) != off_v.view(np.uint64)) == 21
-        assert on_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101194260600193)
-        assert off_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101194260600193)
+        assert on_t.view(np.uint64)[6, 6, 0] == np.uint64(4626191806737554007)
+        assert off_t.view(np.uint64)[6, 6, 0] == np.uint64(4626191806737554016)
         assert on_u.view(np.uint64)[7, 0, 0] == np.uint64(4575974731222083058)
         assert off_u.view(np.uint64)[7, 0, 0] == np.uint64(4575974731222093077)
     finally:
@@ -466,8 +466,8 @@ def test_rk3_vector_raw_vmask_shared_ratio_fold_or_changes_tripole_ws_rk3_step()
             on_u.view(np.uint64) != off_u.view(np.uint64)) == 27
         assert np.count_nonzero(
             on_v.view(np.uint64) != off_v.view(np.uint64)) == 21
-        assert on_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101194260600193)
-        assert off_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101194260600193)
+        assert on_t.view(np.uint64)[6, 6, 0] == np.uint64(4626191806737554007)
+        assert off_t.view(np.uint64)[6, 6, 0] == np.uint64(4626191806737554016)
         assert on_v.view(np.uint64)[7, 0, 0] == np.uint64(13796485171548590350)
         assert off_v.view(np.uint64)[7, 0, 0] == np.uint64(13796485171548590417)
     finally:
@@ -859,8 +859,8 @@ def test_rk3_stage3_salt_geothermal_and_krhs_order_change_model_step():
             state, 300.0, surface_forcing=forcing)
         t_krhs_on = np.asarray(krhs_on.T.data).view(np.uint64)
         assert np.count_nonzero(t_krhs_on != t_geo_off) == 13
-        assert t_krhs_on[0, 1, 0] == np.uint64(4626263714402632106)
-        assert t_geo_off[0, 1, 0] == np.uint64(4626263714402632106)
+        assert t_krhs_on[0, 2, 0] == np.uint64(4626383867473963377)
+        assert t_geo_off[0, 2, 0] == np.uint64(4626383867473963376)
     finally:
         set_policy(prev_policy)
 

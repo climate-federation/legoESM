@@ -61,7 +61,9 @@ def test_damping_booked_in_tracer_transports():
     for _ in range(N_STEPS):
         new = model.step(st, DT, surface_forcing=sf)
         div = np.asarray(divergence_cgrid(new.mass_flux_u.data, new.mass_flux_v.data, grid).sum(-1))
-        worst = max(worst, float(np.abs((np.asarray(new.eta.data - st.eta.data) + DT * div) * mask2).max()))
+        resid = float(np.abs((np.asarray(new.eta.data - st.eta.data) + DT * div) * mask2).max())
+        assert np.isfinite(resid), resid
+        worst = max(worst, resid)
         st = new
     salt = np.asarray(st.S.data)
     assert worst < 1e-12, worst

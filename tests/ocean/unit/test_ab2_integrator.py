@@ -303,8 +303,8 @@ def test_ab2_long_run_growth_rate_ratchet():
         f"AB2 growth rate REGRESSED: {growth:.4f} > baseline "
         f"{_AB2_GROWTH_300_OVER_150_BASELINE}.  This baseline is SHRINK-ONLY: "
         f"if you have improved the lane, LOWER it (and lower "
-        f"_AB2_UMAX_150_BASELINE / _AB2_NAN_BY_STEPS / retire the xfail as "
-        f"appropriate).  Do NOT raise it to make this pass.")
+        f"_AB2_UMAX_150_BASELINE, raise _AB2_NAN_BY_STEPS / retire the xfail "
+        f"as appropriate).  Do NOT raise it to make this pass.")
     # AMPLITUDE ratchet -- a ratio alone cannot see a uniformly larger
     # trajectory (see the header block).  Also shrink-only.
     assert umax[150] <= _AB2_UMAX_150_BASELINE, (
