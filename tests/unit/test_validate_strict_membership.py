@@ -39,17 +39,23 @@ def test_default_config_passes() -> None:
 
 # ---- parity: accept exactly the canonical dynamical-core axis members ----
 # The cubed sphere admits only fv3_duo (cdgrid retired), so each member is
-# validated on a grid its lane runs on; spectral/gaussian carries all three
-# model types.
-_GRID_FOR_DISCRETIZATION = {
-    "spectral": "gaussian", "sfno": "gaussian", "u_cast": "gaussian",
-    "mpas": "mpas", "latlon_cgrid": "latlon", "finite_volume": "latlon",
-    "centered": "latlon", "plane": "plane", "fv3_duo": "cubed_sphere",
+# validated on a (grid, model_type) its lane runs on; spectral/gaussian
+# carries all three model types.
+_LANE_FOR_DISCRETIZATION = {
+    "spectral": ("gaussian", "hydrostatic"),
+    "sfno": ("gaussian", "hydrostatic"),
+    "u_cast": ("gaussian", "hydrostatic"),
+    "mpas": ("mpas", "hydrostatic"),
+    "latlon_cgrid": ("latlon", "hydrostatic"),
+    "finite_volume": ("latlon", "hydrostatic"),
+    "centered": ("latlon", "hydrostatic"),
+    "plane": ("plane", "nonhydrostatic"),
+    "fv3_duo": ("cubed_sphere", "hydrostatic"),
 }
 
 
-def test_grid_table_covers_every_discretization() -> None:
-    assert set(_GRID_FOR_DISCRETIZATION) == set(DISCRETIZATION_OPTIONS)
+def test_lane_table_covers_every_discretization() -> None:
+    assert set(_LANE_FOR_DISCRETIZATION) == set(DISCRETIZATION_OPTIONS)
 
 
 @pytest.mark.parametrize("model_type", DYNAMICS_OPTIONS)
@@ -62,9 +68,10 @@ def test_every_canonical_model_type_accepted(model_type: str) -> None:
 
 @pytest.mark.parametrize("discretization", DISCRETIZATION_OPTIONS)
 def test_every_canonical_discretization_accepted(discretization: str) -> None:
+    grid_type, model_type = _LANE_FOR_DISCRETIZATION[discretization]
     ExperimentConfig(
-        grid=GridConfig(grid_type=_GRID_FOR_DISCRETIZATION[discretization]),
-        dycore=DycoreConfig(model_type="hydrostatic", discretization=discretization),
+        grid=GridConfig(grid_type=grid_type),
+        dycore=DycoreConfig(model_type=model_type, discretization=discretization),
     ).validate_strict()
 
 
