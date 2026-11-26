@@ -64,7 +64,7 @@ def _cfg(**physics) -> ExperimentConfig:
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
         dycore=DycoreConfig(
             energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
-            model_type="hydrostatic", discretization="cdgrid",
+            model_type="hydrostatic", discretization="fv3_duo",
         ),
         **physics,
     )

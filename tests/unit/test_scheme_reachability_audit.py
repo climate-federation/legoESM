@@ -332,23 +332,26 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
             # routing, and is wired on the MPAS lane only (documented
             # cross-field contract, validate_strict enforces all three).
             if axis == "clouds" and scheme == "cam6_clubb":
-                from legoesm.driver.config import DycoreConfig
+                from legoesm.driver.config import DycoreConfig, GridConfig
                 kwargs.update(turbulence="clubb", use_clubb_cloud_fraction=True,
                               microphysics="sundqvist", radiation="rrtmgp",
-                              dycore=DycoreConfig(discretization="mpas"))
+                              dycore=DycoreConfig(discretization="mpas"),
+                              grid=GridConfig(grid_type="mpas"))
             # IFS CLOUDSC reads CUMASTRN's raw fields and runs on the MPAS
             # column lane only (documented cross-field contract).
             if axis == "microphysics" and scheme == "ifs_cloudsc":
-                from legoesm.driver.config import DycoreConfig
+                from legoesm.driver.config import DycoreConfig, GridConfig
                 kwargs.update(convection="bechtold", bechtold_use_ifs_ascent=True,
                               cld_macmic_num_steps=1,
-                              dycore=DycoreConfig(discretization="mpas"))
+                              dycore=DycoreConfig(discretization="mpas"),
+                              grid=GridConfig(grid_type="mpas"))
             # ecRad 49r1 runs on the MPAS column lane only, with the lane's
             # aerosols off and the input4MIPs TSI/ozone/GHG (votes L2a/L20a/
             # M7a, documented cross-field contract).
             if axis == "radiation" and scheme == "ecrad_ifs":
-                from legoesm.driver.config import DycoreConfig
+                from legoesm.driver.config import DycoreConfig, GridConfig
                 kwargs.update(dycore=DycoreConfig(discretization="mpas"),
+                              grid=GridConfig(grid_type="mpas"),
                               ozone_forcing="external", ghg_forcing="external",
                               solar_source="spectral_file",
                               ecrad_ifs_aerosol_file="cams.nc")
@@ -358,8 +361,9 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
                 kwargs["turbulence"] = "louis"
             # ZM CMT is dropped on the compiled pipeline (refused there, P1).
             if axis == "convection" and scheme == "zhang_mcfarlane":
-                from legoesm.driver.config import DycoreConfig
+                from legoesm.driver.config import DycoreConfig, GridConfig
                 kwargs["dycore"] = DycoreConfig(discretization="mpas")
+                kwargs["grid"] = GridConfig(grid_type="mpas")
             try:
                 ExperimentConfig(**kwargs).validate_strict()
             except ValueError as e:  # pragma: no cover - failure path
