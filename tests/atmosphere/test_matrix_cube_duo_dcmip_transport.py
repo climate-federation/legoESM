@@ -827,8 +827,8 @@ def test_audit_wires_the_duo_air_mass_failure_into_the_row(monkeypatch, tmp_path
     """A failing duo global air-mass criterion reaches the row's CRITERION
     FAIL list (the audit wiring, not only the helper)."""
     import scripts.matrix.run_atmosphere_test_matrix as M
-    # local closure made to pass: the planted air-mass failure alone fails it
-    monkeypatch.setattr(M, "_DCMIP13_CLOSURE_TOL", float("inf"))
+    # (closure is a diagnostic on the duo row: the planted air-mass failure
+    # alone fails it)
     monkeypatch.setattr(
         M, "duo_air_mass_criterion",
         lambda a0, a1, s: ("planted", ["global air-mass conservation (planted)"]))
@@ -929,7 +929,6 @@ def test_matrix_runner_cube_13_hybrid_runs_duo_with_the_13_audit(tmp_path):
     text = (tmp_path / "results.txt").read_text()
     assert "vertical_scheme: fv3_duo Lagrangian" in text, text
     assert "W_eff" in notes and "p_s-p_s(t=0)" in notes, notes
-    assert re.search(r"air-mass closure drift [0-9.e+-]+ \(duo", notes), notes
     unif = float(re.search(r"uniform-tracer max\|q-1\| ([0-9.e+-]+)", notes).group(1))
     assert unif <= 1e-12, notes
     assert int(re.search(r"peak over (\d+) samples", notes).group(1)) >= 3, notes
@@ -946,10 +945,13 @@ def test_matrix_runner_cube_13_hybrid_runs_duo_with_the_13_audit(tmp_path):
     assert m and float(m.group(1)) <= 1e-12 and int(m.group(2)) >= 3, notes
     assert "AUDIT INCOMPLETE: terrain crossing untested" in notes, notes
     # the duo's air column departs from the steady analytic one (p_s
-    # evolves): under the current closure gate (the other grids' 1e-6) a
-    # measured failure, and it reaches the row status
-    assert "CRITERION FAIL: local air-mass closure" in notes, notes
-    assert status == "FAIL" and "status: FAIL" in text
+    # evolves): closure far above the other grids' 1e-6 gate, reported as a
+    # diagnostic only (user decision 2026-11-26), so the row passes
+    drift = float(re.search(r"air-mass closure drift (\S+) \(closure \(diagnostic, "
+                            r"FV3 evolves p_s; user decision 2026-11-26\)", notes).group(1))
+    assert drift > 1e-6, notes
+    assert "CRITERION FAIL" not in notes, notes
+    assert status == "PASS" and "status: PASS" in text
 
 
 @x64

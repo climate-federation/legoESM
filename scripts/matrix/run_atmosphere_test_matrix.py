@@ -1410,6 +1410,10 @@ def _namelist_vertical_table(tc) -> str | None:
     if tc.equation_set != "hydrostatic" or (
             tc.vertical_coord != "hybrid" and tc.case != "amip"):
         return None   # run_amip builds hybrid whatever the label
+    if tc.case == "dcmip_transport_13":
+        # every grid's hybrid 1-3 row (run_dcmip_transport builds it)
+        return ("dcmip13_kent2014_L30 (Kent et al. 2014 App. B hybrid = DCMIP "
+                "2012 L30 fixed-lid table; create_dcmip13_hybrid)")
     if tc.grid_type == "cubed_sphere":
         if tc.case == "amip":
             return None   # skipped: no duo adapter
@@ -5000,7 +5004,8 @@ def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
 
     The cube row (``duo``, FV3 duo transport) has no prescribed air fluxes:
     its air mass ``delp`` evolves (Lagrangian d_sw step + remap, p_s not
-    reset).  Its closure is the layer-mass drift of ONE duo step from the
+    reset).  Its closure -- a reported DIAGNOSTIC, not a gate (FV3 evolves
+    p_s; user decision 2026-11-26) -- is the layer-mass drift of ONE duo step from the
     analytic 1-3 air mass, ``max |delp_1 - delp_0| / delp_0 * period /
     dt`` (the same per-period scaling); the realised final drift is
     reported beside it.  Its tracer-mass, edge-layer and terrain weights
@@ -5038,7 +5043,8 @@ def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
         drift = float(np.max(np.abs(dp1 - dp0) / dp0) * period_s / dt)
         fin = float(np.max(np.abs(np.asarray(duo.layer_mass(state_final), np.float64)
                                   - dp0) / dp0))
-        notes.append(f"air-mass closure drift {drift:.3e} (duo: one step from the "
+        notes.append(f"air-mass closure drift {drift:.3e} (closure (diagnostic, FV3 "
+                     f"evolves p_s; user decision 2026-11-26); duo: one step from the "
                      f"analytic air mass x period/dt; realised final max|ddelp|/delp "
                      f"{fin:.3e})")
     else:
@@ -5049,7 +5055,10 @@ def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
                              / np.asarray(mf.dp, np.float64)) * period_s)
         notes.append(f"air-mass closure drift {drift:.3e} (|W| mean removed "
                      f"{float(np.max(np.abs(np.asarray(mf.w_mean_removed)))):.2e} Pa/s)")
-    if not drift <= _DCMIP13_CLOSURE_TOL:          # NaN fails too
+    # the duo row's closure is a reported diagnostic, not a gate (FV3 evolves
+    # p_s; user decision 2026-11-26); its global air / tracer mass, uniform
+    # tracer and terrain crossing stay gates
+    if duo is None and not drift <= _DCMIP13_CLOSURE_TOL:          # NaN fails too
         failed.append(f"local air-mass closure (drift {drift:.3e} > {_DCMIP13_CLOSURE_TOL:g})")
 
     # uniform-tracer preservation (one step from q = 1)

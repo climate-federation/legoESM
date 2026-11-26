@@ -98,6 +98,27 @@ def test_13_measured_criterion_failure_fails_the_row(tmp_path, monkeypatch):
     assert "status: FAIL" in (tmp_path / "results.txt").read_text()
 
 
+def test_13_prescribed_flux_rows_still_gate_closure(tmp_path, monkeypatch):
+    """The closure gate stays on the non-duo rows (only the cube duo row
+    reports it as a diagnostic): a drift above the tolerance fails the
+    spectral row."""
+    import scripts.matrix.run_atmosphere_test_matrix as M
+    monkeypatch.setattr(M, "_DCMIP13_CLOSURE_TOL", 0.0)    # measured drift ~1e-14 > 0
+    status, _, notes = _row(tmp_path, "spectral", "T10")
+    assert status == "FAIL"
+    assert "CRITERION FAIL: local air-mass closure" in notes, notes
+    assert "diagnostic, FV3 evolves p_s" not in notes, notes
+
+
+def test_13_namelist_records_the_kent_table():
+    import scripts.matrix.run_atmosphere_test_matrix as M
+    for g in ("latlon", "icosahedral", "spectral", "cubed_sphere"):
+        tc = M.TestCase("hydrostatic", "dcmip_transport_13", g, "x", "hybrid", 12, 1,
+                        {"test_num": 13})
+        assert M._namelist_vertical_table(tc).startswith(
+            "dcmip13_kent2014_L30 (Kent et al. 2014 App. B"), g
+
+
 @pytest.mark.slow
 def test_13_spectral_full_row_passes_every_criterion(tmp_path):
     """The full 12-day spectral T21 matrix row (the cheapest core at the
