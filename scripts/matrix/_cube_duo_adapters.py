@@ -498,14 +498,16 @@ def duo_shared_ic_spec(case: str, ic_kwargs: dict | None = None):
         from tests.test_cases.dcmip2008._shared import U0_DEFAULT
         if kw:
             raise ValueError(f"{case}: no IC kwargs, got {sorted(kw)}")
+        wind_fn = _solid_body_winds(U0_DEFAULT)
         if case == "gravity_wave_3_1":
             from tests.test_cases.dcmip2008.gravity_wave_3_1 import (
                 gravity_wave_init as init)
             phis_fn, omega = None, 0.0   # DCMIP 2008 3-1: non-rotating
         elif case == "inertio_gravity_3_2":
+            # DCMIP 2008 [6-3-0]: at rest (u0 = 0) on the rotating Earth
             from tests.test_cases.dcmip2008.inertio_gravity_3_2 import (
                 inertio_gravity_init as init)
-            phis_fn, omega = None, None
+            phis_fn, omega, wind_fn = None, None, None
         else:
             from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
             from tests.test_cases.dcmip2008.mountain_rossby_5_0 import (
@@ -515,8 +517,7 @@ def duo_shared_ic_spec(case: str, ic_kwargs: dict | None = None):
                 return np.array(_phis(lon, lat, FV3_RADIUS_M), dtype=np.float64)
             omega = None
         return SimpleNamespace(
-            builder=init, phis_fn=phis_fn,
-            wind_fn=_solid_body_winds(U0_DEFAULT), omega=omega,
+            builder=init, phis_fn=phis_fn, wind_fn=wind_fn, omega=omega,
             label=f"DCMIP 2008 {case} ({init.__name__})")
     if case == "rossby_haurwitz_6_0":
         from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M

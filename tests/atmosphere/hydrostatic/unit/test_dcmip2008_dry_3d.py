@@ -117,17 +117,42 @@ class TestGravityWave31:
 # ---------------------------------------------------------------------------
 
 
+def _assert_ig_630(state, lon, lat, radius, coord):
+    """DCMIP 2008 [6-3-0] written out from the reference at the builder's
+    points: u = v = 0, p_s = 1000 hPa, T = 300 K + 10 K s sin(2 pi z/20 km)
+    (p/p0)^kappa (Eqs. 94-98), s the cosine bell of radius a/3 about
+    (pi, pi/4), z = (R_d T0/g) ln(p_s/p) (Eq. 92)."""
+    import numpy as np
+    lon = np.asarray(lon, dtype=np.float64)
+    lat = np.asarray(lat, dtype=np.float64)
+    a, t0, p0 = float(radius), 300.0, constants.p_ref
+    r = a * np.arccos(np.clip(np.sin(np.pi / 4) * np.sin(lat)
+                              + np.cos(np.pi / 4) * np.cos(lat)
+                              * np.cos(lon - np.pi), -1, 1))
+    s = np.where(r < a / 3, 0.5 * (1 + np.cos(np.pi * r / (a / 3))), 0.0)
+    p = (np.asarray(coord.A_full) * coord.p_ref
+         + np.asarray(coord.B_full) * p0)
+    z = constants.R_d * t0 / constants.g * np.log(p0 / p)
+    T_ref = t0 + (10.0 * s[..., None] * np.sin(2 * np.pi * z / 20000.0)
+                  * (p / p0) ** constants.kappa)
+    np.testing.assert_allclose(np.asarray(state.p_s.data), p0, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(state.u.data), 0.0, atol=0.0)
+    # rtol 1e-6: the builders may store at the fp32 policy dtype
+    np.testing.assert_allclose(np.asarray(state.T.data), T_ref, rtol=1e-6)
+
+
 class TestInertioGravity32:
+    """DCMIP 2008 test 6-3-0 (Sect. 1.6), row name kept."""
+
     def test_cubed_sphere(self, sigma8):
         from tests.test_cases.dcmip2008.inertio_gravity_3_2 import (
             inertio_gravity_init,
         )
         grid = create_cubed_sphere(8)
         state = inertio_gravity_init(grid, sigma8)
-        _assert_dry3d_state_grid_space(state)
-        # §3-2 uses smaller δθ = 0.5 K so T variation < 3 K
-        T_dev = float(jnp.max(jnp.abs(state.T.data - 300.0)))
-        assert T_dev < 3.0
+        _assert_dry3d_state_grid_space(state, T_min=290.0, T_max=310.0)
+        _assert_ig_630(state, grid.lon, grid.lat, grid.radius, sigma8)
+        assert float(jnp.max(jnp.abs(state.v.data))) == 0.0
 
     def test_latlon(self, sigma8):
         from tests.test_cases.dcmip2008.inertio_gravity_3_2 import (
@@ -135,7 +160,8 @@ class TestInertioGravity32:
         )
         grid = create_latlon_grid(24, 48)
         state = inertio_gravity_init_latlon(grid, sigma8)
-        _assert_dry3d_state_grid_space(state)
+        _assert_dry3d_state_grid_space(state, T_min=290.0, T_max=310.0)
+        _assert_ig_630(state, grid.lon2d, grid.lat2d, grid.radius, sigma8)
 
     def test_mpas(self, sigma8):
         from tests.test_cases.dcmip2008.inertio_gravity_3_2 import (
@@ -143,15 +169,49 @@ class TestInertioGravity32:
         )
         mesh = create_voronoi_mesh(4)
         state = inertio_gravity_init_mpas(mesh, sigma8)
-        _assert_dry3d_state_mpas(state)
+        _assert_dry3d_state_mpas(state, T_min=290.0, T_max=310.0)
+        _assert_ig_630(state, mesh.lonCell, mesh.latCell, mesh.radius,
+                       sigma8)
 
     def test_spectral(self, sigma8):
+        import numpy as np
+        from legoesm.grids.gaussian import sh_analysis, sh_analysis_3d
         from tests.test_cases.dcmip2008.inertio_gravity_3_2 import (
             inertio_gravity_init_spectral,
         )
         grid = create_gaussian_grid(21)
         state = inertio_gravity_init_spectral(grid, sigma8)
         _assert_dry3d_state_spectral(state)
+        # fp64 precondition for the tight projection tolerance below
+        assert grid.lat.dtype == jnp.float64
+        assert state.T_hat.data.dtype == jnp.complex128
+        # p_s = 1000 hPa (Eq. 87 with u0 = 0): ln p_s projects onto the
+        # mean only
+        lnps_ref = np.asarray(sh_analysis(
+            grid, jnp.full((grid.n_lat, grid.n_lon), np.log(constants.p_ref))))
+        np.testing.assert_allclose(np.asarray(state.lnps_hat.data), lnps_ref,
+                                   rtol=0, atol=1e-12 * np.abs(lnps_ref).max())
+        # at rest: no vorticity / divergence
+        assert float(jnp.max(jnp.abs(state.vor_hat.data))) == 0.0
+        assert float(jnp.max(jnp.abs(state.div_hat.data))) == 0.0
+        # T_hat = projection of the [6-3-0] T written out independently
+        lat2 = np.broadcast_to(np.asarray(grid.lat)[:, None],
+                               (grid.n_lat, grid.n_lon))
+        lon2 = np.broadcast_to(np.asarray(grid.lon2d),
+                               (grid.n_lat, grid.n_lon))
+        a = float(grid.radius)
+        r = a * np.arccos(np.clip(np.sin(np.pi / 4) * np.sin(lat2)
+                                  + np.cos(np.pi / 4) * np.cos(lat2)
+                                  * np.cos(lon2 - np.pi), -1, 1))
+        s = np.where(r < a / 3, 0.5 * (1 + np.cos(3 * np.pi * r / a)), 0.0)
+        p = (np.asarray(sigma8.A_full) * sigma8.p_ref
+             + np.asarray(sigma8.B_full) * constants.p_ref)
+        z = constants.R_d * 300.0 / constants.g * np.log(constants.p_ref / p)
+        T = 300.0 + (10.0 * s[..., None] * np.sin(2 * np.pi * z / 20000.0)
+                     * (p / constants.p_ref) ** constants.kappa)
+        ref = np.asarray(sh_analysis_3d(grid, jnp.asarray(T)))
+        np.testing.assert_allclose(np.asarray(state.T_hat.data), ref, rtol=0,
+                                   atol=1e-10 * np.abs(ref).max())
 
 
 # ---------------------------------------------------------------------------

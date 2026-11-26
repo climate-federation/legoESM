@@ -135,7 +135,32 @@ def test_inertio_gravity_keeps_the_rotating_planet():
     from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA
     np.testing.assert_allclose(f.f0, 2 * FV3_OMEGA * np.sin(f.lat),
                                rtol=1e-6, atol=1e-12)
-    assert np.abs(f.pt - 300.0).max() > 0.2
+    # DCMIP 2008 [6-3-0]: at rest, p_s = 1000 hPa, 10 K theta bubble
+    # centred at (pi, pi/4)
+    assert np.all(f.ue == 0.0) and np.all(f.vn == 0.0)
+    np.testing.assert_allclose(f.ps, constants.p_ref, rtol=1e-14)
+    d = np.abs(f.pt - 300.0).max(-1)
+    assert 5.0 < d.max() < 10.0
+    i = np.unravel_index(np.argmax(d), d.shape)
+    assert abs(np.degrees(f.lon[i]) - 180.0) < 12
+    assert abs(np.degrees(f.lat[i]) - 45.0) < 12
+    # signed field: T = 300 + 10 s sin(2 pi z/20 km) (p/p0)^kappa (Eqs.
+    # 94-98) at the duo cells and the run's own L32 full levels (ak/bk
+    # mid-points), z = (R_d T0/g) ln(p0/p) (Eq. 92)
+    from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+    a, p0 = FV3_RADIUS_M, constants.p_ref
+    r = a * np.arccos(np.clip(np.sin(np.pi / 4) * np.sin(f.lat)
+                              + np.cos(np.pi / 4) * np.cos(f.lat)
+                              * np.cos(f.lon - np.pi), -1, 1))
+    s = np.where(r < a / 3, 0.5 * (1 + np.cos(3 * np.pi * r / a)), 0.0)
+    ak, bk = np.asarray(model.ak), np.asarray(model.bk)
+    p = 0.5 * (ak[:-1] + ak[1:]) + 0.5 * (bk[:-1] + bk[1:]) * p0
+    z = constants.R_d * 300.0 / constants.g * np.log(p0 / p)
+    T_ref = 300.0 + (10.0 * s[..., None] * np.sin(2 * np.pi * z / 20000.0)
+                     * (p / p0) ** constants.kappa)
+    # MEASURED max rel diff 2.0e-9 (distance evaluated by a different
+    # routine); rtol 1e-6 as the other duo T checks
+    np.testing.assert_allclose(f.pt, T_ref, rtol=1e-6)
 
 
 def test_mountain_rossby_terrain_isothermal_288():
