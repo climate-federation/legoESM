@@ -837,13 +837,14 @@ class SpectralCompressibleEulerModel:
         """Anchor ``∫ J · (rho_ref + rho') · dz · dA`` to ``target_mass``
         (falls back to ``self._target_mass`` for the eager call sites).
 
-        Uniform additive correction in physical space (matches the
-        cubed-sphere / MPAS ``fix_mass_nonhydrostatic`` convention):
-        ``Δρ = (target − current) / (∫ J · dz · dA)``.  Adding ``Δρ`` to
-        ``rho'`` adds ``Δρ · J`` to the prognostic ``J·rho'``, i.e.
-        ``Δρ · analysis(J)`` to every level of ``jrho_prime_hat``.  With
-        J·rho' prognostic the dry mass already closes to round-off, so
-        this opt-in fixer only removes round-off.
+        Additive correction (cubed-sphere / MPAS ``fix_mass_nonhydrostatic``
+        convention): ``Δρ = (target − current) / (∫ J · dz · dA)``, applied
+        as ``Δρ · analysis(J)`` on every level of ``jrho_prime_hat``.  Its
+        global integral is exactly ``Δρ · ∫ J dz dA``; the physical rho'
+        change is ``Δρ · P(J) / J``, uniform only where J is resolved by
+        the truncation.  The correction is not paired with tracer mass.
+        With J·rho' prognostic the dry mass already closes to round-off
+        without this opt-in fixer.
         """
         current_mass = self.compute_dry_mass(state)
         if target_mass is None:
