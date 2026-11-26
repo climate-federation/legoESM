@@ -292,6 +292,19 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # mixing-ratio update, which creates or destroys tracer mass at second
     # order in dt (KNOWN DIFFERENCE; gaps in test_latlon_mass_weighted_rk).
     tracer_mass_weighted_rk: bool = True
+    # Vertical temperature (theta-form) transport of the shared-core
+    # ``vertical_form="sb81_theta"`` (``primitive_eq_generic``), mirroring
+    # ``MPASPrimitiveEquationConfig.vert_advection_scheme``: "upwind" (default,
+    # the advective donor cell, bit-identical to before) or "sb" (hybrid only:
+    # the conservative Simmons-Burridge flux form, the ico matrix lane's
+    # setting).  The upwind form is first order and not conservative: on DCMIP
+    # 2012 3-1 (72x144, L10) it drifts the global-mean T per level linearly in
+    # the wave amplitude (lid +0.017 K, opposite sign under "legacy") where
+    # "sb" holds it to 1e-4 K.  The hybrid vertical momentum advection stays
+    # upwind either way (as on the ico lane).  Other forms refuse "sb" (inert
+    # there).  Appended
+    # after ``tracer_mass_weighted_rk`` (positional ABI).
+    vert_advection_scheme: str = "upwind"
 
 
 # CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same

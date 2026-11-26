@@ -143,3 +143,66 @@ def test_latlon_polar_filter_stable_at_relaxed_dt(mat):
         "the filter")
     drift = abs(float(jnp.sum(state.p_s)) - p_s0) / abs(p_s0)
     assert drift < 1e-3, f"surface-pressure mass drift {drift:.2e} too large"
+
+
+def test_A_h_does_not_depend_on_the_polar_filter(mat, monkeypatch):
+    """The del-2 A_h cap is sized on the lane's FILTERED step for every row,
+    so the rotated rows (filter off, pole-limited dt) get the same A_h as
+    their unrotated partners (they used to get 20x more at 72x144), and every
+    filter-on row keeps the old value bit for bit."""
+    monkeypatch.delenv("LEGOESM_MATRIX_DT_SCALE", raising=False)
+    dx_pole, design = 6.0e3, 1.455e6
+    ref = min(design, 0.4 * dx_pole ** 2 / 200.0)
+    for env in (None, "0"):
+        if env is None:
+            monkeypatch.delenv("LEGOESM_LATLON_POLAR_FILTER", raising=False)
+        else:
+            monkeypatch.setenv("LEGOESM_LATLON_POLAR_FILTER", env)
+        for case in _LATLON_HYDRO_CASES:
+            dt = mat._latlon_dt(dx_pole, 200.0, case)
+            ah = mat._latlon_A_h(design, dx_pole, dt, 200.0)
+            assert ah == ref, (env, case, ah)
+            assert ah <= 0.4 * dx_pole ** 2 / dt      # still a stability cap
+            if mat._latlon_polar_filter_on(case):
+                assert ah == min(design, 0.4 * dx_pole ** 2 / dt)  # old law
+
+
+def _lane_A_h(mat, monkeypatch, tmp_path, case):
+    """(A_h, dt) the lat-lon run_baroclinic lane hands its model (72x144
+    hybrid), time loop stubbed."""
+    import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as M
+    seen = {}
+    real = M.CGridLatLonPrimitiveEquationModel
+
+    class Spy(real):
+        def __init__(self, *a, **k):
+            seen["cfg"], seen["dt"] = a[2], k["dt"]
+            super().__init__(*a, **k)
+
+    class _Stop(Exception):
+        pass
+
+    def fake(*a, **k):
+        raise _Stop
+
+    monkeypatch.setattr(M, "CGridLatLonPrimitiveEquationModel", Spy)
+    monkeypatch.setattr(mat, "_run_timeloop", fake)
+    tc = mat.TestCase("hydrostatic", case, "latlon", "72x144", "hybrid",
+                      2, 2, {"perturbed": False})
+    with pytest.raises(_Stop):
+        mat.run_baroclinic(tc, tmp_path, 2)
+    return seen["cfg"].A_h, seen["dt"]
+
+
+def test_rotated_lane_gets_the_unrotated_A_h(mat, monkeypatch, tmp_path):
+    """72x144: rotated_steady (filter off, dt ~10 s) and baroclinic (filter
+    on, dt 200 s) reach their models with the same del-2 A_h (7.35e4 m^2/s);
+    before, the rotated row got 1.455e6 and its steady jet decayed (27.18 vs
+    27.89 m/s at 2 d, max |dp_s| 67 vs 7-34 Pa on the other grids)."""
+    monkeypatch.delenv("LEGOESM_LATLON_POLAR_FILTER", raising=False)
+    monkeypatch.delenv("LEGOESM_MATRIX_DT_SCALE", raising=False)
+    ah_rot, dt_rot = _lane_A_h(mat, monkeypatch, tmp_path, "rotated_steady")
+    ah_ref, dt_ref = _lane_A_h(mat, monkeypatch, tmp_path, "baroclinic")
+    assert dt_ref == 200.0 and dt_rot < 11.0
+    assert ah_rot == ah_ref
+    assert ah_ref == pytest.approx(7.35e4, rel=1e-2)

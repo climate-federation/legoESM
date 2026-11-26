@@ -145,6 +145,11 @@ def test_latlon_lane_runs_the_small_planet(mm, monkeypatch, tmp_path):
     # the lane's other settings are the ordinary lat-lon rows'
     assert cfg.A_h_pressure_surfaces == mm._LATLON_A_H_PRESSURE_SURFACES
     assert cfg.sb81_omega_conversion is True
+    # the shared-core sb81_theta form with the conservative SB theta
+    # transport (the ico lane's vertical numerics); the legacy form's upwind
+    # vertical T transport drifted the level means and wiped the packets
+    assert cfg.vertical_form == "sb81_theta"
+    assert cfg.vert_advection_scheme == "sb"
     # the 2012 IC reached the state (after the lane's C-grid conversion)
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         hydrostatic_to_cgrid)

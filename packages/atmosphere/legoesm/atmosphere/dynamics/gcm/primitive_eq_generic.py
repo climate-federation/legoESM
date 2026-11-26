@@ -292,6 +292,7 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
     Arakawa-Suarez forms use the TRiSK-form kinetic energy and the
     energy-neutral Coriolis term; ``"sb81_theta"`` keeps the current ones."""
     vertical_form = _resolve_form(vertical_form, config)
+    _check_latlon_vert_scheme(config.vert_advection_scheme, vertical_form, None)
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         latlon_dissipation,
         latlon_pole_bc,
@@ -411,8 +412,25 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
     return PEOperators(
         gops_ll, to_face, kinetic_energy,
         vorticity_term, v_dot_grad_L, horizontal_T, dissipation, tracer_fn,
-        ps_post, boundary, "upwind", config.p_floor, config.p_ceil,
-        vertical_form, face_pairs)
+        ps_post, boundary, config.vert_advection_scheme, config.p_floor,
+        config.p_ceil, vertical_form, face_pairs)
+
+
+def _check_latlon_vert_scheme(scheme: str, vertical_form: str,
+                              hybrid: bool | None) -> None:
+    """Static guard of the lat-lon ``vert_advection_scheme``: "upwind" anywhere;
+    "sb" only where it acts (``sb81_theta`` on a hybrid coordinate) -- the
+    legacy and Arakawa-Suarez forms and the sigma lane would run it inert.
+    ``hybrid=None`` (the operator factory, which does not see the coordinate)
+    checks the form only; on sigma the shared core's ``vertical_advection``
+    itself refuses "sb"."""
+    if scheme not in ("upwind", "sb"):
+        raise ValueError(f"unknown lat-lon vert_advection_scheme {scheme!r}; "
+                         "expected 'upwind' or 'sb'")
+    if scheme == "sb" and (vertical_form != "sb81_theta" or hybrid is False):
+        raise ValueError("lat-lon vert_advection_scheme='sb' acts only in "
+                         "vertical_form='sb81_theta' on a hybrid coordinate; got "
+                         f"vertical_form={vertical_form!r}, hybrid={hybrid}")
 
 
 def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
@@ -432,6 +450,8 @@ def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
     if config is None:
         config = CGridLatLonPrimitiveEquationConfig()
     vertical_form = _resolve_form(vertical_form, config)
+    _check_latlon_vert_scheme(config.vert_advection_scheme, vertical_form,
+                              isinstance(sigma_coord, HybridSigmaPressureCoordinate))
     if vertical_form == "legacy":
         return latlon_legacy_pe_tendencies(state, grid, sigma_coord, config,
                                            geom_pads=geom_pads, dt=dt)

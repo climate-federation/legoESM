@@ -238,6 +238,23 @@ def _latlon_dt(dx_pole: float, dt_cap: float, case: str | None = None) -> float:
     return base * _matrix_dt_scale()
 
 
+def _latlon_A_h(design: float, dx_pole: float, dt: float,
+                dt_cap: float) -> float:
+    """Del-2 A_h [m^2/s] of a lat-lon PE row: ``design`` capped at
+    ``0.4 dx_pole^2 / dt_ref``, ``dt_ref`` = the lane's polar-filter step
+    ``dt_cap * _matrix_dt_scale()`` (or ``dt`` if larger).
+
+    The cap is sized on the FILTERED step for every row, so the coefficient
+    no longer depends on whether a case switches the polar filter off: the
+    rotated rows (filter off, pole-limited ``dt`` ~10 s at 72x144) used to get
+    a 20x larger A_h (1.455e6 vs 7.35e4 m^2/s) than their unrotated partners,
+    decaying the steady jet (27.18 m/s at 2 d vs 27.89 on the other grids).
+    ``dt <= dt_ref`` keeps the cap a valid stability bound at the run's step.
+    Rows with the filter on are bit-identical (``dt == dt_ref``)."""
+    dt_ref = max(dt, dt_cap * _matrix_dt_scale())
+    return min(design, 0.4 * dx_pole ** 2 / dt_ref)
+
+
 def _gw31_diag_every(dt: float) -> int:
     """Diagnostic stride [steps] of the DCMIP 2012 3-1 row: the largest
     ``k`` with ``k dt <= 100 s`` (the document's output interval, Sect. 3)
@@ -4116,8 +4133,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
         dt = _latlon_dt(_dx_pole, 200.0, tc.case)
-        _A_h_max = 0.4 * _dx_pole**2 / dt
-        ah = min(ah, _A_h_max)
+        ah = _latlon_A_h(ah, _dx_pole, dt, 200.0)
         # #1029: enable the dormant #836 top sponge for the topo case ONLY, as a
         # symptom-bounding MITIGATION (NOT the generator fix). Generator (localized
         # + codex-vetted in PR #1078): the lat-lon HYBRID PGF multiplies the
@@ -4706,15 +4722,28 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        dt = _latlon_dt(_dx_pole, 200.0 if _gw31 is None
-                        else 200.0 / _gw31.X_SCALE, tc.case)
-        _A_h_max = 0.4 * _dx_pole**2 / dt
-        ah = min(ah, _A_h_max)
+        _dt_cap = 200.0 if _gw31 is None else 200.0 / _gw31.X_SCALE
+        dt = _latlon_dt(_dx_pole, _dt_cap, tc.case)
+        ah = _latlon_A_h(ah, _dx_pole, dt, _dt_cap)
+        # DCMIP 2012 3-1: the shared-core sb81_theta form with the
+        # conservative SB theta transport (the ico lane's vertical numerics,
+        # _mpas_hydro_config).  The legacy form's first-order upwind vertical
+        # T transport drifted the global-mean T per level linearly in the
+        # wave amplitude (lid +0.041 K, surface -0.026 K in 3600 s) and wiped
+        # out the mid-troposphere packets.  Vote 2026-11-26: codex A, author
+        # A; scope this row only (codex i, author i).  Other rows: legacy.
+        # The form brings its own conversion (theta-form vertical term +
+        # kappa T omega_ps / p); ``sb81_omega_conversion`` is a legacy-form
+        # switch and has no effect here (as on the held_suarez_topo row).
+        _ll_vform = (dict(vertical_form="sb81_theta",
+                          vert_advection_scheme="sb")
+                     if _gw31 is not None else {})
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             A_h_pressure_surfaces=_LATLON_A_H_PRESSURE_SURFACES,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
             sb81_omega_conversion=True,
+            **_ll_vform,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _rotated:
@@ -5015,6 +5044,10 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         notes = f"{notes}; {_vertical_table_label(tc.vertical_coord, sigma)}"
         if tc.grid_type == "latlon":
             notes = f"{notes}; {_LATLON_A_H_PRESSURE_SURFACES_NOTE}"
+            if config.vertical_form != "legacy":
+                notes = (f"{notes}; vertical form {config.vertical_form} "
+                         f"(vert_advection_scheme "
+                         f"{config.vert_advection_scheme})")
         elif tc.grid_type == "spectral":
             notes = f"{notes}; {_spec_tdamp_note}"
 
@@ -5955,8 +5988,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
         dt = _latlon_dt(_dx_pole, 300.0, tc.case)
-        _A_h_max = 0.4 * _dx_pole**2 / dt
-        ah = min(ah, _A_h_max)
+        ah = _latlon_A_h(ah, _dx_pole, dt, 300.0)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             A_h_pressure_surfaces=_LATLON_A_H_PRESSURE_SURFACES,

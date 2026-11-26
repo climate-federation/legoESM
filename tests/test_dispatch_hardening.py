@@ -174,6 +174,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # with the filter off, never sits silently unused.
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "validate_vert4_flux_form_tracers"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/shallow_water_generic.py", "mpas_sw_operators"),
+        # Lat-lon vertical theta transport: an unknown scheme, or "sb" where
+        # it would run inert (legacy / as83 / sigma), raises.
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_generic.py",
+         "_check_latlon_vert_scheme"),
         ("packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py", "compute_cloud_properties"),
         ("packages/atmosphere/legoesm/atmosphere/physics/combined.py", "make_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py", "dca_convection"),
