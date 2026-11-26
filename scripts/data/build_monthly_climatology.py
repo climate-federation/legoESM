@@ -61,6 +61,9 @@ def climatology(ds, first: int, last: int, optics: bool = False):
     # the stamps (and bounds) of the FIRST YEAR's records, whatever the file order
     first_idx = [int(np.flatnonzero((years == first) & (months == m))[0])
                  for m in range(1, 13)]
+    aux = [c for c in ds.coords if c != "time" and "time" in ds[c].dims]
+    if aux:     # they would keep the file's record order beside sorted months
+        raise ValueError(f"time-dependent coordinates {aux} are not supported")
     out = ds.drop_vars([v for v in ds.data_vars if "time" in ds[v].dims] + ["time"])
     timed = [v for v in ds.data_vars if "time" in ds[v].dims]
     means = {v: [] for v in timed}

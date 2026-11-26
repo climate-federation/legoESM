@@ -123,3 +123,9 @@ def test_bounds_name_the_month_a_record_covers():
     del ds["time_bnds"]                                             # named but absent
     with pytest.raises(ValueError, match="does not carry"):
         bmc.climatology(ds, 2005, 2006)
+
+
+def test_refuses_time_dependent_auxiliary_coordinates():
+    ds = _ds("days since 2004-01-01").assign_coords(year_label=("time", np.arange(36)))
+    with pytest.raises(ValueError, match="year_label"):
+        bmc.climatology(ds, 2005, 2006)
