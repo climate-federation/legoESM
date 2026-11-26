@@ -697,3 +697,298 @@ def test_hydro_duo_refuses_unvalidated_resolution(monkeypatch):
     monkeypatch.setattr(factory, "create_fv3_duo_grid", _no_setup)
     with pytest.raises(ValueError, match="validated at C36 only"):
         build_duo_hydro(12, perturbed=False)
+
+
+def _ps13(lo, la):
+    return D._p0 * jnp.exp(-D._mountain_height(lo, la) / D._H)
+
+
+@x64
+def test_duo_13_starts_on_the_kent_hybrid_air_mass():
+    """1-3 on the Kent et al. (2014, App. B) hybrid levels: the duo's
+    fixed-lid table is that hybrid table, the initial delp is dA p0 + dB
+    p_s with p_s = p0 exp(-z_s/H) over the mountains, the tracers are the
+    analytic 1-3 clouds at those heights, and one step conserves the
+    tracer mass and keeps q = const."""
+    from types import SimpleNamespace
+    from legoesm.grids.vertical import dp_from_hybrid
+    from scripts.matrix._cube_duo_adapters import build_duo_dcmip_transport
+    sc = D.create_dcmip13_hybrid(30)
+    r = build_duo_dcmip_transport(
+        N, wind_geo=D.dcmip13_wind_geo_banded, init_latlon=D.dcmip13_init_latlon,
+        sigma_coord=sc, n_tracers=4, dt=1800.0, n_sub=None,
+        period_s=12 * 86400.0, ps_init_fn=_ps13)
+    lon, lat = jnp.radians(r.lon_deg), jnp.radians(r.lat_deg)
+    ps = np.asarray(_ps13(lon, lat))
+    assert float(np.ptp(ps)) > 1.0e4                        # real terrain
+    np.testing.assert_allclose(r.ps(r.carry), ps, rtol=1e-12, atol=0)
+    np.testing.assert_allclose(r.layer_mass(r.carry),
+                               np.asarray(dp_from_hybrid(sc, ps)),
+                               rtol=1e-10, atol=0)
+    np.testing.assert_array_equal(r.ps_ref, ps)
+    q = np.asarray(D.dcmip13_init_latlon(
+        SimpleNamespace(lon2d=lon.reshape(6 * N, N), lat2d=lat.reshape(6 * N, N)),
+        sc).tracers.data).reshape(6, N, N, 30, 4)
+    np.testing.assert_array_equal(r.tracers(r.carry), q)
+    m0, a0 = _masses(r, r.carry)
+    c = r.step(r.carry, 1800.0)
+    m1, a1 = _masses(r, c)
+    np.testing.assert_allclose(m1, m0, rtol=1e-13, atol=0)
+    np.testing.assert_allclose(a1, a0, rtol=1e-13, atol=0)
+    (dp, qq), t = r.carry
+    cu = r.step(((dp, jnp.ones_like(qq)), t), 1800.0)
+    np.testing.assert_allclose(r.tracers(cu), 1.0, rtol=0, atol=1e-13)
+
+
+@x64
+def test_duo_refuses_a_hybrid_table_other_than_its_own():
+    """The table guard extended to hybrid rows: A p0 / B must be the
+    model's ak / bk."""
+    from legoesm.grids.vertical import create_hybrid_coordinate
+    from scripts.matrix._cube_duo_adapters import build_duo_dcmip_transport
+    sc = D.create_dcmip13_hybrid(30)
+    a, b = np.asarray(sc.A_half, np.float64), np.asarray(sc.B_half, np.float64)
+    shift = np.zeros_like(b)
+    shift[1:-1] = 1e-3                    # same A + B (= eta), other split
+    bad = create_hybrid_coordinate(30, a - shift, b + shift, p_ref=D._p0,
+                                   dtype=jnp.float64)
+    other_pref = create_hybrid_coordinate(30, a, b, p_ref=0.99 * D._p0,
+                                          dtype=jnp.float64)
+    for c in (bad, other_pref):              # other A/B split; other p_ref
+        with pytest.raises(ValueError, match="hybrid A p_ref / B"):
+            build_duo_dcmip_transport(
+                N, wind_geo=D.dcmip13_wind_geo_banded,
+                init_latlon=D.dcmip13_init_latlon, sigma_coord=c, n_tracers=4,
+                dt=1800.0, n_sub=1, ps_init_fn=_ps13)
+
+
+@x64
+def test_duo_level_heights_follow_the_layer_mass():
+    """The duo 1-3 terrain audit's level heights: equal to the analytic
+    1-3 full-level heights at the analytic air mass, and moving with delp
+    (a column with 5 % more mass in every layer sits lower)."""
+    from legoesm.grids.vertical import dp_from_hybrid
+    from scripts.matrix.run_atmosphere_test_matrix import duo_full_level_height
+    sc = D.create_dcmip13_hybrid(30)
+    lon = jnp.linspace(0.0, 2 * np.pi, 41)[:-1]
+    lat = jnp.zeros_like(lon) + 0.1
+    ps = np.asarray(_ps13(lon, lat))
+    assert float(np.ptp(ps)) > 1.0e3
+    dp = np.asarray(dp_from_hybrid(sc, ps))
+    ptop = dcmip2012_transport_eta_table(30)[2]
+    z = duo_full_level_height(dp, ptop)
+    np.testing.assert_allclose(
+        z, np.asarray(D.dcmip13_full_level_height(lon, lat, sc)), rtol=0, atol=1e-6)
+    assert np.all(duo_full_level_height(1.05 * dp, ptop) < z)
+
+
+def test_duo_air_mass_criterion_catches_an_intermediate_sample():
+    """The duo global air-mass gate reads every sample, not only the end:
+    a planted out-of-tolerance intermediate sample fails with equal
+    initial and final totals; NaN fails; round-off passes."""
+    from scripts.matrix.run_atmosphere_test_matrix import duo_air_mass_criterion
+    a0 = 5.1e19
+    note, failed = duo_air_mass_criterion(a0, a0, [a0, a0 * (1 + 1e-9), a0])
+    assert failed and "global air-mass conservation" in failed[0], (note, failed)
+    assert "over 3 samples" in note
+    assert duo_air_mass_criterion(a0, a0, [a0, np.nan])[1]
+    assert not duo_air_mass_criterion(a0, a0 * (1 + 1e-15), [a0 * (1 - 1e-15)])[1]
+
+
+def test_duo13_exact_tracers_follow_the_moved_levels():
+    """The duo 1-3 norms' exact field: the analytic clouds at the level
+    heights of the given state's delp -- equal to the analytic cloud on
+    moved levels (zero error for such a final field), while the
+    layer-index return error vs the IC is not zero."""
+    from types import SimpleNamespace
+    from legoesm.grids.vertical import dp_from_hybrid
+    from scripts.matrix.run_atmosphere_test_matrix import (
+        duo13_exact_tracers, duo_full_level_height)
+    sc = D.create_dcmip13_hybrid(30)
+    # the clouds' longitudes, on the equator
+    lon_deg = np.linspace(120.0, 240.0, 6 * 4 * 4).reshape(6, 4, 4)
+    lat_deg = np.zeros_like(lon_deg)
+    ps = np.asarray(_ps13(jnp.radians(lon_deg), jnp.radians(lat_deg)))
+    dp0 = np.asarray(dp_from_hybrid(sc, ps))
+    dp1 = dp0 * 1.03                                  # moved levels
+    ptop = dcmip2012_transport_eta_table(30)[2]
+    duo = SimpleNamespace(lon_deg=lon_deg, lat_deg=lat_deg, ptop=ptop,
+                          layer_mass=lambda s: s)
+    q_ic = np.asarray(duo13_exact_tracers(duo, dp0))
+    q_T = np.stack([np.asarray(x) for x in D.dcmip13_tracers_at_points(
+        jnp.radians(lon_deg), jnp.radians(lat_deg),
+        jnp.asarray(duo_full_level_height(dp1, ptop)))], axis=-1)
+    np.testing.assert_array_equal(np.asarray(duo13_exact_tracers(duo, dp1)), q_T)
+    assert float(np.max(np.abs(q_T - q_ic))) > 1e-2
+
+
+@x64
+def test_audit_wires_the_duo_air_mass_failure_into_the_row(monkeypatch, tmp_path):
+    """A failing duo global air-mass criterion reaches the row's CRITERION
+    FAIL list (the audit wiring, not only the helper)."""
+    import scripts.matrix.run_atmosphere_test_matrix as M
+    # local closure made to pass: the planted air-mass failure alone fails it
+    monkeypatch.setattr(M, "_DCMIP13_CLOSURE_TOL", float("inf"))
+    monkeypatch.setattr(
+        M, "duo_air_mass_criterion",
+        lambda a0, a1, s: ("planted", ["global air-mass conservation (planted)"]))
+    case = M.TestCase("hydrostatic", "dcmip_transport_13", "cubed_sphere",
+                      f"C{N}", "hybrid", 12, 1, {"test_num": 13})
+    status, _, notes = M.run_dcmip_transport(case, tmp_path, 2 * 1800 / 86400)
+    assert status == "FAIL"
+    assert "local air-mass closure" not in notes.split("CRITERION FAIL")[-1], notes
+    assert re.search(r"CRITERION FAIL: .*global air-mass conservation \(planted\)",
+                     notes), notes
+
+
+def test_dcmip13_snapshot_geometry_uses_the_snapshot_layer_mass():
+    """The 1-3 terrain moments on the duo row take weights AND level
+    heights from the delp saved with each snapshot; the prescribed-flux
+    rows keep the steady weights / analytic heights."""
+    from types import SimpleNamespace
+    from scripts.matrix.run_atmosphere_test_matrix import (
+        dcmip13_snapshot_geometry, duo_full_level_height)
+    rng = np.random.default_rng(0)
+    area = rng.uniform(1.0, 2.0, (2, 3))
+    dp = rng.uniform(500.0, 900.0, (2, 3, 30))
+    w0, z0 = np.ones((2, 3, 30)), np.zeros((2, 3, 30))
+    duo = SimpleNamespace(ptop=2.5e4)
+    w, z = dcmip13_snapshot_geometry({"delp_3d": dp}, area, duo, w0, z0)
+    np.testing.assert_array_equal(w, area[..., None] * dp)
+    np.testing.assert_array_equal(z, duo_full_level_height(dp, 2.5e4))
+    assert not np.allclose(z, duo_full_level_height(0.9 * dp, 2.5e4))
+    w, z = dcmip13_snapshot_geometry({"delp_3d": dp}, area, None, w0, z0)
+    assert w is w0 and z is z0
+
+
+@x64
+def test_matrix_runner_cube_13_hands_the_banded_wind_and_terrain_ps(monkeypatch, tmp_path):
+    """The runner's cube 1-3 hybrid row builds the duo with the banded 1-3
+    wind and p_s = p0 exp(-z_s/H) (the other grids' 1-3 flow)."""
+    import scripts.matrix._cube_duo_adapters as A
+    from scripts.matrix.run_atmosphere_test_matrix import (
+        TestCase as MatrixCase, run_dcmip_transport)
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _capture(n, **kw):
+        seen.update(kw)
+        raise _Stop
+    monkeypatch.setattr(A, "build_duo_dcmip_transport", _capture)
+    case = MatrixCase("hydrostatic", "dcmip_transport_13", "cubed_sphere",
+                      f"C{N}", "hybrid", 12, 1, {"test_num": 13})
+    with pytest.raises(_Stop):
+        run_dcmip_transport(case, tmp_path, 0.05)
+    assert seen["wind_geo"] is D.dcmip13_wind_geo_banded
+    assert seen["init_latlon"] is D.dcmip13_init_latlon
+    lo, la = jnp.asarray([0.3, 2.0]), jnp.asarray([0.1, -0.4])
+    np.testing.assert_array_equal(np.asarray(seen["ps_init_fn"](lo, la)),
+                                  np.asarray(_ps13(lo, la)))
+    assert hasattr(seen["sigma_coord"], "B_half")
+
+
+@x64
+def test_duo_refuses_a_hybrid_row_without_terrain_pressure():
+    from scripts.matrix._cube_duo_adapters import build_duo_dcmip_transport
+    with pytest.raises(ValueError, match="needs ps_init_fn"):
+        build_duo_dcmip_transport(
+            N, wind_geo=D.dcmip13_wind_geo_banded,
+            init_latlon=D.dcmip13_init_latlon,
+            sigma_coord=D.create_dcmip13_hybrid(30), n_tracers=4, dt=1800.0,
+            n_sub=1)
+
+
+@x64
+def test_duo_refuses_terrain_pressure_on_a_sigma_row():
+    """ps_init_fn needs the hybrid coordinate: on sigma levels the duo's
+    fixed-lid pressures differ from p = sigma p_s away from p0."""
+    from scripts.matrix._cube_duo_adapters import build_duo_dcmip_transport
+    with pytest.raises(ValueError, match="ps_init_fn needs the hybrid"):
+        build_duo_dcmip_transport(
+            N, wind_geo=D.dcmip13_wind_geo_banded,
+            init_latlon=D.dcmip13_init_latlon,
+            sigma_coord=D.create_dcmip_sigma(30), n_tracers=4, dt=1800.0,
+            n_sub=1, ps_init_fn=_ps13)
+
+
+@x64
+def test_matrix_runner_cube_13_hybrid_runs_duo_with_the_13_audit(tmp_path):
+    """The cube 1-3 matrix row (Kent hybrid levels) runs FV3 duo's
+    transport and carries the 1-3 audit of the other grids (closure,
+    uniform tracer, tracer mass at every sample, terrain crossing)."""
+    from scripts.matrix.run_atmosphere_test_matrix import (
+        TEST_MATRIX, TestCase as MatrixCase, run_dcmip_transport)
+    assert {tc.vertical_coord for tc in TEST_MATRIX
+            if tc.case == "dcmip_transport_13"
+            and tc.grid_type == "cubed_sphere"} == {"hybrid"}
+    case = MatrixCase("hydrostatic", "dcmip_transport_13", "cubed_sphere",
+                      f"C{N}", "hybrid", 12, 1, {"test_num": 13})
+    status, _, notes = run_dcmip_transport(case, tmp_path, 3 * 1800 / 86400)
+    text = (tmp_path / "results.txt").read_text()
+    assert "vertical_scheme: fv3_duo Lagrangian" in text, text
+    assert "W_eff" in notes and "p_s-p_s(t=0)" in notes, notes
+    assert re.search(r"air-mass closure drift [0-9.e+-]+ \(duo", notes), notes
+    unif = float(re.search(r"uniform-tracer max\|q-1\| ([0-9.e+-]+)", notes).group(1))
+    assert unif <= 1e-12, notes
+    assert int(re.search(r"peak over (\d+) samples", notes).group(1)) >= 3, notes
+    # the peak is the worst deviation over every tracer and sample
+    peak = float(re.search(r"peak over \d+ samples q\d ([0-9.e+-]+)", notes).group(1))
+    assert peak <= 1e-12, notes
+    rels = re.search(r"mass\[q dp\] rel q1 (\S+), q2 (\S+), q3 (\S+), q4 (\S+),", notes)
+    assert rels, notes
+    vals = [float(x) for x in rels.groups()]
+    assert len(vals) == 4 and all(np.isfinite(v) and abs(v) <= 1e-12 for v in vals), notes
+    air = float(re.search(r"air-mass rel ([-+0-9.eE]+)", notes).group(1))
+    assert abs(air) < 1e-13, notes
+    m = re.search(r"global air mass max \|rel\| (\S+) over (\d+) samples", notes)
+    assert m and float(m.group(1)) <= 1e-12 and int(m.group(2)) >= 3, notes
+    assert "AUDIT INCOMPLETE: terrain crossing untested" in notes, notes
+    # the duo's air column departs from the steady analytic one (p_s
+    # evolves): under the current closure gate (the other grids' 1e-6) a
+    # measured failure, and it reaches the row status
+    assert "CRITERION FAIL: local air-mass closure" in notes, notes
+    assert status == "FAIL" and "status: FAIL" in text
+
+
+@x64
+@pytest.mark.slow
+def test_matrix_runner_cube_13_reports_full_period_norms(tmp_path, monkeypatch):
+    """Over the full 12 days the cube 1-3 row reports the error norms and
+    the terrain-crossing measurement (C12, 576 steps)."""
+    from scripts.matrix.run_atmosphere_test_matrix import (
+        TestCase as MatrixCase, run_dcmip_transport)
+    case = MatrixCase("hydrostatic", "dcmip_transport_13", "cubed_sphere",
+                      f"C{N}", "hybrid", 12, 1, {"test_num": 13})
+    import scripts.matrix.run_atmosphere_test_matrix as M
+    calls, scored = [], []
+    real = M.duo13_exact_tracers
+    real_norms = D.compute_tracer_error_norms
+
+    def _spy(duo, st):
+        out = real(duo, st)
+        calls.append((float(st[1]), np.asarray(out)))
+        return out
+
+    def _norms(final, exact, g):
+        scored.append(np.asarray(exact.tracers.data))
+        return real_norms(final, exact, g)
+    monkeypatch.setattr(M, "duo13_exact_tracers", _spy)
+    monkeypatch.setattr(D, "compute_tracer_error_norms", _norms)
+    _, _, notes = run_dcmip_transport(case, tmp_path, 12.0)
+    assert [t for t, _ in calls] == [12 * 86400.0], calls   # the final state
+    # the primary norms are scored against that final-level field, which
+    # differs from the IC (the second call: the layer-index return error)
+    assert len(scored) == 2
+    np.testing.assert_array_equal(scored[0], calls[0][1])
+    assert float(np.max(np.abs(scored[0] - scored[1]))) > 0.0
+    for i in range(1, 5):
+        m = re.search(rf"q{i} L1=(\S+) L2=(\S+) Linf=(\S+?),", notes)
+        assert m, notes
+        assert all(np.isfinite(float(x)) and float(x) > 0 for x in m.groups()), notes
+    assert "integrated 576 of 576 steps" in notes, notes
+    assert "exact = analytic clouds at the final level heights" in notes, notes
+    m = re.search(r"terrain crossing: cloud height shift (\S+) m at the largest "
+                  r"terrain shift (\S+) m \(ratio (\S+);", notes)
+    assert m and all(np.isfinite(float(x)) for x in m.groups()), notes

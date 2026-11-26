@@ -867,8 +867,9 @@ def build_duo_dcmip_transport(n: int, *, wind_geo, init_latlon, sigma_coord,
                               n_tracers: int, dt: float,
                               n_sub: int | None = None,
                               period_s: float | None = None,
-                              courant_target: float = 0.8):
-    """DCMIP 2012 1-1 / 1-2 prescribed-wind transport through FV3 duo's OWN
+                              courant_target: float = 0.8,
+                              ps_init_fn=None):
+    """DCMIP 2012 1-1 / 1-2 / 1-3 prescribed-wind transport through FV3 duo's OWN
     tracer machinery, composed from the public duo phases (adapter only,
     the shallow-water case-1 precedent; user decision Q5-A).  Per outer
     step of ``dt`` (winds frozen at the step MID-time ``t + dt/2``):
@@ -915,6 +916,18 @@ def build_duo_dcmip_transport(n: int, *, wind_geo, init_latlon, sigma_coord,
 
     pt rides as a uniform 300 K passenger (the DCMIP isothermal
     atmosphere); w = 0; hydrostatic deck; ``nq`` passive tracers.
+
+    ``ps_init_fn`` (1-3): ``(lon, lat) [rad] -> p_s [Pa]`` at the cell
+    centres, the initial surface pressure over the terrain (DCMIP 1-3:
+    ``p0 exp(-z_s/H)``); the initial ``delp = diff(ak + bk p_s)`` and the
+    analytic reference of ``effective_omega`` is the coordinate-crossing
+    air-mass flux ``p_s * sigma_dot`` (the DCMIP 1-3 ``sigma_dot`` is
+    returned divided by ``p_s``).  ``None`` (1-1 / 1-2): ``p_s = p0``
+    everywhere, reference ``p0 * sigma_dot``.  A hybrid ``sigma_coord``
+    (the Kent et al. 2014, App. B coordinate, ``create_dcmip13_hybrid``)
+    REQUIRES ``ps_init_fn`` (and a sigma one refuses it); its ``A p_ref``
+    / ``B`` must equal the model's ``ak`` / ``bk`` (the same fixed-lid
+    table).
     """
     import jax
     import jax.numpy as jnp
@@ -959,6 +972,15 @@ def build_duo_dcmip_transport(n: int, *, wind_geo, init_latlon, sigma_coord,
                        rtol=0, atol=1e-6):
         raise ValueError("duo DCMIP transport: eta interfaces at p0 are not "
                          "the row's DCMIP sigma levels")
+    if hasattr(sigma_coord, "B_half") and not (
+            np.allclose(ak, np.asarray(sigma_coord.A_half, np.float64)
+                        * float(sigma_coord.p_ref), rtol=0, atol=1e-6 * p0)
+            and np.allclose(bk, np.asarray(sigma_coord.B_half, np.float64),
+                            rtol=0, atol=1e-6)):
+        # a hybrid row: its A p_ref / B (its own reference pressure) must
+        # be the model's ak / bk
+        raise ValueError("duo DCMIP transport: the row's hybrid A p_ref / B are "
+                         "not the model's ak / bk")
     deck = duo_sw_deck(nord=cfg.nord, d4_bg=cfg.d4_bg,
                        sponge_del2_top_layers=cfg.sponge_del2_top_layers,
                        sponge_del2_top_factor=cfg.sponge_del2_top_factor,
@@ -969,7 +991,9 @@ def build_duo_dcmip_transport(n: int, *, wind_geo, init_latlon, sigma_coord,
     sl = _compute_window(ctx_np)
 
     # template bundle (shapes/halo conventions of the lane), then the
-    # DCMIP state: ps = p0 everywhere, isothermal pt, w = 0, no wind yet
+    # DCMIP state: ps = p0 everywhere (or ps_init_fn on the compute cells;
+    # the halos are filled by the step's entry exchange), isothermal pt,
+    # w = 0, no wind yet
     tmpl = model.dcmip16_initial_state(do_pert=False)
     st0 = dict(tmpl["state"])
     m_a = st0["delp"].shape[1]
@@ -983,6 +1007,27 @@ def build_duo_dcmip_transport(n: int, *, wind_geo, init_latlon, sigma_coord,
     lon_deg, lat_deg, area = duo_cell_geometry(ctx_np)
     lon = np.radians(lon_deg)
     lat = np.radians(lat_deg)
+    ps_ref = None
+    if ps_init_fn is None and hasattr(sigma_coord, "B_half"):
+        # the hybrid (1-3) row's tracers sit on terrain-dependent levels:
+        # a flat p_s = p0 start would put the air elsewhere
+        raise ValueError("duo DCMIP transport: the hybrid coordinate needs "
+                         "ps_init_fn (the terrain surface pressure)")
+    if ps_init_fn is not None and not hasattr(sigma_coord, "B_half"):
+        # terrain p_s on a sigma row: the duo's fixed-lid pressures would
+        # differ from the row's p = sigma p_s levels away from p0
+        raise ValueError("duo DCMIP transport: ps_init_fn needs the hybrid "
+                         "coordinate whose A p0 / B are the model's ak / bk")
+    if ps_init_fn is not None:
+        ps_ref = np.asarray(ps_init_fn(jnp.asarray(lon), jnp.asarray(lat)),
+                            np.float64)
+        if ps_ref.shape != lon.shape or not np.all(ps_ref > ptop):
+            raise ValueError("duo DCMIP transport: ps_init_fn must give a "
+                             "(6, n, n) surface pressure above the lid")
+        delp0[:, sl, sl, :] = np.diff(ak + bk * ps_ref[..., None], axis=-1)
+        st0["delp"] = jnp.asarray(delp0)
+        if not np.all(delp0[:, sl, sl, :] > 0):
+            raise ValueError("duo DCMIP transport: non-positive initial delp")
     cells = SimpleNamespace(lon2d=jnp.asarray(lon.reshape(6 * n, n)),
                             lat2d=jnp.asarray(lat.reshape(6 * n, n)),
                             n_lat=6 * n, n_lon=n)
@@ -1109,7 +1154,10 @@ def build_duo_dcmip_transport(n: int, *, wind_geo, init_latlon, sigma_coord,
         u, v, sd = wind_geo(t + 0.5 * dt_, jnp.asarray(lon),
                             jnp.asarray(lat), sigma_coord)
         return ((pe_l - pe_e) / dt_,
-                p0 * jnp.asarray(sd, jnp.float64)[..., 1:-1],
+                (p0 * jnp.asarray(sd, jnp.float64)[..., 1:-1]
+                 if ps_ref is None else
+                 jnp.asarray(ps_ref)[..., None]
+                 * jnp.asarray(sd, jnp.float64)[..., 1:-1]),
                 jnp.asarray(u, jnp.float64), jnp.asarray(v, jnp.float64),
                 pe_e)
 
@@ -1250,4 +1298,4 @@ def build_duo_dcmip_transport(n: int, *, wind_geo, init_latlon, sigma_coord,
         last_phase=last_phase,
         lon_deg=lon_deg, lat_deg=lat_deg, area=area, radius=FV3_RADIUS_M,
         courant_max=lambda: cmax_seen[0],
-        ak=ak, bk=bk, ptop=ptop, q_ic=q_ic, note=note)
+        ak=ak, bk=bk, ptop=ptop, q_ic=q_ic, note=note, ps_ref=ps_ref)

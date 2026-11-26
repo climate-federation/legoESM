@@ -23,14 +23,14 @@ def _row(tmp_path, grid, res, vert="hybrid"):
 
 
 def test_13_matrix_rows_use_the_kent_hybrid_levels():
-    """1-3 on lat-lon / MPAS / spectral runs the Kent et al. (2014, App. B)
-    hybrid levels; the cube 1-3 row and the 1-1/1-2 rows stay sigma."""
+    """1-3 runs the Kent et al. (2014, App. B) hybrid levels on every grid
+    (the cube row through the FV3 duo transport); the 1-1/1-2 rows stay
+    sigma."""
     from scripts.matrix.run_atmosphere_test_matrix import TEST_MATRIX
     vert = {(tc.case, tc.grid_type): tc.vertical_coord for tc in TEST_MATRIX
             if tc.case.startswith("dcmip_transport_")}
-    for g in ("latlon", "icosahedral", "spectral"):
+    for g in ("latlon", "icosahedral", "spectral", "cubed_sphere"):
         assert vert[("dcmip_transport_13", g)] == "hybrid"
-    assert vert[("dcmip_transport_13", "cubed_sphere")] == "sigma"
     assert all(v == "sigma" for (c, _), v in vert.items() if c != "dcmip_transport_13")
 
 
@@ -50,7 +50,7 @@ def test_vcoord_probe_override_leaves_dcmip_transport_rows(monkeypatch):
 def test_hybrid_refused_outside_the_13_flux_form_rows(tmp_path):
     from scripts.matrix.run_atmosphere_test_matrix import TestCase, run_dcmip_transport
     for case, tn, grid in (("dcmip_transport_11", 11, "latlon"),
-                           ("dcmip_transport_13", 13, "cubed_sphere")):
+                           ("dcmip_transport_11", 11, "cubed_sphere")):
         tc = TestCase("hydrostatic", case, grid, "C6" if grid == "cubed_sphere" else "18x36",
                       "hybrid", 12, 1, {"test_num": tn})
         with pytest.raises(ValueError, match="hybrid"):
