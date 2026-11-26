@@ -155,3 +155,38 @@ def test_the_profiles_are_vectorised_over_z():
     assert pressure(z, lat, C).shape == z.shape
     assert temperature(z, lat, C).shape == z.shape
     assert np.all(np.diff(pressure(z, lat, C)) < 0.0)   # p decreases with z
+
+
+def test_uwind_pert_dcmip2016_follows_eqs_14_15():
+    """DCMIP-2016 document (Ullrich et al. 2016) Sect. 1.2: u' = u_p Z_p(z)
+    exp(-(R/R_p)^2) for R < R_p (Eq. 14), Z_p = 1 - 3(z/z_p)^2 + 2(z/z_p)^3
+    for z <= z_p, else 0 (Eq. 15), u_p = 1 m/s, z_p = 15 km -- written out
+    here.  The FV3 oracle default truncates neither in R nor in z."""
+    from legoesm.core.fv3_native_dcmip16_bc import uwind_pert
+
+    rp = C.radius / 10.0          # R_p = a/10 (reference), not C.rp
+
+    def at(dist):                 # injected distance function; checks the
+        def gcd(p1, p2, r):       # centre (lambda_p, phi_p) = (pi/9, 2pi/9)
+            np.testing.assert_allclose(p2, (np.pi / 9, 2 * np.pi / 9),
+                                       rtol=1e-15)
+            assert r == C.radius
+            return dist
+        return gcd
+
+    def eq14(z, dist):
+        x = z / 15000.0
+        zp = (1 - 3 * x * x + 2 * x ** 3) if z <= 15000.0 else 0.0
+        return 1.0 * zp * np.exp(-(dist / rp) ** 2) if dist < rp else 0.0
+
+    lat, lon = C.ppcenter[1], C.ppcenter[0]
+    for z in (0.0, 1000.0, 7500.0, 14999.0, 15000.0, 18000.0, 30000.0):
+        for frac in (0.0, 0.5, 0.99, 1.0, 1.01, 2.0):
+            dist = frac * rp
+            got = float(uwind_pert(z, lat, lon, C, at(dist),
+                                   use_dcmip2016_perturbation=True))
+            np.testing.assert_allclose(got, eq14(z, dist), rtol=1e-12,
+                                       atol=1e-15, err_msg=f"{z} {frac}")
+    # the FV3 oracle (default) is untruncated in both directions
+    assert float(uwind_pert(1000.0, lat, lon, C, at(1.01 * rp))) > 0.0
+    assert float(uwind_pert(18000.0, lat, lon, C, at(0.5 * rp))) > 0.0

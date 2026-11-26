@@ -181,8 +181,16 @@ def uwind(z, t, lat, c: DCMIP16Constants):
     return -orc + np.sqrt(orc ** 2 + c.radius * coslat * uu)  # :6817
 
 
-def uwind_pert(z, lat, lon, c: DCMIP16Constants, great_circle_dist):
+def uwind_pert(z, lat, lon, c: DCMIP16Constants, great_circle_dist, *,
+               use_dcmip2016_perturbation: bool = False):
     """Perturbation, added ONLY for test_case=-13 -- :6823-6838.
+
+    ``use_dcmip2016_perturbation=False`` is the FV3 oracle verbatim: the
+    exponential bell is NOT truncated at R_p, and ``max(cubic, 0)`` is
+    positive again above z_p (the cubic is (1 - x)^2 (1 + 2x)).
+    ``use_dcmip2016_perturbation=True`` follows the DCMIP-2016 test-case
+    document (Ullrich et al. 2016, Sect. 1.2) exactly: zero where the
+    great-circle distance is >= R_p (Eq. 14) and above z_p (Eq. 15).
 
     ``great_circle_dist(p1, p2, radius)`` is INJECTED: the oracle's version
     computes in quad, so whoever supplies it owns the precision floor of the
@@ -191,7 +199,11 @@ def uwind_pert(z, lat, lon, c: DCMIP16Constants, great_circle_dist):
     zrat = z / ZP_M                                          # :6830
     zz = np.maximum(1.0 - 3.0 * zrat * zrat + 2.0 * zrat * zrat * zrat, 0.0)
     dst = great_circle_dist((lon, lat), c.ppcenter, c.radius)   # :6834
-    return np.maximum(0.0, UP_MS * zz * np.exp(-(dst / c.rp) ** 2))  # :6836
+    pert = np.maximum(0.0, UP_MS * zz * np.exp(-(dst / c.rp) ** 2))  # :6836
+    if use_dcmip2016_perturbation:
+        # DCMIP-2016 Eq. (14) (R < R_p) and Eq. (15) (z <= z_p)
+        pert = np.where((dst < c.rp) & (z <= ZP_M), pert, 0.0)
+    return pert
 
 
 def sphum(p, ps, lat, c: DCMIP16Constants):

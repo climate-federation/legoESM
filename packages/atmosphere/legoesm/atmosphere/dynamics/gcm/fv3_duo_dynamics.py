@@ -563,6 +563,7 @@ class FV3DuoDynamicsModel:
     # ------------------------------------------------------------------
 
     def dcmip16_initial_state(self, *, do_pert: bool = True,
+                              use_dcmip2016_perturbation: bool = False,
                               n_tracers: int = 1,
                               terminator: bool = False) -> dict:
         """The DCMIP16_BC (test_case = -13 / -12) bundle on this grid.
@@ -593,7 +594,8 @@ class FV3DuoDynamicsModel:
         cfg = self.config
         st6, sphum6 = dcmip16_bc_six_face_state(
             self.grid.ctx_np, self._ak, self._bk, cfg.km,
-            hydrostatic=cfg.hydrostatic, do_pert=do_pert, zvir=self.zvir)
+            hydrostatic=cfg.hydrostatic, do_pert=do_pert,
+            use_dcmip2016_perturbation=use_dcmip2016_perturbation, zvir=self.zvir)
         jstate = state_3d_to_jax(st6)
         n, ng = self.grid.n, self.grid.ng
         flat_ctx = (self._flat_ctx_jax if self.window_layout is not None

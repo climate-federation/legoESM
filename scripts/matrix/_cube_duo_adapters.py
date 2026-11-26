@@ -684,7 +684,10 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     elif held_suarez:
         bundle = held_suarez_rest_bundle(model)
     elif rotated_alpha is None:
-        bundle = model.dcmip16_initial_state(do_pert=perturbed)
+        # DCMIP-2016 document Eq. (14): the perturbation is truncated at
+        # R_p, as on the other three grids (the FV3 oracle is not)
+        bundle = model.dcmip16_initial_state(do_pert=perturbed,
+                                             use_dcmip2016_perturbation=True)
     else:
         bundle = rotated_jw_bundle(model, perturbed=perturbed,
                                    alpha=rotated_alpha)

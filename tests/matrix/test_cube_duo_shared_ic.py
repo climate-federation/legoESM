@@ -272,6 +272,25 @@ def test_non_cube_grid_factories_get_the_case_omega(
         assert seen.get("omega") == omega, seen
 
 
+@pytest.mark.parametrize("perturbed", [True, False])
+def test_baroclinic_duo_uses_the_dcmip2016_truncated_perturbation(
+        monkeypatch, perturbed):
+    """The matrix cube baroclinic rows build the DCMIP-2016 state with the
+    document's Eq. (14) perturbation (truncated at R_p, as the other grids)."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoDynamicsModel)
+    seen = {}
+
+    def spy(self, **kw):
+        seen.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(FV3DuoDynamicsModel, "dcmip16_initial_state", spy)
+    with pytest.raises(_Stop):
+        A.build_duo_hydro(36, perturbed=perturbed)   # deck dt is C36-only
+    assert seen == {"do_pert": perturbed, "use_dcmip2016_perturbation": True}
+
+
 def test_terrain_mismatch_is_refused():
     spec, model = _model("mountain_rossby_5_0")
     bad = SimpleNamespace(**{**vars(spec), "builder": A.duo_shared_ic_spec(
