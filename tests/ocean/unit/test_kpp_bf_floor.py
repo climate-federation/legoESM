@@ -89,3 +89,34 @@ def test_gradients_finite_near_zero_flux(dtype):
         for b in (0.0, -0.0, 1e-28, -1e-25, 1e-22, -1e-20, 1e-19, 1e-9, -1e-9, 2e-7):
             val = g(jnp.asarray(b, dtype=dtype))
             assert np.isfinite(float(val)), (us, b, dtype)
+
+
+# CVMix (MOM6 0e9a561 submodule, CVMix fce422195a) cvmix_kpp_compute_turbulent_scales, banked from the compiled
+# library (ported from PR #2560): (u*, B_f [this module's sign, >0 destabilising], h, sigma, w_m, w_s).  Stable
+# and weakly-unstable branches only: they use no rounded LMD94 a_*/c_* constants, so they pin to round-off.
+_CVMIX_WEAK_FLUX = [
+    (0.001, -1e-07, 50.0, 0.02, 1.990049751243781e-06, 1.990049751243781e-06),
+    (0.001, -1e-07, 50.0, 0.5, 3.9960039960039974e-07, 3.9960039960039974e-07),
+    (0.001, -1e-08, 50.0, 0.02, 1.904761904761905e-05, 1.904761904761905e-05),
+    (0.001, -1e-08, 50.0, 0.5, 3.960396039603961e-06, 3.960396039603961e-06),
+    (0.001, -1e-09, 50.0, 0.02, 0.00013333333333333334, 0.00013333333333333334),
+    (0.001, -1e-09, 50.0, 0.5, 3.636363636363637e-05, 3.636363636363637e-05),
+    (0.001, -1e-10, 50.0, 0.02, 0.0003333333333333334, 0.0003333333333333334),
+    (0.001, -1e-10, 50.0, 0.5, 0.0002, 0.0002),
+    (0.001, 1e-10, 50.0, 0.02, 0.0004526587849560099, 0.0005122499389946279),
+    (0.01, -1e-07, 50.0, 0.02, 0.003333333333333334, 0.003333333333333334),
+    (0.01, -1e-08, 50.0, 0.5, 0.0036363636363636364, 0.0036363636363636364),
+    (0.01, -1e-10, 50.0, 0.5, 0.003996003996003997, 0.003996003996003997),
+    (0.01, 1e-10, 50.0, 0.5, 0.004003196167152268, 0.004006394888175653),
+    (0.01, 1e-09, 50.0, 0.02, 0.004006384697092892, 0.004012779585275026),
+    (0.01, 1e-08, 50.0, 0.5, 0.004287493494913047, 0.004595650117230423),
+]
+
+
+@pytest.mark.parametrize("ustar,Bf,h,sigma,wm_cv,ws_cv", _CVMIX_WEAK_FLUX)
+def test_default_weak_flux_matches_compiled_cvmix(ustar, Bf, h, sigma, wm_cv, ws_cv):
+    """The production default reproduces compiled CVMix for |B_f| below float32 eps."""
+    a = jnp.asarray
+    wm, ws = kpp_mod._kpp_velocity_scales(a([ustar]), a([Bf]), a([[sigma * h]]), a([[h]]), KPPConfig(), kpp_mod._EPS)
+    assert float(wm[0, 0]) == pytest.approx(wm_cv, rel=1e-12, abs=0.0)
+    assert float(ws[0, 0]) == pytest.approx(ws_cv, rel=1e-12, abs=0.0)
