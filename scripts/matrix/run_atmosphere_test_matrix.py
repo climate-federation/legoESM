@@ -3761,7 +3761,23 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
         dt = min(1800.0, 0.5 * grid.radius / (n_max * 40.0))
-        config = SpectralSWConfig(spectral_filter_order=8)
+        # Pure transport, no topography: the exponential filter is NOT
+        # applied every step (``spectral_filter_every_step=False``, the
+        # SpectralSWConfig guidance for free-evolution cases).  Per step it
+        # cut the T21 peak (alpha=pi/4) to 818 m at 1 d and 614 m at 12 d,
+        # vs 889 m at both without it; L2 0.177 -> 0.142 (1 d), 0.382 ->
+        # 0.143 (12 d); at T42, 1 d L2 0.0168 -> 0.0139 while the peak goes
+        # 997.7 -> 987.7 m (exact on grid 999.2 m).  The
+        # spectral-transform reference practice (STSWM: unaliased quadratic
+        # grid, linear spectral diffusion) has no per-step exponential
+        # filter (PLAUSIBLE, not re-verified against the tech note).  The
+        # unfiltered T21 peak (889 m) matches the IC projected on the 2/3
+        # band (889.6 m at t=0, vs 978.6 m synthesised at full T21): the
+        # residual loss is consistent with the 2/3 state truncation
+        # (n <= 14), a shared dycore design choice.  Voted: author A,
+        # codex A (2026-11-26).
+        config = SpectralSWConfig(spectral_filter_order=8,
+                                  spectral_filter_every_step=False)
         model = SpectralShallowWaterModel(grid, config)
         state = cosine_bell_spectral(grid, beta)
         phi_init = sh_synthesis(grid, state.phi_hat.data).copy()
