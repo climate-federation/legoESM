@@ -74,3 +74,13 @@ def test_barotropic_diffusion_book_transport_flag() -> None:
         ["--barotropic-diffusion-book-transport"]).barotropic_diffusion_book_transport is True
     assert parser.parse_args(
         ["--no-barotropic-diffusion-book-transport"]).barotropic_diffusion_book_transport is False
+
+
+def test_cube_tracer_constant_preserving_flag() -> None:
+    """None keeps the config default (constant-preserving); --no-... selects the old operator."""
+    parser = _parser()
+    assert parser.parse_args([]).cube_tracer_constant_preserving is None
+    assert parser.parse_args(
+        ["--cube-tracer-constant-preserving"]).cube_tracer_constant_preserving is True
+    assert parser.parse_args(
+        ["--no-cube-tracer-constant-preserving"]).cube_tracer_constant_preserving is False

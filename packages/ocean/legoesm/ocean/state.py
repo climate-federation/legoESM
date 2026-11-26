@@ -460,6 +460,10 @@ class OceanConfig(NamedTuple):
     # quasi-uniform cube: sub-grid marginal-sea fronts spin up uncarriable jets;
     # clipping |u|,|v| bounds them (open ocean untouched) for a caveated comparison.
     velocity_ceiling: float = 0.0
+    # Add q*div_h(u) to the cd-grid FCT tracer tendency so a uniform tracer
+    # stays uniform (flux-form horizontal + advective vertical left -q div_h u).
+    # False = old operator (uniform 35 psu drifted ~3e-2 psu in 10 x 300 s, C8).
+    tracer_advection_constant_preserving: bool = True
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
     # Partial-cell horizontal pressure-gradient scheme on the cd-grid AL

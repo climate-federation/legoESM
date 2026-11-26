@@ -650,6 +650,16 @@ def ocean_baroclinic_tendencies_cdgrid(
             tracer_flat, grid, config.K_h,
         )
     horiz_stack = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
+    # The FCT operator is the flux form -div_h(u q) on velocity alone, while the
+    # vertical term below is advective (-w dq/dz) and the update is in
+    # concentration form, so a uniform q would pick up -q div_h(u).  Adding
+    # q div_h(u) (same unweighted C-grid divergence the fluxes use) makes the
+    # horizontal term advective too: uniform tracers stay uniform.  KNOWN GAP:
+    # the update is then not exactly tracer-content conserving (nor was the old
+    # one, which ignored the thickness change); a thickness-weighted (h q) update
+    # would fix both.  False restores the old operator.
+    if config.tracer_advection_constant_preserving:
+        horiz_stack = horiz_stack + tracer_stack * div_v[..., None]
 
     # Vertical advection per-tracer (vmap over the trailing tracer axis
     # so JAX produces one batched kernel rather than n_tracers unrolled
