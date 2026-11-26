@@ -1022,6 +1022,16 @@ _SITE_SYNTHETIC = {
     ('en = sm.max(en, -ZDD_DET_MAX * kget(pmfu, jk) - (mfd1 - zdmfde), _W_DDEN)', 'max'):
         ('0.0', '_W_DDEN',
          'full-scheme injection point found, but its derivative (|d loss/ds| ~ 2e-6..2e-7 on a loss ~ 200) is resolved by finite differences only to >= 9e-4..1.5e-3 at h = 1e-2..3e-2 (round-off, error ~ 1/h), not robustly inside the 1e-3 tolerance (vote 3 2026-11-19) (bound traced: representative value)'),
+    # LMFENTHCONS fallbacks (#2571): off by default, and with it on no fixture
+    # column enters either window (|ZINT| is 0, < 1e-14 or >= 142 W/m2;
+    # |ratio| <= 0.044, measured 2026-11-26); also covered by
+    # test_enthcons_factor_gradient_inside_the_smooth_windows
+    ('return (sm.on(sm.abs(zint, _W_ENTH_Z), ZENTH_MIN, _W_ENTH_Z) * r', 'on'):
+        ('ZENTH_MIN', '_W_ENTH_Z',
+         'LMFENTHCONS lower fallback: no fixture column has |ZINT| in its window (0, < 1e-14 or >= 142 W/m2)'),
+    ('* sm.off(sm.abs(r, _W_ENTH_R), ZENTH_MAX, _W_ENTH_R, strict=False))', 'off'):
+        ('ZENTH_MAX', '_W_ENTH_R',
+         'LMFENTHCONS upper fallback: no fixture column has |ratio| in its window (all <= 0.044)'),
 }
 
 
