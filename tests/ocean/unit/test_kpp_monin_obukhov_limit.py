@@ -5,11 +5,12 @@ Reference (CVMix-src master cvmix_kpp.F90, cvmix_kpp_compute_OBL_depth, not
 Stokes-MOST, lMonOb = .true.; read 26 November 2026):
 ``lstable = surf_buoy > 0``; stable: ``MoninObukhov = surf_fric**3 /
 (surf_buoy * vonkarman)``, else the column bottom; ``OBL_limit = min(OBL_limit,
-MoninObukhov)``; ``OBL_depth = min(OBL_depth, OBL_limit)``, and no shallower
-than the top cell centre.  CVMix's surf_buoy > 0 is stabilising; legoESM's
+MoninObukhov)``; the interpolated depth is floored at the top cell centre and
+THEN ``OBL_depth = min(OBL_depth, OBL_limit)``, so CVMix's final depth can be
+shallower than that floor.  CVMix's surf_buoy > 0 is stabilising; legoESM's
 B_f > 0 is destabilising, so CVMix surf_buoy = -B_f.  The reference below is
 written from those lines, with legoESM's own top-layer floor (one top-layer
-thickness).
+thickness) applied last instead.
 
 RULE 5 tests: (1) both widths 0 reproduce the reference to round-off, with
 legoESM's final floor of one top layer kept (CVMix caps after its top-cell-
