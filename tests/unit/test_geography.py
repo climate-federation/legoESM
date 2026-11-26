@@ -571,7 +571,8 @@ def test_coupled_mpas_ocean_tke_carry_survives_a_checkpoint(tmp_path):
     import jax.numpy as jnp
     d = _mpas_ocean_driver(tmp_path, ocean_vertical_mixing="tke")
     d.setup()
-    marked = np.asarray(d._ocean_state.tke.data) * 0.0 + 3.5e-4
+    seed = np.asarray(d._ocean_state.tke.data)
+    marked = (1.0e-6 * (1.0 + np.arange(seed.size))).reshape(seed.shape).astype(seed.dtype)
     d._ocean_state = d._ocean_state._replace(
         tke=d._ocean_state.tke.replace(data=jnp.asarray(marked)))
     np.savez(tmp_path / "coupled_day_0001.npz", **d.coupled_checkpoint_arrays())
@@ -581,6 +582,14 @@ def test_coupled_mpas_ocean_tke_carry_survives_a_checkpoint(tmp_path):
     assert not np.allclose(np.asarray(r._ocean_state.tke.data), marked)
     r.load_coupled_checkpoint(1.0, checkpoint_dir=tmp_path)
     assert np.array_equal(np.asarray(r._ocean_state.tke.data), marked)
+    # a KPP checkpoint (no TKE carry) does not restore into a TKE run
+    (tmp_path / "k").mkdir()
+    k = _mpas_ocean_driver(tmp_path / "k")
+    k.setup()
+    (tmp_path / "kc").mkdir()
+    np.savez(tmp_path / "kc" / "coupled_day_0001.npz", **k.coupled_checkpoint_arrays())
+    with pytest.raises(ValueError):
+        r.load_coupled_checkpoint(1.0, checkpoint_dir=tmp_path / "kc")
 
 
 @pytest.mark.parametrize("cc, match", [
@@ -640,6 +649,14 @@ def test_coupled_ocean_forcing_carries_the_ice_concentration(tmp_path):
         "seg_evap_ow", "seg_lhflx_ow", "seg_ow_lw_net", "seg_ow_sw_net",
         "seg_precip_ice", "seg_precip_ow", "seg_runoff_land", "seg_shflx_ow",
         "seg_taux_ow", "seg_tauy_ow")}
+    ice = d._sfc_state.ice
+    shp = ice.concentration.data.shape
+    ncat = shp[-1] if "category" in tuple(ice.concentration.dims) else 1
+    conc = (0.5 * (1.0 + jnp.sin(jnp.arange(int(np.prod(shp)))))).reshape(shp) / ncat
+    conc = conc.astype(ice.concentration.data.dtype)
+    d._sfc_state = d._sfc_state._replace(
+        ice=ice._replace(concentration=ice.concentration.replace(data=conc)))
+    want = conc.sum(axis=-1) if ncat > 1 else conc
     sf, _ = d._assemble_owned_ocean_forcing()
-    assert sf.ice_concentration is not None
-    assert sf.ice_concentration.shape == sf.q_net.shape
+    np.testing.assert_allclose(np.asarray(sf.ice_concentration).ravel(),
+                               np.asarray(want).ravel(), rtol=0, atol=1e-6)

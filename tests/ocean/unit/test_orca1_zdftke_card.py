@@ -12,6 +12,7 @@ def test_card_is_prognostic_dirichlet_nemo_mxl3_when_asked():
                                    prognostic=True, kappa_convention="veros_sqrte")
     assert cfg.prognostic and cfg.surface_bc == "nemo_dirichlet"
     assert cfg.tke_mxl_choice == 3 and cfg.kappa_convention == "veros_sqrte"
+    assert cfg.eice == 3                      # NEMO ORCA1 nn_eice=3
 
 
 def test_card_refuses_an_unlisted_mixing_length_choice():
