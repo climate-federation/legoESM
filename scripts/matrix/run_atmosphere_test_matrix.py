@@ -255,7 +255,8 @@ def _gw31_diag_every(dt: float) -> int:
 
 
 #: grids whose gravity_wave_3_1 lane runs the DCMIP 2012 3-1 setup
-_GW31_GRIDS = frozenset({"cubed_sphere", "latlon", "icosahedral"})
+_GW31_GRIDS = frozenset({"cubed_sphere", "latlon", "icosahedral",
+                         "spectral"})
 
 
 def _gw31_n_steps(days: float, dt: float) -> int:
@@ -4526,15 +4527,7 @@ def _build_dcmip2008_state(case: str, grid_kind: str, grid_or_mesh, sigma):
     the returned state matches the tendency dispatch each downstream
     runner expects.
     """
-    if case == "gravity_wave_3_1":
-        from tests.test_cases.dcmip2008 import gravity_wave_3_1 as _m
-        fn = {
-            "cube": _m.gravity_wave_init,
-            "latlon": _m.gravity_wave_init_latlon,
-            "mpas": _m.gravity_wave_init_mpas,
-            "spectral": _m.gravity_wave_init_spectral,
-        }[grid_kind]
-    elif case == "inertio_gravity_3_2":
+    if case == "inertio_gravity_3_2":
         from tests.test_cases.dcmip2008 import inertio_gravity_3_2 as _m
         fn = {
             "cube": _m.inertio_gravity_init,
@@ -4571,7 +4564,7 @@ def dcmip_omega_override(case: str) -> float | None:
     """Planetary rotation rate a ``run_baroclinic`` case must run with, or
     ``None`` for the grid factory's default (Earth).
 
-    - ``gravity_wave_3_1``: non-rotating gravity wave.
+    - ``gravity_wave_3_1``: DCMIP 2012 test 3-1 (non-rotating small planet).
     - ``rest_state_topo``: DCMIP 2012 test 2-0-0 sets the rotation rate to
       zero (Table XII, Omega = 0 1/s; Table VIII, "set the rotational speed
       to zero").
@@ -4603,13 +4596,13 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     # terrain-following coordinates.
     _rest = tc.case == "rest_state_topo"
     _rest_h0 = float(tc.run_kwargs.get("h_0", 2000.0)) if _rest else 0.0
-    # DCMIP 2008 dry-3D family: gravity wave (§3-1), inertio-gravity
-    # wave (§3-2), mountain Rossby (§5-0), Rossby-Haurwitz (§6-0).
-    # All four use isothermal hydrostatic state + zonal solid-body
-    # flow as the base; they differ in perturbation / topography only.
+    # DCMIP 2008 dry-3D family: inertio-gravity wave (§3-2), mountain
+    # Rossby (§5-0), Rossby-Haurwitz (§6-0).  All three use isothermal
+    # hydrostatic state + zonal solid-body flow as the base; they differ in
+    # perturbation / topography only.  (gravity_wave_3_1 is DCMIP 2012
+    # test 3-1, ``_gw31`` below.)
     _dcmip2008_dry = tc.case in (
-        "gravity_wave_3_1", "inertio_gravity_3_2",
-        "mountain_rossby_5_0", "rossby_haurwitz_6_0",
+        "inertio_gravity_3_2", "mountain_rossby_5_0", "rossby_haurwitz_6_0",
     )
     # Non-rotating cases override the planetary rotation rate at
     # grid-construction time (the four grid factories all accept
@@ -4627,16 +4620,16 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         if tc.case not in ("baroclinic", "baroclinic_steady",
                            "rotated_baroclinic", "rotated_steady") and not (
-                               _rest or _dcmip2008_dry):
+                               _rest or _dcmip2008_dry or _gw31 is not None):
             raise NotImplementedError(
                 f"{tc.case} on cube: no fv3_duo matrix adapter for this IC")
         # FV3 duo (sole cube core): FV3DuoDynamicsModel, DCMIP16 IC; see
         # scripts/matrix/_cube_duo_adapters.py.
         from scripts.matrix._cube_duo_adapters import build_duo_hydro
         n = int(tc.resolution[1:])
-        if _rest or _dcmip2008_dry:
+        if _rest or _dcmip2008_dry or _gw31 is not None:
             # the SAME cube IC builder as the other grids' dispatch, on the
-            # duo cells; terrain and omega (3-1: 0) from its recipe
+            # duo cells; terrain, omega, radius and table from its recipe
             duo = build_duo_hydro(
                 n, shared_case=tc.case,
                 ic_kwargs={"h_0": _rest_h0} if _rest else None)
@@ -4886,11 +4879,22 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
             # with the flow, else the rotated baroclinic state is not steady.
             _gauss_kwargs["coriolis_alpha"] = _rot_alpha
+        if _gw31 is not None:
+            _gauss_kwargs["radius"] = _gw31.small_planet_radius()
         grid = create_gaussian_grid(n_max, **_gauss_kwargs)
-        sigma = _create_vertical(nlev, tc.vertical_coord)
-        dt = 600.0
+        if _gw31 is not None:
+            from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+            sigma = make_dcmip2012_gw31_levels()
+        else:
+            sigma = _create_vertical(nlev, tc.vertical_coord)
+        dt = 600.0 if _gw31 is None else 600.0 / _gw31.X_SCALE
+        _hd = 2.338e15 * (21.0 / n_max) ** 4
+        if _gw31 is not None:
+            # del-4 (hyperdiff_order 2, k = 2): K_4 / X^3; the per-step
+            # spectral filter below needs no change (it scales with dt / X)
+            _hd = _hd / _gw31.X_SCALE ** 3
         pe_config = SpectralPEConfig(
-            hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+            hyperdiff_coeff=_hd,
             spectral_filter_order=8,
             spectral_filter_strength=0.01,
             fix_mass=True, anchor_mass_to_initial=True,
@@ -4919,6 +4923,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             state = lapse_rate_state_topography_init_spectral(
                 grid, sigma, h_0=_rest_h0,
                 dealiasing_fraction=pe_config.dealiasing_fraction)
+        elif _gw31 is not None:
+            state = _gw31.gravity_wave_init_spectral(grid, sigma)
         elif _dcmip2008_dry:
             state = _build_dcmip2008_state(
                 tc.case, "spectral", grid, sigma)
@@ -6901,7 +6907,7 @@ RUNNERS: dict[str, Callable] = {
     "rotated_baroclinic": run_baroclinic,            # M1.a (rotated as DCMIP 2008 2-3-0)
     "rotated_steady": run_baroclinic,                # M1.a (rotated as DCMIP 2008 1-3-0)
     "rest_state_topo": run_baroclinic,               # M1.a (DCMIP 2012 §2-0-0)
-    "gravity_wave_3_1":   run_baroclinic,            # M1.a (DCMIP 2008 §3-1)
+    "gravity_wave_3_1":   run_baroclinic,            # DCMIP 2012 test 3-1
     "inertio_gravity_3_2": run_baroclinic,           # M1.a (DCMIP 2008 §3-2)
     "mountain_rossby_5_0": run_baroclinic,           # M1.a (DCMIP 2008 §5-0)
     "rossby_haurwitz_6_0": run_baroclinic,           # M1.a (DCMIP 2008 §6-0)

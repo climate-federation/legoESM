@@ -181,7 +181,7 @@ def test_latlon_lane_divides_the_del2_viscosity_by_x(mm, monkeypatch,
 
 #: the lanes wired to the DCMIP 2012 3-1 setup so far (explicit, not read
 #: from the module under test)
-WIRED = {"cubed_sphere", "latlon", "icosahedral"}
+WIRED = {"cubed_sphere", "latlon", "icosahedral", "spectral"}
 
 
 @pytest.mark.parametrize("grid", ["cubed_sphere", "latlon", "icosahedral",
@@ -313,3 +313,131 @@ def test_ico_control_row_keeps_the_earth_lane(mm, monkeypatch, tmp_path):
         np.testing.assert_array_equal(np.asarray(getattr(loop["state"], k).data),
                                       np.asarray(getattr(ref, k).data),
                                       err_msg=k)
+
+
+_SPEC = "legoesm.atmosphere.dynamics.gcm.spectral_pe"
+
+
+def test_spectral_lane_runs_the_small_planet(mm, monkeypatch, tmp_path):
+    """T21: radius a_ref/125, Omega = 0, the L10 table, the 2012 IC,
+    dt = 600 s / X = 4.8 s, del-4 hyperdiffusion / X^3, the per-step
+    spectral filter of the ordinary rows."""
+    import numpy as np
+    from legoesm.grids.gaussian import sh_synthesis_3d
+    from tests.test_cases.dcmip2012 import gravity_wave_3_1 as gw
+    seen = _spy_model(monkeypatch, _SPEC, "SpectralPrimitiveEquationModel")
+    s = _loop_args(mm, monkeypatch, tmp_path, "spectral", "T21")
+    assert s["dt"] == 4.8 and s["n_steps"] == 750 and s["diag_every"] == 5
+    grid, sigma, cfg = seen["args"][:3]
+    assert grid.n_max == 21
+    assert float(grid.radius) == gw.small_planet_radius()
+    assert float(grid.omega) == 0.0
+    assert np.all(np.asarray(grid.f) == 0.0)
+    _assert_gw31_table(sigma)
+    assert cfg.hyperdiff_order == 2                     # del-4: k = 2
+    assert cfg.hyperdiff_coeff == pytest.approx(2.338e15 / 125.0 ** 3,
+                                                rel=1e-15)
+    assert (cfg.spectral_filter_order, cfg.spectral_filter_strength) == (
+        8, 0.01)
+    # the del-4 operator the step applies, on THIS grid: per degree l the
+    # rate is K_4 (l(l+1)/a^2)^2 -- X times the Earth row's rate (so the
+    # damping per step, rate * dt with dt / X, is the Earth row's)
+    from legoesm.grids.gaussian import (
+        create_gaussian_grid, spectral_hyperdiffusion_3d)
+    from legoesm import constants
+    ones = np.ones((grid.n_sh, 1), dtype=np.complex128)
+    rate = -np.real(np.asarray(spectral_hyperdiffusion_3d(
+        grid, ones, cfg.hyperdiff_coeff, cfg.hyperdiff_order)))[:, 0]
+    ell = np.asarray(grid.ls, dtype=np.float64)
+    a = gw.small_planet_radius()
+    np.testing.assert_allclose(rate, 2.338e15 / 125.0 ** 3
+                               * (ell * (ell + 1) / a ** 2) ** 2, rtol=1e-12)
+    earth = create_gaussian_grid(21, omega=0.0)
+    rate_e = -np.real(np.asarray(spectral_hyperdiffusion_3d(
+        earth, ones, 2.338e15, 2)))[:, 0]
+    m = ell > 0
+    np.testing.assert_allclose(rate[m] / rate_e[m], 125.0, rtol=1e-6)
+    np.testing.assert_allclose(rate[m] * 4.8, rate_e[m] * 600.0, rtol=1e-6)
+    assert float(earth.radius) == float(constants.R_earth)
+    assert cfg.T_damping_pressure_surfaces is False
+    assert cfg.fix_mass and cfg.anchor_mass_to_initial
+    ref = gw.gravity_wave_init_spectral(grid, sigma)
+    for k in ("vor_hat", "div_hat", "T_hat", "lnps_hat", "phis_hat"):
+        np.testing.assert_array_equal(np.asarray(getattr(s["state"], k).data),
+                                      np.asarray(getattr(ref, k).data),
+                                      err_msg=k)
+    T = np.asarray(sh_synthesis_3d(grid, s["state"].T_hat.data))
+    assert np.all(np.isfinite(T)) and 225.0 < T.min() and T.max() < 305.0
+    # the loop's step callback is the model's own step at the given dt,
+    # and it applies the EXPLICIT del-4 on the small grid with the scaled
+    # coefficient (recorded at trace time)
+    assert cfg.implicit_hyperdiff is False
+    import importlib
+    spm = importlib.import_module(_SPEC)
+    real_hd, hd_calls = spm.spectral_hyperdiffusion_3d, []
+
+    def hd_spy(g, c, nu, order=2):
+        hd_calls.append((g, nu, order))
+        return real_hd(g, c, nu, order)
+
+    monkeypatch.setattr(spm, "spectral_hyperdiffusion_3d", hd_spy)
+    out = s["step_fn"](s["state"], s["dt"])
+    assert hd_calls and all(g is grid and nu == cfg.hyperdiff_coeff
+                            and order == 2 for g, nu, order in hd_calls)
+    # ... and its tendency reaches the state: the same step without it
+    # (a fresh model, hyperdiff_coeff = 0) evolves T differently
+    monkeypatch.setattr(spm, "spectral_hyperdiffusion_3d", real_hd)
+    real_cls = type(seen["model"]).__bases__[0]      # the spy's base
+    nohd = real_cls(grid, sigma, cfg._replace(hyperdiff_coeff=0.0)).step(
+            s["state"], s["dt"])
+    assert not np.array_equal(np.asarray(nohd.T_hat.data),
+                              np.asarray(out.T_hat.data))
+    mod = seen["model"].step(s["state"], s["dt"])
+    for k in ("vor_hat", "div_hat", "T_hat", "lnps_hat"):
+        a = np.asarray(getattr(out, k).data)
+        assert np.all(np.isfinite(a)), k
+        np.testing.assert_array_equal(a, np.asarray(getattr(mod, k).data),
+                                      err_msg=k)
+    assert not np.array_equal(np.asarray(out.T_hat.data),
+                              np.asarray(s["state"].T_hat.data))
+
+
+def test_spectral_control_row_keeps_the_earth_lane(mm, monkeypatch,
+                                                   tmp_path):
+    """An ordinary T21 row (inertio_gravity_3_2): Earth radius and rotation,
+    CAM6 L32, dt = 600 s, the unscaled hyperdiffusion."""
+    import numpy as np
+    from legoesm import constants
+    from legoesm.grids.vertical import make_cam6_l32_levels
+    for v in ("LEGOESM_MATRIX_NLEV", "LEGOESM_MATRIX_TRANSITION_EXPONENT"):
+        monkeypatch.delenv(v, raising=False)
+    seen = _spy_model(monkeypatch, _SPEC, "SpectralPrimitiveEquationModel")
+    loop = {}
+
+    def fake(step_fn, state, dt, n_steps, *a, **k):
+        loop.update(dt=dt, n_steps=n_steps, state=state)
+        raise _Stop
+
+    monkeypatch.setattr(mm, "_run_timeloop", fake)
+    tc = mm.TestCase("hydrostatic", "inertio_gravity_3_2", "spectral", "T21",
+                     "hybrid", 3.0, 0.5, {})
+    with pytest.raises(_Stop):
+        mm.run_baroclinic(tc, tmp_path, tc.quick_days)
+    grid, sigma, cfg = seen["args"][:3]
+    assert float(grid.radius) == float(constants.R_earth)
+    assert float(grid.omega) == float(constants.Omega)
+    ref = make_cam6_l32_levels()
+    for k in ("A_half", "B_half"):
+        np.testing.assert_array_equal(np.asarray(getattr(sigma, k)),
+                                      np.asarray(getattr(ref, k)), err_msg=k)
+    assert loop["dt"] == 600.0 and loop["n_steps"] == int(0.5 * 86400 / 600)
+    assert cfg.hyperdiff_coeff == 2.338e15
+    assert (cfg.spectral_filter_order, cfg.spectral_filter_strength) == (
+        8, 0.01)
+    from tests.test_cases.dcmip2008.inertio_gravity_3_2 import (
+        inertio_gravity_init_spectral)
+    ref_state = inertio_gravity_init_spectral(grid, sigma)
+    for k in ("vor_hat", "div_hat", "T_hat", "lnps_hat", "phis_hat"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(loop["state"], k).data),
+            np.asarray(getattr(ref_state, k).data), err_msg=k)

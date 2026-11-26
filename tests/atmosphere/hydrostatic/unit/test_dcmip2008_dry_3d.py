@@ -1,8 +1,8 @@
 """Sanity tests for the DCMIP 2008 dry-3D Hughes-tutorial cases.
 
-Covers four IC modules added in M1.b:
+Covers three IC modules added in M1.b (the gravity wave is DCMIP 2012
+test 3-1: ``test_dcmip2012_gravity_wave_3_1.py``):
 
-- ``gravity_wave_3_1``  — gravity wave on (notionally) non-rotating Earth
 - ``inertio_gravity_3_2`` — inertio-gravity wave on rotating planet
 - ``mountain_rossby_5_0`` — mountain-induced Rossby wave (Gaussian peak)
 - ``rossby_haurwitz_6_0`` — small-amplitude 3D Rossby-Haurwitz wave-4
@@ -66,50 +66,6 @@ def _assert_dry3d_state_spectral(state):
     assert bool(jnp.all(jnp.isfinite(state.div_hat.data.real)))
     assert bool(jnp.all(jnp.isfinite(state.T_hat.data.real)))
     assert bool(jnp.all(jnp.isfinite(state.lnps_hat.data.real)))
-
-
-# ---------------------------------------------------------------------------
-# DCMIP 2008 §3-1 — gravity wave on non-rotating Earth
-# ---------------------------------------------------------------------------
-
-
-class TestGravityWave31:
-    def test_cubed_sphere(self, sigma8):
-        from tests.test_cases.dcmip2008.gravity_wave_3_1 import (
-            gravity_wave_init,
-        )
-        grid = create_cubed_sphere(8)
-        state = gravity_wave_init(grid, sigma8)
-        _assert_dry3d_state_grid_space(state)
-        # Solid-body u_0 ≈ 20 m/s with cos(lat) ≤ 1 so |u| ≤ ~20 m/s
-        assert float(jnp.max(jnp.abs(state.u.data))) < 25.0
-        # Theta perturbation is small (δθ = 1 K) so T variation < 5 K
-        T_dev = float(jnp.max(jnp.abs(state.T.data - 300.0)))
-        assert T_dev < 5.0
-
-    def test_latlon(self, sigma8):
-        from tests.test_cases.dcmip2008.gravity_wave_3_1 import (
-            gravity_wave_init_latlon,
-        )
-        grid = create_latlon_grid(24, 48)
-        state = gravity_wave_init_latlon(grid, sigma8)
-        _assert_dry3d_state_grid_space(state)
-
-    def test_mpas(self, sigma8):
-        from tests.test_cases.dcmip2008.gravity_wave_3_1 import (
-            gravity_wave_init_mpas,
-        )
-        mesh = create_voronoi_mesh(4)
-        state = gravity_wave_init_mpas(mesh, sigma8)
-        _assert_dry3d_state_mpas(state)
-
-    def test_spectral(self, sigma8):
-        from tests.test_cases.dcmip2008.gravity_wave_3_1 import (
-            gravity_wave_init_spectral,
-        )
-        grid = create_gaussian_grid(21)
-        state = gravity_wave_init_spectral(grid, sigma8)
-        _assert_dry3d_state_spectral(state)
 
 
 # ---------------------------------------------------------------------------

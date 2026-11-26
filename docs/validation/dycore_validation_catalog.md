@@ -47,7 +47,7 @@ Run with `JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py
 | DCMIP12-2-0-0 | Atmospheric rest state with steep hydrostatic topography | all | ✅ M1 | `tests/test_cases/dcmip2012/rest_state_topography.py` |
 | DCMIP08-6-0 | Small-amplitude Rossby-Haurwitz wave (3D, isothermal background) | all | ✅ M1.b | `tests/test_cases/dcmip2008/rossby_haurwitz_6_0.py` |
 | DCMIP08-5-0 | Mountain-induced Rossby wave (3D zonal flow over isolated mountain) | all | ✅ M1.b | `tests/test_cases/dcmip2008/mountain_rossby_5_0.py` |
-| DCMIP08-3-1 | Gravity wave on non-rotating Earth (isothermal) | all | ✅ M1.b (canonical: matrix runner builds grid with `omega=0`) | `tests/test_cases/dcmip2008/gravity_wave_3_1.py` |
+| DCMIP12-3-1 | Non-orographic gravity waves on the non-rotating X = 125 small planet (constant N, App. F.3 L10, 3600 s; hydrostatic pressure-based form) | all | ✅ (`gravity_wave_3_1` row) | `tests/test_cases/dcmip2012/gravity_wave_3_1.py` |
 | DCMIP08-3-2 | Inertio-gravity wave on rotating planet | all | ✅ M1.b | `tests/test_cases/dcmip2008/inertio_gravity_3_2.py` |
 
 ## §4 — Non-hydrostatic dry 3D
@@ -58,7 +58,7 @@ Run with `JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py
 | DCMIP12-NH-2-0-1 | Atmospheric rest state with steep Schaer (NH) topography | NH | ❌ M2 | TBD `tests/test_cases/dcmip2012/rest_state_schaer_nh.py` |
 | DCMIP12-2-1 | Schaer-mountain orographic GW without shear | NH | ❌ M2 | TBD `tests/test_cases/dcmip2012/schaer_gw_no_shear.py` |
 | DCMIP12-2-2 | Schaer-mountain orographic GW with shear | NH | ❌ M2 | TBD `tests/test_cases/dcmip2012/schaer_gw_with_shear.py` |
-| DCMIP12-3-1 | Non-orographic gravity waves | NH | ❌ M2 | TBD `tests/test_cases/dcmip2012/non_orographic_gw.py` |
+| DCMIP12-3-1-NH | Non-orographic gravity waves, non-hydrostatic dycores (the hydrostatic rows run DCMIP12-3-1 above) | NH | ❌ M2 | TBD |
 | Klemp15-PGW | Quasi-planar reduced-radius orographic GW | NH | ❌ M2 | TBD `tests/test_cases/klemp2015/orographic_gw_planar.py` |
 
 ## §5 — Dynamical tracer tests
@@ -142,8 +142,8 @@ M1.b (delivered in a second commit on this PR):
 - `tests/test_cases/dcmip2008/_shared.py` — isothermal-hydrostatic
   state builders for all four grids (factored out so the four
   DCMIP-2008 modules below can stay short)
-- `tests/test_cases/dcmip2008/gravity_wave_3_1.py` — DCMIP §3-1
-  gravity wave on (notionally) non-rotating sphere
+- (the DCMIP §3-1 gravity wave module was replaced by the DCMIP 2012
+  test 3-1 port, `tests/test_cases/dcmip2012/gravity_wave_3_1.py`)
 - `tests/test_cases/dcmip2008/inertio_gravity_3_2.py` — DCMIP §3-2
 - `tests/test_cases/dcmip2008/mountain_rossby_5_0.py` — DCMIP §5-0
 - `tests/test_cases/dcmip2008/rossby_haurwitz_6_0.py` — DCMIP §6-0
