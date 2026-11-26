@@ -1205,6 +1205,11 @@ class BarotropicConfig(NamedTuple):
     n_barotropic_substeps: int = 30
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
+    # True: the eta damping's volume flux is booked into the time-averaged
+    # transport the tracers are advected with, so tracer continuity closes.
+    # False: the pre-2026-11-25 behaviour (eta damped, tracers never see the
+    # water it moves; uniform tracers drift).
+    barotropic_diffusion_book_transport: bool = True
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
