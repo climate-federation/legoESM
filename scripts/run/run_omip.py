@@ -210,6 +210,10 @@ def build_vertical_mixing_config_from_args(
         tke_cfg = tke_fesom2_card()
     else:
         raise ValueError(f"unknown --tke-card {tke_card!r}")
+    if args.kpp_bld_structure == "cvmix" and args.kpp_vt2_velocity_scale != "candidate":
+        raise ValueError(
+            "--kpp-bld-structure cvmix requires --kpp-vt2-velocity-scale candidate "
+            f"(got {args.kpp_vt2_velocity_scale!r})")
     return VerticalMixingConfig(
         scheme=scheme,
         tke=tke_cfg,
@@ -219,6 +223,7 @@ def build_vertical_mixing_config_from_args(
             K_bg=args.kpp_k_bg,
             K_conv=args.kpp_k_conv,
             A_bg=args.kpp_a_bg,
+            bld_structure=args.kpp_bld_structure,
             enable_langmuir=args.langmuir,
             langmuir_coeff=args.langmuir_coeff,
             langmuir_number_default=args.langmuir_number_default,
@@ -860,6 +865,11 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--kpp-a-bg", type=float,
                    default=_DEFAULT_KPP_CONFIG.A_bg,
                    help="KPP background viscosity [m^2/s]")
+    p.add_argument("--kpp-bld-structure", type=str,
+                   default=_DEFAULT_KPP_CONFIG.bld_structure,
+                   choices=("legacy", "cvmix"),
+                   help="KPP boundary-layer structure: legacy, or cvmix "
+                        "(CVMix/MOM6 reference, crossing and interface K)")
     # --- wide-halo split-explicit barotropic (scaling-audit item 3) ---
     p.add_argument("--mpas-k-zeta-bih", type=float, default=None,
                    dest="mpas_k_zeta_bih",

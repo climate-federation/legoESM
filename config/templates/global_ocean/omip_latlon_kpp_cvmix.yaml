@@ -4,7 +4,8 @@
 # fork): the unresolved-shear velocity scale of the CVMix/MOM6 form, velocity scales
 # from the actual surface buoyancy flux (no float32-epsilon floor), and surrogate
 # gradients through the boundary-layer-base and convective switches (forward
-# unchanged).  Defaults elsewhere stay as in omip_latlon_kpp.yaml.
+# unchanged), plus the CVMix/MOM6 boundary-layer structure (bld_structure: cvmix).
+# Defaults elsewhere stay as in omip_latlon_kpp.yaml.
 experiment:
   tier: tier3
   complexity: primitive_equation
@@ -44,6 +45,7 @@ ocean:
         vt2_velocity_scale: candidate   # CVMix / MOM6 w_s at sigma = epsilon of each candidate depth
         actual_buoyancy_flux: true      # zeta from the actual B_f (CVMix 1d_OBL)
         gradient_surrogates: true       # logistic-blend backward pass through the two switches
+        bld_structure: cvmix            # CVMix/MOM6 BL structure: surface-layer reference, (1-eps/2) Ri, first-crossing interp, interface K
     lateral_mixing:
       scheme: none            # lat-lon: lateral mixing via A_h / gm_redi (see header)
     convection:

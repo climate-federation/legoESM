@@ -36,6 +36,21 @@ def test_issue484_new_omip_flags_flow_to_config():
     assert cfg.vertical_mixing.kpp.A_bg == 2e-4
 
 
+def test_kpp_bld_structure_flag_flows_to_config():
+    """--kpp-bld-structure selects KPPConfig.bld_structure (default legacy)."""
+    off = build_config_from_args(parse_args(["--grid", "latlon"]))
+    assert off.vertical_mixing.kpp.bld_structure == "legacy"
+    on = build_config_from_args(parse_args(
+        ["--grid", "latlon", "--kpp-bld-structure", "cvmix", "--kpp-vt2-velocity-scale", "candidate"]))
+    assert (on.vertical_mixing.kpp.bld_structure, on.vertical_mixing.kpp.vt2_velocity_scale) == (
+        "cvmix", "candidate")
+    for extra in ([], ["--kpp-vt2-velocity-scale", "column"]):
+        with pytest.raises(ValueError, match="requires --kpp-vt2-velocity-scale candidate"):
+            build_config_from_args(parse_args(["--grid", "latlon", "--kpp-bld-structure", "cvmix", *extra]))
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "latlon", "--kpp-bld-structure", "cvmx"])
+
+
 def test_kpp_cvmix_option_flags_flow_to_config():
     """The opt-in KPP options reach KPPConfig; absent flags keep the defaults."""
     cfg = build_config_from_args(parse_args([
