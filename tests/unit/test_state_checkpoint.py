@@ -466,3 +466,20 @@ class TestHelpers:
     def test_field_metadata_none(self, land_state):
         meta = _extract_field_metadata(land_state)
         assert meta["runoff"]["is_none"] is True
+
+
+def test_legacy_field_is_refused(tmp_path):
+    """A field a state class declares renamed-and-redefined must not load."""
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import SpectralNHState
+
+    class _Renamed(NamedTuple):
+        new: Field
+        checkpoint_legacy_fields = {"old": "replaced by new"}
+
+    f = Field(data=jnp.ones(3), name="x", dims=("x",), units="1")
+    path = tmp_path / "legacy.npz"
+    np.savez(path, old=np.ones(3))
+    with pytest.raises(ValueError, match="old: replaced by new"):
+        load_state_checkpoint(path, _Renamed(new=f), strict=False)
+    # The spectral NH state declares its pre-#2682 density field.
+    assert "rho_prime_hat" in SpectralNHState.checkpoint_legacy_fields

@@ -106,6 +106,13 @@ class SpectralNHState(NamedTuple):
     phis_hat: Field
     tracers_hat: Field
 
+    # Read by legoesm.io.state_checkpoint: refuse pre-#2682 checkpoints.
+    checkpoint_legacy_fields = {
+        "rho_prime_hat": "replaced by jrho_prime_hat = J*rho' (#2682); "
+                         "converting needs the terrain Jacobian, regenerate "
+                         "the checkpoint",
+    }
+
 
 class SpectralNHConfig(NamedTuple):
     """Configuration for spectral non-hydrostatic model."""
