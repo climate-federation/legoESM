@@ -2138,6 +2138,45 @@ def hybrid_from_sigma(
     return create_hybrid_coordinate(sigma_coord.n_levels, A_half, B_half, p_ref)
 
 
+def fv3_sigma_eta_table(sigma_half, p_ref: float = constants.p_ref):
+    """``(ak [Pa], bk, ptop [Pa])`` float64 FV3 interface table of a sigma
+    coordinate, top -> surface, for ``pe = ak + bk * ps`` with FV3's FIXED
+    lid ``ptop`` (a scalar in FV3; ``ptop = 0`` is inadmissible, log(0)).
+
+    Pure sigma below the lid: ``ak = 0``, ``bk = sigma_half`` at every
+    interior interface, so ``pe_k = sigma_k * ps`` exactly (the
+    :func:`hybrid_from_sigma` A = 0, B = sigma form) at ANY ``ps``.  The
+    top interface is the lid ``ptop = sigma_half[0] * p_ref`` (``ak[0] =
+    ptop``, ``bk[0] = 0``: FV3's remap target top is ``ptop`` and never
+    reads ``ak[0]``/``bk[0]``, fv_mapz.F90:203-206, so the table is written
+    self-consistently with it).  At ``ps = p_ref`` every interface equals
+    the sigma coordinate's ``sigma_half * p_ref``; away from it only the
+    lid differs (fixed ``ptop`` vs ``sigma_half[0] * ps``).  The top layer
+    stays positive only while ``ps > ptop / sigma_half[1]`` (uniform L40,
+    sigma_top 0.01: ps > 28.8 kPa); the FV3 step fails loudly (non-positive
+    delp) beyond it.
+    (Vote 2026-11-26, pure-sigma interior vs FV3 ks=0 ``ak = ptop (1-bk)``:
+    author A, codex A.)
+    """
+    s = np.asarray(sigma_half)
+    if s.dtype != np.float64:
+        raise ValueError(f"fv3_sigma_eta_table: sigma_half must be float64, "
+                         f"got {s.dtype} (enable jax x64)")
+    if (s.ndim != 1 or s.size < 3 or not np.all(np.diff(s) > 0.0)
+            or not 0.0 < s[0] < 1.0 or s[-1] != 1.0):
+        raise ValueError("fv3_sigma_eta_table: sigma_half must increase "
+                         "strictly from a top in (0, 1) to exactly 1")
+    ptop = float(s[0] * p_ref)
+    if not (np.isfinite(ptop) and ptop > 0.0):
+        raise ValueError(f"fv3_sigma_eta_table: lid ptop = sigma_top * p_ref "
+                         f"must be finite and > 0, got {ptop}")
+    bk = s.copy()
+    bk[0] = 0.0
+    ak = np.zeros_like(s)
+    ak[0] = ptop
+    return ak, bk, ptop
+
+
 def pressure_from_hybrid(
     coord: HybridSigmaPressureCoordinate,
     p_s: jax.Array,

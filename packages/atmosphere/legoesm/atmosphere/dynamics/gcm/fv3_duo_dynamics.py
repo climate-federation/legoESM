@@ -123,6 +123,8 @@ class FV3DuoConfig(NamedTuple):
     #: 30; explicitly selected by the DCMIP transport rows only.
     #: "dcmip2012_gw31_l10": DCMIP 2012 test 3-1 grid (App. F.3, constant-N
     #: profile, 10 km lid), km must be 10; selected by that row only.
+    #: "sigma": uniform sigma (create_sigma_coordinate(km)) with a fixed
+    #: lid at 0.01 p_ref, any km >= 2; selected by the sigma rows only.
     eta: str = "analytic"
     #: fv_mapz.F90:336/:1840 ``fill``: FV3's column borrow (``fillz``) on
     #: every tracer after the vertical remap -- the dycore-internal
@@ -209,6 +211,11 @@ def duo_eta_table(eta: str, km: int):
     ``"dcmip2012_gw31_l10"``: the DCMIP 2012 test 3-1 grid
     (:func:`legoesm.grids.vertical.dcmip2012_gw31_eta_table`), km == 10,
     fixed lid at ~273.8 hPa; selected explicitly by that matrix row only.
+    ``"sigma"``: the matrix sigma rows' coordinate
+    (``create_sigma_coordinate(km)``, uniform, sigma_top 0.01, built in
+    float64) as a fixed-lid FV3 table
+    (:func:`legoesm.grids.vertical.fv3_sigma_eta_table`: ak = 0, bk =
+    sigma below the lid ptop = 0.01 p_ref), any km >= 2.
     """
     if eta == "fv3_l40":
         from legoesm.core.fv3_native_eta import FV3_L40_AK, FV3_L40_BK
@@ -248,9 +255,19 @@ def duo_eta_table(eta: str, km: int):
                 f"FV3DuoConfig(eta='dcmip2012_gw31_l10') is the 10-level "
                 f"table; got km={km}")
         return dcmip2012_gw31_eta_table(10)
+    if eta == "sigma":
+        # explicitly selected only (the matrix's sigma-labelled rows)
+        import jax.numpy as jnp
+        from legoesm.grids.vertical import (
+            create_sigma_coordinate, fv3_sigma_eta_table)
+        if km < 2:
+            raise ValueError(f"FV3DuoConfig(eta='sigma') needs km >= 2; "
+                             f"got km={km}")
+        sig = create_sigma_coordinate(km, dtype=jnp.float64)
+        return fv3_sigma_eta_table(sig.sigma_half)
     raise ValueError(
         f"FV3DuoConfig.eta={eta!r}: expected 'analytic', 'cam6_l32', "
-        f"'fv3_l40', 'dcmip2012_l30' or 'dcmip2012_gw31_l10'")
+        f"'fv3_l40', 'dcmip2012_l30', 'dcmip2012_gw31_l10' or 'sigma'")
 
 
 def lon_modulated_tracer(sphum, agrid_lon, n: int, ng: int, iq: int):

@@ -328,6 +328,11 @@ DUO_HYDRO_DT_ATMOS = 1920.0
 DUO_GW31_DT_ATMOS = 15.0
 DUO_GW31_KM = 10
 DUO_GW31_ETA = "dcmip2012_gw31_l10"
+#: The duo table of the matrix's sigma-labelled rows (Held-Suarez,
+#: baroclinic, baroclinic_steady): the other grids' sigma coordinate
+#: (``create_sigma_coordinate(nlev)``) as a fixed-lid FV3 table
+#: (``fv3_sigma_eta_table``); km is the row's nlev.
+DUO_SIGMA_ETA = "sigma"
 
 
 def _cam6_l32_coord(model, what: str):
@@ -687,6 +692,10 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     ``rotated_alpha`` (not None): rotated DCMIP-2016 wave -- the planet's
     rotation axis tilted by alpha (``create_fv3_duo_grid(rotation_alpha)``)
     and :func:`rotated_jw_bundle` as the IC.
+    ``eta=DUO_SIGMA_ETA`` (with ``km`` = the row's nlev): the sigma rows'
+    table (pure sigma below a fixed 0.01 p_ref lid); only with the
+    Held-Suarez rest IC or the un-rotated DCMIP16 wave, whose builders
+    take any ak/bk.
     ``shared_case`` (not None): the row's IC is its shared cube builder
     (:func:`duo_shared_ic_spec`, ``ic_kwargs`` passed through), with the
     recipe's terrain (``phis_fn``, unfiltered like every other grid's) and
@@ -705,6 +714,10 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     if gw31 and (km, eta) != (DUO_HYDRO_KM, DUO_HYDRO_ETA):
         raise ValueError("gravity_wave_3_1 runs its own DCMIP 2012 L10 "
                          "table; do not pass km/eta")
+    if eta == DUO_SIGMA_ETA and (shared_case is not None
+                                 or rotated_alpha is not None):
+        raise ValueError(f"eta={DUO_SIGMA_ETA!r}: the shared-IC and rotated "
+                         f"builders are built on CAM6 L32 only")
     if gw31:
         # the one admitted small-planet configuration: C36, the 3-1 L10
         # table, a = R_earth/125 and DUO_GW31_DT_ATMOS -- checked below

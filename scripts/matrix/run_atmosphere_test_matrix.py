@@ -1453,6 +1453,32 @@ def _is_gw31_table(sigma) -> bool:
                                np.asarray(ref.A_half, np.float64)))
 
 
+def _duo_vertical_kw(vertical_coord: str, nlev: int) -> dict:
+    """``build_duo_hydro`` kwargs for a cube row's vertical label: a sigma
+    row runs the other grids' sigma coordinate (``create_sigma_coordinate
+    (nlev)``, as a fixed-lid FV3 table); every other label keeps the duo
+    default (CAM6 L32)."""
+    if vertical_coord == "sigma":
+        from scripts.matrix._cube_duo_adapters import DUO_SIGMA_ETA
+        return {"km": int(nlev), "eta": DUO_SIGMA_ETA}
+    return {}
+
+
+def _duo_vertical_note(vertical_coord: str, duo) -> str:
+    """results.txt record of the table a cube duo row ran; a sigma row
+    carries the same ``sigma_L<n>`` table ID as the other grids."""
+    from scripts.matrix._cube_duo_adapters import DUO_SIGMA_ETA
+    if duo.eta == DUO_SIGMA_ETA:
+        return (f"{duo.note}; vertical table: sigma_L{duo.km} (fv3_duo eta "
+                f"table: create_sigma_coordinate({duo.km}) interfaces, "
+                f"ak = 0 / bk = sigma below a fixed lid ptop = "
+                f"sigma_top * p_ref)")
+    return (f"{duo.note}; matrix vertical label "
+            f"'{vertical_coord}' NOT honoured (duo runs its "
+            f"hybrid table); vertical table: {duo.eta} (fv3_duo "
+            f"eta table, L{duo.km})")
+
+
 def _analytic_hybrid_exponent(n: int, sigma) -> str:
     """Effective ``B = eta**exp`` power of an analytic hybrid table.
 
@@ -4075,19 +4101,21 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # scripts/matrix/_cube_duo_adapters.py.
         from scripts.matrix._cube_duo_adapters import build_duo_hydro
         n = int(tc.resolution[1:])
+        # a sigma label on a CAM6-only builder (topo) is refused there
         duo = (build_duo_hydro(n, held_suarez=True,
                                shared_case="held_suarez_topo",
-                               ic_kwargs=_topo_init_kwargs()) if _topo
-               else build_duo_hydro(n, perturbed=True, held_suarez=True))
+                               ic_kwargs=_topo_init_kwargs(),
+                               **_duo_vertical_kw(tc.vertical_coord, nlev))
+               if _topo
+               else build_duo_hydro(n, perturbed=True, held_suarez=True,
+                                    **_duo_vertical_kw(tc.vertical_coord,
+                                                       nlev)))
         state = duo.state
         dt = duo.dt
         nlev = duo.km
         sigma = SimpleNamespace(sigma_full=duo.level_values)
         _ps0 = duo.ps(state)
-        _duo_note = (f"{duo.note}; matrix vertical label "
-                     f"'{tc.vertical_coord}' NOT honoured (duo runs its "
-                     f"hybrid table); vertical table: {duo.eta} (fv3_duo "
-                     f"eta table, L{duo.km})")
+        _duo_note = _duo_vertical_note(tc.vertical_coord, duo)
 
         def step_fn(s, dt_):
             return duo.step(s, dt_)
@@ -4648,21 +4676,22 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             # duo cells; terrain, omega, radius and table from its recipe
             duo = build_duo_hydro(
                 n, shared_case=tc.case,
-                ic_kwargs={"h_0": _rest_h0} if _rest else None)
+                ic_kwargs={"h_0": _rest_h0} if _rest else None,
+                **_duo_vertical_kw(tc.vertical_coord, nlev))
         elif _rotated:
+            # a sigma label on these CAM6-only builders is refused there
             duo = build_duo_hydro(n, perturbed=_rot_perturbed,
-                                  rotated_alpha=_rot_alpha)
+                                  rotated_alpha=_rot_alpha,
+                                  **_duo_vertical_kw(tc.vertical_coord, nlev))
         else:
-            duo = build_duo_hydro(n, perturbed=_perturbed)
+            duo = build_duo_hydro(n, perturbed=_perturbed,
+                                  **_duo_vertical_kw(tc.vertical_coord, nlev))
         state = duo.state
         dt = duo.dt
         nlev = duo.km
         sigma = SimpleNamespace(sigma_full=duo.level_values)
         _ps0 = duo.ps(state)
-        _duo_note = (f"{duo.note}; matrix vertical label "
-                     f"'{tc.vertical_coord}' NOT honoured (duo runs its "
-                     f"hybrid table); vertical table: {duo.eta} (fv3_duo "
-                     f"eta table, L{duo.km})")
+        _duo_note = _duo_vertical_note(tc.vertical_coord, duo)
 
         def step_fn(s, dt_):
             return duo.step(s, dt_)
