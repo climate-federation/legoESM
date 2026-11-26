@@ -53,8 +53,10 @@ def test_tables_are_real_fields_appended_at_the_tuple_end():
     assert set(_ZM) == set(ZM_SCALAR_FIELDS)
     assert set(_CLUBB) == set(CLUBB_SCALAR_FIELDS)
     assert CLUBB_PROGNOSTIC_ONLY <= set(CLUBB_SCALAR_FIELDS)
+    # Later features append after this block, so check append ORDER only.
     tail = list(ZM_SCALAR_FIELDS) + list(CLUBB_SCALAR_FIELDS)
-    assert list(ExperimentConfig._fields[-len(tail):]) == tail
+    idx = [ExperimentConfig._fields.index(f) for f in tail]
+    assert idx == sorted(idx)
 
 
 def test_cli_values_reach_the_mpas_scheme_configs():
@@ -148,11 +150,12 @@ def test_clubb_refused_without_clubb():
         turbulence_config_for(cfg)
 
 
-def test_prognostic_only_leaves_refused_on_diagnostic_clubb():
-    cfg = ExperimentConfig(turbulence="clubb", clubb_c14=3.0)
-    with pytest.raises(ValueError, match="clubb_c14"):
+@pytest.mark.parametrize("field", ["clubb_c14", "clubb_c6rtb"])
+def test_prognostic_only_leaves_refused_on_diagnostic_clubb(field):
+    cfg = ExperimentConfig(turbulence="clubb", **{field: _CLUBB[field]})
+    with pytest.raises(ValueError, match=field):
         cfg.validate_strict()
-    with pytest.raises(ValueError, match="clubb_c14"):
+    with pytest.raises(ValueError, match=field):
         turbulence_config_for(cfg)
     # gamma_coef and beta are read by the diagnostic path too.
     ok = ExperimentConfig(turbulence="clubb", clubb_beta=2.0)
