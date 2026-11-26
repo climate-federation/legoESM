@@ -48,6 +48,7 @@ ocean:
       scheme: kpp
       kpp:
         Ri_crit: 0.3          # critical bulk Richardson number (Large et al. 1994)
+        actual_buoyancy_flux: true   # zeta from the actual B_f (CVMix 1d_OBL), no float32-eps floor
     lateral_mixing:
       scheme: none            # lat-lon: lateral mixing via A_h / gm_redi (see header)
     convection:

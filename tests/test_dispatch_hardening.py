@@ -137,6 +137,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py",
          "latlon_tracer_tendencies"),
+        # KPP boundary-layer structure ("legacy" | "cvmix"): an unknown value
+        # must raise, never run the legacy structure silently.
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py",
+         "_boundary_layer_depth"),
         # RRTMGP gas-table set: an unknown name must raise, never fall back
         # to the reduced tables.
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py",

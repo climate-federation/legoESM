@@ -605,6 +605,10 @@ class CoupledESMDriver:
         if isinstance(self._ocean_grid, VoronoiMesh):
             self._init_mpas_dynamic_ocean(T_sfc_mean)
             return
+        if self._atm.config.geography:
+            raise ValueError(
+                "geography with a lat-lon/tripole dynamic ocean is not supported "
+                "yet (only the co-located MPAS ocean reads it); refusing")
         from legoesm.grids.latlon import LatLonGrid
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -1014,7 +1018,7 @@ class CoupledESMDriver:
         from legoesm.ocean.fidelity.nemo_match_recipe import (
             nemo_match_mpas_model_config,
         )
-        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        from legoesm.ocean.init_mpas import REST_T_DEEP_C, rest_state_mpas_ocean
         from legoesm.ocean.vertical import create_ocean_z_star
         from legoesm import constants
 
@@ -1052,11 +1056,69 @@ class CoupledESMDriver:
         # rationale as the lat-lon ocean_ic='rest' branch.  The surface layer
         # starts near the atmosphere's mean SST (T_sfc_mean [K] -> degC) so the
         # cold start is not shocked by a large air-sea temperature jump.
-        T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+        if cfg.ocean_ic == "qobs":
+            from legoesm.forcing.analytical import qobs_sst_C
+            T_surf_C = qobs_sst_C(np.degrees(np.asarray(mesh.latCell)))
+            # cold-over-warm is unstable at 35 psu: deep water no warmer than
+            # the surface (VOTED a/a/c), so polar columns start neutral
+            T_deep_C = np.minimum(REST_T_DEEP_C, T_surf_C)
+        elif cfg.ocean_ic == "rest":
+            T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+            T_deep_C = REST_T_DEEP_C
+        else:
+            raise ValueError(
+                f"MPAS ocean: ocean_ic must be 'rest' or 'qobs', got {cfg.ocean_ic!r}.")
         self._ocean_state = rest_state_mpas_ocean(
-            mesh, z_coord, T_water_init_C=T_surf_C, H_max=cfg.ocean_H_max_m,
+            mesh, z_coord, T_water_init_C=T_surf_C, T_deep=T_deep_C, H_max=cfg.ocean_H_max_m,
             land_lat_threshold=90.0,
         )
+        geo = self._atm.config.geography
+        if geo:
+            # depth from the geography, wet = atm f_land < 1 on the shared mesh
+            # (no air-sea flux lands on a dry ocean cell; user 2026-11-20).
+            # Built on the global mesh then sliced to this rank's cells, as the
+            # atm terrain is; then the OMIP realistic recipe: snap thin bottom
+            # cells, partial-cell coordinate, model rebuilt on it.
+            from legoesm.core.field import Field
+            from legoesm.grids.geography import geography_ocean_depth
+            from legoesm.ocean.bathymetry import BathymetryConfig, snap_partial_cells
+            from legoesm.ocean.vertical import create_partial_cell_coordinate
+            if mesh is not self._atm.grid:
+                raise ValueError(
+                    "geography with an MPAS ocean on its own mesh is not supported "
+                    "yet (the wet mask is the atmosphere's land fraction, cell by "
+                    "cell); refusing")
+            layout = getattr(self._atm, "_voronoi_layout", None)
+            if layout is not None:
+                # VOTED a/a/a, widened (codex r5): the dry->wet flux routing is
+                # built from the rank-local wet mask and the snap-to-zero
+                # refusal below counts rank-local cells, so either could fire on
+                # some ranks only; refused on every rank until both are global
+                raise ValueError(
+                    f"geography {geo} on a partitioned (multi-rank) MPAS ocean is "
+                    "not supported yet (dry-cell flux routing and the wet-cell "
+                    "checks are rank-local); run it on one process")
+            depth = geography_ocean_depth(
+                self._atm._grid_global if layout is not None else mesh, geo,
+                H_min=BathymetryConfig().H_min, H_max=cfg.ocean_H_max_m)
+            if layout is not None:
+                depth = depth[np.asarray(layout.partition.local_cells)]
+            wet = np.asarray(self._atm._f_land, dtype=np.float64).ravel() < 1.0
+            _sd = self._ocean_state.H_bathy.data.dtype
+            H = snap_partial_cells(jnp.asarray(np.where(wet, depth, 0.0), dtype=_sd),
+                                   z_coord)
+            n_dried = int(np.sum(wet & (np.asarray(H) <= 0.0)))
+            if n_dried:
+                raise ValueError(
+                    f"geography {geo}: {n_dried} ocean cells snap to zero depth "
+                    "(shallower than 30% of the top ocean level); the ocean wet "
+                    "mask would no longer match the atmosphere's land fraction")
+            z_coord = create_partial_cell_coordinate(z_coord, H)
+            self._ocean_model = MPASOceanModel(mesh, z_coord, config)
+            self._ocean_state = self._ocean_state._replace(
+                H_bathy=Field(data=H, name="H_bathy", dims=("nCells",), units="m"),
+                land_mask=Field(data=jnp.asarray(wet, dtype=_sd), name="land_mask",
+                                dims=("nCells",), units="1"))
         self._ocean_step = self._ocean_model.step
         self._ocean_z_coord = z_coord
         self._ocean_land_mask = self._ocean_state.land_mask.data
@@ -1069,7 +1131,7 @@ class CoupledESMDriver:
         self._ocean_S_target = None
         _ocean_frac = float(jnp.mean(self._ocean_land_mask))
         logger.info(
-            "  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic=rest, "
+            f"  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic={cfg.ocean_ic}, "
             f"ocean_frac={_ocean_frac:.2f}, nlev={cfg.ocean_nlev}, "
             f"ocean_dt={cfg.ocean_dt_s}s, surface_forcing=none(coupled), "
             "normalize_freshwater=True")
@@ -1087,6 +1149,53 @@ class CoupledESMDriver:
         cfg = self.coupled_cfg
         shape_2d = self._atm.grid.grid_shape_2d
         _sd = get_policy().storage
+        from legoesm.grids.geography import geography_has_land
+        if self._atm.config.geography and cfg.f_land_mode != "analytical":
+            # 'zero' would put ocean fluxes on dry cells, 'from_ocean' full
+            # ocean weight on fractional coasts
+            raise ValueError(
+                f"geography needs f_land_mode='analytical' (the coupler's land "
+                f"fraction is the geography's, read from the atmosphere); got "
+                f"{cfg.f_land_mode!r}")
+        if self._atm.config.geography and cfg.land_mode != "none":
+            # VOTED b/b/b: the coupler's land tile cannot close water/energy
+            # with the atmosphere on the MPAS column lane (no flux handback;
+            # each side computes its own land fluxes) and gives the slab's
+            # two-leaf canopy generic geometry; geography land is the
+            # atmosphere's own multilayer land
+            raise ValueError(
+                "geography with the coupler's own land tile is not supported: "
+                "use land_mode='none' with atm_owns_surface=True (the "
+                "atmosphere's multilayer land reads the geography)")
+        if (self._atm.config.geography and not cfg.atm_owns_surface
+                and geography_has_land(self._atm.config.geography)):
+            # land_mode='none' with analytical f_land would still step a generic
+            # slab over the geography's land; has-land is read from the file so
+            # every MPI rank agrees
+            raise ValueError(
+                "geography has land but no land model runs on it: use "
+                "atm_owns_surface=True (the atmosphere's land reads the geography)")
+        if (self._atm.config.geography and cfg.atm_owns_surface
+                and self._atm.config.use_multilayer_land
+                and not geography_has_land(self._atm.config.geography)):
+            # an all-ocean geography runs no land model (the ice/lake handback
+            # enters the atmosphere's flux kernel directly); a land model
+            # here would build no soil column; refused at setup, on every rank
+            raise ValueError(
+                f"geography {self._atm.config.geography} is all ocean: the "
+                "atmosphere's land model would build no land columns there. "
+                "Set use_multilayer_land=False (the coupler's ice/lake "
+                "handback needs no land model on an all-ocean geography).")
+        if (self._atm.config.geography and cfg.atm_owns_surface
+                and not self._atm.config.use_multilayer_land
+                and geography_has_land(self._atm.config.geography)):
+            # coupled, the atmosphere's slab land is switched off (the coupler
+            # owns land) and atm_owns_surface steps no coupler land tile, so
+            # only the atmosphere's multilayer land can run on the land cells
+            raise ValueError(
+                "geography has land and atm_owns_surface=True, but the "
+                "atmosphere runs no land model on it (use_multilayer_land=False); "
+                "land cells would be passive.  Set use_multilayer_land=True.")
 
         coupler_cfg = self._coupler_config or CouplerConfig()
         self._coupler_cfg = coupler_cfg  # reused by the 3D-ocean flux assembly
@@ -1289,8 +1398,11 @@ class CoupledESMDriver:
             f_land = jnp.zeros(shape_2d, dtype=_sd)
         elif cfg.f_land_mode == "analytical":
             # Use driver's land mask if non-trivial; otherwise generate one
-            # based on latitude (simple continents approximation).
-            if (self._atm._f_land is not None
+            # based on latitude (simple continents approximation).  A
+            # geography's mask is taken as-is, even all ocean.
+            if self._atm.config.geography:
+                f_land = self._atm._f_land   # no-land-model refusal: setup top
+            elif (self._atm._f_land is not None
                     and float(jnp.max(self._atm._f_land)) > 0):
                 f_land = self._atm._f_land
             elif cfg.land_mode != "none":

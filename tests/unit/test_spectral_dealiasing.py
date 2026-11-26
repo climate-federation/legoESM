@@ -285,7 +285,7 @@ class TestAliasingStabilityNH:
             vor_hat=rs.vor_hat.replace(data=vor),
             div_hat=rs.div_hat.replace(data=div),
             theta_prime_hat=rs.theta_prime_hat.replace(data=thp),
-            rho_prime_hat=rs.rho_prime_hat.replace(data=rhp),
+            jrho_prime_hat=rs.jrho_prime_hat.replace(data=rhp),
             tracers_hat=rs.tracers_hat.replace(data=tr),
         )
 
@@ -301,7 +301,7 @@ class TestAliasingStabilityNH:
         t_on = spectral_nh_slow_tendencies(state, grid, hc, tm, on_cfg)
         t_off = spectral_nh_slow_tendencies(state, grid, hc, tm, off_cfg)
 
-        for name in ("vor_hat", "div_hat", "theta_prime_hat", "rho_prime_hat", "tracers_hat"):
+        for name in ("vor_hat", "div_hat", "theta_prime_hat", "jrho_prime_hat", "tracers_hat"):
             e_on = _energy(getattr(t_on, name).data, high)
             e_off = _energy(getattr(t_off, name).data, high)
             assert e_off > 0.0, f"{name}: no aliased energy (vacuous)"
@@ -320,7 +320,7 @@ class TestAliasingStabilityNH:
         off_cfg = SpectralNHConfig(hyperdiff_coeff=0.0, sponge_coeff=0.0, dealiasing_fraction=0.0)
         t_on = spectral_nh_slow_tendencies(state, grid, hc, tm, on_cfg)
         t_off = spectral_nh_slow_tendencies(state, grid, hc, tm, off_cfg)
-        for name in ("vor_hat", "div_hat", "theta_prime_hat", "rho_prime_hat"):
+        for name in ("vor_hat", "div_hat", "theta_prime_hat", "jrho_prime_hat"):
             r = retained[:, None]
             on = getattr(t_on, name).data * r
             off = getattr(t_off, name).data * r

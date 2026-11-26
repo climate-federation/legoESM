@@ -177,6 +177,9 @@ __param_spec__ = {
             "crossing_threshold": "numerics: solver/CFL/smoothing parameter",
             "surrogate_width_sigma": "numerics: backward-pass surrogate width (gradients only, never fitted)",
             "surrogate_width_n2": "numerics: backward-pass surrogate width (gradients only, never fitted)",
+            "min_vt2": "numerics: floor/cap (CVMix minVtsqr)",
+            "min_vt2_width": "numerics: solver/CFL/smoothing parameter",
+            "bl_min_depth_width_frac": "numerics: solver/CFL/smoothing parameter",
             "epsilon_lmd": "numerics: floor/cap",
             "gamma_S": "Large 1994 fixed nondim constant",
             "gamma_T": "Large 1994 fixed nondim constant",
@@ -1047,12 +1050,12 @@ class KPPConfig(NamedTuple):
     # its default; MOM6 MOM_CVMix_KPP.F90 KPP_compute_BLD, Vt_layer = 1.0 and
     # OBL_depth = cell-centre depth).
     vt2_velocity_scale: str = "column"
-    # Surface buoyancy flux in the KPP velocity scales.  False (default, unchanged
-    # behaviour): |B_f| below float32 machine epsilon (1.19e-7 m^2/s^3) is replaced by
-    # that floor with the same sign, which covers most tropical fluxes.  True: the actual
-    # flux, with zeta = d_eff kappa B_f / u*^3 written without a division by B_f, as
-    # LMD94 and CVMix (cvmix_kpp_compute_turbulent_scales_1d_OBL) use it.
-    actual_buoyancy_flux: bool = False
+    # Surface buoyancy flux in the KPP velocity scales.  True (default, user decision
+    # 2026-11-26): the actual flux, with zeta = d_eff kappa B_f / u*^3 written without a
+    # division by B_f, as LMD94 and CVMix (cvmix_kpp_compute_turbulent_scales_1d_OBL) use
+    # it.  False (legacy): |B_f| below float32 machine epsilon (1.19e-7 m^2/s^3) is
+    # replaced by that floor with the same sign, which covers most tropical fluxes.
+    actual_buoyancy_flux: bool = True
     # Gradient surrogates (docs/88 6.12 (a2)): the boundary-layer base switch (K_bl inside, interior K below
     # sigma = 1) and the convective switch (K_conv where N2 < Ri_conv) keep their exact forward values but
     # take the derivative of a logistic blend in the backward pass, with these widths (numerical, stated
@@ -1061,6 +1064,20 @@ class KPPConfig(NamedTuple):
     surrogate_switches: str = "bl_base,convective"   # which switches get a surrogate (comma list)
     surrogate_width_sigma: float = 0.1     # in sigma = depth / h_bl
     surrogate_width_n2: float = 1.0e-6     # in N2 [s^-2]
+    # Boundary-layer structure: "legacy" (top-cell potential-density reference,
+    # centre-depth crossing average, centre K averaged to interfaces) or
+    # "cvmix" (MOM6 surface-layer/local-pressure reference, CVMix (1-eps/2) Ri,
+    # smoothed first-crossing quadratic interpolation, interface K).
+    bld_structure: str = "legacy"
+    # cvmix structure only: CVMix floor V_t^2 >= minVtsqr [m^2/s^2], applied as
+    # a C1 smooth max of this width (0 = CVMix's hard max).  Exact outside
+    # |V_t^2 - min_vt2| >= width/2; at most width/8 above the hard max.
+    min_vt2: float = 1e-10
+    min_vt2_width: float = 1e-11
+    # cvmix structure only: the boundary-layer depth is floored at the top-cell
+    # thickness (MOM6) by a C1 smooth max of this width, as a fraction of that
+    # thickness (0 = MOM6's hard max).
+    bl_min_depth_width_frac: float = 0.01
 
 
 class CATKEConfig(NamedTuple):

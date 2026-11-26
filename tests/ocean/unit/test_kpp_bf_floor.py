@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.test_util import check_grads
 
 from legoesm.ocean.physics.vertical_mixing import kpp as kpp_mod
 from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
@@ -61,9 +62,13 @@ def test_independent_hand_values():
     assert abs(lego_ws(cfg, 0.01, 1e-8, 100.0) - 0.0051225) < 1e-6
 
 
-def test_default_is_the_legacy_floor():
-    assert KPPConfig().actual_buoyancy_flux is False
-    cfg = KPPConfig()
+def test_default_is_the_actual_flux():
+    assert KPPConfig().actual_buoyancy_flux is True
+    np.testing.assert_allclose(lego_ws(KPPConfig(), 0.01, 1e-8, 100.0), 0.0051225, atol=1e-6)
+
+
+def test_legacy_floor_when_switched_off():
+    cfg = KPPConfig(actual_buoyancy_flux=False)
     for s in (1.0, -1.0):
         np.testing.assert_allclose(lego_ws(cfg, 0.01, s * 1e-8, 100.0), lego_ws(cfg, 0.01, s * LEGACY, 100.0),
                                    rtol=0, atol=0)
@@ -85,3 +90,86 @@ def test_gradients_finite_near_zero_flux(dtype):
         for b in (0.0, -0.0, 1e-28, -1e-25, 1e-22, -1e-20, 1e-19, 1e-9, -1e-9, 2e-7):
             val = g(jnp.asarray(b, dtype=dtype))
             assert np.isfinite(float(val)), (us, b, dtype)
+
+
+# CVMix (MOM6 0e9a561 submodule, CVMix fce422195a) cvmix_kpp_compute_turbulent_scales, banked from the compiled
+# library (ported from PR #2560): (u*, B_f [this module's sign, >0 destabilising], h, sigma, w_m, w_s).  Stable
+# and weakly-unstable branches only: they use no rounded LMD94 a_*/c_* constants, so they pin to round-off.
+_CVMIX_WEAK_FLUX = [
+    (0.001, -1e-07, 50.0, 0.02, 1.990049751243781e-06, 1.990049751243781e-06),
+    (0.001, -1e-07, 50.0, 0.5, 3.9960039960039974e-07, 3.9960039960039974e-07),
+    (0.001, -1e-08, 50.0, 0.02, 1.904761904761905e-05, 1.904761904761905e-05),
+    (0.001, -1e-08, 50.0, 0.5, 3.960396039603961e-06, 3.960396039603961e-06),
+    (0.001, -1e-09, 50.0, 0.02, 0.00013333333333333334, 0.00013333333333333334),
+    (0.001, -1e-09, 50.0, 0.5, 3.636363636363637e-05, 3.636363636363637e-05),
+    (0.001, -1e-10, 50.0, 0.02, 0.0003333333333333334, 0.0003333333333333334),
+    (0.001, -1e-10, 50.0, 0.5, 0.0002, 0.0002),
+    (0.001, 1e-10, 50.0, 0.02, 0.0004526587849560099, 0.0005122499389946279),
+    (0.01, -1e-07, 50.0, 0.02, 0.003333333333333334, 0.003333333333333334),
+    (0.01, -1e-08, 50.0, 0.5, 0.0036363636363636364, 0.0036363636363636364),
+    (0.01, -1e-10, 50.0, 0.5, 0.003996003996003997, 0.003996003996003997),
+    (0.01, 1e-10, 50.0, 0.5, 0.004003196167152268, 0.004006394888175653),
+    (0.01, 1e-09, 50.0, 0.02, 0.004006384697092892, 0.004012779585275026),
+    (0.01, 1e-08, 50.0, 0.5, 0.004287493494913047, 0.004595650117230423),
+]
+
+
+@pytest.mark.parametrize("ustar,Bf,h,sigma,wm_cv,ws_cv", _CVMIX_WEAK_FLUX)
+def test_default_weak_flux_matches_compiled_cvmix(ustar, Bf, h, sigma, wm_cv, ws_cv):
+    """The production default reproduces compiled CVMix for |B_f| below float32 eps."""
+    a = jnp.asarray
+    wm, ws = kpp_mod._kpp_velocity_scales(a([ustar]), a([Bf]), a([[sigma * h]]), a([[h]]), KPPConfig(), kpp_mod._EPS)
+    assert float(wm[0, 0]) == pytest.approx(wm_cv, rel=1e-12, abs=0.0)
+    assert float(ws[0, 0]) == pytest.approx(ws_cv, rel=1e-12, abs=0.0)
+
+
+@pytest.mark.parametrize("Bf", [-1e-8, -5e-9, -1e-9])
+def test_weak_stable_flux_gradient_is_nonzero_by_default(Bf):
+    """Stable weak flux (0 > B_f > -eps): the legacy floor is constant in B_f, so dw_s/dB_f = 0 there; the
+    default restores a nonzero derivative.  u* = 5.8e-4 m/s is the stress-path floor sqrt(sqrt(eps)/rho_0); h = 50 m, d = 2 m."""
+    def ws(b, cfg):
+        return kpp_mod._kpp_velocity_scales(jnp.asarray([5.8e-4]), b[None], jnp.asarray([[2.0]]),
+                                            jnp.asarray([[50.0]]), cfg, kpp_mod._EPS)[1][0, 0]
+    b = jnp.asarray(Bf)
+    g_default = float(jax.grad(ws)(b, KPPConfig()))
+    g_legacy = float(jax.grad(ws)(b, KPPConfig(actual_buoyancy_flux=False)))
+    assert np.isfinite(g_default) and abs(g_default) > 0.0
+    assert g_legacy == 0.0
+    check_grads(lambda x: ws(x, KPPConfig()), (b,), order=1, modes=["rev"], eps=1e-12)
+
+
+@pytest.mark.parametrize("bad", [None, "false", 0])
+def test_non_bool_switch_raises(bad):
+    with pytest.raises(ValueError, match="must be a bool"):
+        lego_ws(KPPConfig(actual_buoyancy_flux=bad), 0.01, 1e-8, 100.0)
+
+
+@pytest.mark.parametrize("tau", [0.0, 1e-3])
+@pytest.mark.parametrize("actual", [True, False])
+def test_fp32_column_finite_at_corner_fluxes(tau, actual):
+    """float32 end to end through kpp_vertical_mixing at B_f in {0, -0, +-1e-20, +-1e-9, +-eps, +-(eps+1ulp),
+    +-2e-7} (tau = 0 puts u* on the stress-path floor): K_v, A_v and d(sum K_v)/dB_f are finite in both modes."""
+    from legoesm.ocean.eos import wright_eos
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    f32 = jnp.float32
+    up = float(np.nextafter(np.float32(LEGACY), np.float32(1.0)))
+    b = jnp.asarray([0.0, -0.0, 1e-20, -1e-20, 1e-9, -1e-9, LEGACY, -LEGACY, up, -up, 2e-7, -2e-7], f32)
+    n, nlev = b.shape[0], 20
+    z = create_ocean_z_star(n_levels=nlev, H_max=400.0)
+    S = jnp.broadcast_to(jnp.linspace(34.6, 35.0, nlev), (n, nlev)).astype(f32)
+    T = jnp.broadcast_to(jnp.linspace(20.0, 10.0, nlev), (n, nlev)).astype(f32)
+    rho = wright_eos(T, S, jnp.zeros_like(T)).astype(f32)
+    u = jnp.broadcast_to(jnp.linspace(0.2, 0.0, nlev), (n, nlev)).astype(f32)
+    zeros = jnp.zeros((n,), f32)
+    cfg = KPPConfig(actual_buoyancy_flux=actual)
+
+    def run(Bf):
+        return kpp_mod.kpp_vertical_mixing(u, jnp.zeros_like(u), T, S, rho, zeros, z, jnp.ones((n,), f32), cfg,
+                                           tau_x=jnp.full((n,), tau, f32), tau_y=zeros, B_f=Bf,
+                                           apply_diffusion=False)
+
+    out = run(b)
+    assert out.K_v.dtype == jnp.float32
+    assert bool(jnp.all(jnp.isfinite(out.K_v))) and bool(jnp.all(jnp.isfinite(out.A_v)))
+    assert bool(jnp.all(jnp.isfinite(jax.grad(lambda x: jnp.sum(run(x).K_v))(b))))

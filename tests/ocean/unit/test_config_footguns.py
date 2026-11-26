@@ -146,8 +146,8 @@ def test_kpp_cvmix_template_selects_the_opt_in_kpp_options():
 
     p = Path("config/templates/global_ocean/omip_latlon_kpp_cvmix.yaml")
     kpp = OceanExperimentConfig.from_yaml(str(p)).to_ocean_config().physics.vertical_mixing.kpp
-    assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates) == (
-        "candidate", True, True)
+    assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates,
+            kpp.bld_structure) == ("candidate", True, True, "cvmix")
 
 
 def test_vertical_mixing_reachable_via_the_yaml_ocean_key():

@@ -734,13 +734,14 @@ CLUBB_SCALAR_FIELDS = {
     "clubb_gamma_coefb": "gamma_coefb",
     "clubb_beta": "beta",
     "clubb_c_k10": "c_K10",
+    "clubb_c6rtb": "C6rtb",
 }
 # Read only by the prognostic CLUBB path (advance_clubb_core and its
 # advance_xp2_xpyp / advance_wp2_wp3 / compute_clubb_diagnostics); the
 # diagnostic path (clubb_turbulence) reads gamma_coef and beta only.
 CLUBB_PROGNOSTIC_ONLY = frozenset({
     "clubb_c14", "clubb_c8", "clubb_c11", "clubb_c11b", "clubb_gamma_coefb",
-    "clubb_c_k10"})
+    "clubb_c_k10", "clubb_c6rtb"})
 
 
 def resolve_tracer_vertical_scheme(value, solver_name, *, hybrid: bool) -> str | None:
@@ -1473,6 +1474,13 @@ class ExperimentConfig(NamedTuple):
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
     land_mask_path: str = ""
+    # One geography file (legoesm.grids.geography) for terrain, land fraction,
+    # barriers and the land surface map; replaces topography / land_mask_path /
+    # surfdata_path / clm_surfdata_path.  geography_regrid ("legacy" = the
+    # topography + land-mask path bitwise, "binned") is required with it.
+    geography: str = ""
+    geography_regrid: str = ""
+    geography_barrier_width_cells: int = 1
     # Where the column land fraction comes from, for the land model AND the
     # physics alike (one coastline; user 2026-10-28, R3/R5/R6):
     #   "topography" -- the terrain / land_mask_path above (every lane so far);
@@ -1905,6 +1913,10 @@ class ExperimentConfig(NamedTuple):
     # corrected, True = OpenIFS as written (BechtoldConfig.
     # ifs_openifs_cloud_top_fixer, #2594).
     bechtold_ifs_openifs_cloud_top_fixer: bool = False
+    # The faithful chain's LMFENTHCONS column enthalpy correction: False =
+    # off (OpenIFS default), True = on (BechtoldConfig.
+    # ifs_enthalpy_conservation, #2571).
+    bechtold_ifs_enthalpy_conservation: bool = False
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -2452,6 +2464,8 @@ class ExperimentConfig(NamedTuple):
     # (CLUBBConfig.mf_alphturb, clubb_mf_alphturb).  None = 0 (off); CAM7 = 3.
     # Needs clubb_mf.
     clubb_mf_alphturb: float | None = None
+    # APPENDED LAST.  CLUBB_SCALAR_FIELDS member (CLUBBParams.C6rtb).
+    clubb_c6rtb: float | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2513,6 +2527,26 @@ class ExperimentConfig(NamedTuple):
             validate_orbit_fields(self)
         except ValueError as exc:
             errors.append(str(exc))
+        if self.geography:
+            from legoesm.grids.geography import REGRID_MODES
+            if self.geography_regrid not in REGRID_MODES:
+                errors.append(f"geography needs geography_regrid in {REGRID_MODES}, "
+                              f"got {self.geography_regrid!r}")
+            _geo_clash = [f for f, unset in (
+                ("topography", self.topography == "flat"),
+                ("land_mask_path", not self.land_mask_path),
+                ("surfdata_path", not self.surfdata_path),
+                ("clm_surfdata_path", not self.clm_surfdata_path),
+                ("land_fraction_source", self.land_fraction_source == "topography"))
+                if not unset]
+            if _geo_clash:
+                errors.append(f"geography replaces {', '.join(_geo_clash)}; drop them")
+            if (self.geography_barrier_width_cells < 1
+                    or self.geography_barrier_width_cells % 2 == 0):
+                errors.append("geography_barrier_width_cells must be odd and >= 1, got "
+                              f"{self.geography_barrier_width_cells}")
+        elif self.geography_regrid or self.geography_barrier_width_cells != 1:
+            errors.append("geography_regrid / geography_barrier_width_cells need geography")
         if (normalize_grid_type(g.grid_type) == "cubed_sphere"
                 and d.discretization != "fv3_duo"):
             errors.append(
@@ -3761,7 +3795,7 @@ class ExperimentConfig(NamedTuple):
         # land).  Only a real elevation file or an explicit mask gives land.
         _idealized_topography = self.topography in ("flat", "gaussian")
         _tiled_with_real_land = self.surface_tiled and bool(
-            self.land_mask_path
+            (self.land_mask_path or self.geography)
             or ((self.slab_land_active or self.use_multilayer_land)
                 and not _idealized_topography))
         if self.surface_unstable_scheme not in VALID_UNSTABLE_SCHEMES:
@@ -3865,7 +3899,7 @@ class ExperimentConfig(NamedTuple):
                 f"injected tiled surface flux); got turbulence={self.turbulence!r}."
             )
         if self.surface_tiled and not (self.slab_land_active
-                                       or self.land_mask_path
+                                       or (self.land_mask_path or self.geography)
                                        or self.use_multilayer_land):
             errors.append(
                 "surface_tiled=True requires an active land tile "
@@ -3883,7 +3917,7 @@ class ExperimentConfig(NamedTuple):
         # zero land and goes silently inert -- the trap that cost the AMIP
         # campaign three tuning waves. Refused, not warned.
         if ((self.use_multilayer_land or self.slab_land_active)
-                and not self.land_mask_path
+                and not (self.land_mask_path or self.geography)
                 and self.land_fraction_source != "era5"
                 and _idealized_topography):
             errors.append(
@@ -3905,7 +3939,7 @@ class ExperimentConfig(NamedTuple):
         # cannot be placed safely (it would sit downstream of per-rank setup that
         # can raise, leaving peers blocked).  Counting land points in the mask
         # file HERE, where the check is rank-symmetric, is the open follow-up.
-        if (self.land_beta_soil and not self.land_mask_path
+        if (self.land_beta_soil and not (self.land_mask_path or self.geography)
                 and _idealized_topography):
             errors.append(
                 f"land_beta_soil with an idealized topography"
@@ -4010,7 +4044,7 @@ class ExperimentConfig(NamedTuple):
         # Prognostic soil-water bucket: needs an active land tile to step,
         # and physically-bounded parameters.
         if self.land_soil_bucket and not (
-                self.slab_land_active or self.land_mask_path):
+                self.slab_land_active or (self.land_mask_path or self.geography)):
             errors.append(
                 "land_soil_bucket=True requires an active land tile "
                 "(--slab-land-active or a land-mask file); there is no land "
@@ -4285,7 +4319,7 @@ class ExperimentConfig(NamedTuple):
             if ((self.land_lapse_K_per_km > 0.0
                  or self.land_beta != 1.0)
                     and self.topography in ("flat", "gaussian")
-                    and not self.land_mask_path):
+                    and not (self.land_mask_path or self.geography)):
                 errors.append(
                     "land_lapse_K_per_km/land_beta need a land "
                     f"fraction, but topography={self.topography!r} (with no land-mask "
@@ -4890,7 +4924,7 @@ class ExperimentConfig(NamedTuple):
                     "SEB only; use_multilayer_land replaces the slab, so the "
                     "flag would be a silent no-op. Drop one of the two."
                 )
-            if not (self.land_mask_path
+            if not ((self.land_mask_path or self.geography)
                     or (self.slab_land_active
                         and self.topography not in ("flat", "gaussian"))):
                 errors.append(
@@ -5656,18 +5690,19 @@ class ExperimentConfig(NamedTuple):
             #     coupled climate spin-up grows its own circulation from the T
             #     gradient (no balanced-jet IC needed, unlike a baroclinic-wave
             #     test).  See ModelDriver._apply_standard_atmosphere_ic.
+            #   * mpas: T / p_s overlay applied, jet skipped (edge-normal u);
+            #     refused at setup over non-flat topography (flat seed p_s).
             # Still not wired (fail early, before setup):
             #   * gaussian/spectral: temperature lives in spectral space (T_hat),
-            #     no grid-space T Field;
-            #   * mpas: not wired.
+            #     no grid-space T Field.
             _gt_std = normalize_grid_type(self.grid.grid_type)
-            if _gt_std not in ("latlon", "cubed_sphere"):
+            if _gt_std not in ("latlon", "cubed_sphere", "mpas"):
                 errors.append(
                     f"ic='standard' is implemented for grid_type "
-                    f"'latlon' and 'cubed_sphere'; got "
+                    f"'latlon', 'cubed_sphere' and 'mpas'; got "
                     f"grid_type={self.grid.grid_type!r} "
                     f"(discretization={self.dycore.discretization!r}). "
-                    f"Use ic='default', or ic='era5' for spectral/mpas."
+                    f"Use ic='default', or ic='era5' for spectral."
                 )
             # T_init is the equator surface temperature; the pole is
             # T_init - 40 K (StandardAtmosphereConfig.equator_pole_delta_K). A
@@ -6057,6 +6092,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_ifs_hard_switches=amip_cfg.bechtold_ifs_hard_switches,
             bechtold_ifs_openifs_cloud_top_fixer=(
                 amip_cfg.bechtold_ifs_openifs_cloud_top_fixer),
+            bechtold_ifs_enthalpy_conservation=(
+                amip_cfg.bechtold_ifs_enthalpy_conservation),
             bechtold_use_ifs_land_rhebc=getattr(
                 amip_cfg, 'bechtold_use_ifs_land_rhebc', True),
             bechtold_use_ifs_snow_melt=getattr(
@@ -6241,6 +6278,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_ifs_shallow_nosupply=self.bechtold_ifs_shallow_nosupply,
             bechtold_ifs_hard_switches=self.bechtold_ifs_hard_switches,
             bechtold_ifs_openifs_cloud_top_fixer=self.bechtold_ifs_openifs_cloud_top_fixer,
+            bechtold_ifs_enthalpy_conservation=self.bechtold_ifs_enthalpy_conservation,
             bechtold_use_ifs_land_rhebc=self.bechtold_use_ifs_land_rhebc,
             bechtold_use_ifs_snow_melt=self.bechtold_use_ifs_snow_melt,
             sigma_b=self.sigma_b,
@@ -6483,7 +6521,7 @@ def land_flux_handoff_eligibility(cfg) -> tuple[bool, str]:
     # another grid never reaches the loop.
     if not (cfg.dycore.column_lane
             or (cfg.dycore.discretization != "fv3_duo"
-                and cfg.grid.grid_type == "mpas")):
+                and normalize_grid_type(cfg.grid.grid_type) == "mpas")):
         return False, "this is not the MPAS lane or a column lane"
     if not cfg.use_multilayer_land:
         return False, "use_multilayer_land is off (no land model)"

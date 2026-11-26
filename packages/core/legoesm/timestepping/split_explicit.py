@@ -43,12 +43,20 @@ class TracerMassHooks(NamedTuple):
     ``finish_stage(base, eval_state, state_slow, acoustic_out, slow_tend,
     dt_eff)`` returns the stage state with conservatively updated tracers.
     ``density(state)`` broadcasts against ``tracers(state)[..., 0]``.
+
+    For projected representations, supply both ``mass(state)`` and
+    ``with_mass(state, mass)`` to blend independently carried mass coefficients
+    instead. Recovery must not re-encode that mass from projected public q.
+    The original density/tracer callbacks are unused by blends in this mode;
+    omitted optional callbacks retain the original grid-space arithmetic.
     """
 
     density: Callable
     tracers: Callable
     with_tracers: Callable
     finish_stage: Callable
+    mass: Callable | None = None
+    with_mass: Callable | None = None
 
 
 class SplitExplicitConfig(NamedTuple):
@@ -414,6 +422,10 @@ def _blend(x, y, a, b, tracer_mass, increment=False):
     if tracer_mass is None:
         return out
     tm = tracer_mass
+    if tm.mass is not None:
+        mx, my = tm.mass(x), tm.mass(y)
+        mq = mx + b * (my - mx) if increment else a * mx + b * my
+        return tm.with_mass(out, mq)
     if increment:
         mx = tm.density(x)[..., None] * tm.tracers(x)
         my = tm.density(y)[..., None] * tm.tracers(y)
