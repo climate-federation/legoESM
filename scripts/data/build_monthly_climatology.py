@@ -26,10 +26,11 @@ def record_year_month(time_values, units: str, calendar: str):
     t = np.asarray(time_values, dtype=np.float64)
     if units.startswith("months since"):
         y0, m0, d0 = ([int(float(x)) for x in units.split()[2].split("-")] + [1])[:3]
-        if d0 != 1:
-            # floor(t) is the month index only from a reference on day 1
-            raise ValueError(f"'{units}': months-since time needs a reference on "
-                             "day 1 of a month")
+        clock = units.split()[3:]
+        if d0 != 1 or any(float(x) != 0.0 for c in clock for x in c.split(":")):
+            # floor(t) is the month index only from 00:00 on day 1 of a month
+            raise ValueError(f"'{units}': months-since time needs a reference at "
+                             "00:00 on day 1 of a month")
         k = (m0 - 1) + np.floor(t).astype(int)
         return y0 + k // 12, k % 12 + 1
     import cftime
@@ -40,7 +41,12 @@ def record_year_month(time_values, units: str, calendar: str):
 def climatology(ds, first: int, last: int, optics: bool = False):
     import xarray as xr
     tv = ds["time"]
-    years, months = record_year_month(tv.values, tv.attrs["units"],
+    bounds = tv.attrs.get("bounds")
+    # the month a record covers: its bounds' midpoint when it has bounds (a
+    # stamp at a month's end or the next month's start would mislabel it)
+    t_month = (ds[bounds].values.astype(np.float64).mean(-1) if bounds in ds.variables
+               else tv.values)
+    years, months = record_year_month(t_month, tv.attrs["units"],
                                       tv.attrs.get("calendar", "standard"))
     sel = (years >= first) & (years <= last)
     # every (year, month) exactly once (VOTED a/a/a): a per-month count would
@@ -54,7 +60,6 @@ def climatology(ds, first: int, last: int, optics: bool = False):
     first_idx = [int(np.flatnonzero((years == first) & (months == m))[0])
                  for m in range(1, 13)]
     out = ds.drop_vars([v for v in ds.data_vars if "time" in ds[v].dims] + ["time"])
-    bounds = tv.attrs.get("bounds")
     timed = [v for v in ds.data_vars if "time" in ds[v].dims]
     means = {v: [] for v in timed}
     for m in range(1, 13):

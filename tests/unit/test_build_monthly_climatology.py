@@ -100,3 +100,22 @@ def test_an_integer_field_keeps_its_fractional_mean():
     ds["n"] = ("time", np.arange(36) % 2)      # 2005-01 = 0, 2006-01 = 0 ... alternating
     ds["n"].values[12], ds["n"].values[24] = 1, 2
     assert bmc.climatology(ds, 2005, 2006)["n"].values[0] == 1.5
+
+
+def test_months_since_needs_a_midnight_reference():
+    with pytest.raises(ValueError, match="00:00 on day 1"):
+        bmc.climatology(_ds("months since 2004-01-01 12:00:00"), 2005, 2006)
+
+
+def test_bounds_name_the_month_a_record_covers():
+    """Stamps at each month's END (the next month's day 1) with bounds
+    spanning the month: grouping by stamp would average December into
+    January."""
+    ds = _ds("months since 2004-01-01")
+    lo = np.arange(36.0)
+    ds = ds.assign_coords(time=("time", lo + 1.0, ds["time"].attrs))
+    ds["time"].attrs["bounds"] = "time_bnds"
+    ds["time_bnds"] = (("time", "nb"), np.stack([lo, lo + 1.0], -1))
+    out = bmc.climatology(ds, 2005, 2006)
+    want = 0.5 * (ds["aod"].values[12] + ds["aod"].values[24])     # Jan 2005, Jan 2006
+    np.testing.assert_allclose(out["aod"].values[0], want, rtol=1e-12)
