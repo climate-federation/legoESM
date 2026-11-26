@@ -31,8 +31,19 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
-from legoesm.core.precision import PrecisionPolicy, set_policy
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
 set_policy(PrecisionPolicy(storage=jnp.float64, compute=jnp.float64))
+
+
+@pytest.fixture(autouse=True)
+def _fp64_policy():
+    """Re-assert fp64 per test: an import-time policy is overwritten by any
+    test that runs earlier in the same worker."""
+    orig = get_policy()
+    set_policy(PrecisionPolicy(storage=jnp.float64, compute=jnp.float64))
+    yield
+    set_policy(orig)
 
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
