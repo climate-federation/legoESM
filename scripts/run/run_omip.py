@@ -225,6 +225,7 @@ def build_vertical_mixing_config_from_args(
             vt2_velocity_scale=args.kpp_vt2_velocity_scale,
             actual_buoyancy_flux=args.kpp_actual_buoyancy_flux,
             gradient_surrogates=args.kpp_gradient_surrogates,
+            monin_obukhov_limit=args.kpp_monin_obukhov_limit,
         ),
         iwm=build_iwm_config_from_args(args),
         ddm=build_ddm_config_from_args(args),
@@ -838,7 +839,13 @@ def parse_args(argv: list[str] | None = None):
                    default=_DEFAULT_KPP_CONFIG.vt2_velocity_scale,
                    choices=["column", "candidate"],
                    help="KPP velocity scale inside the unresolved shear V_t^2: "
-                        "'column' (default) or 'candidate' (CVMix/MOM6 form)")
+                        "'candidate' (default, CVMix/MOM6 form) or 'column' (old "
+                        "form, scaled with the full column depth)")
+    p.add_argument("--kpp-monin-obukhov-limit", action=argparse.BooleanOptionalAction,
+                   default=_DEFAULT_KPP_CONFIG.monin_obukhov_limit,
+                   help="KPP: under stabilising surface buoyancy forcing the boundary "
+                        "layer is no deeper than the Monin-Obukhov length (LMD94; CVMix "
+                        "lMonOb); --no-kpp-monin-obukhov-limit removes the limit")
     p.add_argument("--kpp-actual-buoyancy-flux", action="store_true",
                    help="KPP velocity scales from the actual surface buoyancy "
                         "flux (no float32-epsilon floor; CVMix form)")

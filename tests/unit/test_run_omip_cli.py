@@ -37,7 +37,8 @@ def test_issue484_new_omip_flags_flow_to_config():
 
 
 def test_kpp_cvmix_option_flags_flow_to_config():
-    """The opt-in KPP options reach KPPConfig; absent flags keep the defaults."""
+    """The KPP options reach KPPConfig; absent flags keep the defaults (candidate
+    V_t^2 scale and the Monin-Obukhov limit on); the old forms stay selectable."""
     cfg = build_config_from_args(parse_args([
         "--grid", "latlon", "--kpp-vt2-velocity-scale", "candidate",
         "--kpp-actual-buoyancy-flux", "--kpp-gradient-surrogates"]))
@@ -45,8 +46,12 @@ def test_kpp_cvmix_option_flags_flow_to_config():
     assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates) == (
         "candidate", True, True)
     kpp = build_config_from_args(parse_args(["--grid", "latlon"])).vertical_mixing.kpp
-    assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates) == (
-        "column", False, False)
+    assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates,
+            kpp.monin_obukhov_limit) == ("candidate", False, False, True)
+    kpp = build_config_from_args(parse_args([
+        "--grid", "latlon", "--kpp-vt2-velocity-scale", "column",
+        "--no-kpp-monin-obukhov-limit"])).vertical_mixing.kpp
+    assert (kpp.vt2_velocity_scale, kpp.monin_obukhov_limit) == ("column", False)
 
 
 def test_shortwave_ohlmann_and_skin_fraction_flags_parse():
