@@ -72,9 +72,14 @@ def climatology(ds, first: int, last: int, optics: bool = False):
         sub = {v: ds[v].isel(time=idx).astype(np.float64) for v in timed}
         for v in timed:
             if optics and v in ("ssa", "asy"):
+                # aod/ssa/asy must describe the same records: a missing value in
+                # any of them would weight the others on a different subset
+                if any(bool(sub[o].isnull().any()) for o in ("aod", "ssa", "asy")):
+                    raise ValueError(f"--optics: month {m} has missing aod/ssa/asy "
+                                     "values in the span; incomplete optical records "
+                                     "are refused")
                 w = sub["aod"] * (sub["ssa"] if v == "asy" else 1.0)
-                w = w.where(sub[v].notnull() & w.notnull(), 0.0)   # weights of present values only
-                mv = (w * sub[v].fillna(0.0)).sum("time") / w.sum("time")
+                mv = (w * sub[v]).sum("time") / w.sum("time")
                 means[v].append(mv.where(w.sum("time") > 0, sub[v].mean("time")))
             else:
                 means[v].append(sub[v].mean("time"))
