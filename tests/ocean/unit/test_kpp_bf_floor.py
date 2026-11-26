@@ -142,3 +142,34 @@ def test_weak_stable_flux_gradient_is_nonzero_by_default(Bf):
 def test_non_bool_switch_raises(bad):
     with pytest.raises(ValueError, match="must be a bool"):
         lego_ws(KPPConfig(actual_buoyancy_flux=bad), 0.01, 1e-8, 100.0)
+
+
+@pytest.mark.parametrize("tau", [0.0, 1e-3])
+@pytest.mark.parametrize("actual", [True, False])
+def test_fp32_column_finite_at_corner_fluxes(tau, actual):
+    """float32 end to end through kpp_vertical_mixing at B_f in {0, -0, +-1e-20, +-1e-9, +-eps, +-(eps+1ulp),
+    +-2e-7} (tau = 0 puts u* on the stress-path floor): K_v, A_v and d(sum K_v)/dB_f are finite in both modes."""
+    from legoesm.ocean.eos import wright_eos
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    f32 = jnp.float32
+    up = float(np.nextafter(np.float32(LEGACY), np.float32(1.0)))
+    b = jnp.asarray([0.0, -0.0, 1e-20, -1e-20, 1e-9, -1e-9, LEGACY, -LEGACY, up, -up, 2e-7, -2e-7], f32)
+    n, nlev = b.shape[0], 20
+    z = create_ocean_z_star(n_levels=nlev, H_max=400.0)
+    S = jnp.broadcast_to(jnp.linspace(34.6, 35.0, nlev), (n, nlev)).astype(f32)
+    T = jnp.broadcast_to(jnp.linspace(20.0, 10.0, nlev), (n, nlev)).astype(f32)
+    rho = wright_eos(T, S, jnp.zeros_like(T)).astype(f32)
+    u = jnp.broadcast_to(jnp.linspace(0.2, 0.0, nlev), (n, nlev)).astype(f32)
+    zeros = jnp.zeros((n,), f32)
+    cfg = KPPConfig(actual_buoyancy_flux=actual)
+
+    def run(Bf):
+        return kpp_mod.kpp_vertical_mixing(u, jnp.zeros_like(u), T, S, rho, zeros, z, jnp.ones((n,), f32), cfg,
+                                           tau_x=jnp.full((n,), tau, f32), tau_y=zeros, B_f=Bf,
+                                           apply_diffusion=False)
+
+    out = run(b)
+    assert out.K_v.dtype == jnp.float32
+    assert bool(jnp.all(jnp.isfinite(out.K_v))) and bool(jnp.all(jnp.isfinite(out.A_v)))
+    assert bool(jnp.all(jnp.isfinite(jax.grad(lambda x: jnp.sum(run(x).K_v))(b))))
