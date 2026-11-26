@@ -116,10 +116,14 @@ def test_runner_forwards_the_perturbed_flag_to_every_grid(matrix_mod):
     assert src.count("perturbed=_perturbed") == 4, src.count(
         "perturbed=_perturbed")
     # ... and no un-rotated initializer may hardcode the flag any more.
-    for init in ("baroclinic_wave_init(", "baroclinic_wave_init_latlon(",
+    # The cube lane builds its IC through the FV3 duo (`build_duo_hydro`)
+    # since the legacy cubed-sphere dispatch was retired (e137cbf996).
+    for init in ("build_duo_hydro(", "baroclinic_wave_init_latlon(",
                  "baroclinic_wave_init_mpas(", "baroclinic_wave_init_spectral("):
-        call = src.split(init, 1)[1].split(")", 1)[0]
-        assert "perturbed=True" not in call, init
+        parts = src.split(init)[1:]
+        assert parts, init
+        for part in parts:
+            assert "perturbed=True" not in part.split(")", 1)[0], init
     # The rotated family keeps its own independent flag.
     assert "_rot_perturbed" in src
 
