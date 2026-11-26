@@ -4487,6 +4487,18 @@ def _build_dcmip2008_state(case: str, grid_kind: str, grid_or_mesh, sigma):
 # Runner: Baroclinic Wave
 # ===========================================================================
 
+def dcmip_omega_override(case: str) -> float | None:
+    """Planetary rotation rate a ``run_baroclinic`` case must run with, or
+    ``None`` for the grid factory's default (Earth).
+
+    - ``gravity_wave_3_1``: non-rotating gravity wave.
+    - ``rest_state_topo``: DCMIP 2012 test 2-0-0 sets the rotation rate to
+      zero (Table XII, Omega = 0 1/s; Table VIII, "set the rotational speed
+      to zero").
+    """
+    return 0.0 if case in ("gravity_wave_3_1", "rest_state_topo") else None
+
+
 def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                    radiation: str = "gray") -> tuple[str, float, str]:
     nlev = DEFAULT_NLEV
@@ -4518,15 +4530,10 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         "gravity_wave_3_1", "inertio_gravity_3_2",
         "mountain_rossby_5_0", "rossby_haurwitz_6_0",
     )
-    # DCMIP 2008 §3-1 is canonical *only* on a non-rotating sphere:
-    # the gravity-wave packet is supposed to disperse free of inertial
-    # effects.  When this case is selected we override the planetary
-    # rotation rate at grid-construction time (the four grid factories
-    # all accept ``omega``); ``None`` leaves the factory's default
-    # (Earth) Ω in place.
-    _omega_override: float | None = (
-        0.0 if tc.case == "gravity_wave_3_1" else None
-    )
+    # Non-rotating cases override the planetary rotation rate at
+    # grid-construction time (the four grid factories all accept
+    # ``omega``); ``None`` leaves the factory's default (Earth) Omega.
+    _omega_override = dcmip_omega_override(tc.case)
 
     if tc.grid_type == "cubed_sphere":
         if tc.case not in ("baroclinic", "baroclinic_steady",

@@ -76,6 +76,13 @@ def test_rest_states_over_the_2_0_0_mountain(case, kw):
     assert f.phis.max() > 0.5 * constants.g * 2000.0
     assert np.all(f.ue == 0.0) and np.all(f.vn == 0.0)
     assert np.all(np.isfinite(f.pt))
+    from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA
+    if case == "rest_state_topo":
+        # DCMIP 2012 2-0-0 is non-rotating (Table XII: Omega = 0)
+        assert np.all(f.f0 == 0.0)
+    else:   # HS keeps the rotating planet
+        np.testing.assert_allclose(f.f0, 2 * FV3_OMEGA * np.sin(f.lat),
+                                   rtol=1e-6, atol=1e-12)
     if case == "rest_state_topo":
         # DCMIP 2012 2-0-0 as specified: constant lapse rate 6.5 K/km,
         # p_s = p0 (1 - gamma zs / T0)^(g / (Rd gamma)), T(p) on the run's
@@ -192,6 +199,52 @@ def test_rossby_haurwitz_winds():
     delp = np.asarray(bundle["state"]["delp"])[:, sl, sl, :]
     np.testing.assert_allclose(
         delp, np.diff(ak) + np.diff(bk) * ps_ref[..., None], rtol=1e-6)
+
+
+def test_dcmip_omega_override(matrix_mod):
+    """Non-rotating cases on the non-cube grids: DCMIP 2012 2-0-0 (Table
+    XII, Omega = 0) and the gravity wave; everything else keeps Earth's."""
+    f = matrix_mod.dcmip_omega_override
+    assert f("rest_state_topo") == 0.0
+    assert f("gravity_wave_3_1") == 0.0
+    for case in ("baroclinic", "held_suarez_topo", "inertio_gravity_3_2",
+                 "mountain_rossby_5_0", "rossby_haurwitz_6_0"):
+        assert f(case) is None
+
+
+@pytest.mark.parametrize("grid_type, res, module, factory", [
+    ("latlon", "8x16", "legoesm.grids.latlon", "create_latlon_grid"),
+    ("icosahedral", "ico2", "legoesm.grids.voronoi", "create_voronoi_mesh"),
+    ("spectral", "T10", "legoesm.grids.gaussian", "create_gaussian_grid"),
+])
+@pytest.mark.parametrize("case, kw, omega", [
+    ("rest_state_topo", {"h_0": 2000.0}, 0.0),
+    ("gravity_wave_3_1", {}, 0.0),
+    ("mountain_rossby_5_0", {}, None),
+])
+def test_non_cube_grid_factories_get_the_case_omega(
+        matrix_mod, monkeypatch, tmp_path, grid_type, res, module, factory,
+        case, kw, omega):
+    """run_baroclinic hands each non-cube grid factory the case's rotation
+    rate: omega=0.0 for the non-rotating cases, nothing (factory default,
+    Earth) otherwise."""
+    import importlib
+    mod = importlib.import_module(module)
+    seen = {}
+
+    def fake(*a, **k):
+        seen.update(k)
+        raise _Stop
+
+    monkeypatch.setattr(mod, factory, fake)
+    tc = matrix_mod.TestCase("hydrostatic", case, grid_type, res, "hybrid",
+                             1.0, 0.25, dict(kw))
+    with pytest.raises(_Stop):
+        matrix_mod.run_baroclinic(tc, tmp_path, 0.25)
+    if omega is None:
+        assert "omega" not in seen, seen
+    else:
+        assert seen.get("omega") == omega, seen
 
 
 def test_terrain_mismatch_is_refused():

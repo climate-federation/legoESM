@@ -481,8 +481,9 @@ def duo_shared_ic_spec(case: str, ic_kwargs: dict | None = None):
         h_0 = float(kw.get("h_0", 2000.0))
         return SimpleNamespace(
             builder=lambda g, c: init(g, c, **kw),
-            phis_fn=_mountain_2_0_0_phis(h_0), wind_fn=None, omega=None,
-            label=f"DCMIP 2012 2-0-0 rest state: constant lapse rate 6.5 K/km on native L32 levels (reference 12 km top not reproduced), h_0={h_0:g} m")
+            # DCMIP 2012 2-0-0: Omega = 0 (Table XII)
+            phis_fn=_mountain_2_0_0_phis(h_0), wind_fn=None, omega=0.0,
+            label=f"DCMIP 2012 2-0-0 rest state: constant lapse rate 6.5 K/km on native L32 levels (reference 12 km top not reproduced), non-rotating, h_0={h_0:g} m")
     if case == "held_suarez_topo":
         from legoesm.atmosphere.idealized.held_suarez_topo import (
             DEFAULT_H_0, held_suarez_topo_init as init)
