@@ -15,6 +15,7 @@ Small ico level-2 mesh (162 cells) — fast, CPU-only.
 
 import sys
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,8 @@ def _build_mpas_driver(level=2):
         ocean_nlev=_NLEV, ocean_H_max_m=_H_MAX, ocean_dt_s=300.0,
     )
     drv = CoupledESMDriver.__new__(CoupledESMDriver)
+    # production always builds _atm first; no-geography stub
+    drv._atm = SimpleNamespace(config=SimpleNamespace(geography=None))
     drv.coupled_cfg = cfg
     drv._ocean_grid = mesh
     # Dispatch through the public entry so we also cover the VoronoiMesh branch.
@@ -143,6 +146,8 @@ class TestMPASDynamicOcean(unittest.TestCase):
 
         cfg = CoupledConfig(ocean_mode="dynamic", ocean_ic="rest")
         drv = CoupledESMDriver.__new__(CoupledESMDriver)
+        # production always builds _atm first; no-geography stub
+        drv._atm = SimpleNamespace(config=SimpleNamespace(geography=None))
         drv.coupled_cfg = cfg
         drv._ocean_grid = _FakeCube()
         with self.assertRaises(ValueError):

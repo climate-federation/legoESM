@@ -15,6 +15,7 @@ compute node (sbatch), not the login node.
 
 import sys
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 import tempfile
 
@@ -75,6 +76,8 @@ class TestTripoleDynamicOcean(unittest.TestCase):
             tripole_mesh_path=mesh,
         )
         drv = CoupledESMDriver.__new__(CoupledESMDriver)
+        # production always builds _atm first; no-geography stub
+        drv._atm = SimpleNamespace(config=SimpleNamespace(geography=None))
         drv.coupled_cfg = cfg
         drv._ocean_grid = grid
         drv._init_tripole_dynamic_ocean()
@@ -127,6 +130,8 @@ class TestTripoleDynamicOcean(unittest.TestCase):
 
         cfg = CoupledConfig(ocean_mode="dynamic", ocean_ic="rest")
         drv = CoupledESMDriver.__new__(CoupledESMDriver)
+        # production always builds _atm first; no-geography stub
+        drv._atm = SimpleNamespace(config=SimpleNamespace(geography=None))
         drv.coupled_cfg = cfg
         drv._ocean_grid = _FakeCube()
         with self.assertRaises(ValueError):
