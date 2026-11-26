@@ -7,3 +7,8 @@
 # Everything else is amip_production.yaml.
 include: amip_production.yaml
 clubb_mf: true
+# Plume-area factor on plume cloud fraction (CAM7 default 10; user 2026-11-26).
+# BOMEX/RICO SCM vs LES (branch diag/mf-cldfrac-fac): factor 10 gives cloud
+# cover ~6x LES; cover is best at 1.75-2 and LWP at 1.25-1.5.  This deck keeps
+# convective water out of radiation, so only cover reaches radiation -> 1.75.
+cloud_clubb_mf_cldfrac_fac: 1.75
