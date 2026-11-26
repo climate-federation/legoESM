@@ -2863,7 +2863,6 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
                        mask_marginal_seas=False, dt=30.0,
                        velocity_ceiling=None, partial_cell=False,
-                       tracer_advection_constant_preserving=None,
                        pgf_scheme=None, bottom_drag_r=None,
                        bottom_drag_bbl_thickness=None,
                        bottom_drag_bg_velocity=None,
@@ -2871,7 +2870,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        bathy_smoothing_passes=0,
                        smc03_bottom_2nd_order=None,
                        barotropic_sw_div_damp_factor=None,
-                       barotropic_sw_damp_v=None):
+                       barotropic_sw_damp_v=None,
+                       tracer_advection_constant_preserving=None):
     """Build a cubed-sphere ocean (FV3 C-D grid baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
