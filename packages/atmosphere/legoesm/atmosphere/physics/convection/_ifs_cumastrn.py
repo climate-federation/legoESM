@@ -7,8 +7,9 @@ cuflxn,cudtdqn,cubidiag,cududv}.F90``; the updraught routines are in
 
 Configuration ported (sucumf.F90 defaults, the deterministic ECMWF physics):
 LMFPEN = LMFSCV = LMFMID = LMFDD = LMFDUDV = LMFDSNOW = LMFWETB = LMFGLAC =
-LSCVLIQ = LMFUVDIS = .TRUE.; LMFENTHCONS = LMFCUCA = LNEWTAU = LMFWSTAR =
-LMFSMOOTH = .FALSE.; RMFSOLTQ = RMFSOLUV = 1, RMFSOLRHS = RMFADVW = 0,
+LSCVLIQ = LMFUVDIS = .TRUE.; LMFCUCA = LNEWTAU = LMFWSTAR = LMFSMOOTH =
+.FALSE.; LMFENTHCONS = .FALSE. by default, .TRUE. selectable (#2571);
+RMFSOLTQ = RMFSOLUV = 1, RMFSOLRHS = RMFADVW = 0,
 RCAPDCYCL = 2, RCAPQADV = 0.8; LDTDKMF = LDMCAPEA = LPHYLIN = .FALSE.;
 SPP off; no chemical tracers (KTRAC = 0); LEPCLD = .TRUE.; PPLRG = PPLDARE
 = 1.  Branches of other switch values are NOT ported.
@@ -56,6 +57,14 @@ removes ZFAC from PLUDE and PLUDELI in proportion (water and energy neutral);
 ``IfsTunables.openifs_cloud_top_fixer`` = True (BechtoldConfig.
 ifs_openifs_cloud_top_fixer) gives OpenIFS's form.  The fixer fires on no
 oracle fixture column, so the oracle match is the same in both forms.
+Column enthalpy-conservation correction LMFENTHCONS (cudtdqn.F90:278-305,
+#2571, user decision 2026-11-26: an option, default off as sucumf):
+``IfsTunables.enthalpy_conservation`` (BechtoldConfig.ifs_enthalpy_conservation)
+ports OpenIFS's form, its 1e-3 regularizer and both fallbacks included.  Its
+two fallbacks (|ZINT| > 0.1, |ZINT2/ZINT| > 2) switch on traced state: smooth
+by default on one-sided windows of 0.01 x the threshold (_W_ENTH_*), exact
+with hard_switches.  The LSCVFLAG latent-heat swap reads the ascent's LSCV
+weight (hard 0/1 with hard_switches).
 Gap of the smooth default
 against the oracle per fixture column: tests/atmosphere/
 test_bechtold_ifs_oracle.py (``_SWITCH_GAP``).
@@ -210,6 +219,12 @@ _W_MF, _W_DH, _W_HEAT, _W_CAPE, _W_TIME, _W_VEL, _W_GEO, _W_PRES, _W_OMEGA = (
     _W_REL * x for x in (_S_MF, _S_DH, _S_HEAT, _S_CAPE, _S_TIME, _S_VEL,
                          _S_GEO, _S_PRES, _S_OMEGA))
 _W_SATFR = _W_REL * ZSATFR_MAX  # O(1) ratio: 0.01 x |threshold|
+# LMFENTHCONS fallbacks (cudtdqn.F90:300-305), 0.01 x |threshold| (vote #2571 V2)
+ZENTH_MIN = 0.1        # [W m-2] |ZINT| below which no correction (:300)
+ZENTH_REG = 1.0e-3     # [W m-2] denominator regularizer (:301)
+ZENTH_MAX = 2.0        # [1] |correction factor| above which none (:305)
+_W_ENTH_Z = _W_REL * ZENTH_MIN
+_W_ENTH_R = _W_REL * ZENTH_MAX
 # part 3 (fluxes, evaporation, positivity): x = distance to the switch point
 _S_DDEN = 7.87e-7          # [kg m-2 s-1] downdraught entrainment vs its bounds
 _S_DDBUO = 3.44e-3         # [1] downdraught buoyancy / T
@@ -250,6 +265,9 @@ class IfsTunables(NamedTuple):
     # PLUDE.  True = OpenIFS as written (adds it to PLUDE: q more negative).
     # The host passes BechtoldConfig.ifs_openifs_cloud_top_fixer.
     openifs_cloud_top_fixer: bool = True
+    # LMFENTHCONS (cudtdqn.F90:278-305, #2571): False = off (sucumf default);
+    # the host passes BechtoldConfig.ifs_enthalpy_conservation.
+    enthalpy_conservation: bool = False
 
 
 SHALLOW_NOSUPPLY_MODES = ("zero", "first_guess")
@@ -743,12 +761,22 @@ def _zdp(th, K, paph):
 
 # ---------------------------------------------------------------------------
 # CUDTDQN (cudtdqn.F90:197-460): RMFSOLTQ = 1, RMFSOLRHS = RMFADVW = 0,
-# LMFENTHCONS = LDTDKMF = LPHYLIN = .FALSE., LEPCLD = .TRUE.
+# LDTDKMF = LPHYLIN = .FALSE., LEPCLD = .TRUE.; LMFENTHCONS = ``enth``.
 # ---------------------------------------------------------------------------
+def enthcons_factor(sm, zint, zint2):
+    """LMFENTHCONS correction factor ZINT (cudtdqn.F90:299-305): ZINT2/(ZINT+1e-3)
+    where |ZINT| > 0.1, else 0, and 0 where that ratio exceeds 2 in magnitude.
+    Both fallbacks one-sided (IfsSmooth.on/off): exact outside their windows."""
+    big = jnp.abs(zint) > ZENTH_MIN   # division guard = the gate's support
+    r = sdiv(zint2, zint + ZENTH_REG, big)
+    return (sm.on(sm.abs(zint, _W_ENTH_Z), ZENTH_MIN, _W_ENTH_Z) * r
+            * sm.off(sm.abs(r, _W_ENTH_R), ZENTH_MAX, _W_ENTH_R, strict=False))
+
+
 def cudtdqn(th, K, dt, kctop, ldcum, lddraf, kdtop, pten, pqen, paph, pgeo,
             pgeoh, ptenh, pqenh, pqsen, plglac, plude, pludeli1, pludeli2, psnde1,
             psnde2, pmfu, pmfd, pmfus, pmfds, pmfuq, pmfdq, pmful, pdmfup, pdpmel,
-            ptent, ptenq):
+            ptent, ptenq, enth=False, lscv=None, pmflxr=None, pmflxs=None, sm=None):
     rcpd = th.RCPD
     lev = jnp.arange(K + 1)
     zorcpd = 1.0 / rcpd
@@ -766,18 +794,33 @@ def cudtdqn(th, K, dt, kctop, ldcum, lddraf, kdtop, pten, pqen, paph, pgeo,
     dd = on & lddraf & (lev >= kdtop)
     zmfds = jnp.where(dd, pmfds - pmfd * zs, pmfds)
     zmfdq = jnp.where(dd, pmfdq - pmfd * zq, pmfdq)
-    # 3.0 tendencies (ZINT = 0: LMFENTHCONS off), :290-380
-    zalv = foelhmcu(th, pten)
+    # 3.0 tendencies, :278-380
+    zalv2 = foelhmcu(th, pten)
+    zalv = zalv2
+    zint = 0.0
+    if enth:
+        # LMFENTHCONS, :285-305: ZALV = RLVTT on liquid-only shallow columns
+        # from KTOPM2 (= 2, set by CUFLXN, cuflxn.F90:238) down; ZALV2 keeps FOELHMCU
+        zalv = jnp.where(lev >= 2, sm.sel(lscv, th.RLVTT, zalv2), zalv2)
+        zmelt = th.RLMLT * (plglac - pdpmel)
+        dmful = _nx(pmful) - pmful
+        # sequential, in the source's level and operand order: the hard gate
+        # |ZINT| > 0.1 then sees the source's rounding
+        zi = jax.lax.fori_loop(2, K, lambda jk, z: z + zmelt[jk] - zalv[jk] * dmful[jk]
+                               + zalv2[jk] * pdmfup[jk],
+                               jnp.zeros((), jnp.result_type(zmelt, zalv, dmful, zalv2, pdmfup)))
+        zi = zi + zmelt[K] + zalv[K] * pmful[K] + zalv2[K] * pdmfup[K]
+        zint = enthcons_factor(sm, zi, zi - th.RLVTT * pmflxr[K + 1] - th.RLSTT * pmflxs[K + 1])
     zdtdt = zdp * zorcpd * (_nx(zmfus) - zmfus + _nx(zmfds) - zmfds
                             + (th.RLMLT * (plglac - pdpmel)
-                               - zalv * (_nx(pmful) - pmful) + zalv * pdmfup)
+                               - zalv * (_nx(pmful) - pmful) + zalv2 * pdmfup) * (1.0 - zint)
                             + th.RLVTT * (pludeli1 + psnde1)
                             + th.RLSTT * (pludeli2 + psnde2))
     zdqdt = zdp * (_nx(zmfuq) - zmfuq + _nx(zmfdq) - zmfdq + _nx(pmful) - pmful
                    - plude - pdmfup - psnde1 - psnde2)
     zdtdt = zdtdt.at[K].set(-zdp[K] * zorcpd * (
         zmfus[K] + zmfds[K] + (th.RLMLT * (pdpmel[K] - plglac[K]) - zalv[K] * pmful[K]
-                               - zalv[K] * pdmfup[K])))
+                               - zalv2[K] * pdmfup[K]) * (1.0 - zint)))
     zdqdt = zdqdt.at[K].set(-zdp[K] * (zmfuq[K] + zmfdq[K] + (pmful[K] + pdmfup[K])))
     # 3.2 implicit solution, :400-455.  RMFSOLRHS = 0 and ZADVW = 0 make the
     # RHS (ZDTDT + PTENT*0)*PTSPHY + PTEN - 0 = ZDTDT*PTSPHY + PTEN exactly.
@@ -1135,7 +1178,8 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
     ptent, ptenq, penth = cudtdqn(
         th, K, dt, kctop, ldcum, lddraf, idtop, pten, pqen, paph, pgeo, pgeoh, ztenh,
         zqenh, pqsen_c, zlglac, plude, pludeli1, pludeli2, psnde1, psnde2, pmfu, pmfd,
-        zmfus, zmfds, zmfuq, zmfdq, zmful, zdmfup, zdpmel, ptent, ptenq)
+        zmfus, zmfds, zmfuq, zmfdq, zmful, zdmfup, zdpmel, ptent, ptenq,
+        enth=tun.enthalpy_conservation, lscv=a["lscv"], pmflxr=pmflxr, pmflxs=pmflxs, sm=sm)
 
     # 9.0 momentum, LMFDUDV, :1242-1382
     def uu_body(i, c):
@@ -1260,6 +1304,9 @@ def cumastrn(th, dt, pgaw, T, q, u, v, plitot, omega, qsat, ahfs, qhfl, p_full,
     if not isinstance(tun.openifs_cloud_top_fixer, bool):
         raise ValueError("openifs_cloud_top_fixer must be a python bool (static), "
                          f"got {tun.openifs_cloud_top_fixer!r}.")
+    if not isinstance(tun.enthalpy_conservation, bool):
+        raise ValueError("enthalpy_conservation must be a python bool (static), "
+                         f"got {tun.enthalpy_conservation!r}.")
     if not tun.shallow_supply_width_w_m2 >= 0.0:
         raise ValueError(
             "shallow_supply_width_w_m2 must be >= 0 (0 = hard max(ZDHPBL, 0)), "
