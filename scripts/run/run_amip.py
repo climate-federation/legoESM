@@ -632,6 +632,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="latlon_ah_pressure_surfaces",
                         help="lat-lon PE: A_h T diffusion partially corrected to "
                              "pressure surfaces (CAM3 eq. 3.80); default off")
+    parser.add_argument("--latlon-vert-advection-scheme",
+                        choices=("auto", "upwind", "sb"),
+                        default=_DYCORE_DEFAULTS.latlon_vert_advection_scheme,
+                        dest="latlon_vert_advection_scheme",
+                        help="lat-lon PE vertical temperature transport: 'auto' "
+                             "(default) = centred Simmons-Burridge on hybrid "
+                             "levels, upwind on sigma (user decision "
+                             "2026-11-26); 'upwind' reproduces earlier runs")
     parser.add_argument("--spectral-t-damping-pressure-surfaces",
                         action=argparse.BooleanOptionalAction,
                         default=_DYCORE_DEFAULTS.spectral_t_damping_pressure_surfaces,
@@ -3347,6 +3355,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_fct_upwind_width_ms=args.mpas_fct_upwind_width_ms,
         mpas_kh_pressure_surfaces=args.mpas_kh_pressure_surfaces,
         latlon_ah_pressure_surfaces=args.latlon_ah_pressure_surfaces,
+        latlon_vert_advection_scheme=args.latlon_vert_advection_scheme,
         spectral_t_damping_pressure_surfaces=args.spectral_t_damping_pressure_surfaces,
         mpas_edge_scaled_damping=args.mpas_edge_scaled_damping,
         mpas_damping_exp_del2=args.mpas_damping_exp_del2,

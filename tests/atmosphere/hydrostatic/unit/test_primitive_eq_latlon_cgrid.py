@@ -1096,6 +1096,11 @@ class TestTracerMassConservation:
         real_vertical = getattr(pe, symbol)
 
         def observe_vertical(*args, **kwargs):
+            # Since the user decision of 2026-11-26 the legacy body also runs
+            # the centred SB helper on T (field rank 3); record only the
+            # stacked tracer call (rank 4) this test is about.
+            if args[0].ndim != q.ndim + 1:
+                return real_vertical(*args, **kwargs)
             captured["calls"] += 1
             captured["args"] = args
             captured["width"] = kwargs.get("smoothing_width")

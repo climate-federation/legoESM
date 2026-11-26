@@ -165,6 +165,9 @@ def primitive_equation_tendencies(
     if as83 and not hybrid:
         raise ValueError("the Arakawa-Suarez vertical form needs a hybrid coordinate; "
                          "use vertical_form=\"sb81_theta\" on sigma")
+    vert_scheme = ops.vert_scheme
+    if vert_scheme == "auto":   # the lat-lon default, resolved on the coordinate
+        vert_scheme = resolve_latlon_vert_scheme(vert_scheme, ops.vertical_form, hybrid)
     gops = ops.grid_ops
     p_s = jnp.clip(p_s, ops.p_floor, ops.p_ceil)
     if hybrid:
@@ -222,19 +225,19 @@ def primitive_equation_tendencies(
         dps = -D[..., 0] / sigma_coord.B_range
         vv = compute_mass_flux_from_cumsum(cumsum, D, sigma_coord)
         vert_T = None if as83 else vertical_advection_theta_hybrid(
-            T, vv, p_s, sigma_coord, conservative=(ops.vert_scheme == "sb"))
+            T, vv, p_s, sigma_coord, conservative=(vert_scheme == "sb"))
         omega_ps = sigma_coord.B_full * dps[..., None]
     else:
         dps = -D[..., 0] / (1.0 - sigma_coord.sigma_half[0])
         vv = compute_sigma_dot_from_cumsum(cumsum, D, p_s, sigma_coord)
-        vert_T = vertical_advection_theta(T, vv, p_s, sigma_coord, scheme=ops.vert_scheme)
+        vert_T = vertical_advection_theta(T, vv, p_s, sigma_coord, scheme=vert_scheme)
         omega_ps = sigma_coord.sigma_full * dps[..., None]
     ctx.update(div_dp=div_dp, vert_vel=vv, dps_raw=dps)
 
     vv_face = ops.to_face(vv)
     ps_face = tuple(f[..., 0] for f in ops.to_face(p_s[..., None]))
     terms["vert_mom"] = tuple(
-        vertical_momentum_advection(v, vf, pf, sigma_coord, hybrid, ops.vert_scheme, centred=as83)
+        vertical_momentum_advection(v, vf, pf, sigma_coord, hybrid, vert_scheme, centred=as83)
         for v, vf, pf in zip(vel, vv_face, ps_face))
     dvel = tuple(d + a for d, a in zip(dvel, terms["vert_mom"]))
 
@@ -416,21 +419,48 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
         config.p_ceil, vertical_form, face_pairs)
 
 
+#: Lat-lon ``vert_advection_scheme`` values.  "auto" (the default) resolves per
+#: coordinate in :func:`resolve_latlon_vert_scheme`.
+LATLON_VERT_SCHEMES = ("auto", "upwind", "sb")
+#: Vertical forms whose hybrid temperature transport the field selects (the
+#: Arakawa-Suarez forms carry their own centred transport and ignore it).
+_LATLON_SB_FORMS = ("legacy", "sb81_theta")
+
+
 def _check_latlon_vert_scheme(scheme: str, vertical_form: str,
                               hybrid: bool | None) -> None:
-    """Static guard of the lat-lon ``vert_advection_scheme``: "upwind" anywhere;
-    "sb" only where it acts (``sb81_theta`` on a hybrid coordinate) -- the
-    legacy and Arakawa-Suarez forms and the sigma lane would run it inert.
-    ``hybrid=None`` (the operator factory, which does not see the coordinate)
-    checks the form only; on sigma the shared core's ``vertical_advection``
-    itself refuses "sb"."""
-    if scheme not in ("upwind", "sb"):
+    """Static guard of the lat-lon ``vert_advection_scheme``: "auto" and
+    "upwind" anywhere; "sb" only where it acts (the ``legacy`` and
+    ``sb81_theta`` forms on a hybrid coordinate) -- the Arakawa-Suarez forms
+    and the sigma lane would run it inert.  ``hybrid=None`` (the operator
+    factory, which does not see the coordinate) checks the form only; on sigma
+    the shared core's ``vertical_advection`` itself refuses "sb"."""
+    if scheme not in LATLON_VERT_SCHEMES:
         raise ValueError(f"unknown lat-lon vert_advection_scheme {scheme!r}; "
-                         "expected 'upwind' or 'sb'")
-    if scheme == "sb" and (vertical_form != "sb81_theta" or hybrid is False):
+                         f"expected one of {LATLON_VERT_SCHEMES}")
+    if scheme == "sb" and (vertical_form not in _LATLON_SB_FORMS
+                           or hybrid is False):
         raise ValueError("lat-lon vert_advection_scheme='sb' acts only in "
-                         "vertical_form='sb81_theta' on a hybrid coordinate; got "
-                         f"vertical_form={vertical_form!r}, hybrid={hybrid}")
+                         f"vertical_form in {_LATLON_SB_FORMS} on a hybrid "
+                         f"coordinate; got vertical_form={vertical_form!r}, "
+                         f"hybrid={hybrid}")
+
+
+def resolve_latlon_vert_scheme(scheme: str, vertical_form: str,
+                               hybrid: bool) -> str:
+    """The concrete lat-lon vertical temperature transport ("upwind" | "sb").
+
+    "auto" (the default; user decision 2026-11-26) is the centred
+    Simmons-Burridge (1981) form, "sb", on a hybrid coordinate in the
+    ``legacy`` and ``sb81_theta`` forms -- the ico lane's hybrid setting and
+    CAM-EUL's -- and "upwind" elsewhere: sigma (as on the ico lane; no
+    centred sigma transport is wired on lat-lon) and the Arakawa-Suarez forms,
+    where the field is inert.  Explicit "upwind" reproduces the pre-decision
+    first-order donor cell; explicit values are validated, never rewritten."""
+    _check_latlon_vert_scheme(scheme, vertical_form, hybrid)
+    if scheme != "auto":
+        return scheme
+    return "sb" if hybrid and vertical_form in _LATLON_SB_FORMS else "upwind"
 
 
 def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
@@ -438,8 +468,10 @@ def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
                                geom_pads: Any = None, dt: Any = None):
     """Lat-lon C-grid PE tendencies ``(du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends)``.
 
-    ``"legacy"`` runs the lane's pre-core body unchanged (geometry pads and the
-    packed exchange included).  The other forms ignore ``geom_pads`` (the pads
+    ``"legacy"`` runs the lane's pre-core body (geometry pads and the packed
+    exchange included), unchanged except for the hybrid vertical T transport,
+    which ``config.vert_advection_scheme`` selects ("auto" -> centred SB on
+    hybrid since the user decision of 2026-11-26).  The other forms ignore ``geom_pads`` (the pads
     are value-identical to the in-operator ones) and refuse the packed
     exchange; the Arakawa-Suarez forms also refuse the lat-band SPMD / MPI
     lanes (their face metrics and vertex PV are not band-aware)."""
@@ -450,8 +482,11 @@ def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
     if config is None:
         config = CGridLatLonPrimitiveEquationConfig()
     vertical_form = _resolve_form(vertical_form, config)
-    _check_latlon_vert_scheme(config.vert_advection_scheme, vertical_form,
-                              isinstance(sigma_coord, HybridSigmaPressureCoordinate))
+    _scheme = resolve_latlon_vert_scheme(
+        config.vert_advection_scheme, vertical_form,
+        isinstance(sigma_coord, HybridSigmaPressureCoordinate))
+    if _scheme != config.vert_advection_scheme:
+        config = config._replace(vert_advection_scheme=_scheme)
     if vertical_form == "legacy":
         return latlon_legacy_pe_tendencies(state, grid, sigma_coord, config,
                                            geom_pads=geom_pads, dt=dt)

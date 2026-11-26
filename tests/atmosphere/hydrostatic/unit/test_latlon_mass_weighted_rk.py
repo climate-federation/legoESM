@@ -39,10 +39,14 @@ _MASS = {
     ("sigma", False): {"q_v": -2.1684814028531837e-08, "q_c": -1.0698386758825048e-09},
     ("hybrid", False): {"q_v": -2.1255574859590977e-08, "q_c": -1.1744393796154918e-09},
 }
-# max |q_mass_weighted - q_legacy| / max |q_legacy| after the 4 steps
+# max |q_mass_weighted - q_legacy| / max |q_legacy| after the 4 steps.
+# Hybrid re-measured 2026-11-26: the lat-lon hybrid T vertical transport moved
+# from upwind to centred SB by default (user decision); the flow, hence the
+# gap, changes at 3e-4 relative (upwind values: q_v 1.2063852513064226e-06,
+# q_c 1.763639178611702e-06).  Sigma unchanged (still upwind).
 _GAP = {
     "sigma": {"q_v": 4.7626983119430156e-07, "q_c": 6.966465708577796e-07},
-    "hybrid": {"q_v": 1.2063852513064226e-06, "q_c": 1.763639178611702e-06},
+    "hybrid": {"q_v": 1.206767733432758e-06, "q_c": 1.764200560197969e-06},
 }
 
 

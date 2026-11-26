@@ -56,6 +56,7 @@ from legoesm.grids.operators_latlon_cgrid import (
 )
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import (
     cgrid_latlon_pe_tendencies,
+    resolve_latlon_vert_scheme,
 )
 from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
@@ -292,19 +293,24 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # mixing-ratio update, which creates or destroys tracer mass at second
     # order in dt (KNOWN DIFFERENCE; gaps in test_latlon_mass_weighted_rk).
     tracer_mass_weighted_rk: bool = True
-    # Vertical temperature (theta-form) transport of the shared-core
-    # ``vertical_form="sb81_theta"`` (``primitive_eq_generic``), mirroring
-    # ``MPASPrimitiveEquationConfig.vert_advection_scheme``: "upwind" (default,
-    # the advective donor cell, bit-identical to before) or "sb" (hybrid only:
-    # the conservative Simmons-Burridge flux form, the ico matrix lane's
-    # setting).  The upwind form is first order and not conservative: on DCMIP
-    # 2012 3-1 (72x144, L10) it drifts the global-mean T per level linearly in
-    # the wave amplitude (lid +0.017 K, opposite sign under "legacy") where
-    # "sb" holds it to 1e-4 K.  The hybrid vertical momentum advection stays
-    # upwind either way (as on the ico lane).  Other forms refuse "sb" (inert
-    # there).  Appended
-    # after ``tracer_mass_weighted_rk`` (positional ABI).
-    vert_advection_scheme: str = "upwind"
+    # Vertical temperature transport on a HYBRID coordinate, in the "legacy"
+    # form (advective -F dT/dp) and the shared-core "sb81_theta" form (theta
+    # form), mirroring ``MPASPrimitiveEquationConfig.vert_advection_scheme``.
+    # "auto" (DEFAULT, user decision 2026-11-26) resolves to "sb" on a hybrid
+    # coordinate (legacy / sb81_theta) and "upwind" on sigma and in the
+    # Arakawa-Suarez forms (inert there): ``resolve_latlon_vert_scheme``.
+    # "sb" = the centred Simmons-Burridge (1981) form (CAM-EUL; the ico
+    # lane's hybrid setting); "upwind" = the first-order donor cell, kept as
+    # the explicit opt-out that reproduces pre-2026-11-26 runs.  The upwind
+    # form is not conservative (its dp-weighted column sum does not
+    # telescope; the SB form's does, paired with continuity): on DCMIP 2012
+    # 3-1 (72x144, L10) it drifted the global-mean T per level linearly in the
+    # wave amplitude (legacy: lid +0.041 K, surface -0.026 K in 1 h), a drift
+    # the single-term swap to "sb" removed in that setup (commit
+    # 3aa75b62d9).  Vertical momentum advection stays upwind either way
+    # (as on the ico lane).  "sb" on sigma or as83 raises (it would be
+    # inert).  Appended after ``tracer_mass_weighted_rk`` (positional ABI).
+    vert_advection_scheme: str = "auto"
 
 
 # CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
@@ -757,6 +763,11 @@ def latlon_legacy_pe_tendencies(
     kappa = constants.kappa
 
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+    # Vertical T transport (hybrid): "sb" (the "auto" default, user decision
+    # 2026-11-26) = the centred Simmons-Burridge form, "upwind" = the old
+    # first-order donor cell.  Sigma keeps upwind.
+    _vert_scheme = resolve_latlon_vert_scheme(
+        config.vert_advection_scheme, "legacy", _hybrid)
 
     # Positivity protections
     T = jnp.maximum(T, config.T_min)
@@ -1023,7 +1034,14 @@ def latlon_legacy_pe_tendencies(
             p_s[..., jnp.newaxis], f_pad=_ps_lat_pad)[..., 0]
         du_dt = du_dt + vertical_advection_hybrid(u, mf_u, ps_u, sigma_coord)
         dv_dt = dv_dt + vertical_advection_hybrid(v, mf_v, ps_v, sigma_coord)
-        vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
+        # T: SB81 centred (CAM-EUL; the ico lane's hybrid "sb") by default,
+        # paired with the SB81 alpha omega/p conversion below; momentum
+        # stays upwind (as on the ico lane).  The first-order upwind T form
+        # drifted the level-mean T linearly in the wave amplitude (DCMIP
+        # 2012 3-1: lid +0.041 K, surface -0.026 K in 1 h).
+        _vadv_T = (vertical_advection_hybrid_sb if _vert_scheme == "sb"
+                   else vertical_advection_hybrid)
+        vert_adv_T = _vadv_T(T, mass_flux, p_s, sigma_coord)
     else:
         # Flux-form sigma_dot consistent with mass-flux continuity:
         # σ̇_{k+1/2} = [frac_k · D_total_p - cumsum_k(div(dp·v))] / p_s

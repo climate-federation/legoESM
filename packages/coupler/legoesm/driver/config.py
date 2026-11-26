@@ -496,6 +496,15 @@ class DycoreConfig(NamedTuple):
     # on any other core (validate_strict and the dycore factory).
     latlon_ah_pressure_surfaces: bool = False
     spectral_t_damping_pressure_surfaces: bool = False
+    # Lat-lon C-grid PE vertical TEMPERATURE transport
+    # (CGridLatLonPrimitiveEquationConfig.vert_advection_scheme).  "auto"
+    # (default, user decision 2026-11-26) = the centred Simmons-Burridge form
+    # on a hybrid coordinate (legacy / sb81_theta forms) and upwind on sigma;
+    # "upwind" = the first-order donor cell of runs before 2026-11-26 (the
+    # opt-out that reproduces them); "sb" = centred, hybrid legacy/sb81_theta
+    # only.  The as83 forms carry their own centred transport (inert there).
+    # Appended at the tuple END (positional ABI).
+    latlon_vert_advection_scheme: str = "auto"
 
 
 class EvaluationConfig(NamedTuple):
@@ -4656,6 +4665,28 @@ class ExperimentConfig(NamedTuple):
         for _pk in ("latlon_ah_pressure_surfaces", "spectral_t_damping_pressure_surfaces"):
             if not isinstance(getattr(d, _pk), bool):
                 errors.append(f"dycore.{_pk} must be a bool (got {getattr(d, _pk)!r})")
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import (
+            LATLON_VERT_SCHEMES)
+        if d.latlon_vert_advection_scheme not in LATLON_VERT_SCHEMES:
+            errors.append(
+                f"dycore.latlon_vert_advection_scheme must be one of "
+                f"{LATLON_VERT_SCHEMES}, got {d.latlon_vert_advection_scheme!r}")
+        elif d.latlon_vert_advection_scheme != "auto":
+            from legoesm.driver.component_factory import driver_solver_name
+            if driver_solver_name(self) != "latlon_cgrid_primitive_equations":
+                errors.append(
+                    "dycore.latlon_vert_advection_scheme is wired into the "
+                    "hydrostatic lat-lon C-grid dycore only; on solver "
+                    f"{driver_solver_name(self)!r} it would be silently inert. "
+                    "Leave it at 'auto'.")
+            elif d.latlon_vert_advection_scheme == "sb" and (
+                    g.vertical_coord == "sigma"
+                    or d.vertical_form not in ("legacy", "sb81_theta")):
+                errors.append(
+                    "dycore.latlon_vert_advection_scheme='sb' acts only on a "
+                    "hybrid vertical coordinate in vertical_form 'legacy' or "
+                    f"'sb81_theta'; with vertical_coord={g.vertical_coord!r}, "
+                    f"vertical_form={d.vertical_form!r} it would be inert.")
         if d.latlon_ah_pressure_surfaces is True:
             if (d.model_type != "hydrostatic"
                     or d.discretization not in ("finite_volume", "centered", "latlon_cgrid")

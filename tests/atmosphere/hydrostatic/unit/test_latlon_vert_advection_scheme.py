@@ -71,7 +71,8 @@ def test_scheme_reaches_the_operators():
         CGridLatLonPrimitiveEquationConfig as Cfg)
     from legoesm.grids.latlon import create_latlon_grid
     grid = create_latlon_grid(8, 16)
-    assert Cfg().vert_advection_scheme == "upwind"
+    # user decision 2026-11-26: the default is no longer the upwind donor cell
+    assert Cfg().vert_advection_scheme == "auto"
     for scheme in ("upwind", "sb"):
         ops = g.latlon_pe_operators(
             grid, Cfg(vertical_form="sb81_theta", vert_advection_scheme=scheme),
@@ -82,7 +83,7 @@ def test_scheme_reaches_the_operators():
 @pytest.mark.parametrize("scheme, form, hybrid, match", [
     ("van_leer", "sb81_theta", True, "unknown"),
     ("ppm", "sb81_theta", True, "unknown"),
-    ("sb", "legacy", True, "acts only"),
+    ("sb", "legacy", False, "acts only"),
     ("sb", "as83", True, "acts only"),
     ("sb", "as83_logmean", True, "acts only"),
     ("sb", "sb81_theta", False, "acts only"),
@@ -96,7 +97,9 @@ def test_guard_refuses_inert_or_unknown(scheme, form, hybrid, match):
 @pytest.mark.parametrize("scheme, form, hybrid", [
     ("upwind", "legacy", True), ("upwind", "legacy", False),
     ("upwind", "sb81_theta", False), ("upwind", "as83", True),
-    ("sb", "sb81_theta", True),
+    ("sb", "sb81_theta", True), ("sb", "legacy", True), ("sb", "legacy", None),
+    ("auto", "legacy", True), ("auto", "legacy", False), ("auto", "as83", True),
+    ("auto", "sb81_theta", False),
 ])
 def test_guard_accepts(scheme, form, hybrid):
     from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
@@ -104,17 +107,17 @@ def test_guard_accepts(scheme, form, hybrid):
 
 
 def test_tendency_entry_runs_the_guard():
-    """The model's tendency entry refuses the legacy form with "sb" (it would
-    run the old upwind transport silently)."""
+    """The model's tendency entry refuses "sb" on the sigma lane (it would
+    run the upwind transport silently)."""
     from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationConfig as Cfg,
         CGridLatLonHydrostaticState)
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+    from legoesm.grids.vertical import create_sigma_coordinate
     import jax.numpy as jnp
     grid = create_latlon_grid(8, 16)
-    sigma = make_dcmip2012_gw31_levels()
+    sigma = create_sigma_coordinate(10)
     st = CGridLatLonHydrostaticState(
         u=jnp.zeros((8, 17, 10)), v=jnp.zeros((9, 16, 10)),
         T=jnp.full((8, 16, 10), 250.0), p_s=jnp.full((8, 16), 1e5),
@@ -132,7 +135,7 @@ def test_operator_factory_refuses_inert_sb():
         CGridLatLonPrimitiveEquationConfig as Cfg)
     from legoesm.grids.latlon import create_latlon_grid
     grid = create_latlon_grid(8, 16)
-    for form in ("legacy", "as83", "as83_logmean"):
+    for form in ("as83", "as83_logmean"):
         with pytest.raises(ValueError, match="acts only"):
             g.latlon_pe_operators(
                 grid, Cfg(vertical_form=form, vert_advection_scheme="sb"),
@@ -194,3 +197,121 @@ def test_sb_changes_theta_transport_only():
         assert np.all(np.isfinite(np.asarray(out[s]["vert_T"])))
     assert not np.allclose(np.asarray(out["upwind"]["vert_T"]),
                            np.asarray(out["sb"]["vert_T"]))
+
+
+# --- user decision 2026-11-26: lat-lon hybrid runs default to centred SB T ---
+
+def _sheared_state(nlev=10):
+    """A sheared, divergent, horizontally varying hybrid state (8x16)."""
+    import jax.numpy as jnp
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonHydrostaticState)
+    rng = np.random.default_rng(1)
+    k = jnp.arange(float(nlev))
+    return CGridLatLonHydrostaticState(
+        u=10.0 + 2.0 * k + jnp.asarray(rng.normal(size=(8, 17, nlev))),
+        v=jnp.asarray(rng.normal(size=(9, 16, nlev))).at[0].set(0.0).at[-1].set(0.0),
+        T=230.0 + 6.0 * k + jnp.asarray(rng.normal(size=(8, 16, nlev))),
+        p_s=1e5 + 300.0 * jnp.asarray(rng.normal(size=(8, 16))),
+        phis=jnp.zeros((8, 16)))
+
+
+@pytest.mark.parametrize("form", ["legacy", "sb81_theta"])
+def test_default_is_centred_sb_on_hybrid(form):
+    """Fails if the lat-lon hybrid default reverts to the upwind T transport:
+    the default config's tendencies equal explicit "sb" bit for bit and differ
+    from explicit "upwind" (the opt-out).  Momentum and p_s are unchanged by
+    the scheme (only the T transport moves)."""
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationConfig as Cfg)
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+    grid = create_latlon_grid(8, 16)
+    sigma = make_dcmip2012_gw31_levels()
+    st = _sheared_state()
+    out = {s: g.cgrid_latlon_pe_tendencies(
+               st, grid, sigma, Cfg(vertical_form=form, vert_advection_scheme=s),
+               dt=600.0)
+           for s in ("auto", "sb", "upwind")}
+    assert Cfg().vert_advection_scheme == "auto"
+    assert g.resolve_latlon_vert_scheme("auto", form, True) == "sb"
+    for o in out.values():
+        assert all(np.all(np.isfinite(np.asarray(x))) for x in o[:4])
+    for a, b in zip(out["auto"][:4], out["sb"][:4]):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    for i in (0, 1, 3):   # du, dv, dps: the T transport does not feed them
+        np.testing.assert_array_equal(np.asarray(out["sb"][i]),
+                                      np.asarray(out["upwind"][i]))
+    assert not np.allclose(np.asarray(out["sb"][2]), np.asarray(out["upwind"][2]))
+
+
+def test_default_stays_upwind_on_sigma():
+    """Sigma (no centred sigma transport on lat-lon; the ico lane's sigma
+    setting): "auto" is the upwind donor cell, bit for bit."""
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationConfig as Cfg)
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    grid = create_latlon_grid(8, 16)
+    sigma = create_sigma_coordinate(10)
+    st = _sheared_state()
+    for form in ("legacy", "sb81_theta"):
+        a = g.cgrid_latlon_pe_tendencies(st, grid, sigma, Cfg(vertical_form=form),
+                                         dt=600.0)
+        b = g.cgrid_latlon_pe_tendencies(
+            st, grid, sigma, Cfg(vertical_form=form, vert_advection_scheme="upwind"),
+            dt=600.0)
+        for x, y in zip(a[:4], b[:4]):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_factory_auto_resolves_in_the_shared_core():
+    """A direct factory caller with the "auto" default gets the coordinate's
+    scheme from the shared core (sb on hybrid), not an unknown-scheme error."""
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationConfig as Cfg)
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+    grid = create_latlon_grid(8, 16)
+    sigma = make_dcmip2012_gw31_levels()
+    st = _sheared_state()
+    terms = {}
+    for s in ("auto", "sb"):
+        ops = g.latlon_pe_operators(grid, Cfg(vertical_form="sb81_theta",
+                                              vert_advection_scheme=s), {}, 600.0)
+        *_, ctx = g.primitive_equation_tendencies(
+            st.T, (st.u, st.v), st.p_s, st.phis, sigma, ops)
+        terms[s] = np.asarray(ctx["terms"]["vert_T"])
+    np.testing.assert_array_equal(terms["auto"], terms["sb"])
+
+
+@_x64
+def test_legacy_sb_conserves_column_dp_weighted_vertical_transport():
+    """Budget of the legacy-form T vertical transport (hybrid): the centred SB
+    term plus T times the layer mass-flux convergence is a flux divergence, so
+    its dp-weighted column sum vanishes to round-off (the property the upwind
+    advective form lacks).  Checked on the shared helper the legacy body now
+    calls, on a random column state."""
+    import jax.numpy as jnp
+    from legoesm.grids.vertical import (
+        dp_from_hybrid, make_dcmip2012_gw31_levels, vertical_advection_hybrid,
+        vertical_advection_hybrid_sb)
+    coord = make_dcmip2012_gw31_levels()
+    rng = np.random.default_rng(2)
+    nlev = 10
+    T = jnp.asarray(250.0 + 5.0 * rng.normal(size=(4, nlev)))
+    ps = jnp.asarray(1e5 + 500.0 * rng.normal(size=(4,)))
+    F = jnp.pad(jnp.asarray(rng.normal(size=(4, nlev - 1))), ((0, 0), (1, 1)))
+    dp = dp_from_hybrid(coord, ps)
+    resid = {}
+    for name, op in (("sb", vertical_advection_hybrid_sb),
+                     ("upwind", vertical_advection_hybrid)):
+        adv = op(T, F, ps, coord)
+        resid[name] = float(jnp.abs(jnp.sum(dp * adv - T * jnp.diff(F, axis=-1),
+                                            axis=-1)).max())
+    scale = float(jnp.abs(T * jnp.diff(F, axis=-1)).sum(axis=-1).max())
+    assert resid["sb"] < 1e-12 * scale
+    assert resid["upwind"] > 1e-3 * scale

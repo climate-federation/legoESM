@@ -86,6 +86,9 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "mpas_vert_advection_scheme",
         "mpas_tracer_horizontal_scheme",
         "tracer_vertical_scheme",
+        # nested dycore.latlon_vert_advection_scheme — lat-lon vertical T
+        # transport ("auto" | "upwind" | "sb"); membership + inert refusal.
+        "latlon_vert_advection_scheme",
         # External-forcing source selectors (2026-07-21 AMIP/CMIP audit):
         # the driver gates each channel with an equality test, so a typo
         # silently deactivated the channel before these membership checks.
@@ -309,7 +312,8 @@ def _bogus_is_rejected(field: str) -> bool:
         "dycore": (DycoreConfig, ("model_type", "discretization",
                                   "time_integrator", "mpas_vert_advection_scheme",
                                   "mpas_tracer_horizontal_scheme",
-                                  "tracer_vertical_scheme")),
+                                  "tracer_vertical_scheme",
+                                  "latlon_vert_advection_scheme")),
         "output": (OutputConfig, ("checkpoint_format",)),
     }
     for kw, (cls, fields) in _NESTED.items():
@@ -340,7 +344,8 @@ def test_default_config_is_valid() -> None:
         EXPECTED_VALIDATED
         # nested DycoreConfig / GridConfig fields; tested separately below
         - {"model_type", "discretization", "mpas_vert_advection_scheme",
-           "mpas_tracer_horizontal_scheme", "tracer_vertical_scheme", "vertical_coord"}
+           "mpas_tracer_horizontal_scheme", "tracer_vertical_scheme", "vertical_coord",
+           "latlon_vert_advection_scheme"}
         | EQUALITY_VALIDATED
     ),
 )
@@ -358,6 +363,7 @@ def test_validate_strict_rejects_bogus_nested_dycore() -> None:
     assert _bogus_raises(dycore=DycoreConfig(mpas_vert_advection_scheme=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(mpas_tracer_horizontal_scheme=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(tracer_vertical_scheme=_BOGUS))
+    assert _bogus_raises(dycore=DycoreConfig(latlon_vert_advection_scheme=_BOGUS))
 
 
 def test_ocean_validate_strict_rejects_bogus_shortwave_selector() -> None:

@@ -4346,6 +4346,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             # flat HS: 28.3). Chosen by vote (codex
             # sb81_theta, GLM sb81_theta, author as83). Flat HS keeps legacy.
             vertical_form="sb81_theta" if _topo else "legacy",
+            # vert_advection_scheme: default "auto" = centred SB T transport
+            # on the hybrid rows, upwind on sigma (user decision 2026-11-26)
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         print(f"  latlon HS dissipation: A_h={config.A_h:.4e} m^2/s, "
@@ -4846,7 +4848,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         # T transport drifted the global-mean T per level linearly in the
         # wave amplitude (lid +0.041 K, surface -0.026 K in 3600 s) and wiped
         # out the mid-troposphere packets.  Vote 2026-11-26: codex A, author
-        # A; scope this row only (codex i, author i).  Other rows: legacy.
+        # A; scope this row only (codex i, author i).  Other rows: legacy,
+        # whose T transport is now centred SB too (vert_advection_scheme
+        # "auto" default, user decision 2026-11-26); this row keeps its form.
         # The form brings its own conversion (theta-form vertical term +
         # kappa T omega_ps / p); ``sb81_omega_conversion`` is a legacy-form
         # switch and has no effect here (as on the held_suarez_topo row).

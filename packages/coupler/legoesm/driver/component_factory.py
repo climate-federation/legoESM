@@ -1548,6 +1548,9 @@ def create_atmosphere_dycore(
             nu_div4_scale=dc.mpas_div_damp4_scale,
             vertical_form=dc.vertical_form,
             A_h_pressure_surfaces=bool(dc.latlon_ah_pressure_surfaces),
+            # vertical T transport: "auto" = centred SB on hybrid (user
+            # decision 2026-11-26), "upwind" = the pre-decision donor cell
+            vert_advection_scheme=dc.latlon_vert_advection_scheme,
         )
         if cfg.A_h_pressure_surfaces and not _A_h > 0:
             raise ValueError(
