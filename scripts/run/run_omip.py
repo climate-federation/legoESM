@@ -6793,23 +6793,9 @@ def run_omip_single(grid_type: str, args) -> dict:
             ocean_mask = ocean_mask * cap_mask
 
         # Snap thin partial cells to nearest interface (30% threshold)
-        snap_frac = 0.30
-        abs_z_half = jnp.abs(z_coord.z_half_ref)
-        nlev = z_coord.n_levels
-        n_above = jnp.sum(
-            abs_z_half[None, :] < H_bathy_raw[:, None], axis=1)
-        bottom_level = jnp.clip(n_above - 1, 0, nlev - 1)
-        dz_at_bottom = z_coord.dz_ref[bottom_level]
-        partial_thick = H_bathy_raw - abs_z_half[bottom_level]
-        frac = partial_thick / jnp.maximum(dz_at_bottom, 1e-10)
-        z_upper = abs_z_half[bottom_level]
-        z_lower = abs_z_half[jnp.minimum(bottom_level + 1, nlev)]
-        H_snapped = jnp.where(
-            H_bathy_raw - z_upper < z_lower - H_bathy_raw,
-            z_upper, z_lower)
-        needs_snap = (frac < snap_frac) & (frac > 0) & (H_bathy_raw > 0)
-        H_bathy_final = jnp.where(needs_snap, H_snapped, H_bathy_raw)
-        H_bathy_final = jnp.where(H_bathy_final <= 0, 0.0, H_bathy_final)
+        from legoesm.ocean.bathymetry import PARTIAL_CELL_SNAP_FRAC, snap_partial_cells
+        snap_frac = PARTIAL_CELL_SNAP_FRAC
+        H_bathy_final = snap_partial_cells(H_bathy_raw, z_coord, snap_frac)
         ocean_mask = jnp.where(H_bathy_final > 0, ocean_mask, 0.0)
 
         # Isolated basin removal is handled inside load_bathymetry_mpas
@@ -6865,21 +6851,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         mask_raw = jnp.asarray(mask_raw, dtype=jnp.float64)
 
         # Snap thin partial cells to the nearest interface (30% threshold).
-        snap_frac = 0.30
-        abs_z_half = jnp.abs(z_coord.z_half_ref)
-        nlev = z_coord.n_levels
-        Hf = H_raw.ravel()
-        n_above = jnp.sum(abs_z_half[None, :] < Hf[:, None], axis=1)
-        bottom_level = jnp.clip(n_above - 1, 0, nlev - 1)
-        dzb = z_coord.dz_ref[bottom_level]
-        partial_thick = Hf - abs_z_half[bottom_level]
-        frac = partial_thick / jnp.maximum(dzb, 1e-10)
-        z_upper = abs_z_half[bottom_level]
-        z_lower = abs_z_half[jnp.minimum(bottom_level + 1, nlev)]
-        Hs = jnp.where(Hf - z_upper < z_lower - Hf, z_upper, z_lower)
-        needs_snap = (frac < snap_frac) & (frac > 0) & (Hf > 0)
-        H_snap = jnp.where(needs_snap, Hs, Hf)
-        H_snap = jnp.where(H_snap <= 0, 0.0, H_snap).reshape(H_raw.shape)
+        from legoesm.ocean.bathymetry import PARTIAL_CELL_SNAP_FRAC, snap_partial_cells
+        snap_frac = PARTIAL_CELL_SNAP_FRAC
+        H_snap = snap_partial_cells(H_raw.ravel(), z_coord, snap_frac).reshape(H_raw.shape)
         mask_snap = jnp.where(H_snap > 0, mask_raw, 0.0)
 
         # Partial-cell coordinate + model rebuild (the eta-stretched

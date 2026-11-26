@@ -2213,7 +2213,13 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     # (``clm_surfdata_path``) is required on compute nodes with no outbound
     # internet (the default fetches from UCAR, which fails on such nodes).
     surfdata_path = config.clm_surfdata_path
-    if surfdata_path:
+    if getattr(config, "geography", ""):
+        from legoesm.grids.geography import geography_clm_surface
+        # the map is built in memory; the hydraulics stamp hashes the
+        # geography FILE it came from
+        surfdata_file = config.geography
+        surfdata_src = geography_clm_surface(config.geography)
+    elif surfdata_path:
         # A staged path is set: use it, and FAIL LOUDLY if absent rather than
         # attempting a (compute-node-blocked) network fetch to that exact path.
         if not os.path.exists(surfdata_path):
@@ -2225,8 +2231,8 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     else:
         surfdata_file = download_clm_surfdata()
     surface_map = load_clm_surface(
-        surfdata_file, lat_deg, lon_deg,
-        vg_air_entry_m=float(config.land_soil_vg_air_entry_m))
+        surfdata_src if getattr(config, "geography", "") else surfdata_file,
+        lat_deg, lon_deg, vg_air_entry_m=float(config.land_soil_vg_air_entry_m))
 
     # Non-spatial defaults from the config; clm_multilayer_setup overwrites only
     # hydraulics/thermal.  Thread the active snow-albedo + stomata features the
@@ -3897,12 +3903,13 @@ class ModelDriver:
         )
 
         topo = self.config.topography
+        geo = self.config.geography
         shape_2d = self.grid.grid_shape_2d
         self._phis_global = None    # the global terrain, Voronoi cell-partition MPI only
 
         from legoesm.core.precision import get_policy
         _sd = get_policy().storage
-        if topo == "flat":
+        if topo == "flat" and not geo:
             self._phis_data = jnp.zeros(shape_2d, dtype=_sd)
             self._f_land = jnp.zeros(shape_2d, dtype=_sd)
         elif topo == "gaussian":
@@ -3926,6 +3933,15 @@ class ModelDriver:
                 smoothing_passes=self.config.topo_smoothing,
                 land_mask_path=getattr(self.config, "land_mask_path", "") or "",
             )
+            terrain = load_real_topography
+            if geo:
+                from legoesm.grids.geography import geography_terrain
+
+                def terrain(g, config):
+                    return geography_terrain(
+                        g, geo, self.config.geography_regrid,
+                        smoothing_passes=self.config.topo_smoothing,
+                        barrier_width_cells=self.config.geography_barrier_width_cells)
             if self._voronoi_layout is not None:
                 # the product is a GLOBAL construction (exact binning + the
                 # masked diffusion across cell neighbours): build it on the
@@ -3933,7 +3949,7 @@ class ModelDriver:
                 # cells (owned + halo, the partition's own order) -- a rank-
                 # local build mis-assigns every source cell near a partition
                 # edge (measured 4 ranks: area ratio 0.21..876)
-                _phis_g, _fl_g = load_real_topography(
+                _phis_g, _fl_g = terrain(
                     self._grid_global, config=topo_config)
                 _ids = np.asarray(self._voronoi_layout.partition.local_cells)
                 # the local mesh IS global[local_cells] (voronoi_partition.
@@ -3954,12 +3970,12 @@ class ModelDriver:
                 # lat-lon column lane: the product on the NATIVE lat-lon grid
                 # (its own binning + neighbour filter, the lat-lon lane's
                 # terrain), flattened to the mesh's row-major columns
-                _p, _f = load_real_topography(
+                _p, _f = terrain(
                     self._latlon_native_grid, config=topo_config)
                 self._phis_data = jnp.reshape(_p, (-1,))
                 self._f_land = jnp.reshape(_f, (-1,))
             else:
-                self._phis_data, self._f_land = load_real_topography(
+                self._phis_data, self._f_land = terrain(
                     self.grid, config=topo_config
                 )
             if self.config.dycore.discretization == "spectral":
@@ -5131,7 +5147,8 @@ class ModelDriver:
                 self.physics.albedo_land = self._surfdata_land_albedo(
                     surfdata_path, lat_albedo
                 ).astype(_sd)
-            elif getattr(self.config, "clm_surfdata_path", ""):
+            elif (getattr(self.config, "clm_surfdata_path", "")
+                  or getattr(self.config, "geography", "")):
                 # ERA5-TUNED per-column land albedo (the LMIP calibration):
                 # PFT-weighted _TUNED_PFT_ALBEDO_MULTILAYER + soil-colour blend
                 # + glacier override (0.7178), the exact product run_lmip.py and
@@ -5142,9 +5159,14 @@ class ModelDriver:
                 from legoesm.land.clm_surface_map import clm_surface_provider
                 _lat_deg = np.degrees(np.asarray(self.grid.grid_lat)).reshape(-1)
                 _lon_deg = np.degrees(np.asarray(self.grid.grid_lon)).reshape(-1)
+                if getattr(self.config, "geography", ""):
+                    from legoesm.grids.geography import geography_clm_surface
+                    _clm_src = geography_clm_surface(self.config.geography)
+                else:
+                    _clm_src = self.config.clm_surfdata_path
                 _lp = clm_surface_provider(
                     _lat_deg, _lon_deg,
-                    surfdata_path=self.config.clm_surfdata_path,
+                    surfdata_path=_clm_src,
                     variant="multilayer",
                     vg_air_entry_m=float(self.config.land_soil_vg_air_entry_m))()
                 _alb = jnp.asarray(_lp.albedo_veg).reshape(
@@ -5180,7 +5202,8 @@ class ModelDriver:
             self.physics.surface_z0_land = float(
                 getattr(self.config, "surface_z0_land", 0.1)
             )
-            _activate = bool(getattr(self.config, "land_mask_path", "")) or bool(
+            _activate = bool(getattr(self.config, "land_mask_path", "")
+                             or getattr(self.config, "geography", "")) or bool(
                 getattr(self.config, "slab_land_active", False)
             )
             # Coupled atmosphere (F36, vote 2026-10-10): the coupler's land tile
@@ -6777,6 +6800,7 @@ class ModelDriver:
             "aerosol_ccn_file",
             "volcanic_aerosol_file",
             "land_mask_path",
+            "geography",
             "ic_path",
         )
         config_fields = type(self._input_config)._fields
@@ -12826,7 +12850,7 @@ class ModelDriver:
         DCMIP16 baroclinic wave through the view.  One tracer slot per
         registered name.  ``_phis_data`` IS the dynamics terrain."""
         cfg = self.config
-        if cfg.topography != "flat":
+        if cfg.topography != "flat" or cfg.geography:
             self._fv3_duo_column_terrain()
         if cfg.ic == "era5":
             from legoesm.training.era5_to_state import (

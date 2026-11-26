@@ -1473,6 +1473,13 @@ class ExperimentConfig(NamedTuple):
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
     land_mask_path: str = ""
+    # One geography file (legoesm.grids.geography) for terrain, land fraction,
+    # barriers and the land surface map; replaces topography / land_mask_path /
+    # surfdata_path / clm_surfdata_path.  geography_regrid ("legacy" = the
+    # topography + land-mask path bitwise, "binned") is required with it.
+    geography: str = ""
+    geography_regrid: str = ""
+    geography_barrier_width_cells: int = 1
     # Where the column land fraction comes from, for the land model AND the
     # physics alike (one coastline; user 2026-10-28, R3/R5/R6):
     #   "topography" -- the terrain / land_mask_path above (every lane so far);
@@ -2513,6 +2520,26 @@ class ExperimentConfig(NamedTuple):
             validate_orbit_fields(self)
         except ValueError as exc:
             errors.append(str(exc))
+        if self.geography:
+            from legoesm.grids.geography import REGRID_MODES
+            if self.geography_regrid not in REGRID_MODES:
+                errors.append(f"geography needs geography_regrid in {REGRID_MODES}, "
+                              f"got {self.geography_regrid!r}")
+            _geo_clash = [f for f, unset in (
+                ("topography", self.topography == "flat"),
+                ("land_mask_path", not self.land_mask_path),
+                ("surfdata_path", not self.surfdata_path),
+                ("clm_surfdata_path", not self.clm_surfdata_path),
+                ("land_fraction_source", self.land_fraction_source == "topography"))
+                if not unset]
+            if _geo_clash:
+                errors.append(f"geography replaces {', '.join(_geo_clash)}; drop them")
+            if (self.geography_barrier_width_cells < 1
+                    or self.geography_barrier_width_cells % 2 == 0):
+                errors.append("geography_barrier_width_cells must be odd and >= 1, got "
+                              f"{self.geography_barrier_width_cells}")
+        elif self.geography_regrid or self.geography_barrier_width_cells != 1:
+            errors.append("geography_regrid / geography_barrier_width_cells need geography")
         if (normalize_grid_type(g.grid_type) == "cubed_sphere"
                 and d.discretization != "fv3_duo"):
             errors.append(
@@ -3761,7 +3788,7 @@ class ExperimentConfig(NamedTuple):
         # land).  Only a real elevation file or an explicit mask gives land.
         _idealized_topography = self.topography in ("flat", "gaussian")
         _tiled_with_real_land = self.surface_tiled and bool(
-            self.land_mask_path
+            (self.land_mask_path or self.geography)
             or ((self.slab_land_active or self.use_multilayer_land)
                 and not _idealized_topography))
         if self.surface_unstable_scheme not in VALID_UNSTABLE_SCHEMES:
@@ -3865,7 +3892,7 @@ class ExperimentConfig(NamedTuple):
                 f"injected tiled surface flux); got turbulence={self.turbulence!r}."
             )
         if self.surface_tiled and not (self.slab_land_active
-                                       or self.land_mask_path
+                                       or (self.land_mask_path or self.geography)
                                        or self.use_multilayer_land):
             errors.append(
                 "surface_tiled=True requires an active land tile "
@@ -3883,7 +3910,7 @@ class ExperimentConfig(NamedTuple):
         # zero land and goes silently inert -- the trap that cost the AMIP
         # campaign three tuning waves. Refused, not warned.
         if ((self.use_multilayer_land or self.slab_land_active)
-                and not self.land_mask_path
+                and not (self.land_mask_path or self.geography)
                 and self.land_fraction_source != "era5"
                 and _idealized_topography):
             errors.append(
@@ -3905,7 +3932,7 @@ class ExperimentConfig(NamedTuple):
         # cannot be placed safely (it would sit downstream of per-rank setup that
         # can raise, leaving peers blocked).  Counting land points in the mask
         # file HERE, where the check is rank-symmetric, is the open follow-up.
-        if (self.land_beta_soil and not self.land_mask_path
+        if (self.land_beta_soil and not (self.land_mask_path or self.geography)
                 and _idealized_topography):
             errors.append(
                 f"land_beta_soil with an idealized topography"
@@ -4010,7 +4037,7 @@ class ExperimentConfig(NamedTuple):
         # Prognostic soil-water bucket: needs an active land tile to step,
         # and physically-bounded parameters.
         if self.land_soil_bucket and not (
-                self.slab_land_active or self.land_mask_path):
+                self.slab_land_active or (self.land_mask_path or self.geography)):
             errors.append(
                 "land_soil_bucket=True requires an active land tile "
                 "(--slab-land-active or a land-mask file); there is no land "
@@ -4285,7 +4312,7 @@ class ExperimentConfig(NamedTuple):
             if ((self.land_lapse_K_per_km > 0.0
                  or self.land_beta != 1.0)
                     and self.topography in ("flat", "gaussian")
-                    and not self.land_mask_path):
+                    and not (self.land_mask_path or self.geography)):
                 errors.append(
                     "land_lapse_K_per_km/land_beta need a land "
                     f"fraction, but topography={self.topography!r} (with no land-mask "
@@ -4890,7 +4917,7 @@ class ExperimentConfig(NamedTuple):
                     "SEB only; use_multilayer_land replaces the slab, so the "
                     "flag would be a silent no-op. Drop one of the two."
                 )
-            if not (self.land_mask_path
+            if not ((self.land_mask_path or self.geography)
                     or (self.slab_land_active
                         and self.topography not in ("flat", "gaussian"))):
                 errors.append(

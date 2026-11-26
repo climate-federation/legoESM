@@ -132,6 +132,8 @@ def test_none_with_a_land_mask_file_is_refused():
     with pytest.raises(SystemExit, match="activates the land tile"):
         mod._resolve_land_model(_args(land_model="none",
                                       land_mask_file="/some/mask.nc"))
+    with pytest.raises(SystemExit, match="--geography 'ridge.nc'"):
+        mod._resolve_land_model(_args(land_model="none", geography="ridge.nc"))
 
 
 def test_the_resolver_is_actually_called_from_main_with_real_argv():
