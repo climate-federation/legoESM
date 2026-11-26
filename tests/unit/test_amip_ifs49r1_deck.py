@@ -122,3 +122,17 @@ def test_deck_selects_wms_drag_and_methox():
     assert cfg.gravity_wave_drag == "mcfarlane+ifs_wms"
     assert cfg.ifs_methox is True
     assert cfg.ifs_ozone_chem is True
+
+
+def test_enthcons_deck_differs_from_the_ifs_deck_in_one_row():
+    """config/amip/amip_ifs49r1_enthcons.yaml (#2571): the IFS deck with
+    LMFENTHCONS on; nothing else in the resolved config moves, and the row
+    reaches the scheme."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+
+    base, enth = _cfg(_IFS), _cfg(_AMIP / "amip_ifs49r1_enthcons.yaml")
+    a, b = _flat(base), _flat(enth)
+    assert {k for k in a.keys() | b.keys() if a.get(k) != b.get(k)} == {
+        "bechtold_ifs_enthalpy_conservation"}
+    assert base.bechtold_ifs_enthalpy_conservation is False
+    assert _resolve_convection(enth)[1].ifs_enthalpy_conservation is True

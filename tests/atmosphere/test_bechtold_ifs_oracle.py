@@ -96,8 +96,11 @@ def _field(out, k, i):
 @pytest.mark.parametrize("arm", ["L", "N"])
 @pytest.mark.parametrize("g", _GROUPS)
 def test_cumastrn_matches_openifs(fix, arm, g):
-    out = _run(fix, arm, g)
-    o = lambda t: fix[f"{arm}_{g}_{t}"]
+    _assert_matches_oracle(_run(fix, arm, g), fix, arm, g)
+
+
+def _assert_matches_oracle(out, fix, arm, g):
+    o = lambda t: fix[f"{arm}_{g}_{t}"]  # noqa: E731
     ldcum = o("LDCUM") > 0
     np.testing.assert_array_equal(np.asarray(out.ldcum), ldcum)
     np.testing.assert_array_equal(np.asarray(out.ktype), o("KTYPE"))
@@ -1605,3 +1608,140 @@ def test_cloud_top_fixer_switch_is_validated():
 
     with pytest.raises(ValueError, match="openifs_cloud_top_fixer"):
         cumastrn(lego_thermo(), 1.0, *([None] * 22), tun=IfsTunables(openifs_cloud_top_fixer=1))
+
+
+# --- LMFENTHCONS column enthalpy-conservation correction (#2571) -------------
+# Fixture oracle_fixtures/bechtold_ifs_enthcons.npz: the same 24 columns run
+# through the same OpenIFS build with LMFENTHCONS = .TRUE. (arm LE = arm L
+# otherwise; make_fixture.py --enthcons).
+_FIX_ENTH = Path(__file__).parent / "oracle_fixtures" / "bechtold_ifs_enthcons.npz"
+
+
+# Per-column (PTENT, PTENQ) gap of the smooth default (every RULE 5 switch
+# smooth, LMFENTHCONS on) against the LMFENTHCONS oracle, measured 2026-11-26
+# (x64, CPU).  The LMFENTHCONS fallback windows themselves fire on no fixture
+# column (|ZINT| and the ratio sit outside both); the gaps are the other
+# switches' (cf. _SWITCH_GAP).
+_ENTH_GAP = {
+    "L32": (
+        [1.138450686423336e-13, 3.2239474749873393e-13, 0.0011369233036655315, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.016538660325176e-06, 4.37256665099518e-05, 0.0, 0.0002610564789789999, 2.127191801689274e-12, 1.3122795867946275e-12, 3.142026974097415e-12],
+        [1.7035607804582582e-14, 8.964804996727085e-14, 0.0010733578124074003, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.7756235657371847e-06, 4.895650392689234e-05, 0.0, 0.0024658320098176526, 1.761822651262876e-13, 1.8535518542798295e-13, 1.3103158528321544e-13],
+    ),
+    "L137": (
+        [1.8361348299623198e-11, 0.0, 0.0, 0.0, 0.0],
+        [6.834335159164536e-14, 0.0, 0.0, 0.0, 0.0],
+    ),
+    "STRESS": (
+        [3.3496267300172606e-13, 0.012678152015880932, 1.3465809674633554e-12],
+        [8.082185060405903e-14, 0.014019249386248966, 1.2646314756610266e-13],
+    ),
+}
+
+
+@pytest.fixture(scope="module")
+def fix_enth():
+    return dict(np.load(_FIX_ENTH))
+
+
+def _run_enth(fix_enth, g, hard):
+    import functools
+
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    tun = IfsTunables(enthalpy_conservation=True, hard_switches=hard)
+    return _run(fix_enth, "LE", g, fn=functools.partial(cumastrn, tun=tun))
+
+
+@pytest.mark.parametrize("g", _GROUPS)
+def test_enthcons_matches_openifs(fix_enth, g):
+    """Exact switches + LMFENTHCONS = the compiled OpenIFS with LMFENTHCONS on."""
+    _assert_matches_oracle(_run_enth(fix_enth, g, hard=True), fix_enth, "LE", g)
+
+
+def test_enthcons_oracle_differs_from_the_off_arm(fix, fix_enth):
+    """The correction moves the oracle's heating (else the match above is vacuous),
+    and only the heating: humidity is untouched (cudtdqn.F90 ZDQDT has no ZINT)."""
+    dT = max(_err(fix_enth[f"LE_{g}_PTENT"], fix[f"L_{g}_PTENT"]) for g in _GROUPS)
+    dq = max(_err(fix_enth[f"LE_{g}_PTENQ"], fix[f"L_{g}_PTENQ"]) for g in _GROUPS)
+    assert dT > 1.0e-6, dT
+    assert dq == 0.0, dq
+    # the liquid-only shallow column L137[0] (KTYPE 2, ZINT = 0): its change is
+    # the LSCVFLAG latent-heat swap alone
+    assert int(fix_enth["LE_L137_KTYPE"][0]) == 2
+    assert _err(fix_enth["LE_L137_PTENT"][0], fix["L_L137_PTENT"][0]) > 1.0e-5
+
+
+def test_enthcons_smooth_default_gap_per_case(fix_enth):
+    """RULE 5: the smooth default (every RULE 5 switch smooth, LMFENTHCONS on)
+    against the LMFENTHCONS oracle, per column: (PTENT, PTENQ) gap."""
+    for g in _GROUPS:
+        out = _run_enth(fix_enth, g, hard=False)
+        o = lambda t: fix_enth[f"LE_{g}_{t}"]  # noqa: E731
+        got = (_per_column_gap(np.asarray(out.ptent), o("PTENT")),
+               _per_column_gap(np.asarray(out.ptenq), o("PTENQ")))
+        for a, want in zip(got, _ENTH_GAP[g]):
+            np.testing.assert_allclose(a, np.asarray(want), rtol=1e-6, atol=1e-12)
+
+
+def test_enthcons_factor_hard_is_the_source_and_smooth_exact_outside_windows():
+    """cudtdqn.F90:299-305 as written; the one-sided smooth windows agree with it
+    exactly away from |ZINT| in (0.1, 0.101] and |ratio| in (2, 2.02]."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import enthcons_factor
+
+    def src(z, z2):
+        r = z2 / (z + 1.0e-3) if abs(z) > 0.1 else 0.0
+        return 0.0 if abs(r) > 2.0 else r
+
+    pts = [(0.05, 0.04), (0.1, 0.09), (-0.1, -0.09), (0.2, 0.15), (-3.0, -2.5),
+           (5.0, 5.0 * 1.999), (5.0, 5.0 * 2.5), (-5.0, 5.0), (40.0, -12.0)]
+    for z, z2 in pts:
+        want = src(z, z2)
+        for hard in (True, False):
+            got = float(enthcons_factor(IfsSmooth(hard), jnp.float64(z), jnp.float64(z2)))
+            assert got == pytest.approx(want, rel=1e-15, abs=0.0), (hard, z, z2, got)
+
+
+def test_enthcons_factor_window_midpoints_are_smooth():
+    """Inside each window the smooth gate is the cubic step at its midpoint (0.5),
+    the hard one the source's 0/1: the two forms differ there."""
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import enthcons_factor
+
+    f = lambda hard, a, b: float(enthcons_factor(IfsSmooth(hard), jnp.float64(a),  # noqa: E731
+                                                 jnp.float64(b)))
+    r = 0.09 / (0.1005 + 1.0e-3)                     # |ZINT| at mid lower window
+    assert f(False, 0.1005, 0.09) == pytest.approx(0.5 * r, rel=1e-12)
+    assert f(True, 0.1005, 0.09) == pytest.approx(r, rel=1e-15)
+    z2 = 2.01 * (5.0 + 1.0e-3)                       # ratio at mid upper window
+    assert f(False, 5.0, z2) == pytest.approx(0.5 * 2.01, rel=1e-12)
+    assert f(True, 5.0, z2) == 0.0
+
+
+@pytest.mark.parametrize("z,z2", [(0.1005, 0.09), (-0.1005, -0.09),
+                                   (5.0, 2.01 * 5.001), (-5.0, 2.01 * 4.999)])
+def test_enthcons_factor_gradient_inside_the_smooth_windows(z, z2):
+    """RULE 5: finite, non-zero derivative through each fallback window."""
+    from jax.test_util import check_grads
+
+    from legoesm.atmosphere.physics._ifs_smooth import IfsSmooth
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import enthcons_factor
+
+    f = lambda a, b: enthcons_factor(IfsSmooth(False), a, b)  # noqa: E731
+    args = (jnp.float64(z), jnp.float64(z2))
+    check_grads(f, args, order=2, modes=("rev",), eps=1e-7)
+    g = jax.grad(f, argnums=(0, 1))(*args)
+    assert all(np.isfinite(float(x)) for x in g) and any(float(x) != 0.0 for x in g)
+
+
+def test_enthcons_is_off_by_default_and_reaches_the_scheme():
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+    from legoesm.atmosphere.physics.convection._ifs_faithful import _tunables
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    assert IfsTunables().enthalpy_conservation is False   # sucumf
+    assert BechtoldConfig().ifs_enthalpy_conservation is False
+    on = BechtoldConfig(use_ifs_ascent=True, dx_m=_DX, ifs_enthalpy_conservation=True)
+    assert _tunables(on).enthalpy_conservation is True
+    with pytest.raises(ValueError, match="enthalpy_conservation"):
+        cumastrn(None, 1.0, *([None] * 22), tun=IfsTunables(enthalpy_conservation=1))

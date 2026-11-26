@@ -1,0 +1,8 @@
+# =============================================================================
+# legoESM AMIP -- amip_ifs49r1.yaml with OpenIFS's column enthalpy-conservation
+# correction LMFENTHCONS on (#2571; user decision 2026-11-26: an option, not the
+# default).  One row differs from amip_ifs49r1.yaml.
+# =============================================================================
+include: amip_ifs49r1.yaml
+
+bechtold_ifs_enthalpy_conservation: true  # cudtdqn.F90:278-305

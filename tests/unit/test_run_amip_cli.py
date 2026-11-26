@@ -4222,6 +4222,26 @@ def test_bechtold_ifs_hard_switches_round_trip():
         assert back.bechtold_ifs_hard_switches is flag
 
 
+def test_bechtold_ifs_enthalpy_conservation_round_trip():
+    """#2571: the faithful chain's LMFENTHCONS correction (default off) reaches
+    BechtoldConfig from the CLI and survives the AMIP config round trip."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--convection", "bechtold", "--bechtold-use-ifs-ascent"]
+    d = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert d.bechtold_ifs_enthalpy_conservation is False
+    assert _resolve_convection(d)[1].ifs_enthalpy_conservation is False
+    h = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--bechtold-ifs-enthalpy-conservation"]), parser))
+    assert _resolve_convection(h)[1].ifs_enthalpy_conservation is True
+    for flag in (True, False):
+        e = ExperimentConfig(convection="bechtold", bechtold_use_ifs_ascent=True,
+                             bechtold_ifs_enthalpy_conservation=flag)
+        back = ExperimentConfig.from_amip_config(e.to_amip_config())
+        assert back.bechtold_ifs_enthalpy_conservation is flag
+
+
 def test_bechtold_ifs_openifs_cloud_top_fixer_round_trip():
     """#2594: the faithful chain's cloud-top fixer selection (default the
     corrected one) reaches BechtoldConfig from the CLI and survives the AMIP

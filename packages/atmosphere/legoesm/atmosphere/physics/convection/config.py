@@ -1617,6 +1617,10 @@ class BechtoldConfig(NamedTuple):
     # (cumastrn.F90:1171 adds it, driving q more negative).  KNOWN DIFFERENCE
     # in _ifs_cumastrn.cumastrn_column.
     ifs_openifs_cloud_top_fixer: bool = False
+    # Faithful chain only (#2571, user decision 2026-11-26: an option):
+    # OpenIFS's column enthalpy-conservation correction LMFENTHCONS
+    # (cudtdqn.F90:278-305).  False (default) = off, as sucumf.
+    ifs_enthalpy_conservation: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.

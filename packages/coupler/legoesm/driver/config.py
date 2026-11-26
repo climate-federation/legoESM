@@ -1905,6 +1905,10 @@ class ExperimentConfig(NamedTuple):
     # corrected, True = OpenIFS as written (BechtoldConfig.
     # ifs_openifs_cloud_top_fixer, #2594).
     bechtold_ifs_openifs_cloud_top_fixer: bool = False
+    # The faithful chain's LMFENTHCONS column enthalpy correction: False =
+    # off (OpenIFS default), True = on (BechtoldConfig.
+    # ifs_enthalpy_conservation, #2571).
+    bechtold_ifs_enthalpy_conservation: bool = False
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -6057,6 +6061,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_ifs_hard_switches=amip_cfg.bechtold_ifs_hard_switches,
             bechtold_ifs_openifs_cloud_top_fixer=(
                 amip_cfg.bechtold_ifs_openifs_cloud_top_fixer),
+            bechtold_ifs_enthalpy_conservation=(
+                amip_cfg.bechtold_ifs_enthalpy_conservation),
             bechtold_use_ifs_land_rhebc=getattr(
                 amip_cfg, 'bechtold_use_ifs_land_rhebc', True),
             bechtold_use_ifs_snow_melt=getattr(
@@ -6241,6 +6247,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_ifs_shallow_nosupply=self.bechtold_ifs_shallow_nosupply,
             bechtold_ifs_hard_switches=self.bechtold_ifs_hard_switches,
             bechtold_ifs_openifs_cloud_top_fixer=self.bechtold_ifs_openifs_cloud_top_fixer,
+            bechtold_ifs_enthalpy_conservation=self.bechtold_ifs_enthalpy_conservation,
             bechtold_use_ifs_land_rhebc=self.bechtold_use_ifs_land_rhebc,
             bechtold_use_ifs_snow_melt=self.bechtold_use_ifs_snow_melt,
             sigma_b=self.sigma_b,

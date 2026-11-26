@@ -1,6 +1,6 @@
 """Run the OpenIFS cumulus oracle (CUMASTRN, 8f6f722) and write the fixture.
 
-usage: python make_fixture.py <columns dir> <build dir> <out.npz>
+usage: python make_fixture.py <columns dir> <build dir> <out.npz> [--enthcons]
 
 <columns dir> holds the tier-2 audit columns ``columns_{L32,L137,STRESS}.npz``
 (16 L32 soundings incl. DYCOMS-II RF01, 5 L137 columns incl. two
@@ -19,6 +19,8 @@ evaporation, glaciation) and the stock mixed-phase fcttre functions:
   N  the IFS native constants (CONST_MODE = 2)
   L0 as L with PLITOT = 0, the configuration the legoESM wrapper
      (_ifs_faithful.py) runs; it checks the wrapper seam against the oracle
+With --enthcons only one arm is run and written (a separate fixture, #2571):
+  LE as L with LMFENTHCONS = .TRUE. (column enthalpy-conservation correction)
 The fixture stores the CUMASTRN inputs exactly as the driver read them and
 every CUMASTRN output, per arm and group, plus the constants each arm ran.
 """
@@ -43,7 +45,8 @@ LEGO = dict(CRG=C.g, CRD=C.R_d, CRV=C.R_v, CRCPD=C.c_pd, CRTT=C.T_freeze,
             CR4LES_OFF=thermo.TETENS_B_K, CR2ES_E0=thermo.TETENS_E0_PA)
 ARMS = {"L": dict(CONST_MODE=1, **LEGO), "N": dict(CONST_MODE=2),
         "L0": dict(CONST_MODE=1, **LEGO)}
-PLITOT = {"L": True, "N": True, "L0": False}
+PLITOT = {"L": True, "N": True, "L0": False, "LE": True}
+ARMS_ENTHCONS = {"LE": dict(CONST_MODE=1, LMFENTHCONS=True, **LEGO)}
 CONST_NAMES = ("RG", "RD", "RV", "RCPD", "RLVTT", "RTT", "RA", "RLMLT", "R2ES", "R3LES",
                "R4LES", "R3IES", "R4IES", "RPI")
 FULL = ("T", "q", "p_full", "geo_full", "u", "v", "omega", "lit",
@@ -115,14 +118,15 @@ def parse(path):
     return consts, res
 
 
-def main(cdir, build, out):
+def main(cdir, build, out, *flags):
+    arms = ARMS_ENTHCONS if "--enthcons" in flags else ARMS
     exe = Path(build) / "oracle.x"
     fx = {"dt": np.float64(DT), "const_names": np.array(CONST_NAMES)}
     for g in GROUPS:
         x = inputs(np.load(Path(cdir) / f"columns_{g}.npz"))
         for k, v in x.items():
             fx[f"{g}_{k}"] = v
-        for arm, sw in ARMS.items():
+        for arm, sw in arms.items():
             inf = Path(build) / f"in_{g}_lit{int(PLITOT[arm])}.txt"
             inf.write_text(oracle_text(x, PLITOT[arm]))
             outf = Path(build) / f"out_{arm}_{g}.txt"
@@ -143,4 +147,4 @@ def main(cdir, build, out):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:])
