@@ -6559,8 +6559,25 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         # (timestep convergence not established).  A separate, resolved
         # test (one 40 km x 8 km bubble, dry) gives spectral T42 1.60 vs
         # MPAS ico5 1.45 m/s at 120 s.  Not measured: the share of the 2/3
-        # mask vs the nominal truncation, and the resolution at which
-        # spectral matches MPAS on the standard bubbles.
+        # mask vs the nominal truncation.
+        # Resolution proxies (2026-11-26, a = R_earth/60 = 106.2 km): ico5
+        # has dx_mean 3.72 km (2dx 7.44 km, 10242 cells); the retained band
+        # n <= floor(2N/3) first reaches 2*pi*a/floor(2N/3) <= 7.44 km at
+        # N = 135, and (floor(2N/3)+1)^2 >= 10242 coefficients at N = 152.
+        # Current-code ladder, matrix --quick, |w|_max at 84 s: T21 0.051,
+        # T42 0.075, ico5 1.85 m/s; T85 0.353 at its 7th and last sample
+        # (~83 s) before a 50-min wall-clock timeout.  At 240 s: T21 0.019
+        # (84 s wall), T42 0.238 (13.5 min wall), ico5 7.12.  Near 84 s the
+        # maxima increase across the three spectral truncations tested
+        # (dt shrinks with N too); convergence toward ico5 is not
+        # established.  T85
+        # projects to ~2.4 h wall (wall time assumed proportional to
+        # samples done) and T135-T152 (~N^3 from it) to ~10-14 h wall, so
+        # the row stays at the matrix T21 as a smoke test whose |w| is far
+        # below ico5's (horizontal under-resolution remains a PLAUSIBLE
+        # explanation, see above).  Ballot (author / codex), options
+        # A keep T21 + document, B T42 row override, C T85 or higher:
+        # A / A.
         _dt_scale_sp = 3.0 if test_case == "tc3" else 6.0
         dt = max(0.25 if test_case == "tc3" else 0.5,
                  _dt_scale_sp * (21.0 / n_max))
