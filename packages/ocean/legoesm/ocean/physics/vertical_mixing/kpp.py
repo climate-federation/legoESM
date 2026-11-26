@@ -653,6 +653,10 @@ def _boundary_layer_depth(
         V_t2 = _cvmix_min_vt2(V_t2, cfg)
         Ri_b = _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g)
         h = _cvmix_first_crossing_depth(Ri_b, z_depth, cfg)
+        if cfg.monin_obukhov_limit:
+            # CVMix order: crossing, then the stable Monin-Obukhov min; MOM6's
+            # top-cell floor comes after the CVMix call.
+            h = _monin_obukhov_limit(h, u_star, B_f, z_depth[..., -1], cfg)
         return _cvmix_depth_floor(h, dz_actual[..., 0], cfg)
 
     if N2 is None:
@@ -727,10 +731,52 @@ def _boundary_layer_depth(
     blend = jax.nn.sigmoid(cfg.crossing_sharpness * (crossing_strength - cfg.crossing_threshold))
     h = blend * h_crossing + (1.0 - blend) * h_fallback
 
+    if cfg.monin_obukhov_limit:
+        h = _monin_obukhov_limit(h, u_star, B_f, max_depth, cfg)
+
     # At least one layer thick
     h = jnp.maximum(h, dz_actual[..., 0])
 
     return h
+
+
+def _monin_obukhov_limit(h, u_star, B_f, max_depth, cfg):
+    """Stable-forcing depth limit h <= L = u*^3 / (kappa * B_stab) (LMD94 Sec. 4).
+
+    CVMix ``cvmix_kpp_compute_OBL_depth`` (lMonOb, not Stokes-MOST): stable when
+    its surf_buoy > 0, i.e. B_f < 0 here (B_f > 0 destabilising); unstable or
+    neutral columns are limited only by the column depth.  Kept: the stable-only
+    selection, u* = 0 with stable forcing giving L = 0 (the top-layer floor then
+    applies).  Dropped: CVMix's surf_buoy(nlev), the buoyancy flux through the
+    whole boundary layer including penetrating shortwave; this kernel only has
+    the surface B_f, so where shortwave penetrates below h the limit is shallower
+    than CVMix's.  Known difference: CVMix applies the limit AFTER its floor at
+    the top cell centre, so its depth can go below that; this kernel keeps its
+    existing final floor of one full top layer (a boundary layer that holds no
+    cell centre would carry no boundary-layer mixing).  RULE 5: B_stab
+    is the C1 positive part over ``mo_stable_width_bf`` and the min is C1 over
+    ``mo_limit_width_m``; both 0 reproduce CVMix's hard limit (up to the
+    kept top-layer floor above).
+    """
+    from legoesm.core.smooth import positive_part_c1, smooth_min_c1, validate_smoothing_width
+
+    validate_smoothing_width("KPPConfig.mo_stable_width_bf", cfg.mo_stable_width_bf)
+    validate_smoothing_width("KPPConfig.mo_limit_width_m", cfg.mo_limit_width_m)
+    w_bf = cfg.mo_stable_width_bf
+    b_stab = (jnp.maximum(-B_f, 0.0) if w_bf == 0
+              else positive_part_c1(-B_f, 1.0 / w_bf))
+    w = cfg.mo_limit_width_m
+    # The limit acts only where L < h_open = H + w; elsewhere h is returned as
+    # is.  At the switch L = h_open, where smooth_min_c1(h, L, w) is already h
+    # for every h <= H, so the switch is continuous; returning h (rather than
+    # the min against h_open) keeps that exact when H + w rounds to H in fp32.
+    # No division by H (dry columns have H = 0) and b > 0 in the selected
+    # branch, so no 0/0 in either pass.
+    h_open = max_depth + w
+    ustar3 = u_star ** 3
+    sel = (b_stab > 0.0) & (cfg.kappa_vk * b_stab * h_open > ustar3)
+    L = ustar3 / (cfg.kappa_vk * jnp.where(sel, b_stab, 1.0))
+    return jnp.where(sel, smooth_min_c1(h, L, w), h)
 
 
 def kpp_vertical_mixing(

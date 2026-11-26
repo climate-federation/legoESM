@@ -44,15 +44,18 @@ def test_kpp_bld_structure_flag_flows_to_config():
         ["--grid", "latlon", "--kpp-bld-structure", "cvmix", "--kpp-vt2-velocity-scale", "candidate"]))
     assert (on.vertical_mixing.kpp.bld_structure, on.vertical_mixing.kpp.vt2_velocity_scale) == (
         "cvmix", "candidate")
-    for extra in ([], ["--kpp-vt2-velocity-scale", "column"]):
-        with pytest.raises(ValueError, match="requires --kpp-vt2-velocity-scale candidate"):
-            build_config_from_args(parse_args(["--grid", "latlon", "--kpp-bld-structure", "cvmix", *extra]))
+    assert build_config_from_args(parse_args(
+        ["--grid", "latlon", "--kpp-bld-structure", "cvmix"])).vertical_mixing.kpp.bld_structure == "cvmix"
+    with pytest.raises(ValueError, match="requires --kpp-vt2-velocity-scale candidate"):
+        build_config_from_args(parse_args(
+            ["--grid", "latlon", "--kpp-bld-structure", "cvmix", "--kpp-vt2-velocity-scale", "column"]))
     with pytest.raises(SystemExit):
         parse_args(["--grid", "latlon", "--kpp-bld-structure", "cvmx"])
 
 
 def test_kpp_cvmix_option_flags_flow_to_config():
-    """The opt-in KPP options reach KPPConfig; absent flags keep the defaults."""
+    """The KPP options reach KPPConfig; absent flags keep the defaults (candidate
+    V_t^2 scale and the Monin-Obukhov limit on); the old forms stay selectable."""
     cfg = build_config_from_args(parse_args([
         "--grid", "latlon", "--kpp-vt2-velocity-scale", "candidate",
         "--kpp-actual-buoyancy-flux", "--kpp-gradient-surrogates"]))
@@ -60,8 +63,12 @@ def test_kpp_cvmix_option_flags_flow_to_config():
     assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates) == (
         "candidate", True, True)
     kpp = build_config_from_args(parse_args(["--grid", "latlon"])).vertical_mixing.kpp
-    assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates) == (
-        "column", True, False)
+    assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates,
+            kpp.monin_obukhov_limit) == ("candidate", True, False, True)
+    kpp = build_config_from_args(parse_args([
+        "--grid", "latlon", "--kpp-vt2-velocity-scale", "column",
+        "--no-kpp-monin-obukhov-limit"])).vertical_mixing.kpp
+    assert (kpp.vt2_velocity_scale, kpp.monin_obukhov_limit) == ("column", False)
     kpp = build_config_from_args(parse_args(
         ["--grid", "latlon", "--no-kpp-actual-buoyancy-flux"])).vertical_mixing.kpp
     assert kpp.actual_buoyancy_flux is False

@@ -177,6 +177,8 @@ __param_spec__ = {
             "crossing_threshold": "numerics: solver/CFL/smoothing parameter",
             "surrogate_width_sigma": "numerics: backward-pass surrogate width (gradients only, never fitted)",
             "surrogate_width_n2": "numerics: backward-pass surrogate width (gradients only, never fitted)",
+            "mo_limit_width_m": "numerics: RULE 5 smoothing width of the Monin-Obukhov depth limit (0 = hard CVMix min)",
+            "mo_stable_width_bf": "numerics: RULE 5 smoothing width of the stable part of -B_f (0 = hard max)",
             "min_vt2": "numerics: floor/cap (CVMix minVtsqr)",
             "min_vt2_width": "numerics: solver/CFL/smoothing parameter",
             "bl_min_depth_width_frac": "numerics: solver/CFL/smoothing parameter",
@@ -1040,16 +1042,18 @@ class KPPConfig(NamedTuple):
     # cell's own pressure (biased by g^2/c_s^2, about +4e-5 s^-2), kept bit for bit.  User-approved default 2026-11-20 (published form).
     n2_mode: str = "adiabatic"
     # Velocity scale w_s inside the unresolved shear V_t^2 of the bulk Richardson
-    # number.  "column" (default, unchanged behaviour): w_s at each depth d for a
-    # boundary layer of depth h_bl_prev, or of the full column when the caller
-    # passes no h_bl_prev (the lat-lon K-profile path), so the surface-layer cap
-    # d_eff = min(d, epsilon*h) does not act.  "candidate": the CVMix / MOM6 form,
+    # number.  "column" (the old behaviour, kept selectable): w_s at each depth d for
+    # a boundary layer of depth h_bl_prev, or of the full column when the caller
+    # passes no h_bl_prev (no caller in any lane does), so the surface-layer cap
+    # d_eff = min(d, epsilon*h) does not act and wind-driven mixing is scaled with
+    # the whole ocean depth (tropical h_bl 279 m on a coupled aquaplanet day-30
+    # state).  "candidate" (default): the CVMix / MOM6 form,
     # each candidate depth d is its own boundary-layer depth and w_s is taken at
     # sigma = epsilon of it, d_eff = epsilon*d, in stable and unstable forcing
     # (CVMix cvmix_kpp_compute_turbulent_scales_1d_OBL with l_LMD_ws = .false.,
     # its default; MOM6 MOM_CVMix_KPP.F90 KPP_compute_BLD, Vt_layer = 1.0 and
     # OBL_depth = cell-centre depth).
-    vt2_velocity_scale: str = "column"
+    vt2_velocity_scale: str = "candidate"
     # Surface buoyancy flux in the KPP velocity scales.  True (default, user decision
     # 2026-11-26): the actual flux, with zeta = d_eff kappa B_f / u*^3 written without a
     # division by B_f, as LMD94 and CVMix (cvmix_kpp_compute_turbulent_scales_1d_OBL) use
@@ -1064,6 +1068,15 @@ class KPPConfig(NamedTuple):
     surrogate_switches: str = "bl_base,convective"   # which switches get a surrogate (comma list)
     surrogate_width_sigma: float = 0.1     # in sigma = depth / h_bl
     surrogate_width_n2: float = 1.0e-6     # in N2 [s^-2]
+    # Stable-forcing Monin-Obukhov depth limit (LMD94 Sec. 4; CVMix lMonOb, not
+    # Stokes-MOST): under stabilising surface buoyancy forcing the boundary layer
+    # is no deeper than L = u*^3 / (kappa * B_stab), B_stab = max(-B_f, 0).
+    # The min is C1-smoothed over ``mo_limit_width_m`` [m] and the stable part of
+    # -B_f over ``mo_stable_width_bf`` [m^2/s^3] (RULE 5); both 0 give CVMix's
+    # hard limit exactly.  False: no limit (CVMix / MOM6 default .false.).
+    monin_obukhov_limit: bool = True
+    mo_limit_width_m: float = 1.0
+    mo_stable_width_bf: float = 1.0e-10
     # Boundary-layer structure: "legacy" (top-cell potential-density reference,
     # centre-depth crossing average, centre K averaged to interfaces) or
     # "cvmix" (MOM6 surface-layer/local-pressure reference, CVMix (1-eps/2) Ri,
