@@ -19014,6 +19014,19 @@ for _citation, _lines in (
 ):
     _merge_resolution_repin(_citation, _lines)
 
+# The split-explicit eta damping is booked into the barotropic transport (nine
+# lines after the damping update, four docstring lines in _reconcile_targets);
+# these spans only moved.
+for _citation, _lines in (
+    ('barotropic_latlon_cgrid.py:2384-2423', '2418-2457'),
+    ('barotropic_latlon_cgrid.py:2452-2457', '2498-2503'),
+    ('barotropic_latlon_cgrid.py:2611-2615', '2657-2661'),
+    ('barotropic_latlon_cgrid.py:3223-3224', '3274-3275'),
+    ('barotropic_latlon_cgrid.py:3495-3496', '3547-3548'),
+    ('barotropic_latlon_cgrid.py:3496-3497', '3547-3548'),
+):
+    _merge_resolution_repin(_citation, _lines)
+
 def audit_map() -> list[dict]:
     """EVERY entry in the map must resolve cleanly, cited this round or not.
 
