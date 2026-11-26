@@ -10,6 +10,11 @@ wave structure) on top of the returned base state.
 
 By factoring the shared piece here we avoid duplicating ~150 LOC
 of grid-specific state assembly across four IC modules.
+
+Every builder sets ``p_s = p_s_init * exp(-phis / (R_d T_0))``.
+``p_s_init`` is a scalar or a field on the builder's horizontal points
+(e.g. the latitude-dependent factor of DCMIP 2008 Eq. 83 in
+:mod:`.mountain_rossby_5_0`).
 """
 
 from __future__ import annotations
@@ -79,7 +84,7 @@ def isothermal_state_cube(
     *,
     T_0: float = T0_DEFAULT,
     u_0: float = U0_DEFAULT,
-    p_s_init: float = P0_DEFAULT,
+    p_s_init: float | jnp.ndarray = P0_DEFAULT,
     phis: jnp.ndarray | None = None,
 ) -> HydrostaticState:
     """Isothermal hydrostatic state with solid-body zonal flow on cube."""
@@ -128,7 +133,7 @@ def isothermal_state_latlon(
     *,
     T_0: float = T0_DEFAULT,
     u_0: float = U0_DEFAULT,
-    p_s_init: float = P0_DEFAULT,
+    p_s_init: float | jnp.ndarray = P0_DEFAULT,
     phis: jnp.ndarray | None = None,
 ) -> HydrostaticState:
     """Isothermal hydrostatic state on a lat-lon grid."""
@@ -171,7 +176,7 @@ def isothermal_state_mpas(
     *,
     T_0: float = T0_DEFAULT,
     u_0: float = U0_DEFAULT,
-    p_s_init: float = P0_DEFAULT,
+    p_s_init: float | jnp.ndarray = P0_DEFAULT,
     phis: jnp.ndarray | None = None,
 ) -> MPASHydrostaticState:
     """Isothermal hydrostatic state on an MPAS Voronoi mesh."""
@@ -209,7 +214,7 @@ def isothermal_state_spectral(
     *,
     T_0: float = T0_DEFAULT,
     u_0: float = U0_DEFAULT,
-    p_s_init: float = P0_DEFAULT,
+    p_s_init: float | jnp.ndarray = P0_DEFAULT,
     phis: jnp.ndarray | None = None,
 ):
     """Isothermal hydrostatic state in spectral (Gaussian-grid) space.

@@ -159,6 +159,43 @@ class TestInertioGravity32:
 # ---------------------------------------------------------------------------
 
 
+def _mr_eq83_fields(lon, lat, radius, omega=constants.Omega):
+    """``(Phi_s, p_s)`` written out from the reference:
+    p_s = p_sp exp[-(a N^2 u0/(2 g^2 kappa))(u0/a + 2 Omega)(sin^2 phi - 1)
+    - N^2 Phi_s/(g^2 kappa)], N^2 = g^2/(c_p T0) (Eq. 80), Phi_s from
+    Eqs. (81)-(82) with h0 = 2000 m, d = 1500 km, centre (pi/2, pi/6)."""
+    import numpy as np
+    g, a, t0, u0 = constants.g, float(radius), 288.0, 20.0
+    lon = np.asarray(lon, dtype=np.float64)
+    lat = np.asarray(lat, dtype=np.float64)
+    r = a * np.arccos(np.clip(
+        np.sin(np.pi / 6) * np.sin(lat)
+        + np.cos(np.pi / 6) * np.cos(lat) * np.cos(lon - np.pi / 2), -1, 1))
+    phis = g * 2000.0 * np.exp(-(r / 1.5e6) ** 2)
+    n2 = g ** 2 / (constants.c_pd * t0)
+    k = constants.kappa
+    ps = 93000.0 * np.exp(
+        -(a * n2 * u0 / (2 * g ** 2 * k)) * (u0 / a + 2 * omega)
+        * (np.sin(lat) ** 2 - 1) - n2 / (g ** 2 * k) * phis)
+    return phis, ps
+
+
+def _assert_mr_eq83(state, lon, lat, radius, omega=constants.Omega):
+    """Eq. (83) and Eqs. (81)-(82) at the builder's own points, T = 288 K."""
+    import numpy as np
+    phis, ps = _mr_eq83_fields(lon, lat, radius, omega)
+    # the builders may run at the fp32 policy dtype: fp32 great-circle
+    # distances put MEASURED rel errors of 3.3e-6 on Phi_s (cube C8, MPAS)
+    np.testing.assert_allclose(np.asarray(state.phis.data), phis,
+                               rtol=1e-5, atol=1e-2)
+    np.testing.assert_allclose(np.asarray(state.p_s.data), ps, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(state.T.data), 288.0, rtol=1e-6)
+
+
+# Eq. (83): p_s up to ~1043 hPa at the equator, ~800 hPa on the peak.
+_MR_BOUNDS = dict(T_min=280.0, T_max=295.0, p_s_max=104500.0)
+
+
 class TestMountainRossby50:
     def test_cubed_sphere(self, sigma8):
         from tests.test_cases.dcmip2008.mountain_rossby_5_0 import (
@@ -166,22 +203,28 @@ class TestMountainRossby50:
         )
         grid = create_cubed_sphere(8)
         state = mountain_rossby_init(grid, sigma8)
-        _assert_dry3d_state_grid_space(state, T_min=280.0, T_max=295.0)
-        # Mountain peak ≈ 2000 m → φ_s up to ≈ 19620 m²/s²
-        phis_max = float(jnp.max(state.phis.data))
-        assert 0.0 < phis_max <= constants.g * 2000.0 + 1.0
-        # Surface pressure must drop over the mountain
-        p_min = float(jnp.min(state.p_s.data))
-        assert p_min < constants.p_ref
+        _assert_dry3d_state_grid_space(state, **_MR_BOUNDS)
+        _assert_mr_eq83(state, grid.lon, grid.lat, grid.radius)
 
     def test_latlon(self, sigma8):
+        import numpy as np
         from tests.test_cases.dcmip2008.mountain_rossby_5_0 import (
             mountain_rossby_init_latlon,
         )
         grid = create_latlon_grid(24, 48)
         state = mountain_rossby_init_latlon(grid, sigma8)
-        _assert_dry3d_state_grid_space(state, T_min=280.0, T_max=295.0)
-        assert float(jnp.max(state.phis.data)) > 0.0
+        _assert_dry3d_state_grid_space(state, **_MR_BOUNDS)
+        _assert_mr_eq83(state, grid.lon2d, grid.lat2d, grid.radius)
+        # the balance uses the grid's own rotation rate
+        fast = create_latlon_grid(24, 48, omega=2.0 * constants.Omega)
+        _assert_mr_eq83(mountain_rossby_init_latlon(fast, sigma8),
+                        fast.lon2d, fast.lat2d, fast.radius,
+                        omega=2.0 * constants.Omega)
+        # the peak sits at 90E / 30N (7.5 deg cells)
+        i = np.unravel_index(np.argmax(np.asarray(state.phis.data)),
+                             state.phis.data.shape)
+        assert abs(np.degrees(float(grid.lon2d[i])) - 90.0) < 7.5
+        assert abs(np.degrees(float(grid.lat2d[i])) - 30.0) < 7.5
 
     def test_mpas(self, sigma8):
         from tests.test_cases.dcmip2008.mountain_rossby_5_0 import (
@@ -190,7 +233,7 @@ class TestMountainRossby50:
         mesh = create_voronoi_mesh(4)
         state = mountain_rossby_init_mpas(mesh, sigma8)
         _assert_dry3d_state_mpas(state, T_min=280.0, T_max=295.0)
-        assert float(jnp.max(state.phis.data)) > 0.0
+        _assert_mr_eq83(state, mesh.lonCell, mesh.latCell, mesh.radius)
 
     def test_spectral(self, sigma8):
         from tests.test_cases.dcmip2008.mountain_rossby_5_0 import (
@@ -199,8 +242,70 @@ class TestMountainRossby50:
         grid = create_gaussian_grid(21)
         state = mountain_rossby_init_spectral(grid, sigma8)
         _assert_dry3d_state_spectral(state)
-        # phis should have non-zero spectral power
-        assert float(jnp.max(jnp.abs(state.phis_hat.data))) > 0.0
+        # spectral projections of Eqs. (81)-(83) evaluated independently on
+        # the Gaussian grid (fp64 lane): pins the centre and the zonal term
+        import numpy as np
+        from legoesm.grids.gaussian import sh_analysis
+        lat2 = jnp.broadcast_to(grid.lat[:, None], (grid.n_lat, grid.n_lon))
+        lon2 = jnp.broadcast_to(grid.lon2d, (grid.n_lat, grid.n_lon))
+        phis, ps = _mr_eq83_fields(lon2, lat2, grid.radius)
+        for got, ref in ((state.phis_hat.data, sh_analysis(grid, jnp.asarray(phis))),
+                         (state.lnps_hat.data, sh_analysis(grid, jnp.log(jnp.asarray(ps))))):
+            got, ref = np.asarray(got), np.asarray(ref)
+            np.testing.assert_allclose(got, ref, rtol=0,
+                                       atol=1e-10 * np.abs(ref).max())
+
+    def test_surface_pressure_matches_reference(self):
+        """Eq. (83): p_s = p_sp = 930 hPa at the South Pole, and the area
+        mean the reference quotes (~1001.456 hPa, text below Eq. 83).  The
+        old IC (1000 hPa exp(-Phi_s/(R_d T0))) has mean 996.93 hPa."""
+        import numpy as np
+        from tests.test_cases.dcmip2008.mountain_rossby_5_0 import (
+            P_SP, _phis, eq83_zonal_surface_pressure,
+        )
+        x, w = np.polynomial.legendre.leggauss(400)
+        lat = jnp.asarray(np.arcsin(x))[:, None]
+        lon = jnp.asarray(np.linspace(0.0, 2.0 * np.pi, 1600,
+                                      endpoint=False))[None, :]
+        p_s = np.asarray(
+            eq83_zonal_surface_pressure(lat, constants.R_earth,
+                                        omega=constants.Omega)
+            * jnp.exp(-_phis(lon, lat, constants.R_earth)
+                      / (constants.R_d * 288.0)))
+        mean_hpa = float(p_s.mean(axis=1) @ w) / 2.0 / 100.0
+        # legoesm constants give 1001.4518 (reference Appendix G constants
+        # 1001.4555): 5e-3 hPa covers that constants difference only.
+        assert abs(mean_hpa - 1001.456) < 5e-3, mean_hpa
+        # full Eq. (83) at the South Pole: the latitude factor is 1 there,
+        # and Phi_s ~ g h0 exp(-79) makes exp(-Phi_s/(R_d T0)) round to 1
+        sp_lat, sp_lon = jnp.asarray(-np.pi / 2), jnp.asarray(0.0)
+        sp = (eq83_zonal_surface_pressure(sp_lat, constants.R_earth,
+                                          omega=constants.Omega)
+              * jnp.exp(-_phis(sp_lon, sp_lat, constants.R_earth)
+                        / (constants.R_d * 288.0)))
+        np.testing.assert_allclose(float(sp), 93000.0, rtol=1e-12)
+        assert P_SP == 93000.0
+
+    def test_initial_divergence_tendency_is_balanced(self):
+        """Eq. (83) puts the initial state in horizontal momentum balance
+        (the mountain flow itself still has a nonzero p_s tendency): the
+        spectral PE's initial divergence tendency vanishes to round-off.  On T21 / CAM6 L32:
+        MEASURED rms 2.4e-19 1/s^2 for this IC, 5.4e-10 for the old one
+        (1000 hPa, no zonal-flow balance term)."""
+        import numpy as np
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+            SpectralPEConfig, spectral_pe_tendencies)
+        from legoesm.grids.gaussian import sh_synthesis_3d
+        from legoesm.grids.vertical import make_cam6_l32_levels
+        from tests.test_cases.dcmip2008.mountain_rossby_5_0 import (
+            mountain_rossby_init_spectral,
+        )
+        grid = create_gaussian_grid(21)
+        coord = make_cam6_l32_levels()
+        state = mountain_rossby_init_spectral(grid, coord)
+        tend = spectral_pe_tendencies(state, grid, coord, SpectralPEConfig())
+        ddiv = np.asarray(sh_synthesis_3d(grid, tend.div_hat.data))
+        assert float(np.sqrt(np.mean(ddiv ** 2))) < 1e-15
 
 
 # ---------------------------------------------------------------------------

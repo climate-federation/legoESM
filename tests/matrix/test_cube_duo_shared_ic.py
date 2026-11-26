@@ -135,13 +135,22 @@ def test_mountain_rossby_terrain_isothermal_288():
     spec, model = _model("mountain_rossby_5_0")
     f = _fields(model, A.shared_ic_bundle(model, spec))
     i = np.unravel_index(np.argmax(f.phis), f.phis.shape)
-    # the peak cell sits near (270E, 30N) (C8 cells are ~11 deg)
-    assert abs(np.degrees(f.lon[i]) - 270.0) < 12 and abs(np.degrees(f.lat[i]) - 30.0) < 12
+    # DCMIP 2008 5-0-0 (Eq. 82): the peak cell sits near (90E, 30N)
+    # (C8 cells are ~11 deg)
+    assert abs(np.degrees(f.lon[i]) - 90.0) < 12 and abs(np.degrees(f.lat[i]) - 30.0) < 12
     assert f.phis.max() > 0.5 * constants.g * 2000.0
     assert np.all(f.pt == 288.0)
-    np.testing.assert_allclose(
-        f.ps, constants.p_ref * np.exp(-f.phis / (constants.R_d * 288.0)),
-        rtol=1e-12)
+    # Eq. (83) with N^2 = g^2/(c_p T0) (Eq. 80), p_sp = 930 hPa, u0 = 20,
+    # a and Omega = the duo's own radius and rotation rate
+    from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA, FV3_RADIUS_M
+    g, a, u0 = constants.g, FV3_RADIUS_M, 20.0
+    n2, k = g ** 2 / (constants.c_pd * 288.0), constants.kappa
+    ps_ref = 93000.0 * np.exp(
+        -(a * n2 * u0 / (2 * g ** 2 * k)) * (u0 / a + 2 * FV3_OMEGA)
+        * (np.sin(f.lat) ** 2 - 1) - n2 / (g ** 2 * k) * f.phis)
+    np.testing.assert_allclose(f.ps, ps_ref, rtol=1e-10)
+    np.testing.assert_allclose(f.f0, 2 * FV3_OMEGA * np.sin(f.lat),
+                               rtol=1e-6, atol=1e-12)
 
 
 def test_rossby_haurwitz_winds():

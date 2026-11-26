@@ -555,7 +555,7 @@ def shared_ic_bundle(model, spec) -> dict:
     import jax.numpy as jnp
     from legoesm.core.fv3_dynamics import p_var_hydrostatic
     from legoesm.grids.fv3_native_gridstruct import (
-        FV3_KAPPA, FV3_RADIUS_M, analytic_swcore_state)
+        FV3_KAPPA, FV3_OMEGA, FV3_RADIUS_M, analytic_swcore_state)
 
     coord = _cam6_l32_coord(model, "duo shared IC")
     ctx = model.grid.ctx_np
@@ -564,8 +564,12 @@ def shared_ic_bundle(model, spec) -> dict:
     gs6 = ctx["gs6"]
     lon = np.stack([np.asarray(g["agrid_lon"])[sl, sl] for g in gs6])
     lat = np.stack([np.asarray(g["agrid_lat"])[sl, sl] for g in gs6])
+    # omega: the duo's own rotation rate (the recipe's, else FV3_OMEGA) for
+    # builders whose balance depends on it (mountain_rossby_5_0, Eq. 83)
     cells = SimpleNamespace(n=n, lon=jnp.asarray(lon), lat=jnp.asarray(lat),
-                            radius=FV3_RADIUS_M, angle=jnp.zeros_like(lat))
+                            radius=FV3_RADIUS_M, angle=jnp.zeros_like(lat),
+                            omega=FV3_OMEGA if spec.omega is None
+                            else float(spec.omega))
     hst = spec.builder(cells, coord)
 
     hs6 = ctx.get("hs6")
