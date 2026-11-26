@@ -1881,12 +1881,92 @@ def dcmip2012_transport_eta_table(km: int = 30):
     z = DCMIP2012_TRANSPORT_ZTOP * (1.0 - np.arange(km + 1, dtype=np.float64)
                                     / km)
     eta = np.exp(-z / H)
-    ptop = DCMIP2012_TRANSPORT_P0 * eta[0]
+    return _dcmip2012_f3_hybrid_from_eta(eta, DCMIP2012_TRANSPORT_P0)
+
+
+def _dcmip2012_f3_hybrid_from_eta(eta, p0: float):
+    """DCMIP 2012 App. F.3 hybrid interface table (Eqs. 234-236, c = 1)
+    from interface ``eta = p(z)/p0`` (top -> surface): ``B = (eta -
+    eta_top)/(1 - eta_top)``, ``A p0 = eta p0 - B p0 = p_top (1 - B)``
+    (Eq. 235), so the lid stays at ``p_top = p0 eta_top`` and the levels
+    are exactly ``p0 eta`` at ``ps = p0``.  Returns ``(ak [Pa], bk,
+    ptop [Pa])`` float64."""
+    eta = np.asarray(eta, dtype=np.float64)
+    ptop = p0 * eta[0]
     bk = (eta - eta[0]) / (1.0 - eta[0])
     bk[0], bk[-1] = 0.0, 1.0
     ak = ptop * (1.0 - bk)
     ak[-1] = 0.0
     return ak, bk, float(ptop)
+
+
+#: DCMIP 2012 test 3-1 (non-hydrostatic gravity wave on a reduced planet;
+#: Ullrich et al. 2012, DCMIP Test Case Document v1.7, Sect. 3 Table XIV
+#: and App. F.3): constant Brunt-Vaisala frequency N background with
+#: equatorial surface temperature T_eq at p_eq, model top z_top = 10 km,
+#: 10 levels of dz = 1 km.
+DCMIP2012_GW31_N = 0.01            # [1/s]
+DCMIP2012_GW31_TEQ = 300.0         # [K]
+DCMIP2012_GW31_PEQ = 1.0e5         # [Pa]
+DCMIP2012_GW31_ZTOP = 10000.0      # [m]
+DCMIP2012_GW31_KM = 10
+
+
+def dcmip2012_gw31_isothermal_g(n_bv: float = DCMIP2012_GW31_N) -> float:
+    """``G = g^2 / (N^2 c_p)`` (DCMIP 2012 Eq. 90) [K], the temperature of
+    the isothermal state with Brunt-Vaisala frequency ``n_bv``, from the
+    shared ``constants.g`` / ``constants.c_pd``."""
+    from legoesm import constants as _c
+    return float(_c.g) ** 2 / (n_bv ** 2 * float(_c.c_pd))
+
+
+def dcmip2012_gw31_pressure(z, T_s, p_s):
+    """DCMIP 2012 Eq. (94): unperturbed pressure [Pa] at height ``z`` [m]
+    of the constant-N atmosphere with surface temperature ``T_s`` [K] and
+    surface pressure ``p_s`` [Pa] (numpy or jax arrays, broadcasting)::
+
+        p = p_s [ G/T_s exp(-N^2 z / g) + 1 - G/T_s ]^(1/kappa)
+
+    Eq. (232) is its equatorial ``T_s = T_eq``, ``p_s = p_eq`` case."""
+    from legoesm import constants as _c
+    G = dcmip2012_gw31_isothermal_g()
+    r = G / T_s
+    xp = jnp if isinstance(z, jax.Array) else np
+    return p_s * (r * xp.exp(-DCMIP2012_GW31_N ** 2 * z / float(_c.g))
+                  + 1.0 - r) ** (1.0 / float(_c.kappa))
+
+
+def dcmip2012_gw31_eta_table(km: int = DCMIP2012_GW31_KM):
+    """``(ak [Pa], bk, ptop [Pa])`` float64 interface table of DCMIP 2012
+    test 3-1 (App. F.3), top -> surface, ``pe = ak + bk * ps``, FIXED lid.
+
+    Interfaces at the equally spaced heights ``z_k = z_top (1 - k/km)``
+    (``dz`` = 1 km for km = 10), translated to pressure with the
+    constant-N profile at the equator, Eq. (232) (``eta_k = p(z_k)/p_eq``;
+    the lid is 273.831 hPa with the shared ``constants`` -- the document's
+    273.759 hPa uses its Table III R_d/c_p), then the F.3 hybrid coefficients
+    Eqs. (234)-(236) with c = 1 (:func:`_dcmip2012_f3_hybrid_from_eta`).
+    The full levels are the linear averages (Eqs. 237-238) that
+    :func:`create_hybrid_coordinate` forms."""
+    km = int(km)
+    if km < 1:
+        raise ValueError(f"km must be >= 1, got {km}")
+    z = DCMIP2012_GW31_ZTOP * (1.0 - np.arange(km + 1, dtype=np.float64)
+                               / km)
+    eta = dcmip2012_gw31_pressure(z, DCMIP2012_GW31_TEQ,
+                                  DCMIP2012_GW31_PEQ) / DCMIP2012_GW31_PEQ
+    eta[-1] = 1.0
+    return _dcmip2012_f3_hybrid_from_eta(eta, DCMIP2012_GW31_PEQ)
+
+
+def make_dcmip2012_gw31_levels(km: int = DCMIP2012_GW31_KM
+                               ) -> HybridSigmaPressureCoordinate:
+    """:func:`dcmip2012_gw31_eta_table` as a ``HybridSigmaPressureCoordinate``
+    (``A = ak / p_eq``, ``B = bk``, ``p_ref = p_eq``), float64."""
+    ak, bk, _ = dcmip2012_gw31_eta_table(km)
+    return create_hybrid_coordinate(
+        int(km), ak / DCMIP2012_GW31_PEQ, bk, p_ref=DCMIP2012_GW31_PEQ,
+        dtype=jnp.float64)
 
 
 def assert_hybrid_valid_for_surface_pressure(

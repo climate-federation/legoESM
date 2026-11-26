@@ -297,7 +297,7 @@ _CASE_FAMILIES: dict[str, frozenset[str]] = {
     "baroclinic_steady":  frozenset({"hydro"}),           # #1028 same state, no perturbation
     "rotated_baroclinic": frozenset({"hydro", "dcmip2008", "hughes"}),
     "rotated_steady":     frozenset({"hydro", "dcmip2008", "hughes"}),
-    "gravity_wave_3_1":   frozenset({"hydro", "dcmip2008", "hughes"}),
+    "gravity_wave_3_1":   frozenset({"hydro", "dcmip2012", "hughes"}),  # DCMIP 2012 3-1
     "inertio_gravity_3_2": frozenset({"hydro", "dcmip2008", "hughes"}),
     "mountain_rossby_5_0": frozenset({"hydro", "dcmip2008", "hughes"}),
     "rossby_haurwitz_6_0": frozenset({"hydro", "dcmip2008", "hughes"}),
@@ -470,12 +470,17 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "hydrostatic", "held_suarez_topo", g, res[g], "hybrid", 200, 2,
             {"h_0": 2000.0}))
-        # DCMIP 2008 §3-1 / §3-2 / §5-0 / §6-0 — dry-3D Hughes-tutorial
+        # DCMIP 2012 test 3-1 (Ullrich et al. 2012 v1.7 Sect. 3): gravity
+        # waves on the non-rotating X = 125 small planet, App. F.3 L10 to a
+        # 10 km lid; the document's 3600 s on both full and quick runs
+        # (vote 2026-11-26, author A / codex A).
+        matrix.append(TestCase(
+            "hydrostatic", "gravity_wave_3_1", g, res[g], "hybrid",
+            3600.0 / 86400.0, 3600.0 / 86400.0, {}))
+        # DCMIP 2008 §3-2 / §5-0 / §6-0 — dry-3D Hughes-tutorial
         # tests on hydrostatic dycores.  Short integrations (1-3 days) so
         # the wave packets / Rossby trains have time to develop without
         # consuming AMIP-scale wall-clock.
-        matrix.append(TestCase(
-            "hydrostatic", "gravity_wave_3_1", g, res[g], "hybrid", 1.0, 0.25, {}))
         matrix.append(TestCase(
             "hydrostatic", "inertio_gravity_3_2", g, res[g], "hybrid",
             3.0, 0.5, {}))
