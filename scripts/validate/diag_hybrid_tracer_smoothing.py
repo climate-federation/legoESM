@@ -826,7 +826,7 @@ def height_vertical_paths(out, rows, provenance, record):
         inactive_lane="matrix spectral TC3 skipped before initialization",
         dispatch="nonempty tracers: paired; empty axes: legacy; exact J == 1 selects unchanged flat recovery, otherwise projected J*rho denominator",
         acceptance_scope="flat and nonflat global inventory conservation required",
-        known_difference="none for uniform tracers since J*rho' became prognostic (#2682): drift 1.1e-14 per dt=1 s step on this terrain metric (was 9.59e-7 explicit / 9.55e-7 semi-implicit with rho' prognostic); recovery denominator positivity is still not guaranteed",
+        known_difference="historical, not measured by this probe: with rho' prognostic a uniform tracer drifted 9.59e-7 explicit / 9.55e-7 semi-implicit per dt=1 s step on this metric; J*rho' prognostic (#2682) removes the drift (asserted to 1e-12 by test_full_step_inventory_and_constant); recovery denominator positivity is still not guaranteed",
     )
     for nonflat in (False, True):
         for semi_implicit in (False, True):

@@ -131,7 +131,8 @@ def test_long_run_nh_mass_conservation_spectral():
 
     Parallel to iter-33/34/60 long-run guards on cube PE / cube SW /
     cube NH / MPAS NH.  Validates iter-9 spectral NH anchored fixer
-    (`jrho_prime_hat += Δρ·analysis(J)`).  Direct measurement: drift
+    (`jrho_prime_hat += Δρ·analysis(J)`).  Direct measurement before
+    #2682 (rho' prognostic, fixer on the (0,0) mode): drift
     = 1.94e-16 on T21 spectral NH with DCMIP-2025 TC1 init.
     """
     from legoesm.grids.gaussian import create_gaussian_grid
