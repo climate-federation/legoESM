@@ -2870,7 +2870,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        bathy_smoothing_passes=0,
                        smc03_bottom_2nd_order=None,
                        barotropic_sw_div_damp_factor=None,
-                       barotropic_sw_damp_v=None):
+                       barotropic_sw_damp_v=None,
+                       tracer_advection_constant_preserving=None):
     """Build a cubed-sphere ocean (FV3 C-D grid baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -2937,6 +2938,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                               ("div_damp_4", div_damp_4),
                               ("baroclinic_rk3", baroclinic_rk3),
                               ("velocity_ceiling", velocity_ceiling),
+                              ("tracer_advection_constant_preserving",
+                               tracer_advection_constant_preserving),
                               ("pgf_scheme", pgf_scheme),
                               ("bottom_drag_r", bottom_drag_r),
                               ("bottom_drag_bbl_thickness",
@@ -7411,6 +7414,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--cube-velocity-ceiling", type=float, default=None,
                    help="cube: clip |u|,|v| to this [m/s] each step -- bounds the sub-grid "
                         "marginal-sea jet spikes (caveated open-ocean run).")
+    p.add_argument("--cube-tracer-constant-preserving",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="cube: add q*div_h(u) to the FCT tracer tendency so a uniform "
+                        "tracer stays uniform (config default True). --no-... selects the "
+                        "pre-2026-11-26 operator, where uniform salinity drifts wherever "
+                        "the flow is divergent.")
     p.add_argument("--cube-mask-marginal-seas", action="store_true",
                    help="cube: mask poorly-resolved semi-enclosed marginal seas "
                         "(Med/Black/Red/Gulf/Baltic/Hudson) to land — their sub-grid "
@@ -9618,6 +9627,7 @@ def main() -> int:
             mask_marginal_seas=args.cube_mask_marginal_seas,
             dt=args.dt,
             velocity_ceiling=args.cube_velocity_ceiling,
+            tracer_advection_constant_preserving=args.cube_tracer_constant_preserving,
             partial_cell=args.partial_cell,
             pgf_scheme=args.cube_pgf_scheme,
             bottom_drag_r=args.cube_bottom_drag_r,

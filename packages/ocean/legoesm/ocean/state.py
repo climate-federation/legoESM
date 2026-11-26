@@ -485,6 +485,12 @@ class OceanConfig(NamedTuple):
     # latlon) un-over-damped.  Only used when barotropic_staggering=="fv3sw".
     barotropic_sw_div_damp_factor: float = 120.0
     barotropic_sw_damp_v: float = 0.030
+    # cd-grid tracer advection: add q*div_h(u) to the FCT tendency and close
+    # coastal C-faces for tracer fluxes on z*, so a uniform tracer stays uniform
+    # (flux-form horizontal + advective vertical left -q div_h u, and open
+    # coastal faces carried land tracer into wet cells).  False = old operator
+    # (uniform 35 psu drifted ~3e-2 psu in 10 x 300 s on C8).
+    tracer_advection_constant_preserving: bool = True
 
 
 # ==============================================================================

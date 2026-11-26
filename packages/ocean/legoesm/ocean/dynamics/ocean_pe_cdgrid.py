@@ -638,18 +638,51 @@ def ocean_baroclinic_tendencies_cdgrid(
     # velocity must be duplicated ``n_tracers`` times to align, which
     # ``jnp.repeat`` does directly.  ``jnp.tile`` would instead
     # concatenate the entire array and mis-align tracer ↔ level.
+    # Tracer-path C-grid velocities.  With the constant-preserving switch on,
+    # the z* path also closes coastal faces for the TRACER fluxes (the partial
+    # path already closed them above): an open coastal face carried land tracer
+    # values into wet cells (uniform 35 psu next to S=0 land drifted 9.7e-3
+    # psu in 10 x 300 s on C8).  Mass flux, w and eta keep the open faces, so
+    # the z* eta stays bit-exact.
+    u_c_tr, v_c_tr, div_tr = u_c, v_c, div_v
+    if config.tracer_advection_constant_preserving and not is_partial:
+        mask_uc_tr, mask_vc_tr = cgrid_wet_face_masks(mask, cdgrid)
+        u_c_tr = u_c * mask_uc_tr[..., None]
+        v_c_tr = v_c * mask_vc_tr[..., None]
+        div_tr = cgrid_divergence(u_c_tr, v_c_tr, cdgrid)
     if n_tracers == 1:
-        u_c_b, v_c_b = u_c, v_c
+        u_c_b, v_c_b = u_c_tr, v_c_tr
     else:
-        u_c_b = jnp.repeat(u_c, n_tracers, axis=-1)
-        v_c_b = jnp.repeat(v_c, n_tracers, axis=-1)
+        u_c_b = jnp.repeat(u_c_tr, n_tracers, axis=-1)
+        v_c_b = jnp.repeat(v_c_tr, n_tracers, axis=-1)
 
-    horiz_flat = cgrid_tracer_advection_fct(tracer_flat, u_c_b, v_c_b, cdgrid)
+    # With the switch on, land cells are filled from wet neighbours for the
+    # FCT input only: the faces are closed, so filled values enter just the
+    # reconstruction stencil, which otherwise read raw land values across
+    # wet-wet faces next to the coast (2.7e-4 psu residual drift next to S=0
+    # land on C8).  Tendencies at land stay masked below.
+    tracer_adv_in = (fill_TS(tracer_flat)
+                     if config.tracer_advection_constant_preserving else tracer_flat)
+    horiz_flat = cgrid_tracer_advection_fct(tracer_adv_in, u_c_b, v_c_b, cdgrid)
     if config.K_h > 0:
+        # Same filled input: the Laplacian otherwise read raw land values too
+        # (3.8e-5 psu drift next to S=0 land at K_h=1e3 on C8); filled land is
+        # a zero-gradient coastal BC, exact for uniform tracers only.
         horiz_flat = horiz_flat + laplacian_viscosity_3d(
-            tracer_flat, grid, config.K_h,
+            tracer_adv_in, grid, config.K_h,
         )
     horiz_stack = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
+    # The FCT operator is the flux form -div_h(u q) on velocity alone, while the
+    # vertical term below is advective (-w dq/dz) and the update is in
+    # concentration form, so a uniform q would pick up -q div_h(u).  Adding
+    # q div_h(u) (same unweighted C-grid divergence of the same tracer-path
+    # face velocities the fluxes use) makes the
+    # horizontal term advective too: uniform tracers stay uniform.  KNOWN GAP:
+    # the update is then not exactly tracer-content conserving (nor was the old
+    # one, which ignored the thickness change); a thickness-weighted (h q) update
+    # would fix both.  False restores the old operator.
+    if config.tracer_advection_constant_preserving:
+        horiz_stack = horiz_stack + tracer_stack * div_tr[..., None]
 
     # Vertical advection per-tracer (vmap over the trailing tracer axis
     # so JAX produces one batched kernel rather than n_tracers unrolled
