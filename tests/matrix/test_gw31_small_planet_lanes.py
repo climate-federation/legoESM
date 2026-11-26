@@ -436,9 +436,10 @@ def test_spectral_control_row_keeps_the_earth_lane(mm, monkeypatch,
         np.testing.assert_array_equal(np.asarray(getattr(sigma, k)),
                                       np.asarray(getattr(ref, k)), err_msg=k)
     assert loop["dt"] == 600.0 and loop["n_steps"] == int(0.5 * 86400 / 600)
-    assert cfg.hyperdiff_coeff == 2.338e15
-    assert (cfg.spectral_filter_order, cfg.spectral_filter_strength) == (
-        8, 0.01)
+    # DCMIP-2008 dry row: its document's EUL dissipation (Table 4 K4 at
+    # T21, no exp filter; test_spectral_dcmip2008_dissipation.py)
+    assert cfg.hyperdiff_coeff == 2.0e16
+    assert cfg.spectral_filter_strength == 0.0
     from tests.test_cases.dcmip2008.inertio_gravity_3_2 import (
         inertio_gravity_init_spectral)
     ref_state = inertio_gravity_init_spectral(grid, sigma)

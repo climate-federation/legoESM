@@ -882,6 +882,53 @@ def _fv3_native_flag_error(fv3_native_grid, fv3_native_angles, sw_core):
     return None
 
 
+# DCMIP 2008 test-case document (Jablonowski et al., 29 May 2008), Sect. 2.1,
+# Table 4: del4 coefficient K4 [m^4/s] of the reference spectral-transform
+# Eulerian core (CAM3.5 EUL) per triangular truncation.  The document's EUL
+# reference carries NO exponential spectral filter.
+DCMIP2008_EUL_K4: dict[int, float] = {
+    21: 2.0e16, 42: 1.0e16, 85: 1.0e15, 106: 0.5e15, 170: 1.5e14, 340: 1.5e13,
+}
+DCMIP2008_DRY_CASES = frozenset(
+    {"inertio_gravity_3_2", "mountain_rossby_5_0", "rossby_haurwitz_6_0"})
+# Matrix spectral-PE lane default (every other run_baroclinic row): del4 at
+# 2.338e15 (21/n)^4 plus the order-8, 0.01-retention exp filter per step.
+_SPECTRAL_PE_LANE_HD_T21 = 2.338e15
+_SPECTRAL_PE_LANE_FILTER = 0.01
+
+
+def _spectral_pe_dissipation(case: str, n_max: int) -> tuple[float, float, str]:
+    """(del4 coeff [m^4/s], exp-filter strength, note) of the run_baroclinic
+    spectral lane for ``case`` at truncation ``T<n_max>``.
+
+    DCMIP-2008 dry rows (6-3-0 IG, 5-0-0 mountain, 4-0-0 RH) run the
+    reference EUL dissipation of their own document: Table 4 K4, no
+    exponential filter.  The lane's per-step filter (exp(-ln100 (n/N)^8)
+    per 600 s step) e-folds n=14 -- the top of the 2/3 band -- in ~55 min
+    at T21; with it off (K4 unchanged) the 5-0-0 day-2 max wind is 50.2
+    vs 39.1 m/s.  Measured for the combined change (filter off AND K4
+    2.338e15 -> 2.0e16) at T21: 5-0-0 day-2 49.9, 6-3-0 0.5-d peak 6.2
+    m/s (cube/ico/latlon 51.2/50.1/54.0 and 6.4/6.5/6.4).  Evidence is at
+    T21 and T42 only; the lane's fixed 600 s step is not checked here
+    for the higher Table 4 truncations.  K4 is
+    taken from the table only; a truncation the table does not list is
+    refused rather than interpolated.  The reference's del2 K2 = 2.5e5
+    m^2/s on the top three levels is NOT applied (no per-level del2 in
+    SpectralPEConfig) -- disclosed in the note.
+
+    Every other row keeps the lane default unchanged (bit-identical).
+    """
+    if case in DCMIP2008_DRY_CASES:
+        if n_max not in DCMIP2008_EUL_K4:
+            raise ValueError(
+                f"{case} on spectral T{n_max}: DCMIP 2008 Table 4 lists EUL K4 "
+                f"only for T{sorted(DCMIP2008_EUL_K4)}; refusing to guess one")
+        k4 = DCMIP2008_EUL_K4[n_max]
+        return (k4, 0.0,
+                f"DCMIP 2008 Table 4 EUL dissipation: del4 K4={k4:.2e} m^4/s, "
+                f"no exp spectral filter; top-3-level del2 K2=2.5e5 NOT applied")
+    return (_SPECTRAL_PE_LANE_HD_T21 * (21.0 / n_max) ** 4,
+            _SPECTRAL_PE_LANE_FILTER, "")
 
 
 def _modon_hyperdiff_coeff(n: int) -> float:
@@ -4946,7 +4993,10 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         else:
             sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 600.0 if _gw31 is None else 600.0 / _gw31.X_SCALE
-        _hd = 2.338e15 * (21.0 / n_max) ** 4
+        # DCMIP-2008 dry rows: reference EUL dissipation (Table 4 K4, no
+        # exp filter); every other row: the lane default, unchanged.
+        _hd, _spec_filter, _spec_diss_note = _spectral_pe_dissipation(
+            tc.case, n_max)
         if _gw31 is not None:
             # del-4 (hyperdiff_order 2, k = 2): K_4 / X^3; the per-step
             # spectral filter below needs no change (it scales with dt / X)
@@ -4954,7 +5004,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         pe_config = SpectralPEConfig(
             hyperdiff_coeff=_hd,
             spectral_filter_order=8,
-            spectral_filter_strength=0.01,
+            spectral_filter_strength=_spec_filter,
             fix_mass=True, anchor_mass_to_initial=True,
             # Opt-in T damping on pressure surfaces: the rest_state_topo row
             # ONLY (user decision 2026-11-24; enabled after it passed the
@@ -4964,6 +5014,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         _spec_tdamp_note = ("T filter/hyperdiffusion on pressure surfaces: "
                             + ("on" if pe_config.T_damping_pressure_surfaces
                                else "off"))
+        if _spec_diss_note:
+            _spec_tdamp_note = f"{_spec_tdamp_note}; {_spec_diss_note}"
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
