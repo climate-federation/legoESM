@@ -76,8 +76,12 @@ def climatology(ds, first: int, last: int, optics: bool = False):
             if optics and v in ("ssa", "asy"):
                 # aod/ssa/asy must describe the same records: a missing value in
                 # any of them would weight the others on a different subset
-                if not all(bool(np.isfinite(sub[o].values).all()) for o in ("aod", "ssa", "asy")):
-                    raise ValueError(f"--optics: month {m} has missing or non-finite aod/ssa/asy "
+                _rng = {"aod": (0.0, np.inf), "ssa": (0.0, 1.0), "asy": (-1.0, 1.0)}
+                if not all(bool((np.isfinite(x) & (x >= lo) & (x <= hi)).all())
+                           for o, (lo, hi) in _rng.items() for x in [sub[o].values]):
+                    raise ValueError(f"--optics: month {m} has missing, non-finite or "
+                                     "out-of-range (aod >= 0, ssa in [0, 1], asy in "
+                                     "[-1, 1]) aod/ssa/asy "
                                      "values in the span; incomplete optical records "
                                      "are refused")
                 w = sub["aod"] * (sub["ssa"] if v == "asy" else 1.0)
