@@ -13,6 +13,9 @@ Known difference: at Ri_b == Ri_c exactly the sigmoid gives 1/2, CVMix's strict
 """
 from __future__ import annotations
 
+import json
+import pathlib
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -594,3 +597,33 @@ def test_depth_floor_gradient_at_default():
         assert np.isfinite(g) and g > 0.0
     assert float(jax.grad(f)(1.0)) == 0.0
     check_grads(f, (jnp.asarray(1.998),), order=2, modes=["rev"], eps=1e-6)
+
+
+# End to end (codex review): MOM6 SCM columns F1conv..F4deep at step 12, first 30 levels, MOM6's own bulk
+# Delta-rho / Delta-U^2 injected; our cvmix structure computes N, w_s, V_t^2, Ri_b, the depth (hard limit) and
+# the interface K.  Oracle: compiled CVMix cfg 2 (Cv 1.6, quadratic, SimpleShapes, no enhanced diffusion =
+# this port's settings) fed MOM6's KPP_N, CVMix's own w_s and the same Delta-rho / Delta-U^2 (generator
+# oracle_audit/kpp_oracle e2e_cvmix.py).  Measured residual per case (from our N / w_s, which come from T, S
+# rather than MOM6's diagnostics): depth 1e-6..6e-6 relative, K in the boundary layer up to 5.5e-5; stored.
+_E2E = json.loads((pathlib.Path(__file__).parent / "kpp_cvmix_e2e_columns.json").read_text())
+
+
+@pytest.mark.parametrize("case", sorted(_E2E))
+def test_end_to_end_depth_and_k_match_compiled_cvmix(case, monkeypatch):
+    c = _E2E[case]
+    dz = np.asarray(c["dz"])
+    T, S = jnp.asarray(c["T"])[None], jnp.asarray(c["S"])[None]
+    hard = HARD._replace(bl_min_depth_width_frac=0.0)
+    monkeypatch.setattr(K, "_mom6_surface_layer_deltas",
+                        lambda *a, **k: (jnp.asarray(c["drho"])[None], jnp.asarray(c["uz2"])[None]))
+    zc = create_z_star_from_thicknesses(dz)
+    rho = wright_eos(T, S, jnp.zeros_like(T))
+    h = float(K._boundary_layer_depth(rho, T, S, T * 0, T * 0, zc, jnp.ones(1), jnp.array([c["ustar"]]),
+                                      jnp.array([-c["B_cvmix"]]), hard, constants.g)[0])
+    np.testing.assert_allclose(h - c["obl"], c["obl_gap"], rtol=1e-6, atol=1e-12)
+    tau = np.sqrt((c["ustar"] ** 2 * rho_0) ** 2 - K._EPS)  # port u* = sqrt(sqrt(tau^2+eps)/rho0)
+    out = K.kpp_vertical_mixing(T * 0, T * 0, T, S, rho, jnp.zeros(1), zc, jnp.ones(1), hard, constants.g,
+                                tau_x=jnp.array([tau]), tau_y=jnp.zeros(1), B_f=jnp.array([-c["B_cvmix"]]),
+                                apply_diffusion=False)
+    kv = np.asarray(out.K_v[0]) - hard.K_bg
+    np.testing.assert_allclose(kv - np.asarray(c["Kt"]), c["Kt_gap"], rtol=1e-6, atol=1e-12)
