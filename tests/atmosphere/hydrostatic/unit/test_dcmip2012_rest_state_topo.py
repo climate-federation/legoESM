@@ -78,3 +78,54 @@ def test_rest_state_spectral(sigma):
     grid = create_gaussian_grid(21)
     state = rest_state_topography_init_spectral(grid, sigma, h_0=2000.0)
     _check_rest_state_invariants(state, is_spectral=True)
+
+
+def test_lapse_rate_spectral_ic_survives_first_step_projection():
+    """The spectral model truncates lnps to the 2/3 band every step.  With
+    the terrain band-limited first, the p_s change over one step is bounded
+    by 10 Pa (T21 matrix config, fp64: 1.06 Pa; on the raw-terrain IC the
+    first step removes 2168 Pa at the mountain)."""
+    from legoesm.grids.gaussian import sh_synthesis
+    from legoesm.grids.vertical import make_cam6_l32_levels
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        SpectralPEConfig, SpectralPrimitiveEquationModel)
+    from tests.test_cases.dcmip2012.rest_state_topography import (
+        lapse_rate_state_topography_init_spectral)
+
+    grid = create_gaussian_grid(21, omega=0.0)
+    coord = make_cam6_l32_levels()
+    cfg = SpectralPEConfig(hyperdiff_coeff=2.338e15, spectral_filter_order=8,
+                           spectral_filter_strength=0.01, fix_mass=True,
+                           anchor_mass_to_initial=True,
+                           T_damping_pressure_surfaces=True)
+    s0 = lapse_rate_state_topography_init_spectral(
+        grid, coord, h_0=2000.0, dealiasing_fraction=cfg.dealiasing_fraction)
+    s1 = SpectralPrimitiveEquationModel(grid, coord, cfg).step(s0, 600.0)
+    ps = lambda s: jnp.exp(sh_synthesis(grid, s.lnps_hat.data))
+    assert float(jnp.max(jnp.abs(ps(s1) - ps(s0)))) < 10.0
+
+
+def test_matrix_spectral_rest_state_topo_row_ps_perturbation(tmp_path):
+    """The matrix row itself (run_baroclinic, spectral T21, 6 h): its
+    ps_perturbation diagnostic (max |p_s - ps_init_spec|: dynamics plus the
+    ~1 Pa residual projection of the IC's off-band lnps) is bounded by 10 Pa
+    at 6 h (before the fix: 2126 Pa, the first-step projection of the raw-
+    terrain IC; after: ~1.6 Pa), and the anchored dry mass holds."""
+    import numpy as np
+    from scripts.matrix.run_atmosphere_test_matrix import (
+        _DYCORE_MASS_DRIFT_TOL, TestCase as MatrixCase, run_baroclinic)
+    tc = MatrixCase("hydrostatic", "rest_state_topo", "spectral", "T21",
+                    "hybrid", 7, 1, {"h_0": 2000.0})
+    status, _, _ = run_baroclinic(tc, tmp_path, 0.25)
+    assert status == "PASS"
+    csv = next(tmp_path.rglob("mean_timeseries.csv"))
+    with open(csv) as f:
+        header = f.readline().strip().split(",")
+    rows = np.loadtxt(csv, delimiter=",", skiprows=1)
+    assert rows[-1, header.index("time_days")] == 0.25
+    assert rows[-1, header.index("ps_perturbation")] < 10.0
+    # Row 0 is the diagnostic of the IC state itself (step 0, before any
+    # step), so mass[0] is the initialised state's integrated mass.
+    assert rows[0, header.index("step")] == 0
+    mass = rows[:, header.index("mass")]
+    assert np.max(np.abs(mass / mass[0] - 1.0)) < _DYCORE_MASS_DRIFT_TOL

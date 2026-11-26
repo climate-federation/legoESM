@@ -393,8 +393,22 @@ def lapse_rate_state_topography_init_spectral(
     h_0: float = H_0,
     T_init: float = T_0,
     gamma: float = GAMMA,
+    dealiasing_fraction: float,
 ):
-    """DCMIP 2012 2-0-0 (constant lapse rate) in spectral space."""
+    """DCMIP 2012 2-0-0 (constant lapse rate) in spectral space.
+
+    ``dealiasing_fraction`` is the model's ``SpectralPEConfig`` value: the
+    orography is projected onto the band the model keeps
+    (``n <= floor(fraction * n_max)``, ``band_limited_orography``) BEFORE the
+    columns are built, as the spectral NH TC1/TC2 inits do.  The model
+    truncates ``lnps`` to that band after every step, so on an unprojected
+    IC the first step changed p_s by up to ~2.2 kPa at the mountain at T21
+    (projection, not dynamics), and ``phis`` kept the cut terrain detail
+    that ``lnps`` no longer balanced.  The column build is nonlinear in
+    ``z_s``, so lnps keeps a small off-band part: projecting it changes p_s
+    by up to 1.07 Pa at T21.  ``<= 0`` keeps the raw terrain.
+    """
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import band_limited_orography
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
     from legoesm.grids.gaussian import sh_analysis, sh_analysis_3d
 
@@ -403,6 +417,7 @@ def lapse_rate_state_topography_init_spectral(
     lon_2d = jnp.broadcast_to(grid.lon2d, (n_lat, n_lon))
     z_s = jnp.asarray(dcmip_2_0_0_mountain(lon_2d, lat_2d, float(grid.radius),
                                            h_0=h_0), dtype=jnp.float64)
+    z_s = band_limited_orography(grid, z_s, dealiasing_fraction)
     phis_grid = constants.g * z_s
     p_s_grid, T_grid = lapse_rate_columns(z_s, sigma_coord, T_init=T_init, gamma=gamma)
 

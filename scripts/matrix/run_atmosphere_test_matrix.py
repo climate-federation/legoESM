@@ -4806,8 +4806,13 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         elif _rest:
             from tests.test_cases.dcmip2012.rest_state_topography import (
                 lapse_rate_state_topography_init_spectral)
+            # Orography on the band the model keeps (its lnps is truncated
+            # to it every step): the first-step p_s adjustment drops from
+            # ~2.2 kPa to ~1 Pa at T21; ps_init_spec below still carries
+            # that ~1 Pa residual projection of the IC's off-band lnps.
             state = lapse_rate_state_topography_init_spectral(
-                grid, sigma, h_0=_rest_h0)
+                grid, sigma, h_0=_rest_h0,
+                dealiasing_fraction=pe_config.dealiasing_fraction)
         elif _dcmip2008_dry:
             state = _build_dcmip2008_state(
                 tc.case, "spectral", grid, sigma)

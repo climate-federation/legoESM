@@ -46,9 +46,13 @@ def _setup(on: bool, *, filt: float = 0.01, hyperdiff: float = 2.338e15,
     cfg = SpectralPEConfig(hyperdiff_coeff=hyperdiff, spectral_filter_order=8,
                            spectral_filter_strength=filt,
                            T_damping_pressure_surfaces=on)
-    init = (rst.rest_state_topography_init_spectral if isothermal
-            else rst.lapse_rate_state_topography_init_spectral)
-    state = init(grid, coord, h_0=h_0)
+    if isothermal:
+        state = rst.rest_state_topography_init_spectral(grid, coord, h_0=h_0)
+    else:
+        # Raw (unprojected) terrain: the measured filter-heating numbers in
+        # this module were taken on it.
+        state = rst.lapse_rate_state_topography_init_spectral(
+            grid, coord, h_0=h_0, dealiasing_fraction=0.0)
     return grid, coord, cfg, SpectralPrimitiveEquationModel(grid, coord, cfg), state
 
 
