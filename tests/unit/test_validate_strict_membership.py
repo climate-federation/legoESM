@@ -75,6 +75,17 @@ def test_every_canonical_discretization_accepted(discretization: str) -> None:
     ).validate_strict()
 
 
+@pytest.mark.parametrize(
+    "discretization", [d for d in DISCRETIZATION_OPTIONS if d != "fv3_duo"] + ["cdgrid"])
+def test_cubed_sphere_refuses_every_lane_but_fv3_duo(discretization: str) -> None:
+    with pytest.raises(ValueError, match="Cubed-sphere atmosphere requires "
+                       "dycore.discretization='fv3_duo'"):
+        ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere"),
+            dycore=DycoreConfig(model_type="hydrostatic", discretization=discretization),
+        ).validate_strict()
+
+
 # ---- corpus guard: no shipped config that translates is newly rejected ----
 def _all_config_yamls() -> list[Path]:
     files = sorted((REPO_ROOT / "config").glob("*.yaml"))
