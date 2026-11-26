@@ -425,14 +425,16 @@ class TestDriverStandardICMPAS:
         from legoesm.core import precision
         pol, ovr = precision.get_policy(), precision.get_module_overrides()
         cfg.validate_strict()
-        d = ModelDriver(cfg, output_dir=tempfile.mkdtemp(prefix="std_ic_mpas_"))
-        d.setup()
-        yield d
-        # setup set the worker's global policy (fp64) and cleared overrides
-        precision.set_policy(pol)
-        precision.clear_module_overrides()
-        for mod, roles in ovr.items():
-            precision.set_module_override(mod, **{r: v for r, v in roles.items() if v is not None})
+        try:    # setup sets the worker's global policy (fp64), clears overrides
+            d = ModelDriver(cfg, output_dir=tempfile.mkdtemp(prefix="std_ic_mpas_"))
+            d.setup()
+            yield d
+        finally:
+            precision.set_policy(pol)
+            precision.clear_module_overrides()
+            for mod, roles in ovr.items():
+                precision.set_module_override(
+                    mod, **{r: v for r, v in roles.items() if v is not None})
 
     def test_realistic_t_cwv_and_rest_winds(self, drv):
         T = np.asarray(drv.state.T.data)                  # (nCells, nlev)
