@@ -43,10 +43,12 @@ surface is ``Phi' + f(p)``, so the horizontal pressure-gradient force is
 ``-grad Phi'`` at every level -- the nonlinear-balance geopotential of the
 barotropic winds; the initial divergence tendency vanishes analytically.
 
-Constants are ``legoesm.constants`` (R_d = 287.05, Omega = 7.292e-5),
-which differ slightly from the reference's Appendix G (R_d = 287.04,
-Omega = 7.29211e-5): the area-mean p_s is 1000.3748 hPa here vs the
-reference's quoted ~1000.377 hPa.
+Constants are ``legoesm.constants`` (R_d = 287.05) and the grid's own
+rotation rate (``constants.Omega`` = 7.292e-5 where the grid carries
+none; the FV3 duo cells carry FV3_OMEGA), which differ slightly from the
+reference's Appendix G (R_d = 287.04, Omega = 7.29211e-5): the area-mean
+p_s is 1000.3748 hPa with constants.Omega (a = R_earth) vs the reference's
+quoted ~1000.377 hPa.
 
 Reference run setup vs the matrix row (reported, not changed here): the
 reference integrates 30 days at ~1 deg on the CAM L26 hybrid levels
@@ -77,6 +79,7 @@ from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
     SigmaCoordinate,
 )
+from tests.test_cases.dcmip2008._shared import grid_rotation_rate
 from tests.test_cases.dcmip2012.rest_state_topography import (
     lapse_rate_columns,
 )
@@ -104,15 +107,17 @@ def _w6_winds_geo(lon, lat, radius):
                                    omega_wave=mk, k_wave=mk, xp=jnp)
 
 
-def rh_balanced_columns(lon, lat, radius, sigma_coord):
+def rh_balanced_columns(lon, lat, radius, sigma_coord, *, omega: float):
     """``(p_s, T)`` of DCMIP 2008 Eqs. (70)-(74) and (66).
 
     ``p_s`` has the broadcast shape of ``lon`` and ``lat``; ``T`` adds a
     trailing level axis on the coordinate's own full levels.  Phi_s = 0.
+    ``omega`` is the run's rotation rate (Eqs. 72-73 balance the winds for
+    the Omega the dycore integrates with).
     """
     mk = rh_wave_frequency(radius)
     phi_prime = rossby_haurwitz_4_geopotential(
-        lon, lat, radius=radius, omega=constants.Omega, gh0=0.0,
+        lon, lat, radius=radius, omega=omega, gh0=0.0,
         omega_wave=mk, k_wave=mk, xp=jnp)
     return lapse_rate_columns(-phi_prime / constants.g, sigma_coord,
                               T_init=RH_T0, gamma=RH_GAMMA, p_0=RH_P_REF)
@@ -143,7 +148,8 @@ def rossby_haurwitz_init(
     u_3d = jnp.broadcast_to(u_grid_2d[..., None], shape_3d)
     v_3d = jnp.broadcast_to(v_grid_2d[..., None], shape_3d)
 
-    p_s, T_3d = rh_balanced_columns(grid.lon, grid.lat, R, sigma_coord)
+    p_s, T_3d = rh_balanced_columns(grid.lon, grid.lat, R, sigma_coord,
+                                    omega=grid_rotation_rate(grid))
     phis = jnp.zeros(shape_2d)
 
     dims_3d = ("face", "x", "y", "level")
@@ -173,7 +179,8 @@ def rossby_haurwitz_init_latlon(
     u_3d = jnp.broadcast_to(u_east[..., None], (n_lat, n_lon, nlev))
     v_3d = jnp.broadcast_to(v_north[..., None], (n_lat, n_lon, nlev))
 
-    p_s, T_3d = rh_balanced_columns(lon_2d, lat_2d, R, sigma_coord)
+    p_s, T_3d = rh_balanced_columns(lon_2d, lat_2d, R, sigma_coord,
+                                    omega=grid_rotation_rate(grid))
     phis = jnp.zeros((n_lat, n_lon))
 
     dims_3d = ("lat", "lon", "level")
@@ -204,7 +211,8 @@ def rossby_haurwitz_init_mpas(
     u_data = jnp.broadcast_to(u_normal[:, None], (nEdges, nlev))
 
     p_s, T_data = rh_balanced_columns(mesh.lonCell, mesh.latCell, R,
-                                      sigma_coord)
+                                      sigma_coord,
+                                      omega=grid_rotation_rate(mesh))
     phis = jnp.zeros((nCells,))
 
     return MPASHydrostaticState(
@@ -259,7 +267,8 @@ def rossby_haurwitz_init_spectral(
         - one_over_a * sh_analysis_dmu_3d(grid, v_cos)
     )
 
-    p_s_grid, T_grid = rh_balanced_columns(lon_2d, lat_2d, R, sigma_coord)
+    p_s_grid, T_grid = rh_balanced_columns(lon_2d, lat_2d, R, sigma_coord,
+                                           omega=grid_rotation_rate(grid))
     T_hat = sh_analysis_3d(grid, jnp.asarray(T_grid, dtype=jnp.float64))
     lnps_hat = sh_analysis(
         grid, jnp.log(jnp.asarray(p_s_grid, dtype=jnp.float64)))

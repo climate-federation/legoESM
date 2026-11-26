@@ -159,7 +159,7 @@ def test_rossby_haurwitz_winds():
     f = _fields(model, bundle)
     from legoesm.core.williamson_sw_analytic import (
         rossby_haurwitz_4_geopotential, rossby_haurwitz_4_winds)
-    from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+    from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA, FV3_RADIUS_M
     # DCMIP 2008 Sect. 1.4 (test 4-0-0): M = K = u0/(n a), u0 = 50 m/s
     mk = 50.0 / (4.0 * FV3_RADIUS_M)
     u, v = rossby_haurwitz_4_winds(f.lon, f.lat, radius=FV3_RADIUS_M,
@@ -173,11 +173,13 @@ def test_rossby_haurwitz_winds():
     # T0 = 288 K, Gamma = 6.5 K/km, p_ref = 955 hPa, Phi_s = 0
     gamma, t0, p_ref = 0.0065, 288.0, 95500.0
     phi = rossby_haurwitz_4_geopotential(
-        f.lon, f.lat, radius=FV3_RADIUS_M, omega=constants.Omega, gh0=0.0,
+        f.lon, f.lat, radius=FV3_RADIUS_M, omega=FV3_OMEGA, gh0=0.0,
         omega_wave=mk, k_wave=mk)
     ps_ref = p_ref * (1.0 + gamma * phi / (constants.g * t0)) ** (
         constants.g / (gamma * constants.R_d))
-    np.testing.assert_allclose(f.ps, ps_ref, rtol=1e-6)
+    # rtol 1e-10 (fp64 bundle): resolves the duo's FV3_OMEGA vs
+    # constants.Omega (~1e-6 relative in p_s)
+    np.testing.assert_allclose(f.ps, ps_ref, rtol=1e-10)
     assert f.ps.max() - f.ps.min() > 5000.0           # not uniform
     ak, bk = np.asarray(model.ak), np.asarray(model.bk)
     p_full = (0.5 * (ak[:-1] + ak[1:])

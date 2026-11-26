@@ -317,7 +317,8 @@ class TestMountainRossby50:
 _RH_BOUNDS = dict(T_min=90.0, T_max=295.0, p_s_max=103500.0)
 
 
-def _assert_rh_eq70_eq66(state, lon, lat, radius, coord):
+def _assert_rh_eq70_eq66(state, lon, lat, radius, coord,
+                         omega=constants.Omega):
     """p_s from Eq. (70) and T from Eq. (66) at the builder's own points,
     written out here from the reference (T0 = 288 K, Gamma = 6.5 K/km,
     p_ref = 955 hPa, M = K = 50/(4 a)); T at the coordinate's full levels
@@ -329,7 +330,7 @@ def _assert_rh_eq70_eq66(state, lon, lat, radius, coord):
     mk = 50.0 / (4.0 * float(radius))
     phi = rossby_haurwitz_4_geopotential(
         np.asarray(lon, dtype=np.float64), np.asarray(lat, dtype=np.float64),
-        radius=float(radius), omega=constants.Omega, gh0=0.0,
+        radius=float(radius), omega=omega, gh0=0.0,
         omega_wave=mk, k_wave=mk)
     ps_ref = p_ref * (1.0 + gamma * phi / (constants.g * t0)) ** (
         constants.g / (gamma * constants.R_d))
@@ -371,6 +372,11 @@ class TestRossbyHaurwitz60:
         coord = standard_hybrid_levels(8, p_ref=90000.0)
         _assert_rh_eq70_eq66(rossby_haurwitz_init_latlon(grid, coord),
                              grid.lon2d, grid.lat2d, grid.radius, coord)
+        # Eqs. (72)-(73) use the grid's own rotation rate
+        fast = create_latlon_grid(24, 48, omega=2.0 * constants.Omega)
+        _assert_rh_eq70_eq66(rossby_haurwitz_init_latlon(fast, sigma8),
+                             fast.lon2d, fast.lat2d, fast.radius, sigma8,
+                             omega=2.0 * constants.Omega)
 
     def test_mpas(self, sigma8):
         from tests.test_cases.dcmip2008.rossby_haurwitz_6_0 import (
@@ -404,7 +410,8 @@ class TestRossbyHaurwitz60:
         lon = np.linspace(0.0, 2.0 * np.pi, 800, endpoint=False)
         lon2, lat2 = np.meshgrid(lon, lat)
         p_s, _ = rh_balanced_columns(jnp.asarray(lon2), jnp.asarray(lat2),
-                                     constants.R_earth, standard_hybrid_levels(8))
+                                     constants.R_earth, standard_hybrid_levels(8),
+            omega=constants.Omega)
         p_s = np.asarray(p_s)
         mean_hpa = float(p_s.mean(axis=1) @ w) / 2.0 / 100.0
         # legoesm R_d/Omega give 1000.3748 (reference Appendix G constants
@@ -412,7 +419,8 @@ class TestRossbyHaurwitz60:
         assert abs(mean_hpa - 1000.377) < 5e-3, mean_hpa
         p_pole, _ = rh_balanced_columns(
             jnp.asarray([0.3, 1.7]), jnp.asarray([np.pi / 2, -np.pi / 2]),
-            constants.R_earth, standard_hybrid_levels(8))
+            constants.R_earth, standard_hybrid_levels(8),
+            omega=constants.Omega)
         np.testing.assert_allclose(np.asarray(p_pole), RH_P_REF, rtol=1e-12)
         # Spatial phase, independent of the shared geopotential helper:
         # Eqs. (72)-(74) written out at (lambda, phi) = (0, 45 deg) and
@@ -431,7 +439,8 @@ class TestRossbyHaurwitz60:
         ps_hand = 95500.0 * (1 + 0.0065 * phi_prime / (constants.g * 288.0)) ** expo
         p_pts, _ = rh_balanced_columns(
             jnp.asarray([0.0, np.pi / 4.0]), jnp.asarray([np.pi / 4.0] * 2),
-            constants.R_earth, standard_hybrid_levels(8))
+            constants.R_earth, standard_hybrid_levels(8),
+            omega=constants.Omega)
         np.testing.assert_allclose(np.asarray(p_pts), ps_hand, rtol=1e-12)
         assert ps_hand[0] - ps_hand[1] > 1000.0      # wave-4 ridge at lambda=0
 

@@ -42,6 +42,16 @@ U0_DEFAULT = 20.0            # Solid-body zonal flow amplitude [m/s]
 P0_DEFAULT = constants.p_ref  # Reference surface pressure [Pa]
 
 
+def grid_rotation_rate(grid) -> float:
+    """The grid's rotation rate [1/s] for ICs whose balance depends on it.
+
+    Grids that carry none (cubed sphere, MPAS mesh) are built on
+    ``constants.Omega``; the FV3 duo's shared-IC cells carry the duo's own
+    ``FV3_OMEGA`` (``scripts/matrix/_cube_duo_adapters.shared_ic_bundle``).
+    """
+    return float(getattr(grid, "omega", constants.Omega))
+
+
 def hydrostatic_pressure(
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     p_s: jnp.ndarray,

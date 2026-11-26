@@ -45,6 +45,7 @@ from legoesm.atmosphere.idealized.topography import gaussian_mountain
 
 from tests.test_cases.dcmip2008._shared import (
     U0_DEFAULT,
+    grid_rotation_rate,
     isothermal_state_cube,
     isothermal_state_latlon,
     isothermal_state_mpas,
@@ -82,19 +83,12 @@ def eq83_zonal_surface_pressure(lat, radius, *, omega: float,
                           * (jnp.sin(lat) ** 2 - 1.0))
 
 
-def _omega(grid) -> float:
-    """The grid's rotation rate; grids that carry none (cubed sphere, MPAS
-    mesh) are built on ``constants.Omega``.  The FV3 duo's shared-IC cells
-    carry the duo's own ``FV3_OMEGA``."""
-    return float(getattr(grid, "omega", constants.Omega))
-
-
 def mountain_rossby_init(grid, sigma_coord, *, T_0: float = T0_MR, u_0: float = U0_DEFAULT):
     R = float(grid.radius)
     phis = _phis(grid.lon, grid.lat, R)
     return isothermal_state_cube(
         grid, sigma_coord, T_0=T_0, u_0=u_0, phis=phis,
-        p_s_init=eq83_zonal_surface_pressure(grid.lat, R, omega=_omega(grid),
+        p_s_init=eq83_zonal_surface_pressure(grid.lat, R, omega=grid_rotation_rate(grid),
                                              T_0=T_0, u_0=u_0),
     )
 
@@ -108,7 +102,7 @@ def mountain_rossby_init_latlon(grid, sigma_coord, *, T_0: float = T0_MR, u_0: f
     phis = _phis(lon_2d, lat_2d, R)
     return isothermal_state_latlon(
         grid, sigma_coord, T_0=T_0, u_0=u_0, phis=phis,
-        p_s_init=eq83_zonal_surface_pressure(lat_2d, R, omega=_omega(grid),
+        p_s_init=eq83_zonal_surface_pressure(lat_2d, R, omega=grid_rotation_rate(grid),
                                              T_0=T_0, u_0=u_0),
     )
 
@@ -118,7 +112,7 @@ def mountain_rossby_init_mpas(mesh, sigma_coord, *, T_0: float = T0_MR, u_0: flo
     phis = _phis(mesh.lonCell, mesh.latCell, R)
     return isothermal_state_mpas(
         mesh, sigma_coord, T_0=T_0, u_0=u_0, phis=phis,
-        p_s_init=eq83_zonal_surface_pressure(mesh.latCell, R, omega=_omega(mesh),
+        p_s_init=eq83_zonal_surface_pressure(mesh.latCell, R, omega=grid_rotation_rate(mesh),
                                              T_0=T_0, u_0=u_0),
     )
 
@@ -132,6 +126,6 @@ def mountain_rossby_init_spectral(grid, sigma_coord, *, T_0: float = T0_MR, u_0:
     phis = _phis(lon_2d, lat_2d, R)
     return isothermal_state_spectral(
         grid, sigma_coord, T_0=T_0, u_0=u_0, phis=phis,
-        p_s_init=eq83_zonal_surface_pressure(lat_2d, R, omega=_omega(grid),
+        p_s_init=eq83_zonal_surface_pressure(lat_2d, R, omega=grid_rotation_rate(grid),
                                              T_0=T_0, u_0=u_0),
     )
