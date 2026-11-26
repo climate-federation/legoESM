@@ -212,7 +212,7 @@ def main(argv=None) -> int:
                     "atmosphere's flux kernel); the land store is then "
                     "empty and the land row is the residual of E_atm - E_ow "
                     "- H_recv")
-    ap.add_argument("--geography", default="",
+    ap.add_argument("--geography", default=None,
                     help="all-ocean geography file (--land none); with "
                     "--deck, passed to the deck")
     ap.add_argument("--land-mask-file", default="")
@@ -286,7 +286,7 @@ def main(argv=None) -> int:
         ap.error("--replay-copy-col needs --nan-stages")
     if deck_argv and not args.deck:
         ap.error(f"unrecognized arguments: {' '.join(deck_argv)}")
-    if args.deck and args.geography:    # the deck's own flag, as before
+    if args.deck and args.geography is not None:   # the deck's own flag
         deck_argv += ["--geography", args.geography]
     elif (args.land == "none") != bool(args.geography):
         ap.error("--land none needs --geography, and --geography needs "
