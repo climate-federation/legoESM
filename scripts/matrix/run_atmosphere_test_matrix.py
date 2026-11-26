@@ -5609,7 +5609,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             w = sh_synthesis_3d(grid, s.w_hat.data)
             theta_p = sh_synthesis_3d(grid, s.theta_prime_hat.data)
-            rho_p = sh_synthesis_3d(grid, s.rho_prime_hat.data)
+            rho_p = (sh_synthesis_3d(grid, s.jrho_prime_hat.data)
+                     / tmetric.jacobian[..., None])
             # iter-9: report dry mass alongside |w|_max for spectral NH
             # (parallel to iter-7 cube / iter-8 ico instrumentation).
             rho_total = hcoord.rho_ref + rho_p
@@ -5649,7 +5650,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                     sh_synthesis_3d(grid, s.theta_prime_hat.data),
                     dtype=np.float64),
                 "rho_prime_3d": np.asarray(
-                    sh_synthesis_3d(grid, s.rho_prime_hat.data),
+                    sh_synthesis_3d(grid, s.jrho_prime_hat.data)
+                    / tmetric.jacobian[..., None],
                     dtype=np.float64),
             }
 
