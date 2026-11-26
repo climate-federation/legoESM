@@ -112,10 +112,10 @@ def test_bounds_name_the_month_a_record_covers():
     spanning the month: grouping by stamp would average December into
     January."""
     ds = _ds("months since 2004-01-01")
-    lo = np.arange(36.0)
-    ds = ds.assign_coords(time=("time", lo + 1.0, ds["time"].attrs))
+    lo = np.arange(36)                                   # an INTEGER time axis
+    ds = ds.assign_coords(time=("time", lo + 1, ds["time"].attrs))
     ds["time"].attrs["bounds"] = "time_bnds"
-    ds["time_bnds"] = (("time", "nb"), np.stack([lo, lo + 1.0], -1))
+    ds["time_bnds"] = (("time", "nb"), np.stack([lo, lo + 1], -1))
     out = bmc.climatology(ds, 2005, 2006)
     want = 0.5 * (ds["aod"].values[12] + ds["aod"].values[24])     # Jan 2005, Jan 2006
     np.testing.assert_allclose(out["aod"].values[0], want, rtol=1e-12)

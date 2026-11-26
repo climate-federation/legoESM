@@ -77,9 +77,9 @@ def climatology(ds, first: int, last: int, optics: bool = False):
                 means[v].append(sub[v].mean("time"))
     # stamped at the covered month's middle when bounds say which month (the
     # forcing readers interpolate on the stamp and ignore bounds)
-    stamp = t_month if bounds else tv.values
-    time = xr.DataArray(np.asarray(stamp)[first_idx].astype(tv.dtype), dims="time",
-                        attrs=tv.attrs)
+    stamp = (np.asarray(t_month, dtype=np.float64) if bounds   # a midpoint stays fractional
+             else tv.values)
+    time = xr.DataArray(np.asarray(stamp)[first_idx], dims="time", attrs=tv.attrs)
     for v in timed:
         da = xr.concat(means[v], dim="time")
         if np.issubdtype(ds[v].dtype, np.floating):   # an integer field keeps its float mean
