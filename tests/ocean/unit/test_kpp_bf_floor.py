@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.test_util import check_grads
 
 from legoesm.ocean.physics.vertical_mixing import kpp as kpp_mod
 from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
@@ -120,3 +121,24 @@ def test_default_weak_flux_matches_compiled_cvmix(ustar, Bf, h, sigma, wm_cv, ws
     wm, ws = kpp_mod._kpp_velocity_scales(a([ustar]), a([Bf]), a([[sigma * h]]), a([[h]]), KPPConfig(), kpp_mod._EPS)
     assert float(wm[0, 0]) == pytest.approx(wm_cv, rel=1e-12, abs=0.0)
     assert float(ws[0, 0]) == pytest.approx(ws_cv, rel=1e-12, abs=0.0)
+
+
+@pytest.mark.parametrize("Bf", [-1e-8, -5e-9, -1e-9])
+def test_weak_stable_flux_gradient_is_nonzero_by_default(Bf):
+    """Stable weak flux (0 > B_f > -eps): the legacy floor is constant in B_f, so dw_s/dB_f = 0 there; the
+    default restores a nonzero derivative.  u* = 5.8e-4 m/s is the stress-path floor sqrt(sqrt(eps)/rho_0); h = 50 m, d = 2 m."""
+    def ws(b, cfg):
+        return kpp_mod._kpp_velocity_scales(jnp.asarray([5.8e-4]), b[None], jnp.asarray([[2.0]]),
+                                            jnp.asarray([[50.0]]), cfg, kpp_mod._EPS)[1][0, 0]
+    b = jnp.asarray(Bf)
+    g_default = float(jax.grad(ws)(b, KPPConfig()))
+    g_legacy = float(jax.grad(ws)(b, KPPConfig(actual_buoyancy_flux=False)))
+    assert np.isfinite(g_default) and abs(g_default) > 0.0
+    assert g_legacy == 0.0
+    check_grads(lambda x: ws(x, KPPConfig()), (b,), order=1, modes=["rev"], eps=1e-12)
+
+
+@pytest.mark.parametrize("bad", [None, "false", 0])
+def test_non_bool_switch_raises(bad):
+    with pytest.raises(ValueError, match="must be a bool"):
+        lego_ws(KPPConfig(actual_buoyancy_flux=bad), 0.01, 1e-8, 100.0)

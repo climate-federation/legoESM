@@ -1071,6 +1071,10 @@ def _decode_config(obj):
             if k != "__type__" and k in known
         }
         _reconcile_recorded_constants(fields)
+        if cls.__name__ == "KPPConfig" and "actual_buoyancy_flux" not in obj:
+            # written before the field existed: that run used the float32-eps floor, so a
+            # resume keeps it rather than picking up the newer default (True)
+            fields["actual_buoyancy_flux"] = False
         if hasattr(cls, "from_flat"):
             return cls.from_flat(**fields)
         return cls(**fields)

@@ -251,6 +251,10 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps, ice_frac=None):
     -------
     (w_m, w_s) : each (..., nlev) [m/s].
     """
+    if not isinstance(cfg.actual_buoyancy_flux, bool):
+        # YAML null / quoted "false" would otherwise pick a branch by truthiness
+        raise ValueError(
+            f"KPPConfig.actual_buoyancy_flux must be a bool, got {cfg.actual_buoyancy_flux!r}")
     kappa = cfg.kappa_vk
     # Surface-layer cap d_eff = min(d, epsilon*h): the similarity scale is held
     # constant below sigma = epsilon (LMD94 App. A/B).
