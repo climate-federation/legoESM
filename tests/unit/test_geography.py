@@ -529,3 +529,67 @@ def test_coupled_mpas_ocean_refuses_an_unwired_start(tmp_path):
         ocean_ic="woa"), output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match="must be 'rest' or 'qobs'"):
         d.setup()
+
+
+def _mpas_ocean_driver(tmp_path, **cc):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    return CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet")), CoupledConfig(
+        f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+        ocean_ic="qobs", **cc), output_dir=str(tmp_path / "run"))
+
+
+def test_coupled_mpas_ocean_tke_is_the_omip_production_card(tmp_path):
+    from scripts.run.run_omip_core2 import build_tripole_vmix_config
+    d = _mpas_ocean_driver(tmp_path, ocean_vertical_mixing="tke")
+    d.setup()
+    # the OMIP MPAS production flags (--mpas-vmix tke --tke-surface-bc
+    # nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic
+    # --tke-kappa-convention veros_sqrte), built through the OMIP path, no iwm
+    want = build_tripole_vmix_config(
+        "tke", tke_surface_bc="nemo_dirichlet", tke_mxl_choice=3,
+        tke_prognostic=True, tke_kappa_convention="veros_sqrte")
+    assert d._ocean_model.config.physics.vertical_mixing == want
+    tke = d._ocean_state.tke
+    assert tke is not None and tke.data.shape == (d._ocean_grid.nCells, 19)
+    assert float(np.max(np.asarray(tke.data))) > 0.0
+
+
+def test_coupled_mpas_ocean_default_closure_stays_kpp(tmp_path):
+    d = _mpas_ocean_driver(tmp_path)
+    d.setup()
+    assert d._ocean_model.config.physics.vertical_mixing.scheme == "kpp"
+    assert d._ocean_state.tke is None
+
+
+def test_coupled_mpas_ocean_tke_carry_survives_a_checkpoint(tmp_path):
+    import jax.numpy as jnp
+    d = _mpas_ocean_driver(tmp_path, ocean_vertical_mixing="tke")
+    d.setup()
+    marked = np.asarray(d._ocean_state.tke.data) * 0.0 + 3.5e-4
+    d._ocean_state = d._ocean_state._replace(
+        tke=d._ocean_state.tke.replace(data=jnp.asarray(marked)))
+    np.savez(tmp_path / "coupled_day_0001.npz", **d.coupled_checkpoint_arrays())
+    (tmp_path / "r").mkdir()
+    r = _mpas_ocean_driver(tmp_path / "r", ocean_vertical_mixing="tke")
+    r.setup()
+    assert not np.allclose(np.asarray(r._ocean_state.tke.data), marked)
+    r.load_coupled_checkpoint(1.0, checkpoint_dir=tmp_path)
+    assert np.array_equal(np.asarray(r._ocean_state.tke.data), marked)
+
+
+@pytest.mark.parametrize("cc, match", [
+    (dict(ocean_vertical_mixing="epbl"), "unknown ocean_vertical_mixing scheme"),
+    (dict(ocean_vertical_mixing="tke", ocean_mode="slab", ocean_ic="rest"),
+     "MPAS dynamic ocean only"),
+])
+def test_coupled_ocean_vertical_mixing_refusals(tmp_path, cc, match):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    base = dict(f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+                ocean_ic="qobs")
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet")),
+                         CoupledConfig(**{**base, **cc}),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match=match):
+        d.setup()

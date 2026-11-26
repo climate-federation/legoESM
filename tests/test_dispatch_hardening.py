@@ -255,6 +255,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # 'voronoi' was special-cased and mpas/icosahedral fell through to the
         # cubed_sphere ladder returning an unsafe dt, and an unknown grid_type
         # silently used the ladder).
+        # Coupled MPAS ocean vertical mixing (None | kpp | tke): an unknown
+        # value must raise, never run the lane's KPP default silently.
+        ("packages/coupler/legoesm/driver/coupled_esm_driver.py",
+         "_init_mpas_dynamic_ocean"),
         ("packages/coupler/legoesm/driver/rce_dt.py", "auto_dt_rce"),
         ("packages/coupler/legoesm/driver/kernel_registry.py", "resolve_kernel"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "_resolve_physics_parameterization"),

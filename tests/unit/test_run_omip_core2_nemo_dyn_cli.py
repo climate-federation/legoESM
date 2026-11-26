@@ -22,6 +22,8 @@ import pytest
 
 RUNNER = (pathlib.Path(__file__).resolve().parents[2]
           / "scripts" / "run" / "run_omip_core2.py")
+CARD = (pathlib.Path(__file__).resolve().parents[2]
+        / "packages/ocean/legoesm/ocean/fidelity/orca1_zdftke_card.py")
 
 
 def _module():
@@ -217,7 +219,7 @@ def test_the_iwm_override_is_what_sets_the_background_floors():
     the code that refutes it. Under internal-wave mixing the wave field IS the
     interior background, so BOTH floors come from zdfiwm, not from namzdf_tke.
     ORCA1 runs ln_zdfiwm=.true., so these are the oracle's real values."""
-    src = RUNNER.read_text()
+    src = CARD.read_text()
     i = src.index("if iwm_enabled:")
     body = src[i:i + 600]
     assert "avmb, avtb = _const.nu_ocean_molecular, 1.0e-10" in body

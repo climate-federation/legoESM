@@ -83,6 +83,11 @@ class CoupledConfig(NamedTuple):
     ocean_ic: str = "rest"
     woa_t_path: str | None = None   # WOA18 temperature file (ocean_ic=="woa")
     woa_s_path: str | None = None   # WOA18 salinity    file (ocean_ic=="woa")
+    # Dynamic-ocean vertical mixing.  None = the lane's built-in closure (KPP
+    # on MPAS and tripole, constant K on lat-lon).  "kpp" / "tke" are accepted
+    # on the co-located MPAS ocean only; "tke" = the OMIP MPAS production
+    # NEMO ORCA1 zdftke card (prognostic, Dirichlet surface TKE, nn_mxl=3).
+    ocean_vertical_mixing: str | None = None
     # NEMO eORCA tripole mesh_mask file. When the dynamic-ocean grid is a
     # tripole (active-fold) geometry — a DIFFERENT grid from the lat-lon
     # atmosphere, coupled via the Phase-2 cross-grid conservative remap — the

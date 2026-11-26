@@ -437,6 +437,16 @@ class CoupledESMDriver:
         sst_init = remap_field(sst_init_atm, self._grid_remapper.a2o)
         T_sfc_mean = float(jnp.mean(sst_init))
 
+        from legoesm.grids.voronoi import VoronoiMesh
+        if cfg.ocean_vertical_mixing is not None and not (
+                cfg.ocean_mode == "dynamic"
+                and isinstance(self._ocean_grid, VoronoiMesh)):
+            raise ValueError(
+                f"ocean_vertical_mixing={cfg.ocean_vertical_mixing!r} is wired "
+                "for the co-located MPAS dynamic ocean only; got ocean_mode="
+                f"{cfg.ocean_mode!r} on a {type(self._ocean_grid).__name__} "
+                "ocean grid.  Leave it unset (None) for the lane's own closure.")
+
         # Dispatch on ocean_mode (explicit; ValueError on unknown — no silent
         # else->slab, per the CLAUDE.md dispatch-hardening rule).
         if cfg.ocean_mode in ("slab", "two_layer", "fixed"):
@@ -966,6 +976,28 @@ class CoupledESMDriver:
                     scheme="none")),
             normalize_freshwater=True,
         )
+        vmix = cfg.ocean_vertical_mixing
+        if vmix == "tke":
+            # The OMIP MPAS production card (--mpas-vmix tke --tke-surface-bc
+            # nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic
+            # --tke-kappa-convention veros_sqrte), stated explicitly.  No IWM:
+            # its forcing map is Earth's internal-wave energy (VOTED V3 a/a/a).
+            from legoesm.ocean.fidelity.orca1_zdftke_card import (
+                orca1_zdftke_config,
+            )
+            from legoesm.ocean.physics.vertical_mixing.config import (
+                VerticalMixingConfig,
+            )
+            config = config._replace(physics=config.physics._replace(
+                vertical_mixing=VerticalMixingConfig(
+                    scheme="tke",
+                    tke=orca1_zdftke_config(
+                        surface_bc="nemo_dirichlet", mxl_choice=3,
+                        prognostic=True, kappa_convention="veros_sqrte"))))
+        elif vmix not in (None, "kpp"):
+            raise ValueError(
+                f"unknown ocean_vertical_mixing scheme {vmix!r}; must be one of "
+                "None, 'kpp', 'tke'.")
         self._ocean_model = MPASOceanModel(mesh, z_coord, config)
         # Stratified rest cold start (zero velocity/SSH, exponential T, uniform
         # S).  land_lat_threshold=90 => all-ocean, matching a co-located
@@ -1027,6 +1059,9 @@ class CoupledESMDriver:
                 H_bathy=Field(data=H, name="H_bathy", dims=("nCells",), units="m"),
                 land_mask=Field(data=jnp.asarray(wet, dtype=_sd), name="land_mask",
                                 dims=("nCells",), units="1"))
+        # Prognostic TKE carry: None -> Field once, before the first step and
+        # before any restart load (the restore template must carry it).
+        self._ocean_state = self._ocean_model.seed_tke(self._ocean_state)
         self._ocean_step = self._ocean_model.step
         self._ocean_z_coord = z_coord
         self._ocean_land_mask = self._ocean_state.land_mask.data

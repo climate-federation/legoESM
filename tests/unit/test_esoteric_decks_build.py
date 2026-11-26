@@ -40,6 +40,7 @@ def test_deck_builds(deck, tmp_path):
     assert a.use_multilayer_land and a.gravity_wave_drag == "none" and not a.unfused_radiation
     assert a.zm_land_fraction == ("none" if shape == "aquaplanet" else "required")
     assert a.ic == "standard" and a.T_init == 300.0
+    assert c.ocean_vertical_mixing == "tke"
 
 
 def test_atmosphere_owned_land_keeps_its_rows_and_mesh_alias_is_eligible(tmp_path):
@@ -53,3 +54,10 @@ def test_atmosphere_owned_land_keeps_its_rows_and_mesh_alias_is_eligible(tmp_pat
     assert a.snow_albedo_feedback          # production row survives atm_owns_surface
     v = a._replace(grid=a.grid._replace(grid_type="voronoi"))
     assert ocean_flux_surface_eligibility(v)[0] and land_stress_eligibility(v)[0]
+
+
+def test_ocean_vertical_mixing_flag_defaults_unset_and_refuses_other_lanes(tmp_path):
+    assert rc.build_parser().parse_args([]).ocean_vertical_mixing is None
+    with pytest.raises(SystemExit, match="MPAS dynamic ocean only"):
+        rc.main(["--ocean-vertical-mixing", "tke", "--ocean", "slab",
+                 "--output", str(tmp_path / "run"), "--days", "1"], build_only=True)
