@@ -255,7 +255,7 @@ def _gw31_diag_every(dt: float) -> int:
 
 
 #: grids whose gravity_wave_3_1 lane runs the DCMIP 2012 3-1 setup
-_GW31_GRIDS = frozenset({"cubed_sphere", "latlon"})
+_GW31_GRIDS = frozenset({"cubed_sphere", "latlon", "icosahedral"})
 
 
 def _gw31_n_steps(days: float, dt: float) -> int:
@@ -4796,10 +4796,21 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
             # with the flow, else the rotated baroclinic state is not steady.
             _vor_kwargs["coriolis_alpha"] = _rot_alpha
+        if _gw31 is not None:
+            _vor_kwargs["radius"] = _gw31.small_planet_radius()
         mesh = create_voronoi_mesh(level, **_vor_kwargs)
-        sigma = _create_vertical(nlev, tc.vertical_coord)
-        dt = 200.0
+        if _gw31 is not None:
+            from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+            sigma = make_dcmip2012_gw31_levels()
+        else:
+            sigma = _create_vertical(nlev, tc.vertical_coord)
+        dt = 200.0 if _gw31 is None else 200.0 / _gw31.X_SCALE
         config = _mpas_hydro_config(mesh, sigma)
+        if _gw31 is not None:
+            # del-4 (k = 2): the Earth coefficient over X^3.  The lane's
+            # dx_min^4 / (48 h) on the small mesh is already the Earth
+            # value over X^4 (its fixed 48 h e-folding), so times X.
+            config = config._replace(nu_del4=config.nu_del4 * _gw31.X_SCALE)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -4812,6 +4823,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 lapse_rate_state_topography_init_mpas)
             state = lapse_rate_state_topography_init_mpas(
                 mesh, sigma, h_0=_rest_h0)
+        elif _gw31 is not None:
+            state = _gw31.gravity_wave_init_mpas(mesh, sigma)
         elif _dcmip2008_dry:
             state = _build_dcmip2008_state(tc.case, "mpas", mesh, sigma)
         else:

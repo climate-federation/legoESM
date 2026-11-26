@@ -69,7 +69,7 @@ def _loop_args(mm, monkeypatch, tmp_path, grid, res):
     def fake(step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
              diag_every, key_array_fn, **kw):
         seen.update(dt=dt, n_steps=n_steps, diag_every=diag_every,
-                    state=state)
+                    state=state, step_fn=step_fn)
         raise _Stop
 
     monkeypatch.setattr(mm, "_run_timeloop", fake)
@@ -82,7 +82,7 @@ def _loop_args(mm, monkeypatch, tmp_path, grid, res):
 
 def test_cube_lane_integrates_to_3600_s(mm, monkeypatch, tmp_path):
     s = _loop_args(mm, monkeypatch, tmp_path, "cubed_sphere", "C36")
-    s.pop("state")
+    s.pop("state"), s.pop("step_fn")
     assert s == {"dt": 15.0, "n_steps": 240, "diag_every": 5}
 
 
@@ -98,6 +98,7 @@ def _spy_model(monkeypatch, module, cls_name):
         def __init__(self, *a, **k):
             seen["args"], seen["kwargs"] = a, k
             super().__init__(*a, **k)
+            seen["model"] = self
 
     monkeypatch.setattr(mod, cls_name, Spy)
     return seen
@@ -148,6 +149,7 @@ def test_latlon_lane_runs_the_small_planet(mm, monkeypatch, tmp_path):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         hydrostatic_to_cgrid)
     ref = hydrostatic_to_cgrid(gw.gravity_wave_init_latlon(grid, sigma), grid)
+    assert np.all(np.asarray(s["state"].phis) == 0.0)          # z_s = 0
     for k in ("T", "p_s", "u", "v"):
         np.testing.assert_array_equal(np.asarray(getattr(s["state"], k)),
                                       np.asarray(getattr(ref, k)), err_msg=k)
@@ -179,7 +181,7 @@ def test_latlon_lane_divides_the_del2_viscosity_by_x(mm, monkeypatch,
 
 #: the lanes wired to the DCMIP 2012 3-1 setup so far (explicit, not read
 #: from the module under test)
-WIRED = {"cubed_sphere", "latlon"}
+WIRED = {"cubed_sphere", "latlon", "icosahedral"}
 
 
 @pytest.mark.parametrize("grid", ["cubed_sphere", "latlon", "icosahedral",
@@ -196,3 +198,118 @@ def test_namelist_table_label_follows_the_wired_lanes(mm, grid):
     assert mm._vertical_table_id(mm._vertical_table_label(
         "hybrid", __import__("legoesm.grids.vertical", fromlist=["x"])
         .make_dcmip2012_gw31_levels())) == "dcmip2012_gw31_l10"
+
+
+def test_ico_lane_runs_the_small_planet(mm, monkeypatch, tmp_path):
+    """ico5: radius a_ref/125, f = 0 on the mesh, the L10 table, the 2012 IC,
+    dt = 200 s / X = 1.6 s and del-4 nu = (Earth-mesh value) / X^3."""
+    import numpy as np
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from tests.test_cases.dcmip2012 import gravity_wave_3_1 as gw
+    monkeypatch.delenv("LEGOESM_MPAS_INTEGRATOR", raising=False)
+    seen = _spy_model(monkeypatch,
+                      "legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas",
+                      "MPASPrimitiveEquationModel")
+    s = _loop_args(mm, monkeypatch, tmp_path, "icosahedral", "ico5")
+    assert s["dt"] == 1.6 and s["n_steps"] == 2250 and s["diag_every"] == 25
+    mesh, sigma, cfg = seen["args"][:3]
+    assert float(mesh.radius) == gw.small_planet_radius()
+    assert np.asarray(mesh.fEdge).shape == (mesh.nEdges,)
+    assert np.asarray(mesh.fVertex).shape == (mesh.nVertices,)
+    assert np.all(np.asarray(mesh.fEdge) == 0.0)
+    assert np.all(np.asarray(mesh.fVertex) == 0.0)
+    _assert_gw31_table(sigma)
+    earth = create_voronoi_mesh(5)
+    # every length / area the solver reads is the Earth mesh's over X, X^2
+    # (the two builds agree to ~1e-7, mesh-construction round-off)
+    for k, p in (("dcEdge", 1), ("dvEdge", 1), ("areaCell", 2),
+                 ("areaTriangle", 2), ("kiteAreasOnVertex", 2)):
+        e = np.asarray(getattr(earth, k), dtype=np.float64)
+        sm = np.asarray(getattr(mesh, k), dtype=np.float64)
+        assert e.size and np.all(e >= 0) and np.count_nonzero(e) > e.size // 2, k
+        np.testing.assert_allclose(sm, e / 125.0 ** p, rtol=2e-6, err_msg=k)
+    # del-4: the Earth-mesh dx_min^4 / (48 h), written out, over X^3
+    dx = min(float(np.min(np.asarray(earth.dcEdge))),
+             float(np.min(np.asarray(earth.dvEdge))))
+    nu_earth = dx ** 4 / (48.0 * 3600.0)
+    assert nu_earth > 1e13
+    assert cfg.nu_del4 == pytest.approx(nu_earth / 125.0 ** 3, rel=1e-5)
+    # the lane's other settings: the ordinary ico rows' (named)
+    assert cfg.time_integrator == "ssp_rk3"      # the matrix ico default
+    assert cfg.vert_advection_scheme == "sb"
+    assert cfg.nu_del2 == 0.0 and cfg.fix_mass and cfg.anchor_mass_to_initial
+    T_ref = np.asarray(gw.gravity_wave_init_mpas(mesh, sigma).T.data)
+    np.testing.assert_array_equal(np.asarray(s["state"].T.data), T_ref)
+    np.testing.assert_array_equal(
+        np.asarray(s["state"].p_s.data),
+        np.asarray(gw.gravity_wave_init_mpas(mesh, sigma).p_s.data))
+    assert np.all(np.asarray(s["state"].phis.data) == 0.0)     # z_s = 0
+    # edge-normal winds: the projection of u0 cos(lat) eastward
+    un = 20.0 * np.cos(np.asarray(mesh.latEdge, np.float64)) * np.cos(
+        np.asarray(mesh.angleEdge, np.float64))
+    np.testing.assert_allclose(np.asarray(s["state"].u.data),
+                               np.broadcast_to(un[:, None], (un.size, 10)),
+                               rtol=0, atol=1e-5)   # the mesh angles are f32
+    assert np.abs(un).max() > 19.0
+
+    # the step callback the lane hands the time loop advances the state one
+    # 1.6 s step: finite, and the bell's temperature field evolves
+    out = s["step_fn"](s["state"], s["dt"])
+    for f in (out.T.data, out.u.data, out.p_s.data):
+        assert np.all(np.isfinite(np.asarray(f)))
+    assert np.max(np.abs(np.asarray(out.T.data)
+                         - np.asarray(s["state"].T.data))) > 0.0
+    # ... and it is the model's own step at the dt it is given
+    ref = seen["model"].step(s["state"], s["dt"])
+    for k in ("T", "u", "p_s"):
+        np.testing.assert_array_equal(np.asarray(getattr(out, k).data),
+                                      np.asarray(getattr(ref, k).data),
+                                      err_msg=k)
+    half = s["step_fn"](s["state"], 0.8)
+    assert not np.array_equal(np.asarray(half.T.data), np.asarray(out.T.data))
+
+
+def test_ico_control_row_keeps_the_earth_lane(mm, monkeypatch, tmp_path):
+    """An ordinary ico5 row (inertio_gravity_3_2) still gets the Earth mesh,
+    the matrix's CAM6 L32 table, dt = 200 s and the unscaled del-4."""
+    import numpy as np
+    from legoesm import constants
+    for v in ("LEGOESM_MATRIX_NLEV", "LEGOESM_MATRIX_TRANSITION_EXPONENT"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.delenv("LEGOESM_MPAS_INTEGRATOR", raising=False)
+    seen = _spy_model(monkeypatch,
+                      "legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas",
+                      "MPASPrimitiveEquationModel")
+    loop = {}
+
+    def fake(step_fn, state, dt, n_steps, *a, **k):
+        loop.update(dt=dt, n_steps=n_steps, state=state)
+        raise _Stop
+
+    monkeypatch.setattr(mm, "_run_timeloop", fake)
+    tc = mm.TestCase("hydrostatic", "inertio_gravity_3_2", "icosahedral",
+                     "ico5", "hybrid", 3.0, 0.5, {})
+    with pytest.raises(_Stop):
+        mm.run_baroclinic(tc, tmp_path, tc.quick_days)
+    mesh, sigma, cfg = seen["args"][:3]
+    assert float(mesh.radius) == float(constants.R_earth)
+    from legoesm.grids.vertical import make_cam6_l32_levels
+    ref = make_cam6_l32_levels()
+    for k in ("A_half", "B_half", "A_full", "B_full"):
+        np.testing.assert_array_equal(np.asarray(getattr(sigma, k)),
+                                      np.asarray(getattr(ref, k)), err_msg=k)
+    assert loop["dt"] == 200.0 and loop["n_steps"] == int(0.5 * 86400 / 200)
+    dx = min(float(np.min(np.asarray(mesh.dcEdge))),
+             float(np.min(np.asarray(mesh.dvEdge))))
+    assert cfg.nu_del4 == dx ** 4 / (48.0 * 3600.0)
+    np.testing.assert_allclose(
+        np.asarray(mesh.fEdge),
+        2 * float(constants.Omega) * np.sin(np.asarray(mesh.latEdge)),
+        rtol=1e-6, atol=1e-12)                     # the rotating Earth
+    from tests.test_cases.dcmip2008.inertio_gravity_3_2 import (
+        inertio_gravity_init_mpas)
+    ref = inertio_gravity_init_mpas(mesh, sigma)
+    for k in ("T", "u", "p_s", "phis"):
+        np.testing.assert_array_equal(np.asarray(getattr(loop["state"], k).data),
+                                      np.asarray(getattr(ref, k).data),
+                                      err_msg=k)
