@@ -573,8 +573,8 @@ def test_redi_flux_geometry_stage_changes_live_flux_result():
         assert np.count_nonzero(t_on != t_off) == 18
         assert np.count_nonzero(s_on != s_off) == 18
         # Re-pinned with eos='nemo_eos80' (see the a33 test above).
-        assert t_on[1, 0, 0] == np.uint64(4626170872078521070)
-        assert t_off[1, 0, 0] == np.uint64(4626170872078513176)
+        assert t_on[1, 0, 0] == np.uint64(4626171810919354151)
+        assert t_off[1, 0, 0] == np.uint64(4626171810919346257)
     finally:
         set_policy(prev_policy)
 

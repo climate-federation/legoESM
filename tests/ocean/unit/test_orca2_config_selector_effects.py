@@ -331,11 +331,11 @@ def test_fct_fold_exchange_changes_a_full_tripole_ws_rk3_step():
         on_t, off_t = np.asarray(on.T.data), np.asarray(off.T.data)
         on_s, off_s = np.asarray(on.S.data), np.asarray(off.S.data)
         assert np.count_nonzero(
-            on_t.view(np.uint64) != off_t.view(np.uint64)) == 29
+            on_t.view(np.uint64) != off_t.view(np.uint64)) == 36
         assert np.count_nonzero(
-            on_s.view(np.uint64) != off_s.view(np.uint64)) == 48
-        assert on_t.view(np.uint64)[6, 6, 1] == np.uint64(4625908986858152799)
-        assert off_t.view(np.uint64)[6, 6, 1] == np.uint64(4625908986858152689)
+            on_s.view(np.uint64) != off_s.view(np.uint64)) == 45
+        assert on_t.view(np.uint64)[6, 6, 1] == np.uint64(4625908977379508049)
+        assert off_t.view(np.uint64)[6, 6, 1] == np.uint64(4625908977379508062)
     finally:
         set_policy(prev_policy)
 
@@ -359,19 +359,19 @@ def test_rk3_end_of_stage_pivot_fold_changes_a_full_tripole_ws_rk3_step():
         on_s, off_s = np.asarray(on.S.data), np.asarray(off.S.data)
         on_u, off_u = np.asarray(on.u.data), np.asarray(off.u.data)
         assert np.count_nonzero(
-            on_t.view(np.uint64) != off_t.view(np.uint64)) == 62
+            on_t.view(np.uint64) != off_t.view(np.uint64)) == 66
         assert np.count_nonzero(
             on_u.view(np.uint64) != off_u.view(np.uint64)) == 48
-        assert on_t.view(np.uint64)[5, 7, 0] == np.uint64(4626600210828169908)
-        assert off_t.view(np.uint64)[5, 7, 0] == np.uint64(4626600210828170265)
-        assert on_u.view(np.uint64)[6, 0, 0] == np.uint64(4580213822658509297)
-        assert off_u.view(np.uint64)[6, 0, 0] == np.uint64(4580213822683598223)
-        assert on_u.view(np.uint64)[7, 0, 0] == np.uint64(13811414117467377035)
-        assert off_u.view(np.uint64)[7, 0, 0] == np.uint64(4575974430849064564)
-        assert on_t.view(np.uint64)[7, 7, 0] == np.uint64(4626479143473887009)
-        assert off_t.view(np.uint64)[7, 7, 0] == np.uint64(4625960570868119510)
-        assert on_s.view(np.uint64)[7, 7, 0] == np.uint64(4630126004937552226)
-        assert off_s.view(np.uint64)[7, 7, 0] == np.uint64(4630094117933671990)
+        assert on_t.view(np.uint64)[5, 7, 0] == np.uint64(4626600182349574903)
+        assert off_t.view(np.uint64)[5, 7, 0] == np.uint64(4626600182349575139)
+        assert on_u.view(np.uint64)[6, 0, 0] == np.uint64(4580213807131999471)
+        assert off_u.view(np.uint64)[6, 0, 0] == np.uint64(4580213807156812656)
+        assert on_u.view(np.uint64)[7, 0, 0] == np.uint64(13811414012032826675)
+        assert off_u.view(np.uint64)[7, 0, 0] == np.uint64(4575974731222093077)
+        assert on_t.view(np.uint64)[7, 7, 0] == np.uint64(4626479137305305150)
+        assert off_t.view(np.uint64)[7, 7, 0] == np.uint64(4625960564956265194)
+        assert on_s.view(np.uint64)[7, 7, 0] == np.uint64(4630126000022903960)
+        assert off_s.view(np.uint64)[7, 7, 0] == np.uint64(4630094109160139629)
     finally:
         set_policy(prev_policy)
 
@@ -395,10 +395,10 @@ def test_rk3_end_of_stage_pivot_fold_stage3_site_changes_top_fold_row():
         on_s, off_s = np.asarray(on.S.data).view(np.uint64), np.asarray(off.S.data).view(np.uint64)
         assert np.count_nonzero(on_u[7] != off_u[7]) == 27
         assert np.count_nonzero(on_t[7] != off_t[7]) == 27
-        assert np.count_nonzero(on_s[7] != off_s[7]) == 27
-        assert on_u[7, 0, 0] == np.uint64(13811414117467377035)
-        assert on_t[7, 7, 0] == np.uint64(4626479143473887009)
-        assert on_s[7, 7, 0] == np.uint64(4630126004937552226)
+        assert np.count_nonzero(on_s[7] != off_s[7]) == 28
+        assert on_u[7, 0, 0] == np.uint64(13811414012032826675)
+        assert on_t[7, 7, 0] == np.uint64(4626479137305305150)
+        assert on_s[7, 7, 0] == np.uint64(4630126000022903960)
     finally:
         set_policy(prev_policy)
 
@@ -424,17 +424,17 @@ def test_rk3_stage_transport_fold_exchanges_changes_a_full_tripole_ws_rk3_step()
         on_u, off_u = np.asarray(on.u.data), np.asarray(off.u.data)
         on_v, off_v = np.asarray(on.v.data), np.asarray(off.v.data)
         assert np.count_nonzero(
-            on_t.view(np.uint64) != off_t.view(np.uint64)) == 22
+            on_t.view(np.uint64) != off_t.view(np.uint64)) == 26
         assert np.count_nonzero(
-            on_s.view(np.uint64) != off_s.view(np.uint64)) == 20
+            on_s.view(np.uint64) != off_s.view(np.uint64)) == 24
         assert np.count_nonzero(
             on_u.view(np.uint64) != off_u.view(np.uint64)) == 27
         assert np.count_nonzero(
             on_v.view(np.uint64) != off_v.view(np.uint64)) == 21
-        assert on_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101206129409913)
-        assert off_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101206129407921)
-        assert on_u.view(np.uint64)[7, 0, 0] == np.uint64(4575974430849054534)
-        assert off_u.view(np.uint64)[7, 0, 0] == np.uint64(4575974430849064564)
+        assert on_t.view(np.uint64)[6, 6, 0] == np.uint64(4626191806737554007)
+        assert off_t.view(np.uint64)[6, 6, 0] == np.uint64(4626191806737554016)
+        assert on_u.view(np.uint64)[7, 0, 0] == np.uint64(4575974731222083058)
+        assert off_u.view(np.uint64)[7, 0, 0] == np.uint64(4575974731222093077)
     finally:
         set_policy(prev_policy)
 
@@ -459,17 +459,17 @@ def test_rk3_vector_raw_vmask_shared_ratio_fold_or_changes_tripole_ws_rk3_step()
         on_u, off_u = np.asarray(on.u.data), np.asarray(off.u.data)
         on_v, off_v = np.asarray(on.v.data), np.asarray(off.v.data)
         assert np.count_nonzero(
-            on_t.view(np.uint64) != off_t.view(np.uint64)) == 22
+            on_t.view(np.uint64) != off_t.view(np.uint64)) == 26
         assert np.count_nonzero(
-            on_s.view(np.uint64) != off_s.view(np.uint64)) == 20
+            on_s.view(np.uint64) != off_s.view(np.uint64)) == 24
         assert np.count_nonzero(
             on_u.view(np.uint64) != off_u.view(np.uint64)) == 27
         assert np.count_nonzero(
             on_v.view(np.uint64) != off_v.view(np.uint64)) == 21
-        assert on_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101206129409913)
-        assert off_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101206129407921)
-        assert on_v.view(np.uint64)[7, 0, 0] == np.uint64(13796485353636929082)
-        assert off_v.view(np.uint64)[7, 0, 0] == np.uint64(13796485353636929150)
+        assert on_t.view(np.uint64)[6, 6, 0] == np.uint64(4626191806737554007)
+        assert off_t.view(np.uint64)[6, 6, 0] == np.uint64(4626191806737554016)
+        assert on_v.view(np.uint64)[7, 0, 0] == np.uint64(13796485171548590350)
+        assert off_v.view(np.uint64)[7, 0, 0] == np.uint64(13796485171548590417)
     finally:
         set_policy(prev_policy)
 
@@ -564,12 +564,12 @@ def test_rk3_vector_raw_vmask_changes_step_and_tendencies_with_fold_exchanges_of
         step_u_off = np.asarray(step_off.u.data).view(np.uint64)
         step_v_on = np.asarray(step_on.v.data).view(np.uint64)
         step_v_off = np.asarray(step_off.v.data).view(np.uint64)
-        assert np.count_nonzero(step_u_on != step_u_off) == 129
+        assert np.count_nonzero(step_u_on != step_u_off) == 127
         assert np.count_nonzero(step_v_on != step_v_off) == 144
-        assert step_v_on[-1, 0, 0] == np.uint64(4587354100208601891)
+        assert step_v_on[-1, 0, 0] == np.uint64(4587354125310987672)
         assert step_v_off[-1, 0, 0] == np.uint64(0)
-        assert step_u_on[-1, 0, 0] == np.uint64(4576421447979356078)
-        assert step_u_off[-1, 0, 0] == np.uint64(4576410480201352036)
+        assert step_u_on[-1, 0, 0] == np.uint64(4576421921802420305)
+        assert step_u_off[-1, 0, 0] == np.uint64(4576410953845099669)
 
         # 2. ocean_model_latlon_cgrid.py:2440 (_nemo_ws_stage_transport velocity-form w_momentum).
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
@@ -814,8 +814,8 @@ def test_surface_salt_flux_sfx_changes_written_stage3_salt_source():
         on_s = np.asarray(on.S.data).view(np.uint64)
         off_s = np.asarray(off.S.data).view(np.uint64)
         assert np.count_nonzero(on_s != off_s) == 48
-        assert on_s[0, 0, 0] == np.uint64(4630119873119761462)
-        assert off_s[0, 0, 0] == np.uint64(4630119872943128958)
+        assert on_s[0, 0, 0] == np.uint64(4630119715099405197)
+        assert off_s[0, 0, 0] == np.uint64(4630119714922772693)
     finally:
         set_policy(prev_policy)
 
@@ -842,8 +842,8 @@ def test_rk3_stage3_salt_geothermal_and_krhs_order_change_model_step():
         s_on = np.asarray(salt_on.S.data).view(np.uint64)
         s_off = np.asarray(salt_off.S.data).view(np.uint64)
         assert np.count_nonzero(s_on != s_off) == 48
-        assert s_on[0, 0, 0] == np.uint64(4630119873119761461)
-        assert s_off[0, 0, 0] == np.uint64(4630119872943128958)
+        assert s_on[0, 0, 0] == np.uint64(4630119715099405197)
+        assert s_off[0, 0, 0] == np.uint64(4630119714922772693)
 
         geo_on = step_with(
             rk3_stage3_tracer_krhs_nemo_order=False,
@@ -852,15 +852,15 @@ def test_rk3_stage3_salt_geothermal_and_krhs_order_change_model_step():
         t_geo_on = np.asarray(geo_on.T.data).view(np.uint64)
         t_geo_off = np.asarray(salt_on.T.data).view(np.uint64)
         assert np.count_nonzero(t_geo_on != t_geo_off) == 48
-        assert t_geo_on[0, 0, 1] == np.uint64(4626009601048700807)
-        assert t_geo_off[0, 0, 1] == np.uint64(4626009601048700780)
+        assert t_geo_on[0, 0, 1] == np.uint64(4626009430334591344)
+        assert t_geo_off[0, 0, 1] == np.uint64(4626009430334591317)
 
         krhs_on = LatLonCGridOceanModel(grid, z_coord, base_cfg).step(
             state, 300.0, surface_forcing=forcing)
         t_krhs_on = np.asarray(krhs_on.T.data).view(np.uint64)
-        assert np.count_nonzero(t_krhs_on != t_geo_off) == 11
-        assert t_krhs_on[0, 1, 0] == np.uint64(4626263631292573473)
-        assert t_geo_off[0, 1, 0] == np.uint64(4626263631292573474)
+        assert np.count_nonzero(t_krhs_on != t_geo_off) == 13
+        assert t_krhs_on[0, 2, 0] == np.uint64(4626383867473963377)
+        assert t_geo_off[0, 2, 0] == np.uint64(4626383867473963376)
     finally:
         set_policy(prev_policy)
 
@@ -971,8 +971,8 @@ def test_l4b_and_l6_geothermal_and_damping_validator_coupling_and_valid_pair_ste
         assert np.count_nonzero(t_l4b_on != t_l4b_off) == 6
         # Re-pinned with the ORCA2 card's own EOS (nemo_eos80); the old values
         # came from S-EOS slope N2 on a Wright-EOS fixture, now rejected.
-        assert t_l4b_on[1, 0, 2] == np.uint64(4625465393761867892)
-        assert t_l4b_off[1, 0, 2] == np.uint64(4625465393755816221)
+        assert t_l4b_on[1, 0, 2] == np.uint64(4625465458428054001)
+        assert t_l4b_off[1, 0, 2] == np.uint64(4625465458422002330)
 
         cfg_l6_on = cfg_l4b_on._replace(
             rk3_stage3_damping_after_geothermal_nemo_order=True,
@@ -985,10 +985,10 @@ def test_l4b_and_l6_geothermal_and_damping_validator_coupling_and_valid_pair_ste
         s_l4b_on = np.asarray(out_l4b_on.S.data).view(np.uint64)
         assert np.count_nonzero(t_l6_on != t_l4b_on) == 18
         assert np.count_nonzero(s_l6_on != s_l4b_on) == 18
-        assert t_l6_on[1, 0, 0] == np.uint64(4626479647477586594)
-        assert t_l4b_on[1, 0, 0] == np.uint64(4626466981215183895)
-        assert s_l6_on[1, 0, 0] == np.uint64(4630131660021248575)
-        assert s_l4b_on[1, 0, 0] == np.uint64(4630132926647488845)
+        assert t_l6_on[1, 0, 0] == np.uint64(4626479726853602998)
+        assert t_l4b_on[1, 0, 0] == np.uint64(4626467060591200299)
+        assert s_l6_on[1, 0, 0] == np.uint64(4630131729071049511)
+        assert s_l4b_on[1, 0, 0] == np.uint64(4630132995697289781)
     finally:
         set_policy(prev_policy)
 

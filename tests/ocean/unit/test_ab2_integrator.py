@@ -55,6 +55,16 @@ _EPS = 0.1
 #     n_steps            150      300      600      900     1200
 #     pre-2026-08 op    1.630    4.790   13.910   52.658   90.409
 #     current op        1.645    5.110   28.900     NaN      NaN
+#     eta damping booked 1.788    7.651     NaN      NaN      NaN
+#
+# ROW 3 (2026-11-25): the split-explicit eta damping is now booked into the
+# barotropic transport, so the tracer step sees the volume flux that moved
+# eta.  Before that, per-column |deta + dt*div(tracer mass flux)| reached
+# 0.55 m per step in this channel; that silent dilution of tracer anomalies
+# held the lane back.  With it removed (booked, or damping off entirely:
+# 8.59 at 300, NaN by 900) the same instability grows faster and goes NaN at
+# step 575.  The rows above were measured on the defect; the ratchet window
+# moved from 300->600 to 150->300 because 600 is no longer finite.
 #
 # (fp64, JAX_PLATFORMS=cpu, PrecisionPolicy.fp64(); the only variable between
 # the two rows is the AL81 triad<->mass-flux pairing in
@@ -79,7 +89,7 @@ _EPS = 0.1
 #     the amplitude, each against its own SHRINK-ONLY baseline (same pattern as
 #     tests/_ratchet_audit.py: the number may only ever be lowered, never
 #     raised, and lowering it is the record of an improvement);
-#   * ``test_ab2_long_run_bounded_900_steps`` states the property we actually
+#   * ``test_ab2_long_run_bounded_600_steps`` states the property we actually
 #     want and is marked ``xfail(strict=True)``, so the day someone fixes the
 #     lane it turns the suite RED and forces both numbers to be updated.
 # A green suite that silently contains a 90 m/s blowup is worse than a red one.
@@ -95,12 +105,13 @@ _EPS = 0.1
 # (~4%) because these are maxima of an exponentially diverging trajectory two
 # hundred steps from NaN, so the last digits are hardware/XLA-dependent; the
 # MEASURED values sit next to them and are what an improvement must beat.
-_AB2_GROWTH_600_OVER_300_BASELINE = 5.90     # measured 5.6557 (28.9001/5.1099)
-_AB2_UMAX_300_BASELINE = 5.32                # measured 5.1099
+_AB2_GROWTH_300_OVER_150_BASELINE = 4.45     # measured 4.2789 (7.6505/1.7880)
+_AB2_UMAX_150_BASELINE = 1.86                # measured 1.7880
 
 # The step count at which the lane currently goes non-finite (measured: finite
-# at 600, NaN at 900 and at 1200).  Used by the xfail test below.
-_AB2_NAN_BY_STEPS = 900
+# at 300, NaN at step 575 with the eta damping booked).  Used by the xfail
+# test below.
+_AB2_NAN_BY_STEPS = 600
 
 _LONG_RUN_CACHE: dict = {}
 
@@ -115,8 +126,8 @@ def _ab2_running_umax(n_steps):
         u = np.asarray(traj.u.data)
         T = np.asarray(traj.T.data)
         _LONG_RUN_CACHE[n_steps] = (
-            {k: float(np.max(np.abs(u[:k]))) for k in (300, 600, n_steps)},
-            {k: float(np.max(np.abs(T[:k]))) for k in (300, 600, n_steps)},
+            {k: float(np.max(np.abs(u[:k]))) for k in (150, 300, n_steps)},
+            {k: float(np.max(np.abs(T[:k]))) for k in (150, 300, n_steps)},
             final,
         )
     return _LONG_RUN_CACHE[n_steps]
@@ -245,8 +256,8 @@ def test_ab2_momentum_barotropic_mean_preserved():
 
 def test_ab2_long_run_growth_rate_ratchet():
     """THE key long-run test (the leapfrog attempt's 40-step test masked a slow
-    blowup).  Gates the GROWTH RATE of ``max|u|`` between step 300 and step 600,
-    against a SHRINK-ONLY baseline -- see the ``_AB2_GROWTH_600_OVER_300_BASELINE``
+    blowup).  Gates the GROWTH RATE of ``max|u|`` between step 150 and step 300,
+    against a SHRINK-ONLY baseline -- see the ``_AB2_GROWTH_300_OVER_150_BASELINE``
     block at the top of this module for why the previous absolute ``max|u| < 5.0``
     assertion was replaced and for the measured ladder.
 
@@ -259,24 +270,24 @@ def test_ab2_long_run_growth_rate_ratchet():
     NB the growth rate is > 1: this lane IS diverging.  This test asserts that it
     is not diverging FASTER than the last recorded measurement -- it is a ratchet
     on a known defect, NOT a certificate of stability.  The certificate is
-    ``test_ab2_long_run_bounded_900_steps`` below, and it xfails.
+    ``test_ab2_long_run_bounded_600_steps`` below, and it xfails.
 
     NON-VACUOUS: the run is checked finite over the gated window, the two maxima
     are asserted distinct (a frozen trajectory would give a ratio of exactly 1.0
     and pass trivially), and the ratchet fires if the ratio regresses.
     """
     umax, Tmax, final = _ab2_running_umax(_AB2_NAN_BY_STEPS)
-    # Finiteness is only claimed over the window this test gates (0..600); the
-    # 900-step tail is the xfail test's business.
-    assert np.isfinite(umax[300]) and np.isfinite(umax[600]), (
+    # Finiteness is only claimed over the window this test gates (0..300); the
+    # 600-step tail is the xfail test's business.
+    assert np.isfinite(umax[150]) and np.isfinite(umax[300]), (
         f"AB2 went non-finite inside the gated window: {umax}")
-    assert Tmax[600] < 50.0, f"AB2 T unbounded over 600 steps: max|T|={Tmax[600]}"
+    assert Tmax[300] < 50.0, f"AB2 T unbounded over 300 steps: max|T|={Tmax[300]}"
     assert final.T_incr_prev is not None
 
-    growth = umax[600] / umax[300]
-    msg = (f"AB2 al81+matsuno_split growth max|u|(600)/max|u|(300) = "
-           f"{growth:.4f}  (max|u|: 300 -> {umax[300]:.4f}, "
-           f"600 -> {umax[600]:.4f})")
+    growth = umax[300] / umax[150]
+    msg = (f"AB2 al81+matsuno_split growth max|u|(300)/max|u|(150) = "
+           f"{growth:.4f}  (max|u|: 150 -> {umax[150]:.4f}, "
+           f"300 -> {umax[300]:.4f})")
     print("\n  " + msg)
     if growth > 1.0:
         warnings.warn(
@@ -285,27 +296,29 @@ def test_ab2_long_run_growth_rate_ratchet():
               f"{_AB2_NAN_BY_STEPS} steps.  See the header block in "
               "tests/ocean/unit/test_ab2_integrator.py.",
             RuntimeWarning, stacklevel=2)
-    assert umax[600] > umax[300], (
-        "trajectory did not evolve between step 300 and 600 -- the ratchet "
+    assert umax[300] > umax[150], (
+        "trajectory did not evolve between step 150 and 300 -- the ratchet "
         "would be vacuous (ratio identically 1.0)")
-    assert growth <= _AB2_GROWTH_600_OVER_300_BASELINE, (
+    assert growth <= _AB2_GROWTH_300_OVER_150_BASELINE, (
         f"AB2 growth rate REGRESSED: {growth:.4f} > baseline "
-        f"{_AB2_GROWTH_600_OVER_300_BASELINE}.  This baseline is SHRINK-ONLY: "
+        f"{_AB2_GROWTH_300_OVER_150_BASELINE}.  This baseline is SHRINK-ONLY: "
         f"if you have improved the lane, LOWER it (and lower "
-        f"_AB2_UMAX_300_BASELINE / _AB2_NAN_BY_STEPS / retire the xfail as "
-        f"appropriate).  Do NOT raise it to make this pass.")
+        f"_AB2_UMAX_150_BASELINE, raise _AB2_NAN_BY_STEPS / retire the xfail "
+        f"as appropriate).  Do NOT raise it to make this pass.")
     # AMPLITUDE ratchet -- a ratio alone cannot see a uniformly larger
     # trajectory (see the header block).  Also shrink-only.
-    assert umax[300] <= _AB2_UMAX_300_BASELINE, (
-        f"AB2 amplitude REGRESSED: max|u|(300) = {umax[300]:.4f} > baseline "
-        f"{_AB2_UMAX_300_BASELINE}.  SHRINK-ONLY -- do NOT raise it.")
+    assert umax[150] <= _AB2_UMAX_150_BASELINE, (
+        f"AB2 amplitude REGRESSED: max|u|(150) = {umax[150]:.4f} > baseline "
+        f"{_AB2_UMAX_150_BASELINE}.  SHRINK-ONLY -- do NOT raise it.")
 
 
 @pytest.mark.xfail(
     strict=True,
     reason="KNOWN OPEN: the default al81 + matsuno_split lat-lon C-grid lane "
            "diverges in this channel -- max|u| grows monotonically "
-           "(1.6 -> 5.1 -> 28.9 over 150/300/600 steps) and goes NaN by 900. "
+           "(1.8 -> 7.7 over 150/300 steps) and goes NaN at step 575 since "
+           "the eta damping is booked into the barotropic transport (NaN by "
+           "900 while the unbooked damping diluted tracers). "
            "PRE-EXISTS the 2026-08 AL81 triad<->flux pairing fix (which reaches "
            "90 m/s by 1200 steps WITHOUT the fix, finite but diverging); the "
            "fix accelerates it. Mechanism UNKNOWN and deliberately not asserted "
@@ -314,8 +327,8 @@ def test_ab2_long_run_growth_rate_ratchet():
            "scheme pairing, dino_wiring_diagram.md:496, records it STABLE for "
            "DINO). strict=True: fixing the lane turns this RED so the ratchet "
            "above and this marker are updated together.")
-def test_ab2_long_run_bounded_900_steps():
-    """The property this lane SHOULD have and currently does not: a 900-step AB2
+def test_ab2_long_run_bounded_600_steps():
+    """The property this lane SHOULD have and currently does not: a 600-step AB2
     trajectory stays finite and bounded.  Written as the real assertion rather
     than deleted, so the defect is visible in the suite instead of hidden behind
     a relaxed threshold."""
