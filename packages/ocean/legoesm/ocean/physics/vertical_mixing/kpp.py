@@ -257,7 +257,7 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps, ice_frac=None):
     d_eff = jnp.minimum(d, cfg.epsilon_lmd * h_bl_col)
     B_f_e = B_f[..., jnp.newaxis]
     ustar_e = u_star[..., jnp.newaxis]
-    if getattr(cfg, "actual_buoyancy_flux", False):
+    if cfg.actual_buoyancy_flux:
         # zeta from the actual flux, written without dividing by it (CVMix 1d_OBL:
         # zeta = sigma * OBL_depth * surf_buoy_force * vonkar / surf_fric_vel**3; u* is
         # floored by its callers), so weak fluxes are used as they are and the gradient is
