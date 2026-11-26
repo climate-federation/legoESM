@@ -144,16 +144,19 @@ GAMMA = 0.0065        # Constant lapse rate [K/m] (US Standard troposphere)
 
 
 def lapse_rate_columns(z_s, sigma_coord, *, T_init: float = T_0,
-                       gamma: float = GAMMA):
+                       gamma: float = GAMMA, p_0: float = P_0):
     """``(p_s, T)`` of the constant-lapse-rate atmosphere at rest over terrain
     height ``z_s`` (any shape ``(...,)``), on the model's OWN full levels:
 
-        p_s = P_0 (1 - gamma z_s / T_init) ** (g / (R_d gamma))
-        T(p) = T_init (p / P_0) ** (R_d gamma / g)          shape (..., nlev)
+        p_s = p_0 (1 - gamma z_s / T_init) ** (g / (R_d gamma))
+        T(p) = T_init (p / p_0) ** (R_d gamma / g)          shape (..., nlev)
 
     This is the DCMIP 2012 test 2-0-0 atmosphere (T = T_0 - gamma z, T_0 =
     300 K, gamma = 0.0065 K/m; reference ``test2_steady_state_mountain``,
-    ``dcmip_initial_conditions_test_1_2_3_v5.f90``).
+    ``dcmip_initial_conditions_test_1_2_3_v5.f90``) with ``p_0 = P_0``.
+    ``p_0`` is the pressure at ``z = 0``; the DCMIP 2008 Rossby-Haurwitz
+    wave reuses these columns with ``p_0 = p_ref = 955 hPa`` (its Eqs.
+    66 and 70, with ``z_s`` its equivalent surface height ``-Phi'/g``).
     """
     from legoesm.grids.vertical import (
         pressure_from_hybrid, pressure_from_sigma,
@@ -165,7 +168,7 @@ def lapse_rate_columns(z_s, sigma_coord, *, T_init: float = T_0,
             f"rest state, which is what this variant exists to escape); got {gamma!r}")
     # Surface pressure of the constant-lapse-rate atmosphere at terrain height.
     exponent = constants.g / (constants.R_d * gamma)
-    p_s = P_0 * (1.0 - gamma * z_s / T_init) ** exponent
+    p_s = p_0 * (1.0 - gamma * z_s / T_init) ** exponent
 
     if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
         p_full = pressure_from_hybrid(sigma_coord, p_s, full=True)
@@ -173,7 +176,7 @@ def lapse_rate_columns(z_s, sigma_coord, *, T_init: float = T_0,
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
 
     # T(p) for the same atmosphere -- the inverse of p(z) above.
-    T_data = T_init * (p_full / P_0) ** (constants.R_d * gamma / constants.g)
+    T_data = T_init * (p_full / p_0) ** (constants.R_d * gamma / constants.g)
     return p_s, T_data
 
 

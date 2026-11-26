@@ -146,15 +146,41 @@ def test_mountain_rossby_terrain_isothermal_288():
 
 def test_rossby_haurwitz_winds():
     spec, model = _model("rossby_haurwitz_6_0")
-    f = _fields(model, A.shared_ic_bundle(model, spec))
-    from legoesm.core.williamson_sw_analytic import rossby_haurwitz_4_winds
+    bundle = A.shared_ic_bundle(model, spec)
+    f = _fields(model, bundle)
+    from legoesm.core.williamson_sw_analytic import (
+        rossby_haurwitz_4_geopotential, rossby_haurwitz_4_winds)
     from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
-    u, v = rossby_haurwitz_4_winds(f.lon, f.lat, radius=FV3_RADIUS_M)
+    # DCMIP 2008 Sect. 1.4 (test 4-0-0): M = K = u0/(n a), u0 = 50 m/s
+    mk = 50.0 / (4.0 * FV3_RADIUS_M)
+    u, v = rossby_haurwitz_4_winds(f.lon, f.lat, radius=FV3_RADIUS_M,
+                                   omega_wave=mk, k_wave=mk)
     # D-grid projection + c2l lens at C8 (~4 cells per RH wave-4
-    # wavelength): MEASURED rel RMS u 0.027, v 0.079; caps ~1.5-2x
+    # wavelength): MEASURED rel RMS u 0.027, v 0.079 (amplitude-free);
+    # caps ~1.5-2x
     assert _rel_rms(f.ue, np.asarray(u)[..., None] * np.ones_like(f.ue)) < 0.05
     assert _rel_rms(f.vn, np.asarray(v)[..., None] * np.ones_like(f.vn)) < 0.12
-    assert np.all(f.pt == 300.0)
+    # Eq. (70) p_s and Eq. (66) T on the run's own L32 (ak/bk mid-points),
+    # T0 = 288 K, Gamma = 6.5 K/km, p_ref = 955 hPa, Phi_s = 0
+    gamma, t0, p_ref = 0.0065, 288.0, 95500.0
+    phi = rossby_haurwitz_4_geopotential(
+        f.lon, f.lat, radius=FV3_RADIUS_M, omega=constants.Omega, gh0=0.0,
+        omega_wave=mk, k_wave=mk)
+    ps_ref = p_ref * (1.0 + gamma * phi / (constants.g * t0)) ** (
+        constants.g / (gamma * constants.R_d))
+    np.testing.assert_allclose(f.ps, ps_ref, rtol=1e-6)
+    assert f.ps.max() - f.ps.min() > 5000.0           # not uniform
+    ak, bk = np.asarray(model.ak), np.asarray(model.bk)
+    p_full = (0.5 * (ak[:-1] + ak[1:])
+              + 0.5 * (bk[:-1] + bk[1:]) * ps_ref[..., None])
+    T_ref = t0 * (p_full / p_ref) ** (constants.R_d * gamma / constants.g)
+    np.testing.assert_allclose(f.pt, T_ref, rtol=1e-6)
+    # every layer thickness, not just the column sum
+    ctx = model.grid.ctx_np
+    sl = slice(ctx["ng"], ctx["ng"] + ctx["n"])
+    delp = np.asarray(bundle["state"]["delp"])[:, sl, sl, :]
+    np.testing.assert_allclose(
+        delp, np.diff(ak) + np.diff(bk) * ps_ref[..., None], rtol=1e-6)
 
 
 def test_terrain_mismatch_is_refused():
