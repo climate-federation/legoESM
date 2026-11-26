@@ -656,7 +656,14 @@ def ocean_baroclinic_tendencies_cdgrid(
         u_c_b = jnp.repeat(u_c_tr, n_tracers, axis=-1)
         v_c_b = jnp.repeat(v_c_tr, n_tracers, axis=-1)
 
-    horiz_flat = cgrid_tracer_advection_fct(tracer_flat, u_c_b, v_c_b, cdgrid)
+    # With the switch on, land cells are filled from wet neighbours for the
+    # FCT input only: the faces are closed, so filled values enter just the
+    # reconstruction stencil, which otherwise read raw land values across
+    # wet-wet faces next to the coast (2.7e-4 psu residual drift next to S=0
+    # land on C8).  Tendencies at land stay masked below.
+    tracer_adv_in = (fill_TS(tracer_flat)
+                     if config.tracer_advection_constant_preserving else tracer_flat)
+    horiz_flat = cgrid_tracer_advection_fct(tracer_adv_in, u_c_b, v_c_b, cdgrid)
     if config.K_h > 0:
         horiz_flat = horiz_flat + laplacian_viscosity_3d(
             tracer_flat, grid, config.K_h,
