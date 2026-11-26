@@ -293,8 +293,8 @@ _CASE_FAMILIES: dict[str, frozenset[str]] = {
     "cosine_bell_a0":     frozenset({"sw"}),  # issue 504 alpha=0 diagnostic (not in curated hughes set)
     "colliding_modons":   frozenset({"sw"}),  # issue 521 Lin et al. (2017), cube + latlon
     # Hydrostatic dry
-    "baroclinic":         frozenset({"hydro", "hughes"}),  # canonical J-W
-    "baroclinic_steady":  frozenset({"hydro"}),           # #1028 J-W, no perturbation
+    "baroclinic":         frozenset({"hydro", "hughes"}),  # DCMIP-2016 / Ullrich 2014 baroclinic wave
+    "baroclinic_steady":  frozenset({"hydro"}),           # #1028 same state, no perturbation
     "rotated_baroclinic": frozenset({"hydro", "dcmip2008", "hughes"}),
     "rotated_steady":     frozenset({"hydro", "dcmip2008", "hughes"}),
     "gravity_wave_3_1":   frozenset({"hydro", "dcmip2008", "hughes"}),
@@ -426,7 +426,7 @@ def _build_test_matrix() -> list[TestCase]:
                 "hydrostatic", "held_suarez", g, res[g], vert, 200, 30))
             matrix.append(TestCase(
                 "hydrostatic", "baroclinic", g, res[g], vert, 10, 2))
-        # #1028 control: the SAME J-W state with the perturbation OFF.  Sigma
+        # #1028 control: the SAME DCMIP-2016 (Ullrich 2014) state with the perturbation OFF.  Sigma
         # only and un-rotated on purpose — it exists to be the one-variable
         # partner of the `baroclinic` sigma case above, and `rotated_steady`
         # cannot serve (hybrid coordinate + alpha=45 deg, and it is out of
@@ -448,8 +448,8 @@ def _build_test_matrix() -> list[TestCase]:
             "hydrostatic", "amip", g, res[g], "hybrid", 365, 30))
 
         # --- Hughes-tutorial extensions (M1.a) ---
-        # Rotated Jablonowski-Williamson — DCMIP 2008 §4-1 (steady) /
-        # §4-2 (baroclinic). Hybrid coord only by default since the
+        # Rotated DCMIP-2016 (Ullrich 2014) baroclinic wave, DCMIP 2008
+        # rotation recipe: 1-3-0 (steady) / 2-3-0 (baroclinic). Hybrid coord only by default since the
         # canonical DCMIP setup uses pressure-based vertical levels.
         matrix.append(TestCase(
             "hydrostatic", "rotated_baroclinic", g, res[g], "hybrid", 10, 2,
@@ -4508,14 +4508,15 @@ def dcmip_omega_override(case: str) -> float | None:
 def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                    radiation: str = "gray") -> tuple[str, float, str]:
     nlev = DEFAULT_NLEV
-    # Rotated J-W variant (DCMIP 2008 §4-1 / §4-2).  ``alpha`` defaults
+    # Rotated baroclinic-wave variant (DCMIP 2008 1-3-0 / 2-3-0 rotation
+    # of the DCMIP-2016 / Ullrich 2014 state).  ``alpha`` defaults
     # to π/4 (45°) per DCMIP convention; ``perturbed=False`` selects the
-    # steady-state DCMIP §4-1 rotated test.
+    # rotated steady-state test (as DCMIP 2008 1-3-0).
     _rotated = tc.case in ("rotated_baroclinic", "rotated_steady")
     _rot_alpha = float(tc.run_kwargs.get("alpha", jnp.pi / 4.0)) if _rotated else 0.0
     _rot_perturbed = bool(tc.run_kwargs.get(
         "perturbed", tc.case == "rotated_baroclinic")) if _rotated else True
-    # Un-rotated J-W: `baroclinic` carries the perturbation, `baroclinic_steady`
+    # Un-rotated DCMIP-2016 wave: `baroclinic` carries the perturbation, `baroclinic_steady`
     # (#1028) is the SAME balanced initial state with it switched off.  A model
     # that holds the base state leaves the zonal jet where it started; one that
     # does not is losing the flow the eddies would have fed on, which is
@@ -4614,7 +4615,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             _ll_kwargs["omega"] = _omega_override
         if _rotated:
             # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
-            # with the flow, else the rotated JW state is not steady.
+            # with the flow, else the rotated baroclinic state is not steady.
             _ll_kwargs["coriolis_alpha"] = _rot_alpha
         grid = create_latlon_grid(n_lat, n_lon, **_ll_kwargs)
         sigma = _create_vertical(nlev, tc.vertical_coord)
@@ -4700,7 +4701,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             _vor_kwargs["omega"] = _omega_override
         if _rotated:
             # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
-            # with the flow, else the rotated JW state is not steady.
+            # with the flow, else the rotated baroclinic state is not steady.
             _vor_kwargs["coriolis_alpha"] = _rot_alpha
         mesh = create_voronoi_mesh(level, **_vor_kwargs)
         sigma = _create_vertical(nlev, tc.vertical_coord)
@@ -4740,7 +4741,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.abs(s.u.data))),
-                # Same J-W growth diagnostic the cube and lat-lon branches
+                # Same baroclinic-wave growth diagnostic the cube and lat-lon branches
                 # already emit (#1028/#1081): without it the icosahedral arm
                 # has no NATIVE-grid, regrid-free growth series, and the
                 # cross-grid growth comparison would rest on the regridded
@@ -4777,7 +4778,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             _gauss_kwargs["omega"] = _omega_override
         if _rotated:
             # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
-            # with the flow, else the rotated JW state is not steady.
+            # with the flow, else the rotated baroclinic state is not steady.
             _gauss_kwargs["coriolis_alpha"] = _rot_alpha
         grid = create_gaussian_grid(n_max, **_gauss_kwargs)
         sigma = _create_vertical(nlev, tc.vertical_coord)
@@ -6764,8 +6765,8 @@ RUNNERS: dict[str, Callable] = {
     "held_suarez_topo": run_held_suarez,             # M1.a (HS over topo)
     "baroclinic": run_baroclinic,
     "baroclinic_steady": run_baroclinic,             # #1028 unperturbed control
-    "rotated_baroclinic": run_baroclinic,            # M1.a (DCMIP 2008 §4-2 rotated)
-    "rotated_steady": run_baroclinic,                # M1.a (DCMIP 2008 §4-1 rotated)
+    "rotated_baroclinic": run_baroclinic,            # M1.a (rotated as DCMIP 2008 2-3-0)
+    "rotated_steady": run_baroclinic,                # M1.a (rotated as DCMIP 2008 1-3-0)
     "rest_state_topo": run_baroclinic,               # M1.a (DCMIP 2012 §2-0-0)
     "gravity_wave_3_1":   run_baroclinic,            # M1.a (DCMIP 2008 §3-1)
     "inertio_gravity_3_2": run_baroclinic,           # M1.a (DCMIP 2008 §3-2)

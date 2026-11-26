@@ -460,7 +460,7 @@ component plugs into the matrix framework.
 ### Validation Infrastructure
 
 - **Test matrices**:
-  - Atmosphere: `scripts/matrix/run_atmosphere_test_matrix.py` (Williamson 2/5/6, Jablonowski–Williamson + rotated DCMIP-2008 §4-1/§4-2, Held–Suarez ± topography, DCMIP 2012 §2-0-0 rest-with-topography, DCMIP transport, RCE, …) — selectable via `--family {sw,hydro,nh,climate,tracer,moist,dcmip2008,dcmip2012,dcmip2016,hughes,all}` or `--only {sw,hydro,nh,all}`. Williamson CLI emits both PlateCarree u/v and native D-grid winds for plotting (issue #274)
+  - Atmosphere: `scripts/matrix/run_atmosphere_test_matrix.py` (Williamson 2/5/6, DCMIP-2016 / Ullrich (2014) baroclinic wave + its rotated variants (DCMIP 2008 1-3-0/2-3-0 rotation recipe), Held–Suarez ± topography, DCMIP 2012 §2-0-0 rest-with-topography, DCMIP transport, RCE, …) — selectable via `--family {sw,hydro,nh,climate,tracer,moist,dcmip2008,dcmip2012,dcmip2016,hughes,all}` or `--only {sw,hydro,nh,all}`. Williamson CLI emits both PlateCarree u/v and native D-grid winds for plotting (issue #274)
   - Ocean: `scripts/matrix/run_ocean_test_matrix.py` (lat-lon, tripolar, cubed-sphere, MPAS Voronoi)
   - Sea ice: `scripts/matrix/run_sea_ice_test_matrix.py` (15 benchmark tests)
 - **CFL-aware numerical-convergence tests + plotters**: term-by-term analytic shallow-water and ocean tests

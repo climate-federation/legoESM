@@ -340,7 +340,8 @@ def _cam6_l32_coord(model, what: str):
 
 
 def rotated_jw_bundle(model, *, perturbed: bool, alpha: float) -> dict:
-    """DCMIP 2008 4-1/4-2 rotated baroclinic-wave bundle on the duo grid.
+    """Rotated DCMIP-2016 (Ullrich 2014) baroclinic-wave bundle on the duo
+    grid (DCMIP 2008 1-3-0 / 2-3-0 rotation recipe).
 
     The analytic state is the SAME builder every other matrix grid uses
     (``jablonowski_rotated._build_rotated_state_dense_grid``) on the run's
@@ -360,7 +361,7 @@ def rotated_jw_bundle(model, *, perturbed: bool, alpha: float) -> dict:
     from tests.test_cases.dcmip2008.jablonowski_rotated import (
         _build_rotated_state_dense_grid)
 
-    coord = _cam6_l32_coord(model, "rotated JW duo IC")
+    coord = _cam6_l32_coord(model, "rotated baroclinic duo IC")
     km = model.config.km
     ctx = model.grid.ctx_np
     n, ng = ctx["n"], ctx["ng"]
@@ -639,7 +640,7 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
 
     ``dt`` is the deck's ``DUO_HYDRO_DT_ATMOS`` (1920 s, n_split 8), not the
     driver's generic CFL clamp (see the constant).
-    ``rotated_alpha`` (not None): DCMIP 2008 rotated JW -- the planet's
+    ``rotated_alpha`` (not None): rotated DCMIP-2016 wave -- the planet's
     rotation axis tilted by alpha (``create_fv3_duo_grid(rotation_alpha)``)
     and :func:`rotated_jw_bundle` as the IC.
     ``shared_case`` (not None): the row's IC is its shared cube builder
@@ -759,9 +760,11 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
                 "Held-Suarez IC: isothermal 300 K at rest, ps = p_ref, "
                 "1 K lowest-level perturbation (seed 42), as every grid"
                 if held_suarez else
-                f"DCMIP16 baroclinic-wave IC (do_pert={perturbed})"
+                (f"DCMIP16 baroclinic-wave IC (do_pert={perturbed}"
+                 + (", DCMIP-2016 Eq. 14-15 perturbation)" if perturbed
+                    else ")"))
                 if rotated_alpha is None else
-                f"rotated JW IC (jablonowski_rotated builder on CAM6 L32, "
+                f"rotated DCMIP-2016 IC (jablonowski_rotated builder on CAM6 L32, "
                 f"alpha={rotated_alpha:.4f}, perturbed={perturbed}), "
                 f"rotated-planet Coriolis"))
     if held_suarez:
