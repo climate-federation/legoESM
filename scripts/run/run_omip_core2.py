@@ -7668,8 +7668,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Barotropic 2D Laplacian damping coefficient (explicit_substep).")
     p.add_argument("--barotropic-diffusion-book-transport",
                    action=argparse.BooleanOptionalAction, default=None,
-                   help="Book the explicit_substep eta damping's volume flux into the "
-                        "tracer transport (config default True). --no-... selects the "
+                   help="Tripole, lat-lon and MPAS grids: book the explicit_substep eta "
+                        "damping's volume flux into the tracer transport (config default True). --no-... selects the "
                         "pre-2026-11-25 unbooked behaviour, where tracers never see "
                         "the water the damping moves.")
     p.add_argument("--n-barotropic-substeps", type=int, default=None,
