@@ -14928,9 +14928,12 @@ class ModelDriver:
         _hb_fn = self.get_surface_handback
         _hb_last = None
         if _hb_fn is not None:
+            # An all-ocean run (every rank) needs no land model: the handback
+            # enters the flux kernel with zero land terms.
+            _hb_run_has_land = bool(getattr(self, "_has_land_anywhere", True))
             _hb_missing = [_nm for _nm, _ok in (
                 ("the interactive land model's own fluxes "
-                 "(use_multilayer_land)", _land_ml_on),
+                 "(use_multilayer_land)", _land_ml_on or not _hb_run_has_land),
                 ("a land fraction", _f_land_cells is not None),
                 ("the SST surface forcing", _sst_forcing),
                 ("rrtmgp radiation", _rad_scheme == "rrtmgp"),

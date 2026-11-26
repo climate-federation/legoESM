@@ -37,7 +37,7 @@ def test_deck_builds(deck, tmp_path):
     a, c = d._atm.config, d.coupled_cfg
     assert a.geography == geo and a.grid.resolution == 5 and a.dycore.dt == 225.0
     assert c.atm_owns_surface and c.land_mode == "none" and c.ocean_mode == "dynamic"
-    assert a.use_multilayer_land and a.gravity_wave_drag == "none" and not a.unfused_radiation
+    assert a.use_multilayer_land == (shape != "aquaplanet") and a.gravity_wave_drag == "none" and not a.unfused_radiation
     assert a.zm_land_fraction == ("none" if shape == "aquaplanet" else "required")
     assert a.ic == "standard" and a.T_init == 300.0
     a.validate_strict()      # the run validates the resolved config; so must the deck
