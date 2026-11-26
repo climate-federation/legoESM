@@ -420,6 +420,28 @@ def laplacian_smooth_voronoi(
 # ============================================================================
 
 
+PARTIAL_CELL_SNAP_FRAC = 0.30
+"""Bottom partial cells thinner than this fraction of their level snap to the
+nearer interface (the OMIP MPAS / tripole realistic recipe)."""
+
+
+def snap_partial_cells(H_bathy, z_coord, min_frac: float = PARTIAL_CELL_SNAP_FRAC):
+    """Depth with every bottom partial cell thinner than ``min_frac`` of its
+    level moved to the nearer level interface; non-positive depth -> 0."""
+    abs_z_half = jnp.abs(z_coord.z_half_ref)
+    nlev = z_coord.n_levels
+    n_above = jnp.sum(abs_z_half[None, :] < H_bathy[:, None], axis=1)
+    bottom_level = jnp.clip(n_above - 1, 0, nlev - 1)
+    dz_at_bottom = z_coord.dz_ref[bottom_level]
+    frac = (H_bathy - abs_z_half[bottom_level]) / jnp.maximum(dz_at_bottom, 1e-10)
+    z_upper = abs_z_half[bottom_level]
+    z_lower = abs_z_half[jnp.minimum(bottom_level + 1, nlev)]
+    H_snapped = jnp.where(H_bathy - z_upper < z_lower - H_bathy, z_upper, z_lower)
+    needs_snap = (frac < min_frac) & (frac > 0) & (H_bathy > 0)
+    H_new = jnp.where(needs_snap, H_snapped, H_bathy)
+    return jnp.where(H_new <= 0, 0.0, H_new)
+
+
 def compute_max_r_factor(H_bathy, ocean_mask):
     """Maximum r-factor over ocean-ocean neighbour pairs (4-connected).
 

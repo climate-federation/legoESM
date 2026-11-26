@@ -277,3 +277,14 @@ def test_array_summary_hash_is_content_sensitive():
     assert (compute_config_hash(ca, "ocean")
             == compute_config_hash(_latlon_cfg()._replace(
                 runoff_depth_spread_map=a.copy()), "ocean"))
+
+
+def test_codec_old_kpp_record_keeps_the_legacy_buoyancy_floor():
+    """A KPPConfig recorded before actual_buoyancy_flux existed ran with the float32-eps floor; decoding it
+    must not pick up the newer default (True).  A record carrying the field round-trips as written."""
+    from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+
+    d = ocean_config_to_dict(KPPConfig())
+    assert ocean_config_from_dict(d).actual_buoyancy_flux is True
+    del d["actual_buoyancy_flux"]
+    assert ocean_config_from_dict(d).actual_buoyancy_flux is False

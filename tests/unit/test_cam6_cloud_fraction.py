@@ -356,21 +356,24 @@ def test_validate_strict_refuses_partial_cam6_selections(over, match):
 
 
 def test_validate_strict_refuses_cam6_off_the_mpas_lane():
-    from legoesm.driver.config import DycoreConfig
+    from legoesm.driver.config import DycoreConfig, GridConfig
     with pytest.raises(ValueError, match="MPAS lane only"):
-        _exp_cfg(dycore=DycoreConfig(discretization="cdgrid")).validate_strict()
+        _exp_cfg(grid=GridConfig(grid_type="cubed_sphere"),
+                 dycore=DycoreConfig(discretization="fv3_duo")).validate_strict()
 
 
 def test_use_clubb_cloud_fraction_now_legal_on_mpas():
-    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    mpas = dict(grid=GridConfig(grid_type="mpas"),
+                dycore=DycoreConfig(discretization="mpas"))
     ExperimentConfig(turbulence="clubb", use_clubb_cloud_fraction=True,
-                     dycore=DycoreConfig(discretization="mpas")).validate_strict()
+                     **mpas).validate_strict()
     with pytest.raises(ValueError, match="requires turbulence='clubb'"):
         ExperimentConfig(turbulence="louis", use_clubb_cloud_fraction=True,
-                         dycore=DycoreConfig(discretization="mpas")
-                         ).validate_strict()
+                         **mpas).validate_strict()
     with pytest.raises(ValueError, match="not wired into the 'spectral'"):
         ExperimentConfig(turbulence="clubb", use_clubb_cloud_fraction=True,
+                         grid=GridConfig(grid_type="gaussian"),
                          dycore=DycoreConfig(discretization="spectral")
                          ).validate_strict()
 

@@ -903,7 +903,8 @@ def ocean_config_from_dict(d: dict):
 
     Unknown fields are dropped (forward-compat: an older manifest with a since-
     removed field still loads); missing fields fall back to the NamedTuple
-    default.  Only ``legoesm.*`` types may be reconstructed (a manifest cannot
+    default, except ``KPPConfig.actual_buoyancy_flux``, which a pre-field record
+    restores as False (the floor that run used).  Only ``legoesm.*`` types may be reconstructed (a manifest cannot
     coax this into importing arbitrary modules).
     """
     return _decode_config(d)
@@ -1071,6 +1072,10 @@ def _decode_config(obj):
             if k != "__type__" and k in known
         }
         _reconcile_recorded_constants(fields)
+        if cls.__name__ == "KPPConfig" and "actual_buoyancy_flux" not in obj:
+            # written before the field existed: that run used the float32-eps floor, so a
+            # resume keeps it rather than picking up the newer default (True)
+            fields["actual_buoyancy_flux"] = False
         if hasattr(cls, "from_flat"):
             return cls.from_flat(**fields)
         return cls(**fields)

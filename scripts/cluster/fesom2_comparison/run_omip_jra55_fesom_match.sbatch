@@ -121,6 +121,7 @@ EOF
     --precision fp64 \
     --bathymetry "$MAIN/data/bathymetry/etopo_1deg.nc" \
     --vertical-mixing-scheme kpp \
+    --kpp-actual-buoyancy-flux \
     --forcing-mode jra55_do_tropical \
     --jra55-cache "$SCRATCH/jra55_do_fesom_1958_1958_1deg_noleap.zarr" \
     --jra55-sea-ice \

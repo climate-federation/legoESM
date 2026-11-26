@@ -1059,12 +1059,12 @@ class KPPConfig(NamedTuple):
     # its default; MOM6 MOM_CVMix_KPP.F90 KPP_compute_BLD, Vt_layer = 1.0 and
     # OBL_depth = cell-centre depth).
     vt2_velocity_scale: str = "column"
-    # Surface buoyancy flux in the KPP velocity scales.  False (default, unchanged
-    # behaviour): |B_f| below float32 machine epsilon (1.19e-7 m^2/s^3) is replaced by
-    # that floor with the same sign, which covers most tropical fluxes.  True: the actual
-    # flux, with zeta = d_eff kappa B_f / u*^3 written without a division by B_f, as
-    # LMD94 and CVMix (cvmix_kpp_compute_turbulent_scales_1d_OBL) use it.
-    actual_buoyancy_flux: bool = False
+    # Surface buoyancy flux in the KPP velocity scales.  True (default, user decision
+    # 2026-11-26): the actual flux, with zeta = d_eff kappa B_f / u*^3 written without a
+    # division by B_f, as LMD94 and CVMix (cvmix_kpp_compute_turbulent_scales_1d_OBL) use
+    # it.  False (legacy): |B_f| below float32 machine epsilon (1.19e-7 m^2/s^3) is
+    # replaced by that floor with the same sign, which covers most tropical fluxes.
+    actual_buoyancy_flux: bool = True
     # Gradient surrogates (docs/88 6.12 (a2)): the boundary-layer base switch (K_bl inside, interior K below
     # sigma = 1) and the convective switch (K_conv where N2 < Ri_conv) keep their exact forward values but
     # take the derivative of a logistic blend in the backward pass, with these widths (numerical, stated

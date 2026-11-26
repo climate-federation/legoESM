@@ -165,7 +165,7 @@ def test_tracer_step_gradient():
 
 def test_face_values_take_the_upwind_donor():
     from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
-        _tracer_face_value, _tracer_vertical_face_value)
+        _tracer_face_value, tracer_vertical_face_value)
     step = jnp.array([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])          # jump at face 3
     for scheme in ("upwind1", "van_leer"):
         f = step[None, :, None, None]
@@ -173,8 +173,8 @@ def test_face_values_take_the_upwind_donor():
         assert float(_tracer_face_value(f, -jnp.ones_like(f), 1, scheme)[0, 3, 0, 0]) == 1.0
     f = step[None, None, :, None]                              # index 0 = top
     up = jnp.ones((1, 1, 7, 1))
-    assert float(_tracer_vertical_face_value(f, up, "van_leer")[0, 0, 3, 0]) == 1.0
-    assert float(_tracer_vertical_face_value(f, -up, "van_leer")[0, 0, 3, 0]) == 0.0
+    assert float(tracer_vertical_face_value(f, up, "van_leer")[0, 0, 3, 0]) == 1.0
+    assert float(tracer_vertical_face_value(f, -up, "van_leer")[0, 0, 3, 0]) == 0.0
 
 
 def test_tracer_blob_moves_with_the_wind():

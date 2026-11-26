@@ -14,6 +14,22 @@ from legoesm.core.precision import get_policy
 from legoesm.forcing.time_utils import day_to_calendar
 
 
+# --- APE "Qobs" profile (Neale & Hoskins 2000, Atmos. Sci. Lett. 1, 101) ---
+_QOBS_PEAK_C = 27.0
+_QOBS_EDGE_DEG = 60.0
+
+
+def qobs_sst_C(lat_deg) -> np.ndarray:
+    """Aqua-Planet Experiment "Qobs" SST [degC]: 27 (1 - (sin^2 + sin^4)/2)
+    of (3 lat / 2) inside |lat| < 60 deg, 0 beyond: the mean of the APE
+    "Control" 27 (1 - sin^2) and "Flat" 27 (1 - sin^4) profiles.  Zonally
+    symmetric."""
+    lat = np.asarray(lat_deg, dtype=np.float64)
+    s2 = np.sin(np.radians(1.5 * lat)) ** 2
+    return np.where(np.abs(lat) < _QOBS_EDGE_DEG,
+                    _QOBS_PEAK_C * (1.0 - 0.5 * (s2 + s2 * s2)), 0.0)
+
+
 def analytical_sst_sic(
     lat_deg: np.ndarray,
     day: float,

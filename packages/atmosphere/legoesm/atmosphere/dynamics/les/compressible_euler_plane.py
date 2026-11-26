@@ -2813,7 +2813,7 @@ def _tracer_face_value(f, flux, axis, scheme):
     return jnp.where(flux >= 0.0, phi_pos, phi_neg)
 
 
-def _tracer_vertical_face_value(f, flux, scheme):
+def tracer_vertical_face_value(f, flux, scheme):
     """Tracer value at the ``nlev+1`` interfaces (index 0 = top). ``flux`` is
     the upward mass flux; its sign picks the donor cell. Lid values are unused
     (zero flux there)."""
@@ -2923,7 +2923,7 @@ def plane_conservative_tracer_stage(
     ty = fy * _tracer_face_value(q_pad, fy, 0, h_scheme)
     div_h = jax.vmap(lambda a, b: oh.divergence_vlast_halo(a, b, grid, h),
                      in_axes=-1, out_axes=-1)(tx, ty)
-    gq = g_flux * _tracer_vertical_face_value(q_e, g_flux, v_scheme)
+    gq = g_flux * tracer_vertical_face_value(q_e, g_flux, v_scheme)
     gain_z = (gq[..., 1:, :] - gq[..., :-1, :]) / dz[:, None]
     rho_b = plane_total_density(base, height_coord)[..., None]
     rho_e = plane_total_density(eval_state, height_coord)[..., None]

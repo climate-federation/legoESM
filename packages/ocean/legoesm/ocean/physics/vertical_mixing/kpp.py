@@ -262,13 +262,17 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps, ice_frac=None):
     -------
     (w_m, w_s) : each (..., nlev) [m/s].
     """
+    if not isinstance(cfg.actual_buoyancy_flux, bool):
+        # YAML null / quoted "false" would otherwise pick a branch by truthiness
+        raise ValueError(
+            f"KPPConfig.actual_buoyancy_flux must be a bool, got {cfg.actual_buoyancy_flux!r}")
     kappa = cfg.kappa_vk
     # Surface-layer cap d_eff = min(d, epsilon*h): the similarity scale is held
     # constant below sigma = epsilon (LMD94 App. A/B).
     d_eff = jnp.minimum(d, cfg.epsilon_lmd * h_bl_col)
     B_f_e = B_f[..., jnp.newaxis]
     ustar_e = u_star[..., jnp.newaxis]
-    if getattr(cfg, "actual_buoyancy_flux", False):
+    if cfg.actual_buoyancy_flux:
         # zeta from the actual flux, written without dividing by it (CVMix 1d_OBL:
         # zeta = sigma * OBL_depth * surf_buoy_force * vonkar / surf_fric_vel**3; u* is
         # floored by its callers), so weak fluxes are used as they are and the gradient is
