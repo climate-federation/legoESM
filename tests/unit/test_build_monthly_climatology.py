@@ -71,3 +71,20 @@ def test_time_bounds_follow_the_first_year_stamps():
     ds["time_bnds"] = (("time", "nb"), np.stack([t - 15.0, t + 15.0], -1))
     out = bmc.climatology(ds, 2005, 2006)
     np.testing.assert_array_equal(out["time_bnds"].values, ds["time_bnds"].values[12:24])
+
+
+def test_stamps_are_the_first_years_whatever_the_file_order():
+    ds = _ds("days since 2004-01-01")
+    want = ds["time"].values[12:24]
+    out = bmc.climatology(ds.isel(time=np.random.default_rng(1).permutation(36)), 2005, 2006)
+    np.testing.assert_array_equal(np.sort(out["time"].values), want)
+
+
+def test_optics_weights_skip_missing_values():
+    ds = _ds("days since 2004-01-01")
+    ds["ssa"].values[12, 0, 0] = np.nan                  # 2005-01 missing at one point
+    out = bmc.climatology(ds, 2005, 2006, optics=True)
+    np.testing.assert_allclose(out["ssa"].values[0, 0, 0], ds["ssa"].values[24, 0, 0],
+                               rtol=1e-12)               # the 2006 value alone
+    ds["ssa"].values[24, 0, 0] = np.nan                  # both years missing
+    assert np.isnan(bmc.climatology(ds, 2005, 2006, optics=True)["ssa"].values[0, 0, 0])

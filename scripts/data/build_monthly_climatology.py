@@ -46,7 +46,9 @@ def climatology(ds, first: int, last: int, optics: bool = False):
             n = int(np.sum((years == y) & (months == m)))
             if n != 1:
                 raise ValueError(f"{y}-{m:02d}: {n} records, expected exactly 1")
-    first_idx = [int(np.flatnonzero(sel & (months == m))[0]) for m in range(1, 13)]
+    # the stamps (and bounds) of the FIRST YEAR's records, whatever the file order
+    first_idx = [int(np.flatnonzero((years == first) & (months == m))[0])
+                 for m in range(1, 13)]
     out = ds.drop_vars([v for v in ds.data_vars if "time" in ds[v].dims] + ["time"])
     bounds = tv.attrs.get("bounds")
     timed = [v for v in ds.data_vars if "time" in ds[v].dims]
@@ -57,7 +59,8 @@ def climatology(ds, first: int, last: int, optics: bool = False):
         for v in timed:
             if optics and v in ("ssa", "asy"):
                 w = sub["aod"] * (sub["ssa"] if v == "asy" else 1.0)
-                mv = (w * sub[v]).sum("time") / w.sum("time")
+                w = w.where(sub[v].notnull() & w.notnull(), 0.0)   # weights of present values only
+                mv = (w * sub[v].fillna(0.0)).sum("time") / w.sum("time")
                 means[v].append(mv.where(w.sum("time") > 0, sub[v].mean("time")))
             else:
                 means[v].append(sub[v].mean("time"))

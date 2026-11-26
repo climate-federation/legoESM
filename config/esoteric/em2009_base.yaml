@@ -36,7 +36,7 @@ ocean: dynamic                    # co-located MPAS ocean, wet where land fracti
 ocean_nlev: 20
 ocean_dt: 300.0                   # code default; CFL at L5 not yet shown
 ocean_H_max: 5200.0               # = the geography's flat ocean depth (VOTED V6 b/b/b)
-ocean_ic: qobs                    # stratified rest, surface = APE Qobs SST profile (user 2026-11-22: a uniform start leaves no meridional SST contrast)
+ocean_ic: qobs                    # stratified rest, the z=0 surface = APE Qobs SST profile (user 2026-11-22: a uniform start leaves no meridional SST contrast); the top layer the atmosphere sees starts slightly colder (profile decays with depth; VOTED b/b/a)
 mpas_ice_skin_prognostic: false   # coupled: the sea-ice model owns the ice surface
 sea_ice_flux_split: null          # auto -> off: the split charges the ice skin, off here (validator's remedy; VOTED a/b/a)
 sea_ice_albedo_scheme: constant   # what 'auto' resolves to without the skin (VOTED W6 a/a/a)
@@ -58,7 +58,8 @@ aerosol_ccn_file: /burg-archive/glab/users/pg2328/legoESM/data/cmip6_forcing/cli
 # volcanic aerosol: OFF, no file (VOTED S1 a/a/a: E&M had none)
 # minor halogens: radiation always carries HCFC-22 240 / CCl4 75 / CF4 85 pptv
 #   (rrtmgp.py global means), independent of ghg_forcing (VOTED S2 a/a/a: keep them)
-# ocean freshwater normalization stays on (MPAS ocean recipe); every conservation
-#   report states its per-step size (VOTED S3 a/a/b)
+# ocean freshwater normalization stays on (MPAS ocean recipe; VOTED S3 a/a/b).
+#   KNOWN GAP (pre-existing): the owned-surface exchange diagnostics compare
+#   fluxes before the global-mean subtraction, so they do not show it
 start_year: 1979                  # calendar only: every forcing above is constant or cyclic (VOTED V4)
 cmip_output: false                # process study (VOTED V5)

@@ -2556,7 +2556,7 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
                 "the tuned per-PFT emissivity and vegetation albedo do NOT apply "
                 "to it — those are re-fit items, not wiring.",
                 type(cfg.surface_scheme).__name__,
-                _sd_path if isinstance(_sd_path, str) else _sd_path.attrs["source"],
+                _sd_path.attrs["source"] if hasattr(_sd_path, "attrs") else _sd_path,
                 float(jnp.min(_hc)), float(jnp.max(_hc)),
                 float(jnp.min(params.rz0m)), float(jnp.max(params.rz0m)))
         else:
@@ -2565,7 +2565,7 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
                 "(prescribed canopy-top height %.2f-%.2f m, LAI %.2f-%.2f) — "
                 "the accurate per-plant structure the multilayer canopy needs.",
                 type(cfg.surface_scheme).__name__,
-                _sd_path if isinstance(_sd_path, str) else _sd_path.attrs["source"],
+                _sd_path.attrs["source"] if hasattr(_sd_path, "attrs") else _sd_path,
                 float(jnp.min(params.htop)), float(jnp.max(params.htop)),
                 float(jnp.min(params.LAI)), float(jnp.max(params.LAI)))
 
