@@ -287,7 +287,7 @@ def main(argv=None) -> int:
     if deck_argv and not args.deck:
         ap.error(f"unrecognized arguments: {' '.join(deck_argv)}")
     if args.deck and args.geography is not None:   # the deck's own flag
-        deck_argv += ["--geography", args.geography]
+        deck_argv += ["--geography=" + args.geography]   # one token: "" / "-x"
     elif (args.land == "none") != bool(args.geography):
         ap.error("--land none needs --geography, and --geography needs "
                  "--land none")

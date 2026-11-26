@@ -178,7 +178,7 @@ def test_duo_column_lane_closes_atmosphere_water(tmp_path, capsys):
         res["rows"]["atm_water"], e_atm)
 
 
-@pytest.mark.parametrize("geo", ["g.nc", ""])
+@pytest.mark.parametrize("geo", ["g.nc", "", "-g.nc"])
 def test_deck_mode_forwards_geography_to_the_deck(monkeypatch, geo):
     """--deck --geography PATH goes to the deck's own --geography flag (not
     the probe's --land none pairing), an explicit empty path included."""
@@ -194,8 +194,7 @@ def test_deck_mode_forwards_geography_to_the_deck(monkeypatch, geo):
     monkeypatch.setattr(rc, "main", fake_main)
     with pytest.raises(_Stop):
         probe.main(["--deck", "d.yaml", "--geography=" + geo])
-    i = seen["argv"].index("--geography")
-    assert seen["argv"][i + 1] == geo
+    assert "--geography=" + geo in seen["argv"]
 
 
 @pytest.mark.slow
