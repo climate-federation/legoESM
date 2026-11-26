@@ -532,9 +532,13 @@ def _monin_obukhov_limit(h, u_star, B_f, max_depth, cfg):
     its surf_buoy > 0, i.e. B_f < 0 here (B_f > 0 destabilising); unstable or
     neutral columns are limited only by the column depth.  Kept: the stable-only
     selection, u* = 0 with stable forcing giving L = 0 (the top-layer floor then
-    applies, as CVMix's ``OBL_depth >= zt_cntr(1)``).  Dropped: CVMix's
-    surf_buoy(nlev), the buoyancy flux through the whole boundary layer including
-    penetrating shortwave; this kernel only has the surface B_f.  RULE 5: B_stab
+    applies).  Dropped: CVMix's surf_buoy(nlev), the buoyancy flux through the
+    whole boundary layer including penetrating shortwave; this kernel only has
+    the surface B_f, so where shortwave penetrates below h the limit is shallower
+    than CVMix's.  Known difference: CVMix applies the limit AFTER its floor at
+    the top cell centre, so its depth can go below that; this kernel keeps its
+    existing final floor of one full top layer (a boundary layer that holds no
+    cell centre would carry no boundary-layer mixing).  RULE 5: B_stab
     is the C1 positive part over ``mo_stable_width_bf`` and the min is C1 over
     ``mo_limit_width_m``; both 0 reproduce CVMix's hard limit.
     """
@@ -545,14 +549,17 @@ def _monin_obukhov_limit(h, u_star, B_f, max_depth, cfg):
     w_bf = cfg.mo_stable_width_bf
     b_stab = (jnp.maximum(-B_f, 0.0) if w_bf == 0
               else positive_part_c1(-B_f, 1.0 / w_bf))
-    stable = b_stab > 0.0
+    w = cfg.mo_limit_width_m
+    # L is selected only where it is shallower than h_open = H + w; elsewhere
+    # L = h_open, and smooth_min_c1(h, h_open, w) is exactly h for every h <= H,
+    # so neutral, unstable and non-binding columns are untouched and the switch
+    # is invisible.  No division by H (dry columns have H = 0) and b > 0 in the
+    # selected branch, so no 0/0 in either pass.
+    h_open = max_depth + w
     ustar3 = u_star ** 3
-    # denominator floored at u*^3/(kappa*H) so L <= H and never overflows as
-    # B_stab -> 0 (an inf L would give 0*inf = NaN in the backward pass); the
-    # floor's kink at L = H moves h only where h is within the width of the bottom
-    denom = cfg.kappa_vk * jnp.maximum(jnp.where(stable, b_stab, 1.0), ustar3 / (cfg.kappa_vk * max_depth))
-    L = jnp.where(stable, ustar3 / denom, max_depth)
-    return smooth_min_c1(h, L, cfg.mo_limit_width_m)
+    sel = (b_stab > 0.0) & (cfg.kappa_vk * b_stab * h_open > ustar3)
+    L = jnp.where(sel, ustar3 / (cfg.kappa_vk * jnp.where(sel, b_stab, 1.0)), h_open)
+    return smooth_min_c1(h, L, w)
 
 
 def kpp_vertical_mixing(
