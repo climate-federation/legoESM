@@ -903,7 +903,8 @@ def ocean_config_from_dict(d: dict):
 
     Unknown fields are dropped (forward-compat: an older manifest with a since-
     removed field still loads); missing fields fall back to the NamedTuple
-    default.  Only ``legoesm.*`` types may be reconstructed (a manifest cannot
+    default, except ``KPPConfig.actual_buoyancy_flux``, which a pre-field record
+    restores as False (the floor that run used).  Only ``legoesm.*`` types may be reconstructed (a manifest cannot
     coax this into importing arbitrary modules).
     """
     return _decode_config(d)
