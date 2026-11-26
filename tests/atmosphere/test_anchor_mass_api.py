@@ -252,8 +252,7 @@ def test_anchored_step_supports_jax_grad_spectral_nh():
 
     Spectral NH fixer ``_apply_mass_fixer`` reaches grid space via
     ``sh_synthesis_3d`` on a (n_sh, nlev) state and writes back to
-    ``rho_prime_hat[0, :]`` (per-level (0,0) coefficient) with
-    ``Δρ·sqrt(4π)``.  AD must traverse the 3-D SH round-trip + the
+    ``jrho_prime_hat`` (``Δρ·analysis(J)`` on every level).  AD must traverse the 3-D SH round-trip + the
     sigma vertical integral inside the fixer.
     """
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
@@ -277,15 +276,15 @@ def test_anchored_step_supports_jax_grad_spectral_nh():
             grid, hcoord, tmetric, cfg, allow_unsupported_backend=True,
         )
 
-        def loss(rho_prime_hat_data):
+        def loss(jrho_prime_hat_data):
             state = state0._replace(
-                rho_prime_hat=state0.rho_prime_hat.replace(
-                    data=rho_prime_hat_data))
+                jrho_prime_hat=state0.jrho_prime_hat.replace(
+                    data=jrho_prime_hat_data))
             s = model.step(state, 5.0)
             return jnp.sum(jnp.abs(s.theta_prime_hat.data) ** 2)
 
         model.reset_target_mass()
-        grad = jax.grad(loss)(state0.rho_prime_hat.data)
+        grad = jax.grad(loss)(state0.jrho_prime_hat.data)
 
         assert jnp.all(jnp.isfinite(jnp.abs(grad)))
         assert float(jnp.max(jnp.abs(grad))) > 0.0

@@ -10,7 +10,7 @@ So the topography file is ALSO the land-sea source for a ``--topography`` run.
 This regrids ANY regular lat-lon elevation dataset (NOAA ETOPO, GEBCO, GMTED2010,
 ETOPO5, ...) onto a regular ``target_res_deg`` lat-lon grid and writes
 ``elevation(lat, lon)`` in the layout ``load_real_topography`` auto-detects
-(``_detect_variables``: elevation name ``elevation``/``z``/``topo``..., coords
+(``detect_elevation_variables``: elevation name ``elevation``/``z``/``topo``..., coords
 ``lat``/``lon``).  The DOWNLOAD of the (large) source relief file is left to the
 operator — point ``--input`` at it; NOAA ETOPO 2022 is public (no account):
 https://www.ncei.noaa.gov/products/etopo-global-relief-model.  A coarser source
@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import argparse
 
-# Elevation/lat/lon variable names load_real_topography._detect_variables accepts
+# Elevation/lat/lon variable names load_real_topography.detect_elevation_variables accepts
 # (write the output with names from these so it round-trips without --elev-var).
 _ELEV_CANDIDATES = ("elevation", "altitude", "z", "topo", "Band1", "ROSE",
                     "bedrock_topography", "surface_elevation")

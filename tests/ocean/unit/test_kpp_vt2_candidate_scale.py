@@ -86,8 +86,8 @@ def _capture_ws(cfg, ustar, Bf, h_bl_prev=None):
     return z, seen, float(h)
 
 
-# |B_f| = 0 or above legoESM's AD floor (float32 eps, 1.2e-7 m2/s3). Below it, legoESM substitutes the floor for
-# the flux in every KPP velocity scale; that is a departure of its own (docs/92, core-0022 note), not covered here.
+# |B_f| = 0 or above float32 eps (1.2e-7 m2/s3), with the default actual-flux form; below eps (and at 0) the
+# legacy floor (actual_buoyancy_flux=False) substitutes signed eps.  Weak fluxes: test_kpp_bf_floor.py vs CVMix.
 @pytest.mark.parametrize("ustar,Bf", [(0.01, 0.0), (0.01, -2e-7), (0.01, 2e-7), (0.003, 3e-7), (0.02, 5e-7),
                                       (0.005, -1e-6)])
 def test_candidate_ws_equals_cvmix(ustar, Bf):

@@ -7,3 +7,13 @@
 # Everything else is amip_production.yaml.
 include: amip_production.yaml
 clubb_mf: true
+# Plume-area factor on plume cloud fraction (CAM7 default 10; user 2026-11-26).
+# BOMEX/RICO SCM vs LES (branch diag/mf-cldfrac-fac; 2 h, prescribed
+# radiation, alphturb 0): factor 10 gives max cover ~6x LES; cover-profile
+# RMSE is lowest at 1.75-2 (max cover matches LES at 1.75 BOMEX, 1.5 RICO),
+# LWP at 1.25-1.5 (1.75 gives 2.0x/1.5x LES).  This deck keeps
+# conv_water_in_rad 0, so plume water never enters the radiative or
+# microphysical water paths; it only gates where plume cloud FRACTION exists,
+# and that fraction is what reaches radiation -> cover sets the value.
+# With alphturb 3 cover RMSE is flat in the factor; revisit if that changes.
+cloud_clubb_mf_cldfrac_fac: 1.75

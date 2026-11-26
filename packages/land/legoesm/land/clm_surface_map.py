@@ -348,12 +348,13 @@ def soil_color_albedo(color_class):
     return _SOIL_ALB_SAT[idx]
 
 
-def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg, *, vg_air_entry_m) -> dict:
+def load_clm_surface(path, tgt_lat_deg, tgt_lon_deg, *, vg_air_entry_m) -> dict:
     """Map a CLM surfdata file to the target columns.
 
     Parameters
     ----------
-    path : str — CLM surfdata NetCDF (see :func:`download_clm_surfdata`).
+    path : str — CLM surfdata NetCDF (see :func:`download_clm_surfdata`), or an
+        already-open ``xarray.Dataset`` with the same variables.
     tgt_lat_deg, tgt_lon_deg : 1-D arrays — target column centres [deg].
     vg_air_entry_m : float — the run's van Genuchten air-entry head [m] (<= 0; 0 =
         classic curve), for the soil wilting point / field capacity.  No default.
@@ -367,7 +368,7 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg, *, vg_air_entry_m) -> 
     ``MONTHLY_LAI``/``PCT_CFT``).
     """
     import xarray as xr
-    ds = xr.open_dataset(path)
+    ds = path if isinstance(path, xr.Dataset) else xr.open_dataset(path)
     slat = ds["LATIXY"].values[:, 0] if "LATIXY" in ds else ds["lsmlat"].values
     slon = ds["LONGXY"].values[0, :] if "LONGXY" in ds else ds["lsmlon"].values
 

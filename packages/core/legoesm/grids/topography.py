@@ -257,6 +257,8 @@ class TopographyConfig(NamedTuple):
     smoothing_passes: int = 4
     land_mask_path: str = ""
     land_mask_var: str = ""
+    land_mask_lat_var: str = ""
+    land_mask_lon_var: str = ""
 
 
 # ==============================================================================
@@ -264,7 +266,7 @@ class TopographyConfig(NamedTuple):
 # ==============================================================================
 
 
-def _detect_variables(ds) -> tuple[str, str, str]:
+def detect_elevation_variables(ds) -> tuple[str, str, str]:
     """Auto-detect elevation, latitude, and longitude variable names."""
     all_vars = set(ds.data_vars.keys()) | set(ds.coords.keys())
 
@@ -427,6 +429,8 @@ def _load_land_fraction_file(
     var_name: str,
     target_lat_deg: np.ndarray,
     target_lon_deg: np.ndarray,
+    lat_var: str = "",
+    lon_var: str = "",
 ) -> np.ndarray:
     """Load a land-sea-mask file and regrid (bilinear) to the target grid.
 
@@ -470,16 +474,10 @@ def _load_land_fraction_file(
                     )
                 mask_var = data_vars[0]
 
-        lat_var = None
-        for c in ("lat", "latitude", "y", "Y"):
-            if c in all_names:
-                lat_var = c
-                break
-        lon_var = None
-        for c in ("lon", "longitude", "x", "X"):
-            if c in all_names:
-                lon_var = c
-                break
+        lat_var = lat_var or next((c for c in ("lat", "latitude", "y", "Y")
+                                   if c in all_names), None)
+        lon_var = lon_var or next((c for c in ("lon", "longitude", "x", "X")
+                                   if c in all_names), None)
         if lat_var is None or lon_var is None:
             raise KeyError(
                 f"Cannot detect lat/lon in land-mask file {path}; "
@@ -630,6 +628,27 @@ def owner_by_boxes(lat_s, lon_s, lat_c_1d, lon_c_1d, lat_edges_1d=None):
     return (j * lon_c.size + i).astype(np.int64)
 
 
+def point_owner(lat_rad, lon_rad, cell_lat_rad, cell_lon_rad, *, corners_xyz=None,
+                nb=None, axes_1d=None):
+    """Index of the cell owning each point (radians): exact spherical quads
+    (``corners_xyz`` + ``nb``), exact lat-lon boxes (``axes_1d``), else the
+    NEAREST centre (exact for a Voronoi mesh) -- the ownership rule of
+    :func:`bin_latlon_to_cells`."""
+    from scipy.spatial import cKDTree
+    lat_rad, lon_rad = np.ravel(lat_rad), np.ravel(lon_rad)
+    if corners_xyz is not None:
+        owner, n_fb = owner_by_quads(_xyz(lat_rad, lon_rad), _xyz(cell_lat_rad, cell_lon_rad),
+                                     np.asarray(corners_xyz), np.asarray(nb))
+        if n_fb > 0:
+            raise ValueError(f"bin_latlon_to_cells: {n_fb} source cells inside no quad -- "
+                             "the corner arrays do not describe this grid")
+        return owner
+    if axes_1d is not None:
+        return owner_by_boxes(lat_rad, lon_rad, *axes_1d)
+    return cKDTree(_xyz(cell_lat_rad, cell_lon_rad)).query(
+        _xyz(lat_rad, lon_rad), k=1)[1].astype(np.int64)
+
+
 def bin_latlon_to_cells(lat_src_deg, lon_src_deg, fields, cell_lat_rad, cell_lon_rad,
                         cell_area=None, *, corners_xyz=None, nb=None, axes_1d=None):
     """Area-weighted cell means of regular lat-lon ``fields`` (each
@@ -642,22 +661,12 @@ def bin_latlon_to_cells(lat_src_deg, lon_src_deg, fields, cell_lat_rad, cell_lon
     A cell no source cell lands in is an error (the source must be finer);
     with ``cell_area`` the assigned source area is checked against the
     cell's own area (ratio in [0.5, 2])."""
-    from scipy.spatial import cKDTree
     lat_s = np.deg2rad(np.asarray(lat_src_deg, dtype=np.float64))
     lon_s = np.deg2rad(np.asarray(lon_src_deg, dtype=np.float64))
     lon2, lat2 = np.meshgrid(lon_s, lat_s)
-    xyz_s = _xyz(lat2.ravel(), lon2.ravel())
-    xyz_c = _xyz(cell_lat_rad, cell_lon_rad)
-    n = xyz_c.shape[0]
-    if corners_xyz is not None:
-        owner, n_fb = owner_by_quads(xyz_s, xyz_c, np.asarray(corners_xyz), np.asarray(nb))
-        if n_fb > 0:
-            raise ValueError(f"bin_latlon_to_cells: {n_fb} source cells inside no quad -- "
-                             "the corner arrays do not describe this grid")
-    elif axes_1d is not None:
-        owner = owner_by_boxes(lat2.ravel(), lon2.ravel(), *axes_1d)
-    else:
-        owner = cKDTree(xyz_c).query(xyz_s, k=1)[1].astype(np.int64)
+    n = np.asarray(cell_lat_rad).size
+    owner = point_owner(lat2.ravel(), lon2.ravel(), cell_lat_rad, cell_lon_rad,
+                        corners_xyz=corners_xyz, nb=nb, axes_1d=axes_1d)
     w = _source_cell_areas(lat_src_deg, lon_src_deg).ravel()
     denom = np.bincount(owner, weights=w, minlength=n)
     if np.any(denom <= 0.0):
@@ -858,21 +867,10 @@ def _corner_neighbours(corners_xyz, k_max: int = 8):
     return nb
 
 
-def grid_terrain_product(grid, lat_src_deg, lon_src_deg, elev_m, *,
-                         f_land_override=None, smoothing_passes: int = 4):
-    """THE terrain product of ``grid`` from one elevation field (metres,
-    ocean negative or 0): cell-mean elevation of ``max(elev, 0)`` and the
-    land fraction (area fraction with ``elev > 0``) from the SAME binning,
-    then the masked diffusion.  ``f_land_override`` (an sftlf-type field
-    already on the grid) replaces the land fraction BEFORE the filter and
-    masks it; where it says ocean the elevation is pinned to 0.  Returns
-    ``(z_s [m], f_land)`` flattened ``(n_cells,)``; a grid without
-    neighbour information gets the UNSMOOTHED binned elevation (the duo
-    column lane filters on its faces)."""
-    elev = np.asarray(elev_m, dtype=np.float64)
-    area = getattr(grid, "grid_area", None)
-    if area is None:
-        area = getattr(grid, "area", None)
+def grid_ownership(grid) -> dict:
+    """The ownership keywords of :func:`point_owner` / :func:`bin_latlon_to_cells`
+    for ``grid``: corner quads (duo column mesh), lat-lon boxes (structured
+    lat-lon), else nearest centre (Voronoi)."""
     own = {}
     c_lat = getattr(grid, "cornerLat", None)
     if c_lat is not None:
@@ -887,16 +885,47 @@ def grid_terrain_product(grid, lat_src_deg, lon_src_deg, elev_m, *,
                           None if lat_v is None else np.asarray(lat_v, dtype=np.float64))
     # else: nearest centre -- exact for a Voronoi mesh; the cube lane grid
     # (no corner arrays) is served to that approximation (follow-up)
+    return own
+
+
+def grid_terrain_product(grid, lat_src_deg, lon_src_deg, elev_m, *,
+                         f_land_override=None, smoothing_passes: int = 4,
+                         f_land_src=None, closed_cells=None):
+    """THE terrain product of ``grid`` from one elevation field (metres,
+    ocean negative or 0): cell-mean elevation of ``max(elev, 0)`` and the
+    land fraction (area fraction with ``elev > 0``) from the SAME binning,
+    then the masked diffusion.  ``f_land_override`` (an sftlf-type field
+    already on the grid) replaces the land fraction BEFORE the filter and
+    masks it; where it says ocean the elevation is pinned to 0.
+    ``f_land_src`` (a land fraction on the SOURCE grid) is binned with the
+    elevation and replaces the ``elev > 0`` fraction.  ``closed_cells``
+    (bool ``(n_cells,)``, a closed barrier) get land fraction 1 and
+    elevation 0 and are kept out of the filter.  Returns
+    ``(z_s [m], f_land)`` flattened ``(n_cells,)``; a grid without
+    neighbour information gets the UNSMOOTHED binned elevation (the duo
+    column lane filters on its faces)."""
+    elev = np.asarray(elev_m, dtype=np.float64)
+    area = getattr(grid, "grid_area", None)
+    if area is None:
+        area = getattr(grid, "area", None)
     z_mean, f_land = bin_latlon_to_cells(
-        lat_src_deg, lon_src_deg, [np.maximum(elev, 0.0), (elev > 0.0).astype(np.float64)],
+        lat_src_deg, lon_src_deg,
+        [np.maximum(elev, 0.0), (elev > 0.0).astype(np.float64) if f_land_src is None
+         else np.asarray(f_land_src, dtype=np.float64)],
         np.asarray(grid.grid_lat), np.asarray(grid.grid_lon),
-        cell_area=None if area is None else np.asarray(area), **own)
+        cell_area=None if area is None else np.asarray(area), **grid_ownership(grid))
     if f_land_override is not None:
         f_land = np.clip(np.asarray(f_land_override, dtype=np.float64).ravel(), 0.0, 1.0)
+    smooth_mask = f_land
+    if closed_cells is not None:
+        closed = np.asarray(closed_cells, dtype=bool).ravel()
+        f_land = np.where(closed, 1.0, f_land)
+        z_mean = np.where(closed, 0.0, z_mean)
+        smooth_mask = np.where(closed, 0.0, f_land)   # barrier stays at elevation 0
     z_s = np.where(f_land > 0.0, z_mean, 0.0)
     table = neighbour_table(grid)
     if table is not None and smoothing_passes > 0:
-        z_s = masked_diffusion(z_s, f_land, table[0], table[1], passes=smoothing_passes)
+        z_s = masked_diffusion(z_s, smooth_mask, table[0], table[1], passes=smoothing_passes)
     return z_s, f_land
 
 
@@ -1454,6 +1483,7 @@ def load_real_topography(
     grid,
     config: TopographyConfig | None = None,
     data_path: str | None = None,
+    **terrain_kw,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Load real topography from a NetCDF file and regrid to model grid.
 
@@ -1502,7 +1532,7 @@ def load_real_topography(
     if config.elev_var and config.lat_var and config.lon_var:
         elev_var, lat_var, lon_var = config.elev_var, config.lat_var, config.lon_var
     else:
-        elev_var, lat_var, lon_var = _detect_variables(ds)
+        elev_var, lat_var, lon_var = detect_elevation_variables(ds)
 
     # Extract source data
     lat_src = ds[lat_var].values.astype(np.float64)
@@ -1557,10 +1587,11 @@ def load_real_topography(
     if config.land_mask_path:
         target_lat_2d, target_lon_2d, _, _ = _target_grid_degrees(grid)
         f_over = _load_land_fraction_file(
-            config.land_mask_path, config.land_mask_var, target_lat_2d, target_lon_2d)
+            config.land_mask_path, config.land_mask_var, target_lat_2d, target_lon_2d,
+            config.land_mask_lat_var, config.land_mask_lon_var)
     z_s, f_land = grid_terrain_product(
         grid, lat_src, lon_src, elev_data, f_land_override=f_over,
-        smoothing_passes=config.smoothing_passes)
+        smoothing_passes=config.smoothing_passes, **terrain_kw)
     phis = jnp.asarray(constants.g * z_s.reshape(shape))
     f_land = jnp.asarray(np.clip(f_land, 0.0, 1.0).reshape(shape))
     return phis, f_land
