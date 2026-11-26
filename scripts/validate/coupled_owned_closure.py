@@ -209,9 +209,12 @@ def main(argv=None) -> int:
                     default="synthetic",
                     help="none: no land model on an all-ocean --geography "
                     "(the coupler's ice/lake handback alone enters the "
-                    "atmosphere's flux kernel); land rows are then zero")
+                    "atmosphere's flux kernel); the land store is then "
+                    "empty and the land row is the residual of E_atm - E_ow "
+                    "- H_recv")
     ap.add_argument("--geography", default="",
-                    help="geography file (--land none)")
+                    help="all-ocean geography file (--land none); with "
+                    "--deck, passed to the deck")
     ap.add_argument("--land-mask-file", default="")
     ap.add_argument("--clm-surfdata-path", default="")
     ap.add_argument("--surfdata", default="")
@@ -283,7 +286,9 @@ def main(argv=None) -> int:
         ap.error("--replay-copy-col needs --nan-stages")
     if deck_argv and not args.deck:
         ap.error(f"unrecognized arguments: {' '.join(deck_argv)}")
-    if (args.land == "none") != bool(args.geography):
+    if args.deck and args.geography:    # the deck's own flag, as before
+        deck_argv += ["--geography", args.geography]
+    elif (args.land == "none") != bool(args.geography):
         ap.error("--land none needs --geography, and --geography needs "
                  "--land none")
     if args.land == "none" and args.energy_terms:
