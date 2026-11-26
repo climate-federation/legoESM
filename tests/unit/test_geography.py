@@ -657,6 +657,7 @@ def test_coupled_ocean_forcing_carries_the_ice_concentration(tmp_path):
     d._sfc_state = d._sfc_state._replace(
         ice=ice._replace(concentration=ice.concentration.replace(data=conc)))
     want = conc.sum(axis=-1) if ncat > 1 else conc
-    sf, _ = d._assemble_owned_ocean_forcing()
-    np.testing.assert_allclose(np.asarray(sf.ice_concentration).ravel(),
-                               np.asarray(want).ravel(), rtol=0, atol=1e-6)
+    for sf, _ in (d._assemble_owned_ocean_forcing(),
+                  d._assemble_ocean_forcing(d._build_atm_forcing(0.0))):
+        np.testing.assert_allclose(np.asarray(sf.ice_concentration).ravel(),
+                                   np.asarray(want).ravel(), rtol=0, atol=1e-6)
