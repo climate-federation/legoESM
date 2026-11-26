@@ -43,6 +43,10 @@ from legoesm.grids.gaussian import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm import constants
+from legoesm.core.williamson_sw_analytic import (
+    W5_CENTER_WILLIAMSON,
+    williamson_5_mountain_height,
+)
 
 
 # --- default del-4 hyperdiffusion: 2.338e15 m^4/s at T21, scaled (21/T)^4 ---
@@ -598,25 +602,18 @@ def williamson_test5_spectral(grid: GaussianGrid) -> SpectralSWState:
 
     lat2d = grid.lat2d
     lon2d = grid.lon2d
-    cos_lat_2d = jnp.cos(lat2d)
     sin_lat_2d = jnp.sin(lat2d)
 
     # Vorticity and divergence
     vor = 2.0 * u_0 / R * sin_lat_2d
     div_field = jnp.zeros_like(vor)
 
-    # Mountain topography
-    lon_c = 3.0 * jnp.pi / 2.0   # 270E
-    lat_c = jnp.pi / 6.0          # 30N
-    R_m = jnp.pi / 9.0            # 20 degrees radius
-    h_s0 = 2000.0                  # peak height [m]
-
-    r = jnp.arccos(jnp.clip(
-        jnp.sin(lat_c) * sin_lat_2d +
-        jnp.cos(lat_c) * cos_lat_2d * jnp.cos(lon2d - lon_c),
-        -1.0, 1.0,
-    ))
-    h_s = jnp.where(r < R_m, h_s0 * (1.0 - r / R_m), 0.0)
+    # Mountain topography: Williamson et al. (1992) case 5, the shared
+    # planar clipped-radius mountain at Williamson's centre (3pi/2, pi/6),
+    # r0 = pi/9, h_s0 = 2000 m -- the same mountain the cube, lat-lon and
+    # MPAS rows use (this was a great-circle cone, a different mountain).
+    h_s = williamson_5_mountain_height(
+        lon2d, lat2d, center=W5_CENTER_WILLIAMSON, xp=jnp)
     phis = g * h_s
 
     # Height field: free surface from geostrophic balance, then subtract mountain

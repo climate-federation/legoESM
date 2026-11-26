@@ -301,6 +301,27 @@ class TestSpectralSW:
         # Surface geopotential should be nonzero (mountain)
         assert float(jnp.max(jnp.abs(state.phis_hat.data))) > 0
 
+    def test_test5_mountain_is_williamson_planar(self, grid_t21):
+        """Williamson et al. (1992) case 5: r^2 = min(R^2, (lam - lam_c)^2
+        + (th - th_c)^2) (planar, clipped), R = pi/9, h_s0 = 2000 m, centre
+        (3pi/2, pi/6) -- written out here on the Gaussian grid and projected.
+        The old great-circle cone differs by up to ~300 m of height."""
+        state = williamson_test5_spectral(grid_t21)
+        # fp64 precondition for the tight tolerance below (this module
+        # enables jax_enable_x64; the Gaussian grid is built in fp64)
+        assert grid_t21.lon2d.dtype == jnp.float64
+        assert grid_t21.lat2d.dtype == jnp.float64
+        assert state.phis_hat.data.dtype == jnp.complex128
+        lon = np.asarray(grid_t21.lon2d)
+        lat = np.asarray(grid_t21.lat2d)
+        dlon = np.mod(lon - 1.5 * np.pi + np.pi, 2 * np.pi) - np.pi
+        r = np.sqrt(np.minimum((np.pi / 9) ** 2,
+                               dlon ** 2 + (lat - np.pi / 6) ** 2))
+        phis = constants.g * 2000.0 * (1.0 - r / (np.pi / 9))
+        ref = np.asarray(sh_analysis(grid_t21, jnp.asarray(phis)))
+        np.testing.assert_allclose(np.asarray(state.phis_hat.data), ref,
+                                   rtol=0, atol=1e-10 * np.abs(ref).max())
+
     def test_test2_small_tendencies(self, grid_t21):
         """Test Case 2 (geostrophic balance) should have small tendencies."""
         state = williamson_test2_spectral(grid_t21)
