@@ -481,5 +481,8 @@ def test_legacy_field_is_refused(tmp_path):
     np.savez(path, old=np.ones(3))
     with pytest.raises(ValueError, match="old: replaced by new"):
         load_state_checkpoint(path, _Renamed(new=f), strict=False)
+    from legoesm.io.state_checkpoint import _validate_metadata
+    issues = _validate_metadata({"saved_fields": ["old"]}, _Renamed(new=f), None)
+    assert any(i.startswith("ERROR: legacy field 'old'") for i in issues)
     # The spectral NH state declares its pre-#2682 density field.
     assert "rho_prime_hat" in SpectralNHState.checkpoint_legacy_fields

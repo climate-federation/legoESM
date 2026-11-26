@@ -826,7 +826,7 @@ def height_vertical_paths(out, rows, provenance, record):
         inactive_lane="matrix spectral TC3 skipped before initialization",
         dispatch="nonempty tracers: paired; empty axes: legacy; exact J == 1 selects unchanged flat recovery, otherwise projected J*rho denominator",
         acceptance_scope="flat and nonflat global inventory conservation required",
-        known_difference="uniform tracer not preserved over terrain: measured max relative drift 9.59e-7 explicit / 9.55e-7 semi-implicit per dt=1 s step; flat control ~1.7e-14; final min P(J*rho)=0.0464, intermediate positivity UNMEASURED",
+        known_difference="none for uniform tracers since J*rho' became prognostic (#2682): drift 1.1e-14 per dt=1 s step on this terrain metric (was 9.59e-7 explicit / 9.55e-7 semi-implicit with rho' prognostic); recovery denominator positivity is still not guaranteed",
     )
     for nonflat in (False, True):
         for semi_implicit in (False, True):
@@ -846,8 +846,6 @@ def height_vertical_paths(out, rows, provenance, record):
                                   else "required_flat_conservation"),
                 method="paired_projected_density" if nonflat else "paired",
             )
-            if nonflat:
-                rows[budget_index]["known_difference"] = "uniform tracer not preserved over terrain; see recovery docstring and T29 preregistration"
             objects[label + "/initial"] = supplemental_state
             objects[label + "/final"] = supplemental_final
             objects[label + "/metric"] = supplemental_model.terrain_metric

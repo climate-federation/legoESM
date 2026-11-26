@@ -454,6 +454,9 @@ def _validate_metadata(
     saved_fields = set(metadata.get("saved_fields", []))
     template_fields = set(state_template._fields)
     missing = saved_fields - template_fields
+    legacy = getattr(type(state_template), "checkpoint_legacy_fields", {})
+    for name in sorted(saved_fields & set(legacy)):
+        issues.append(f"ERROR: legacy field '{name}': {legacy[name]}")
     if missing:
         issues.append(
             f"WARNING: checkpoint has fields not in template: {sorted(missing)}"
