@@ -437,6 +437,16 @@ class CoupledESMDriver:
         sst_init = remap_field(sst_init_atm, self._grid_remapper.a2o)
         T_sfc_mean = float(jnp.mean(sst_init))
 
+        from legoesm.grids.voronoi import VoronoiMesh
+        if cfg.ocean_vertical_mixing is not None and not (
+                cfg.ocean_mode == "dynamic"
+                and isinstance(self._ocean_grid, VoronoiMesh)):
+            raise ValueError(
+                f"ocean_vertical_mixing={cfg.ocean_vertical_mixing!r} is wired "
+                "for the co-located MPAS dynamic ocean only; got ocean_mode="
+                f"{cfg.ocean_mode!r} on a {type(self._ocean_grid).__name__} "
+                "ocean grid.  Leave it unset (None) for the lane's own closure.")
+
         # Dispatch on ocean_mode (explicit; ValueError on unknown — no silent
         # else->slab, per the CLAUDE.md dispatch-hardening rule).
         if cfg.ocean_mode in ("slab", "two_layer", "fixed"):
@@ -966,6 +976,28 @@ class CoupledESMDriver:
                     scheme="none")),
             normalize_freshwater=True,
         )
+        vmix = cfg.ocean_vertical_mixing
+        if vmix == "tke":
+            # The OMIP MPAS production card (--mpas-vmix tke --tke-surface-bc
+            # nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic
+            # --tke-kappa-convention veros_sqrte), stated explicitly.  No IWM:
+            # its forcing map is Earth's internal-wave energy (VOTED V3 a/a/a).
+            from legoesm.ocean.fidelity.orca1_zdftke_card import (
+                orca1_zdftke_config,
+            )
+            from legoesm.ocean.physics.vertical_mixing.config import (
+                VerticalMixingConfig,
+            )
+            config = config._replace(physics=config.physics._replace(
+                vertical_mixing=VerticalMixingConfig(
+                    scheme="tke",
+                    tke=orca1_zdftke_config(
+                        surface_bc="nemo_dirichlet", mxl_choice=3,
+                        prognostic=True, kappa_convention="veros_sqrte"))))
+        elif vmix not in (None, "kpp"):
+            raise ValueError(
+                f"unknown ocean_vertical_mixing scheme {vmix!r}; must be one of "
+                "None, 'kpp', 'tke'.")
         self._ocean_model = MPASOceanModel(mesh, z_coord, config)
         # Stratified rest cold start (zero velocity/SSH, exponential T, uniform
         # S).  land_lat_threshold=90 => all-ocean, matching a co-located
@@ -1027,6 +1059,9 @@ class CoupledESMDriver:
                 H_bathy=Field(data=H, name="H_bathy", dims=("nCells",), units="m"),
                 land_mask=Field(data=jnp.asarray(wet, dtype=_sd), name="land_mask",
                                 dims=("nCells",), units="1"))
+        # Prognostic TKE carry: None -> Field once, before the first step and
+        # before any restart load (the restore template must carry it).
+        self._ocean_state = self._ocean_model.seed_tke(self._ocean_state)
         self._ocean_step = self._ocean_model.step
         self._ocean_z_coord = z_coord
         self._ocean_land_mask = self._ocean_state.land_mask.data
@@ -2107,6 +2142,12 @@ class CoupledESMDriver:
         # timescales are 0 or no WOA target was loaded (byte-identical).
         self._apply_ocean_restoring(dt)
 
+    def _ocean_ice_concentration(self, like):
+        """Sea-ice concentration [0-1] on the ocean grid, shaped like ``like``
+        (0 with no ice state).  Read only by closures with an under-ice option
+        switched on (the TKE card's eice=3); every other consumer gates on it."""
+        return jnp.zeros_like(like) + (1.0 - self._slab_open_water_frac())
+
     def _slab_open_water_frac(self):
         """Ice-free fraction of the slab's water area, on the ocean grid.
 
@@ -2553,6 +2594,7 @@ class CoupledESMDriver:
         sf = OceanSurfaceForcing(
             sw_down=sw_pen, q_net=q_net,
             tau_x=tau_x, tau_y=tau_y, salt_flux=salt_flux, freshwater=None,
+            ice_concentration=self._ocean_ice_concentration(q_net),
         )
         return sf, fw
 
@@ -2713,7 +2755,8 @@ class CoupledESMDriver:
             ice_fw=to_o(prev.ice_lake_freshwater_flux))
         sf = OceanSurfaceForcing(
             sw_down=to_o(sw_cell), q_net=q_net, tau_x=tau_x, tau_y=tau_y,
-            salt_flux=to_o(prev.salt_flux), freshwater=None)
+            salt_flux=to_o(prev.salt_flux), freshwater=None,
+            ice_concentration=self._ocean_ice_concentration(q_net))
         self._owned_exchange_tripwire(
             {"heat": (q_cell, to_o(q_cell)), "sw": (sw_cell, sf.sw_down),
              "evap": (aux["seg_evap_ow"], fw.evap),

@@ -529,3 +529,136 @@ def test_coupled_mpas_ocean_refuses_an_unwired_start(tmp_path):
         ocean_ic="woa"), output_dir=str(tmp_path / "run"))
     with pytest.raises(ValueError, match="must be 'rest' or 'qobs'"):
         d.setup()
+
+
+def _mpas_ocean_driver(tmp_path, **cc):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    return CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet")), CoupledConfig(
+        f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+        ocean_ic="qobs", **cc), output_dir=str(tmp_path / "run"))
+
+
+def test_coupled_mpas_ocean_tke_is_the_omip_production_card(tmp_path):
+    from scripts.run.run_omip_core2 import build_tripole_vmix_config
+    d = _mpas_ocean_driver(tmp_path, ocean_vertical_mixing="tke")
+    d.setup()
+    # the OMIP MPAS production flags (--mpas-vmix tke --tke-surface-bc
+    # nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic
+    # --tke-kappa-convention veros_sqrte), built through the OMIP path, no iwm
+    want = build_tripole_vmix_config(
+        "tke", tke_surface_bc="nemo_dirichlet", tke_mxl_choice=3,
+        tke_prognostic=True, tke_kappa_convention="veros_sqrte")
+    assert d._ocean_model.config.physics.vertical_mixing == want
+    # nothing else of the recipe's vertical-mixing block is lost (the KPP block
+    # it replaces carries only defaults)
+    from legoesm.ocean.fidelity.nemo_match_recipe import nemo_match_mpas_model_config
+    base = nemo_match_mpas_model_config().physics.vertical_mixing
+    assert want._replace(scheme=base.scheme, tke=base.tke) == base
+    tke = d._ocean_state.tke
+    assert tke is not None and tke.data.shape == (d._ocean_grid.nCells, 19)
+    assert float(np.max(np.asarray(tke.data))) > 0.0
+
+
+def test_coupled_mpas_ocean_default_closure_stays_kpp(tmp_path):
+    d = _mpas_ocean_driver(tmp_path)
+    d.setup()
+    assert d._ocean_model.config.physics.vertical_mixing.scheme == "kpp"
+    assert d._ocean_state.tke is None
+
+
+def test_coupled_mpas_ocean_tke_carry_survives_a_checkpoint(tmp_path):
+    import jax.numpy as jnp
+    d = _mpas_ocean_driver(tmp_path, ocean_vertical_mixing="tke")
+    d.setup()
+    seed = np.asarray(d._ocean_state.tke.data)
+    marked = (1.0e-6 * (1.0 + np.arange(seed.size))).reshape(seed.shape).astype(seed.dtype)
+    d._ocean_state = d._ocean_state._replace(
+        tke=d._ocean_state.tke.replace(data=jnp.asarray(marked)))
+    np.savez(tmp_path / "coupled_day_0001.npz", **d.coupled_checkpoint_arrays())
+    (tmp_path / "r").mkdir()
+    r = _mpas_ocean_driver(tmp_path / "r", ocean_vertical_mixing="tke")
+    r.setup()
+    assert not np.allclose(np.asarray(r._ocean_state.tke.data), marked)
+    r.load_coupled_checkpoint(1.0, checkpoint_dir=tmp_path)
+    assert np.array_equal(np.asarray(r._ocean_state.tke.data), marked)
+    # a KPP checkpoint (no TKE carry) does not restore into a TKE run
+    (tmp_path / "k").mkdir()
+    k = _mpas_ocean_driver(tmp_path / "k")
+    k.setup()
+    (tmp_path / "kc").mkdir()
+    np.savez(tmp_path / "kc" / "coupled_day_0001.npz", **k.coupled_checkpoint_arrays())
+    with pytest.raises(ValueError):
+        r.load_coupled_checkpoint(1.0, checkpoint_dir=tmp_path / "kc")
+
+
+@pytest.mark.parametrize("cc, match", [
+    (dict(ocean_vertical_mixing="epbl"), "unknown ocean_vertical_mixing scheme"),
+    (dict(ocean_vertical_mixing="tke", ocean_mode="slab", ocean_ic="rest"),
+     "MPAS dynamic ocean only"),
+])
+def test_coupled_ocean_vertical_mixing_refusals(tmp_path, cc, match):
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+    base = dict(f_land_mode="analytical", land_mode="none", ocean_mode="dynamic",
+                ocean_ic="qobs")
+    d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet")),
+                         CoupledConfig(**{**base, **cc}),
+                         output_dir=str(tmp_path / "run"))
+    with pytest.raises(ValueError, match=match):
+        d.setup()
+
+
+def test_coupled_mpas_ocean_tke_steps_and_feels_the_wind(tmp_path):
+    """The seeded carry is advanced by the step, the coupled stress reaches
+    the TKE surface condition, and the forcing carries the ice field the
+    card's eice=3 needs (the step fails fast without it)."""
+    import jax.numpy as jnp
+    from legoesm.ocean.state import OceanSurfaceForcing
+    d = _mpas_ocean_driver(tmp_path, ocean_vertical_mixing="tke")
+    d.setup()
+    z = jnp.zeros(d._ocean_grid.nCells)
+    ice = d._ocean_ice_concentration(z)
+    assert ice.shape == z.shape and float(jnp.max(ice)) <= 1.0
+
+    def top_tke(tau):
+        sf = OceanSurfaceForcing(sw_down=z, q_net=z, tau_x=z + tau, tau_y=z,
+                                 ice_concentration=ice)
+        s = d._ocean_step(d._ocean_state, 300.0, surface_forcing=sf)
+        return np.asarray(s.tke.data)[:, 0]
+
+    seed = np.asarray(d._ocean_state.tke.data)[:, 0]
+    calm, windy = top_tke(0.0), top_tke(0.1)
+    assert not np.allclose(calm, seed)
+    assert np.mean(windy) > np.mean(calm)
+    with pytest.raises(ValueError, match="ice_concentration"):
+        d._ocean_step(d._ocean_state, 300.0, surface_forcing=OceanSurfaceForcing(
+            sw_down=z, q_net=z, tau_x=z + 0.1, tau_y=z))
+
+
+def test_coupled_ocean_forcing_carries_the_ice_concentration(tmp_path):
+    """Both coupled forcing assemblies hand the ocean the sea-ice fraction
+    (the TKE card's eice=3 refuses to step without it)."""
+    import jax.numpy as jnp
+    from legoesm.coupler.coupler import OwnedOceanExchange
+    d = _mpas_ocean_driver(tmp_path, ocean_vertical_mixing="tke")
+    d.setup()
+    z = jnp.zeros(d._ocean_grid.nCells)
+    d._owned_to_ocean = OwnedOceanExchange(*([z] * 5))
+    d._atm._carry_aux = {k: z for k in (
+        "seg_evap_ow", "seg_lhflx_ow", "seg_ow_lw_net", "seg_ow_sw_net",
+        "seg_precip_ice", "seg_precip_ow", "seg_runoff_land", "seg_shflx_ow",
+        "seg_taux_ow", "seg_tauy_ow", "held_sw_net_sfc", "held_lw_net_sfc",
+        "seg_precip", "seg_precip_frozen")}
+    ice = d._sfc_state.ice
+    shp = ice.concentration.data.shape
+    ncat = shp[-1] if "category" in tuple(ice.concentration.dims) else 1
+    conc = (0.5 * (1.0 + jnp.sin(jnp.arange(int(np.prod(shp)))))).reshape(shp) / ncat
+    conc = conc.astype(ice.concentration.data.dtype)
+    d._sfc_state = d._sfc_state._replace(
+        ice=ice._replace(concentration=ice.concentration.replace(data=conc)))
+    want = conc.sum(axis=-1) if ncat > 1 else conc
+    for sf, _ in (d._assemble_owned_ocean_forcing(),
+                  d._assemble_ocean_forcing(d._build_atm_forcing(0.0))):
+        np.testing.assert_allclose(np.asarray(sf.ice_concentration).ravel(),
+                                   np.asarray(want).ravel(), rtol=0, atol=1e-6)

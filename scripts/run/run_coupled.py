@@ -897,6 +897,12 @@ def build_parser():
                              "WOA18 reanalysis T/S + WOA-derived continents "
                              "(realistic cold start; f_land co-derived from the "
                              "same ocean mask, land tile enabled)")
+    parser.add_argument("--ocean-vertical-mixing", default=None,
+                        choices=["kpp", "tke"],
+                        help="3D ocean vertical mixing (--ocean dynamic --grid "
+                             "voronoi only). Unset = the lane's own closure "
+                             "(KPP on MPAS); 'tke' = the OMIP MPAS production "
+                             "NEMO ORCA1 zdftke card (prognostic TKE)")
     parser.add_argument("--woa-t-path",
                         default="data/woa18/woa18_decav_t00_01.nc",
                         help="WOA18 temperature file (--ocean-ic woa)")
@@ -1194,6 +1200,10 @@ def main(argv=None, *, build_only=False):
             f"latlon:48). The {args.grid_type} atmosphere couples to the lat-lon 3-D "
             "ocean via the conservative cross-grid remap; a co-located 3-D "
             f"ocean dycore for --grid {args.grid_type} does not exist.")
+    if args.ocean_vertical_mixing is not None and not (
+            args.ocean == "dynamic" and args.grid_type == "voronoi"):
+        raise SystemExit("--ocean-vertical-mixing is wired for the MPAS dynamic "
+                         "ocean only (--ocean dynamic --grid voronoi).")
     if args.ocean != "dynamic" and args.ocean_ic == "qobs":
         raise SystemExit("--ocean-ic qobs starts the 3-D ocean; it needs --ocean dynamic.")
     if args.ocean == "dynamic":
@@ -1259,6 +1269,7 @@ def main(argv=None, *, build_only=False):
         overrides["ocean_dt_s"] = args.ocean_dt
         overrides["ocean_H_max_m"] = args.ocean_H_max
         overrides["ocean_ic"] = args.ocean_ic
+        overrides["ocean_vertical_mixing"] = args.ocean_vertical_mixing
         # WOA surface restoring (coupled spin-up anchor); 0 => off => unchanged.
         overrides["ocean_restore_sst_tau_days"] = args.ocean_restore_sst_tau_days
         overrides["ocean_restore_sss_tau_days"] = args.ocean_restore_sss_tau_days

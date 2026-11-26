@@ -203,6 +203,12 @@ class CoupledConfig(NamedTuple):
     # alone (measured: 15d still drifts -92 K/yr); restoring is the complement.
     ocean_restore_sst_tau_days: float = 0.0   # surface T relaxation [days]
     ocean_restore_sss_tau_days: float = 0.0   # surface S relaxation [days]
+    # Dynamic-ocean vertical mixing (last field: positional calls unchanged).
+    # None = the lane's built-in closure (KPP on MPAS and tripole, constant K
+    # on lat-lon).  "kpp" / "tke" are accepted on the co-located MPAS ocean
+    # only; "tke" = the OMIP MPAS production NEMO ORCA1 zdftke card
+    # (prognostic, Dirichlet surface TKE, nn_mxl=3, eice=3).
+    ocean_vertical_mixing: str | None = None
 
 
 # ============================================================================
