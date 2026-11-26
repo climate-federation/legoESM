@@ -105,9 +105,11 @@ def test_bad_model_type_raises() -> None:
 
 
 def test_bad_discretization_raises() -> None:
-    with pytest.raises(ValueError, match="discretization"):
+    # Off the cube: there the fv3_duo-only guard also names "discretization".
+    with pytest.raises(ValueError, match=r"dycore\.discretization must be one of"):
         ExperimentConfig(
-            dycore=DycoreConfig(discretization="bogus")
+            grid=GridConfig(grid_type="gaussian"),
+            dycore=DycoreConfig(discretization="bogus"),
         ).validate_strict()
 
 
