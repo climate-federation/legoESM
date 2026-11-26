@@ -528,7 +528,8 @@ def test_legacy_structure_unchanged():
     u = jnp.asarray(np.stack([0.2 * np.exp(-z / 5.0), 0.05 * np.exp(-z / 9.0)]))
     v = jnp.asarray(np.stack([0.02 * np.exp(-z / 3.0), -0.04 * np.exp(-z / 6.0)]))
     out = K.kpp_vertical_mixing(u, v, T, S, wright_eos(T, S, jnp.zeros_like(T)), jnp.zeros(2),
-                                create_z_star_from_thicknesses(dz), jnp.ones(2), KPPConfig(),
+                                create_z_star_from_thicknesses(dz), jnp.ones(2),
+                                KPPConfig(vt2_velocity_scale="column", monin_obukhov_limit=False),
                                 constants.g, tau_x=jnp.array([0.05, 0.1]),
                                 tau_y=jnp.array([0.0, 0.02]), B_f=jnp.array([5e-8, -3e-8]),
                                 Q_sfc_T=jnp.array([1e-5, -2e-5]), Q_sfc_S=jnp.array([-1e-6, 1e-6]),

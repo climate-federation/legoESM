@@ -39,7 +39,7 @@ BINDING = [(0.007, -2.4e-8), (0.004, -1.2e-8), (0.01, -5e-8), (0.003, -2e-7)]
 # IN_BAND: L within the min's 1 m width of the free depth (gap from the min);
 # L below the free depth with -B_f inside its 1e-10 smoothing width (gap from
 # the positive part: L 17.15 m hard, 22.87 m smooth)
-IN_BAND = [(0.015189, -2.4e-8), (0.0007, -5e-11)]
+IN_BAND = [(0.015273, -2.4e-8), (0.0007, -5e-11)]
 CASES = BINDING + IN_BAND + [(0.007, -5e-11), (0.01, 0.0), (0.007, 2e-7)]
 
 
@@ -83,7 +83,7 @@ def test_hard_limit_matches_cvmix_with_legoesm_floor(ustar, Bf):
 # (mo_limit_width_m 1.0, mo_stable_width_bf 1e-10); re-measure if either changes.
 SMOOTH_GAP = {
     (0.007, -2.4e-8): 0.0, (0.004, -1.2e-8): 0.0, (0.01, -5e-8): 0.0, (0.003, -2e-7): 0.0,
-    (0.015189, -2.4e-8): -0.054461151542056996, (0.0007, -5e-11): 5.716666666666669,
+    (0.015273, -2.4e-8): -0.02865694131384089, (0.0007, -5e-11): 5.716666666666669,
     (0.007, -5e-11): 0.0, (0.01, 0.0): 0.0, (0.007, 2e-7): 0.0,
 }
 
@@ -161,3 +161,14 @@ def test_narrow_width_fp32_non_binding_exact():
                                                jnp.asarray(0.0, jnp.float32), H, cfg)
     assert float(f(H)) == float(H)
     assert float(jax.grad(f)(H)) == 1.0
+
+
+@pytest.mark.parametrize("ustar,Bf", BINDING[:3])
+def test_cvmix_structure_applies_limit(ustar, Bf):
+    """bld_structure='cvmix' caps its crossing depth at L before MOM6's top-cell floor."""
+    base = dict(bld_structure="cvmix", vt2_velocity_scale="candidate", **HARD)
+    h_off = float(_h(KPPConfig(monin_obukhov_limit=False, **base), ustar, Bf))
+    h_on = float(_h(KPPConfig(**base), ustar, Bf))
+    L = ustar**3 / (KAPPA * -Bf)
+    assert L < h_off
+    np.testing.assert_allclose(h_on, L, rtol=1e-12)

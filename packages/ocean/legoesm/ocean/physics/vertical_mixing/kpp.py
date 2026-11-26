@@ -653,6 +653,10 @@ def _boundary_layer_depth(
         V_t2 = _cvmix_min_vt2(V_t2, cfg)
         Ri_b = _cvmix_bulk_richardson(delta_rho, delta_V2, V_t2, z_depth, cfg, g)
         h = _cvmix_first_crossing_depth(Ri_b, z_depth, cfg)
+        if cfg.monin_obukhov_limit:
+            # CVMix order: crossing, then the stable Monin-Obukhov min; MOM6's
+            # top-cell floor comes after the CVMix call.
+            h = _monin_obukhov_limit(h, u_star, B_f, z_depth[..., -1], cfg)
         return _cvmix_depth_floor(h, dz_actual[..., 0], cfg)
 
     if N2 is None:
