@@ -1,15 +1,15 @@
-"""Pins the spectral NH core's tracer-mass leak (#2641 KNOWN DEFECT).
+"""Conservation on main's original T21, 20-step spectral NH defect fixture.
 
-The plane and MPAS height-coordinate cores conserve tracer mass; this core
-was excluded by ruling. The measured leak is stored here so a change to it
-(either way) is seen: T21, 10 levels, 0.2 K theta perturbation, dt 5 s,
-fp64, 20 steps -> dry mass ~4e-15, tracer mass +1.883e-7 relative.
+The old path leaked +1.883e-7 relative tracer inventory (main's historical
+measurement). The paired mass path must conserve at the unchanged 1e-12 bar;
+current T30 runtime is UNVERIFIED until this test runs on authorized compute.
 """
 import jax
 
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
+import pytest
 
 from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
     SpectralCompressibleEulerModel, SpectralNHConfig, nh_rest_state_spectral)
@@ -18,10 +18,18 @@ from legoesm.grids.gaussian import (
 from legoesm.grids.vertical import (
     compute_terrain_metric, create_height_coordinate)
 
-MEASURED_TRACER_LEAK_20_STEPS = 1.883e-7
+@pytest.fixture(autouse=True)
+def fp64_policy():
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    previous = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(previous)
 
 
-def test_spectral_tracer_mass_leak_is_the_recorded_one():
+def test_spectral_tracer_mass_conserves_20_steps():
     grid = create_gaussian_grid(n_max=21)
     hc = create_height_coordinate(10, 30000.0)
     tm = compute_terrain_metric(jnp.zeros((grid.n_lat, grid.n_lon)), hc)
@@ -55,4 +63,4 @@ def test_spectral_tracer_mass_leak_is_the_recorded_one():
     d1, t1 = masses(s)
     assert abs(d1 / d0 - 1.0) < 1e-13
     leak = t1 / t0 - 1.0
-    assert abs(leak / MEASURED_TRACER_LEAK_20_STEPS - 1.0) < 0.05, leak
+    assert abs(leak) <= 1e-12, leak
