@@ -241,3 +241,148 @@ TC3_PARAMS = {
     "sponge_width": 5000.0,
     "sponge_coeff": 0.05,
 }
+
+
+# ==============================================================================
+# Cyclostrophic balance of the reduced-radius moist-convection cases
+# ==============================================================================
+
+def cyclostrophic_balance_theta_exner(lat, z, theta_eq, exner_eq, u_eq,
+                                      n_quad: int = 4001, n_iter: int = 30,
+                                      check_hydrostatic: bool = True):
+    """Balanced ``(theta, exner)(lat, z)`` for the zonal wind
+    ``u = u_eq(z) cos(lat)`` on a NON-rotating sphere (Klemp et al. 2015;
+    DCMIP2016 supercell, Zarzycki et al. 2019, Eqs. 1-2, 14-15):
+
+        d(exner)/dz       = -g / (c_p theta)                 (hydrostatic)
+        u^2 tan(lat)      = -c_p theta d(exner)/d(lat)       (cyclostrophic)
+
+    so that, eliminating exner,
+
+        d(theta)/d(lat) = sin(2 lat)/(2 g) [u_eq^2 dtheta/dz - theta du_eq^2/dz]
+
+    integrated from the equator (theta = theta_eq) by fixed-point iteration
+    (Eq. 14), and exner(lat, z) = exner_eq(z) - int_0^lat u^2 tan / (c_p
+    theta) (Eq. 15).  The sphere radius cancels from both relations, so the
+    same profiles balance any reduced-radius (small-planet) sphere; what the
+    reduction changes is how strong the metric (centrifugal) term u^2 tan/a
+    is relative to the rest of the dynamics (X times larger).  ``theta`` is
+    the dycore's (dry) potential temperature, so the state is balanced for
+    the equations the dycore integrates.
+
+    ``lat``: (n_lat,) [rad]; ``z``: (nlev,) [m] in any monotone order;
+    ``theta_eq``, ``exner_eq``, ``u_eq``: (nlev,).  Returns numpy
+    ``theta, exner`` of shape (n_lat, nlev).  Uses a fine quadrature grid in
+    |lat| (the balanced fields are even in lat) and centred differences in z.
+
+    The theta solve is the reference fixed-point (Picard) iteration of
+    DCMIP2016 Eq. 14 ("converges to machine epsilon after ~10 iterations"
+    for the smooth soundings it targets).  It is not unconditionally
+    convergent: for profiles with structure much finer than the
+    cyclostrophic displacement (e.g. metre-scale theta noise) it can
+    exhaust ``n_iter`` -- it then raises instead of returning an
+    unconverged state; raise ``n_iter`` or smooth the profile.
+
+    ``check_hydrostatic`` (default True) refuses equatorial profiles whose
+    exner drop across a layer lies outside the endpoint bracket of
+    int g/(c_p theta) dz (10 % margin).  The bracket assumes theta monotone
+    WITHIN each layer; for a column sampled across an unresolved interior
+    temperature extremum pass ``check_hydrostatic=False``.
+    """
+    import numpy as np
+
+    if n_quad < 101:
+        raise ValueError(f"n_quad={n_quad}: need >= 101 quadrature points in |lat|")
+    g, c_p = constants.g, constants.c_pd
+    z = np.asarray(z, dtype=np.float64)
+    th_eq = np.asarray(theta_eq, dtype=np.float64)
+    ex_eq = np.asarray(exner_eq, dtype=np.float64)
+    u2 = np.asarray(u_eq, dtype=np.float64) ** 2
+    # The equatorial profiles must themselves be hydrostatic (the balance
+    # only adds the off-equator correction): d(exner)/dz = -g/(c_p theta).
+    # Layer-wise, quadrature-aware: for theta monotone across a layer the
+    # exact exner drop int g/(c_p theta) dz lies between the endpoint
+    # bounds (g/c_p) |dz| min(1/theta) and (g/c_p) |dz| max(1/theta);
+    # require the supplied drop inside that bracket widened by 10 %.
+    dz_l = np.diff(z)
+    drop = -np.diff(ex_eq) * np.sign(dz_l)            # > 0 going up
+    inv = 1.0 / th_eq
+    lo = g / c_p * np.abs(dz_l) * np.minimum(inv[1:], inv[:-1])
+    hi = g / c_p * np.abs(dz_l) * np.maximum(inv[1:], inv[:-1])
+    bad = (drop < 0.9 * lo) | (drop > 1.1 * hi)
+    if check_hydrostatic and np.any(bad):
+        raise ValueError(
+            "cyclostrophic balance: equatorial (theta_eq, exner_eq) are not "
+            f"hydrostatic ({int(bad.sum())} of {bad.size} layers outside the "
+            "quadrature bracket of int g/(c_p theta) dz)")
+    lat_np = np.asarray(lat, dtype=np.float64)
+    if not (np.all(np.isfinite(lat_np))
+            and np.all(np.abs(lat_np) <= 0.5 * np.pi + 1e-6)):  # fp32 poles
+        raise ValueError("cyclostrophic balance: latitudes must be finite, |lat| <= pi/2")
+    lat_np = np.clip(lat_np, -0.5 * np.pi, 0.5 * np.pi)
+    phi = np.linspace(0.0, 0.5 * np.pi, n_quad)          # (nq,)
+    du2 = np.gradient(u2, z)                              # (nlev,)
+
+    def cumtrapz(f):                                      # along axis 0
+        out = np.zeros_like(f)
+        out[1:] = np.cumsum(0.5 * (f[1:] + f[:-1]) * np.diff(phi)[:, None],
+                            axis=0)
+        return out
+
+    s2 = np.sin(2.0 * phi)[:, None]
+    theta = np.broadcast_to(th_eq, (n_quad, z.size)).copy()
+    done = False
+    for _ in range(n_iter):
+        dth = np.gradient(theta, z, axis=1)
+        theta_new = th_eq[None, :] + cumtrapz(
+            s2 / (2.0 * g) * (u2[None, :] * dth - theta * du2[None, :]))
+        done = np.max(np.abs(theta_new - theta)) < 1e-12 * np.max(theta)
+        theta = theta_new
+        if done:
+            break
+    if not done:
+        raise RuntimeError(
+            f"cyclostrophic balance: theta iteration not converged in "
+            f"{n_iter} iterations")
+    if not (np.all(np.isfinite(theta)) and np.all(theta > 0.0)):
+        raise RuntimeError("cyclostrophic balance: non-finite or non-positive theta")
+    # u^2 tan(lat) = u_eq^2 cos(lat) sin(lat)
+    integrand = u2[None, :] * (np.sin(phi) * np.cos(phi))[:, None] / (
+        c_p * theta)
+    exner = ex_eq[None, :] - cumtrapz(integrand)
+    if not (np.all(np.isfinite(exner)) and np.all(exner > 0.0)):
+        raise RuntimeError("cyclostrophic balance: non-finite or non-positive exner")
+    a = np.abs(lat_np)
+    th_out = np.stack([np.interp(a, phi, theta[:, k]) for k in range(z.size)],
+                      axis=-1)
+    ex_out = np.stack([np.interp(a, phi, exner[:, k]) for k in range(z.size)],
+                      axis=-1)
+    return th_out, ex_out
+
+
+def tc3_balanced_perturbations(lat, height_coord, u_eq):
+    """``(theta', rho')`` at latitudes ``lat`` (any 1-D point set: Gaussian
+    latitudes, MPAS cell centres, flattened cube cells) for the balanced
+    TC3 state with ``u = u_eq(z) cos(lat)`` -- the shared construction all
+    TC3 arms discretize on their native grid.
+
+    theta and exner come from :func:`cyclostrophic_balance_theta_exner`
+    with the dycore's reference profiles as the equatorial column, and
+    rho' from the equation of state exner = (R_d rho theta / p0)^(R_d/c_v)
+    as a ratio to the reference (exactly 0 at the equator).  Returns jax
+    arrays of shape ``(len(lat), nlev)``.
+    """
+    import numpy as np
+
+    lat = np.asarray(lat, dtype=np.float64).ravel()
+    th, ex = cyclostrophic_balance_theta_exner(
+        lat, height_coord.z_full, height_coord.theta_ref,
+        height_coord.exner_ref, u_eq)
+    th = jnp.asarray(th)
+    ex = jnp.asarray(ex)
+    theta_ref = height_coord.theta_ref[None, :]
+    theta_p = th - theta_ref
+    rho_p = height_coord.rho_ref[None, :] * (
+        (ex / height_coord.exner_ref[None, :])
+        ** (constants.c_vd / constants.R_d) * theta_ref / th - 1.0)
+    return theta_p, rho_p

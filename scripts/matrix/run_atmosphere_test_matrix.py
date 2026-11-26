@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -79,6 +80,15 @@ GRID_TYPES = list(GRID_RESOLUTIONS.keys())
 # held_suarez_topo runaway?).  Unset -> 40, exactly as before, so no committed
 # configuration moves; the override exists so an arm need not edit this file
 # while a run is reading it.
+#
+# By default DEFAULT_NLEV is the SIGMA level count only.  Hybrid rows run the
+# fixed CAM6 L32 table on every grid (see ``_create_vertical``), because that
+# is the only table the cube FV3 duo supports and the cross-grid comparison
+# must be like-for-like.  Setting ``LEGOESM_MATRIX_NLEV`` (any value) or
+# ``LEGOESM_MATRIX_TRANSITION_EXPONENT`` switches the non-cube hybrid rows back
+# to the analytic ``standard_hybrid_levels(DEFAULT_NLEV, exponent)`` family
+# for the #1029 probes (exponent alone -> analytic L40); the exponent is
+# rejected on sigma rows; the cube duo always runs CAM6 L32.
 DEFAULT_NLEV = int(os.environ.get("LEGOESM_MATRIX_NLEV", "40"))
 
 
@@ -228,6 +238,38 @@ def _latlon_dt(dx_pole: float, dt_cap: float, case: str | None = None) -> float:
     return base * _matrix_dt_scale()
 
 
+def _gw31_diag_every(dt: float) -> int:
+    """Diagnostic stride [steps] of the DCMIP 2012 3-1 row: the largest
+    ``k`` with ``k dt <= 100 s`` (the document's output interval, Sect. 3)
+    whose interval divides 600 s, so samples land exactly on the
+    document's 3000 s and 3600 s analysis times.  Raises if ``dt`` itself
+    does not divide 600 s (the run could not hit those times either) or
+    exceeds 100 s."""
+    from tests.test_cases.dcmip2012.gravity_wave_3_1 import check_step
+    if not (0.0 < dt <= 100.0):
+        raise ValueError(f"gravity_wave_3_1: dt={dt!r} s is not in (0, 100] s")
+    m = check_step(dt)    # the same rule as the cube adapter
+    # integer arithmetic from here: k | m and k dt <= 100 s
+    return max(k for k in range(1, m + 1)
+               if m % k == 0 and k * dt <= 100.0)
+
+
+#: grids whose gravity_wave_3_1 lane runs the DCMIP 2012 3-1 setup
+_GW31_GRIDS = frozenset({"cubed_sphere", "latlon", "icosahedral",
+                         "spectral"})
+
+
+def _gw31_n_steps(days: float, dt: float) -> int:
+    """Step count of the DCMIP 2012 3-1 row: the one that lands exactly on
+    the run's end (``int()`` of the quotient can fall one short for a
+    valid step, e.g. 600/673 s); raises if no integer count does."""
+    n = int(round(days * 86400 / dt))
+    if n < 1 or n * dt != days * 86400:
+        raise ValueError(f"gravity_wave_3_1: dt={dt!r} s does not divide "
+                         f"the {days * 86400:g} s run")
+    return n
+
+
 # ===========================================================================
 # TestCase dataclass
 # ===========================================================================
@@ -283,11 +325,11 @@ _CASE_FAMILIES: dict[str, frozenset[str]] = {
     "cosine_bell_a0":     frozenset({"sw"}),  # issue 504 alpha=0 diagnostic (not in curated hughes set)
     "colliding_modons":   frozenset({"sw"}),  # issue 521 Lin et al. (2017), cube + latlon
     # Hydrostatic dry
-    "baroclinic":         frozenset({"hydro", "hughes"}),  # canonical J-W
-    "baroclinic_steady":  frozenset({"hydro"}),           # #1028 J-W, no perturbation
+    "baroclinic":         frozenset({"hydro", "hughes"}),  # DCMIP-2016 / Ullrich 2014 baroclinic wave
+    "baroclinic_steady":  frozenset({"hydro"}),           # #1028 same state, no perturbation
     "rotated_baroclinic": frozenset({"hydro", "dcmip2008", "hughes"}),
     "rotated_steady":     frozenset({"hydro", "dcmip2008", "hughes"}),
-    "gravity_wave_3_1":   frozenset({"hydro", "dcmip2008", "hughes"}),
+    "gravity_wave_3_1":   frozenset({"hydro", "dcmip2012", "hughes"}),  # DCMIP 2012 3-1
     "inertio_gravity_3_2": frozenset({"hydro", "dcmip2008", "hughes"}),
     "mountain_rossby_5_0": frozenset({"hydro", "dcmip2008", "hughes"}),
     "rossby_haurwitz_6_0": frozenset({"hydro", "dcmip2008", "hughes"}),
@@ -416,7 +458,7 @@ def _build_test_matrix() -> list[TestCase]:
                 "hydrostatic", "held_suarez", g, res[g], vert, 200, 30))
             matrix.append(TestCase(
                 "hydrostatic", "baroclinic", g, res[g], vert, 10, 2))
-        # #1028 control: the SAME J-W state with the perturbation OFF.  Sigma
+        # #1028 control: the SAME DCMIP-2016 (Ullrich 2014) state with the perturbation OFF.  Sigma
         # only and un-rotated on purpose — it exists to be the one-variable
         # partner of the `baroclinic` sigma case above, and `rotated_steady`
         # cannot serve (hybrid coordinate + alpha=45 deg, and it is out of
@@ -424,18 +466,22 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "hydrostatic", "baroclinic_steady", g, res[g], "sigma", 10, 2,
             {"perturbed": False}))
-        # DCMIP transport: sigma only
+        # DCMIP transport: sigma, except 1-3, which runs the Kent et al.
+        # (2014, App. B) hybrid levels on every grid (flat z_top lid; the
+        # cube row through the FV3 duo transport, whose fixed-lid DCMIP L30
+        # table is that hybrid table)
         for tn in [11, 12, 13]:
+            vert = "hybrid" if tn == 13 else "sigma"
             matrix.append(TestCase(
-                "hydrostatic", f"dcmip_transport_{tn}", g, res[g], "sigma",
+                "hydrostatic", f"dcmip_transport_{tn}", g, res[g], vert,
                 12, 1, {"test_num": tn}))
         # AMIP: hybrid only
         matrix.append(TestCase(
             "hydrostatic", "amip", g, res[g], "hybrid", 365, 30))
 
         # --- Hughes-tutorial extensions (M1.a) ---
-        # Rotated Jablonowski-Williamson — DCMIP 2008 §4-1 (steady) /
-        # §4-2 (baroclinic). Hybrid coord only by default since the
+        # Rotated DCMIP-2016 (Ullrich 2014) baroclinic wave, DCMIP 2008
+        # rotation recipe: 1-3-0 (steady) / 2-3-0 (baroclinic). Hybrid coord only by default since the
         # canonical DCMIP setup uses pressure-based vertical levels.
         matrix.append(TestCase(
             "hydrostatic", "rotated_baroclinic", g, res[g], "hybrid", 10, 2,
@@ -456,12 +502,17 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "hydrostatic", "held_suarez_topo", g, res[g], "hybrid", 200, 2,
             {"h_0": 2000.0}))
-        # DCMIP 2008 §3-1 / §3-2 / §5-0 / §6-0 — dry-3D Hughes-tutorial
+        # DCMIP 2012 test 3-1 (Ullrich et al. 2012 v1.7 Sect. 3): gravity
+        # waves on the non-rotating X = 125 small planet, App. F.3 L10 to a
+        # 10 km lid; the document's 3600 s on both full and quick runs
+        # (vote 2026-11-26, author A / codex A).
+        matrix.append(TestCase(
+            "hydrostatic", "gravity_wave_3_1", g, res[g], "hybrid",
+            3600.0 / 86400.0, 3600.0 / 86400.0, {}))
+        # DCMIP 2008 §3-2 / §5-0 / §6-0 — dry-3D Hughes-tutorial
         # tests on hydrostatic dycores.  Short integrations (1-3 days) so
         # the wave packets / Rossby trains have time to develop without
         # consuming AMIP-scale wall-clock.
-        matrix.append(TestCase(
-            "hydrostatic", "gravity_wave_3_1", g, res[g], "hybrid", 1.0, 0.25, {}))
         matrix.append(TestCase(
             "hydrostatic", "inertio_gravity_3_2", g, res[g], "hybrid",
             3.0, 0.5, {}))
@@ -502,7 +553,11 @@ def _build_test_matrix() -> list[TestCase]:
         # the summary rows, the run directory and — the part that matters —
         # the known-failure lookup are all keyed on it, so an overridden arm
         # does not silently inherit another coordinate's xfail waiver.
-        tc.vertical_coord = _matrix_vcoord(tc.vertical_coord)
+        # DCMIP transport rows are exempt: their coordinate is part of the
+        # test definition (prescribed winds, no pressure-gradient force for
+        # the probe to measure), and the runner refuses unsupported ones
+        if not tc.case.startswith("dcmip_transport_"):
+            tc.vertical_coord = _matrix_vcoord(tc.vertical_coord)
 
     return matrix
 
@@ -1242,6 +1297,17 @@ def _laplacian_visc_cube_v2(n: int) -> float:
     return float(10.0 ** log_a)
 
 
+# Lat-lon A_h temperature diffusion partially corrected to pressure surfaces
+# (CAM3 eq. 3.80; ``A_h_pressure_surfaces``, opt-in, default off).  The matrix
+# selects it EXPLICITLY on every lat-lon PE row (user decision 2026-11-24) and
+# records the setting in results.txt notes.  Without it DCMIP 2012 2-0-0 is
+# heated ~140 K/day along the sloping eta surfaces and spins up 3.6 m/s/day.
+_LATLON_A_H_PRESSURE_SURFACES = True
+_LATLON_A_H_PRESSURE_SURFACES_NOTE = (
+    "A_h T diffusion on pressure surfaces (CAM3 eq. 3.80): "
+    + ("on" if _LATLON_A_H_PRESSURE_SURFACES else "off"))
+
+
 def _laplacian_visc_latlon(n_lat: int, frac: float = 0.1) -> float:
     """Laplacian viscosity A_h = frac * c_gw * dy for lat-lon grid."""
     import math
@@ -1278,27 +1344,166 @@ def _biharmonic_visc_latlon(n_lat: int, efold_hours: float = 9.0) -> float:
     return dy ** 4 / (64.0 * efold_hours * 3600.0)
 
 
-def _laplacian_visc_ico(mesh, frac: float = 0.1) -> float:
-    """Laplacian viscosity A_h = frac * c_gw * dx for icosahedral grid."""
-    import math
-    from legoesm import constants
-    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
-    c_gw = math.sqrt(constants.R_d * 300.0)
-    return frac * c_gw * dx_mean
+def _mpas_hydro_config(mesh, sigma):
+    """Icosahedral hydrostatic matrix dycore config (HS, dycore rows, AMIP).
+
+    MPAS-A Registry defaults (v8.4.2, ``nhyd_model``):
+    ``config_h_mom_eddy_visc2 = 0`` -- no constant del2 (the former
+    ``0.1*c_gw*dx`` = 6.5e6 m^2/s at ico5 was a 2026-03 cube CD-grid stability
+    heuristic, not MPAS; it decayed the steady JW jet 27.8 -> 24.8 m/s in 2 d
+    and cut RH 6-0 / MR 5-0 to 103 / 26 m/s vs 142 / 36 without it);
+    del4 ~ ``config_visc4_2dsmag*dx^3`` (0.05 m/s: 5.5e14 m^4/s at ico5 vs
+    ``_hyperdiff_ico`` 4.3e14).  Vertical theta
+    transport in conservative flux form (MPAS-A transports rho*theta in flux
+    form): ``sb``.  The model default ``upwind`` advective theta diffuses theta
+    down the steep upper-level theta gradient: +50 K mean warming of the top
+    layers in 2 d of adiabatic RH 6-0 on CAM6 L32 (+29 K on analytic L40).
+    ponytail: MPAS-A's flow-dependent 2-D Smagorinsky del2
+    (``config_smagorinsky_coef = 0.125``) and 3rd-order vertical flux
+    (``config_coef_3rd_order``) are not ported; ceiling = flux-form 2nd order,
+    no deformation-dependent del2.
+    """
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        MPASPrimitiveEquationConfig)
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+    # sb is hybrid-only (the model refuses it on sigma); sigma rows keep the
+    # model default, exactly as before
+    hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
+    return MPASPrimitiveEquationConfig(
+        nu_del4=_hyperdiff_ico(mesh), fix_mass=True,
+        anchor_mass_to_initial=True, time_integrator=_mpas_integrator(),
+        vert_advection_scheme="sb" if hybrid else "upwind")
 
 
 # ---------------------------------------------------------------------------
 # Vertical coordinate creation
 # ---------------------------------------------------------------------------
 
+def _hybrid_table_is_analytic() -> bool:
+    """True when a #1029 probe knob asks for the analytic hybrid family.
+
+    Hybrid rows run the CAM6 L32 table (``make_cam6_l32_levels``) on EVERY
+    grid: it is the only table the cube FV3 duo supports, and the cross-grid
+    comparison is only like-for-like when every grid shares it (the analytic
+    L40 put its top full level at ~33 hPa against L32's ~3.6 hPa, so upper-
+    level winds were not comparable).  A fixed table has no level count and
+    no ``B = eta**exponent``, so the two analytic-family probe overrides
+    cannot act on it.  Rather than silently ignore them, setting EITHER
+    ``LEGOESM_MATRIX_NLEV`` or ``LEGOESM_MATRIX_TRANSITION_EXPONENT`` selects
+    ``standard_hybrid_levels(DEFAULT_NLEV, exponent)`` -- exactly what those
+    probe arms ran before the switch.  The cube duo ignores both (it only
+    runs CAM6 L32; its notes say so).  ``LEGOESM_MATRIX_VCOORD`` only picks
+    sigma vs hybrid and does not choose the table.
+    """
+    return ("LEGOESM_MATRIX_NLEV" in os.environ
+            or "LEGOESM_MATRIX_TRANSITION_EXPONENT" in os.environ)
+
+
+def _vertical_table_label(vertical_coord: str, sigma) -> str:
+    """Record of the vertical table a row ran, for results.txt notes.
+
+    The first token after ``vertical table: `` is a stable table ID
+    (``cam6_l32`` -- the same ID the cube duo writes from its ``eta`` --
+    ``analytic_hybrid_L<n>_exp<p>`` (effective power, followed by
+    ``analytic (nlev=<n>, exp=<p>)``) or ``sigma_L<n>``); the cross-grid
+    RMS refuses to compare rows whose IDs differ (``_vertical_table_id``).
+    """
+    n = len(np.asarray(sigma.sigma_full))
+    if vertical_coord != "hybrid":
+        return f"vertical table: {vertical_coord}_L{n}"
+    if _is_gw31_table(sigma):
+        return ("vertical table: dcmip2012_gw31_l10 (make_dcmip2012_gw31_levels,"
+                " DCMIP 2012 3-1 App. F.3 L10, 10 km lid)")
+    if _hybrid_table_is_analytic():
+        exp = _analytic_hybrid_exponent(n, sigma)
+        return (f"vertical table: analytic_hybrid_L{n}_exp{exp} "
+                f"(analytic (nlev={n}, exp={exp}): standard_hybrid_levels, "
+                f"#1029 probe override)")
+    return f"vertical table: cam6_l32 (make_cam6_l32_levels, L{n})"
+
+
+def _is_gw31_table(sigma) -> bool:
+    """True when ``sigma`` IS the DCMIP 2012 3-1 L10 hybrid table."""
+    from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+    b = getattr(sigma, "B_half", None)
+    if b is None:
+        return False
+    ref = make_dcmip2012_gw31_levels()
+    return (np.asarray(b).shape == np.asarray(ref.B_half).shape
+            and np.array_equal(np.asarray(b, np.float64),
+                               np.asarray(ref.B_half, np.float64))
+            and np.array_equal(np.asarray(sigma.A_half, np.float64),
+                               np.asarray(ref.A_half, np.float64)))
+
+
+def _analytic_hybrid_exponent(n: int, sigma) -> str:
+    """Effective ``B = eta**exp`` power of an analytic hybrid table.
+
+    The power whose ``standard_hybrid_levels(n, transition_exponent=e)``
+    reproduces ``sigma``'s ``B_half``: read off the table itself (the tier
+    default is resolved inside ``standard_hybrid_levels`` and not stored on
+    the coordinate), so the tag cannot disagree with what ran.
+    """
+    from legoesm.grids.vertical import standard_hybrid_levels
+    b = np.asarray(sigma.B_half, dtype=np.float64)
+    for e in (1, 2, 3, 4):
+        ref = np.asarray(standard_hybrid_levels(n, transition_exponent=e).B_half,
+                         dtype=np.float64)
+        if ref.shape == b.shape and np.allclose(ref, b, rtol=0, atol=1e-6):
+            return str(e)
+    return "unknown"
+
+
+def _namelist_vertical_table(tc) -> str | None:
+    """The vertical table a hydrostatic HYBRID row will run, for namelist.txt.
+
+    Written before the run (so it is present even if the run fails); the
+    same table ID the row's results.txt notes carry.  ``None`` (no entry)
+    for every other row.
+    """
+    if tc.equation_set != "hydrostatic" or (
+            tc.vertical_coord != "hybrid" and tc.case != "amip"):
+        return None   # run_amip builds hybrid whatever the label
+    if tc.case == "dcmip_transport_13":
+        # every grid's hybrid 1-3 row (run_dcmip_transport builds it)
+        return ("dcmip13_kent2014_L30 (Kent et al. 2014 App. B hybrid = DCMIP "
+                "2012 L30 fixed-lid table; create_dcmip13_hybrid)")
+    if tc.case == "gravity_wave_3_1" and tc.grid_type in _GW31_GRIDS:
+        # its own table (probe env vars do not apply)
+        return ("dcmip2012_gw31_l10 (DCMIP 2012 3-1 App. F.3 L10, 10 km lid"
+                + ("; fv3_duo eta table)" if tc.grid_type == "cubed_sphere"
+                   else "; make_dcmip2012_gw31_levels)"))
+    if tc.grid_type == "cubed_sphere":
+        if tc.case == "amip":
+            return None   # skipped: no duo adapter
+        return "cam6_l32 (fv3_duo eta table; probe env vars do not apply)"
+    try:
+        sig = _create_vertical(DEFAULT_NLEV, "hybrid")
+    except ValueError as e:   # bad probe env: the runner reports the row
+        return f"invalid ({e})"
+    return _vertical_table_label("hybrid", sig).split(": ", 1)[1]
+
+
+def _vertical_table_id(notes: str) -> str | None:
+    """The table ID ``_vertical_table_label`` wrote, or None if absent."""
+    # whole token only: "cam6_l32-v2" must not read as "cam6_l32"
+    m = re.search(r"vertical table: ([A-Za-z0-9_=.]+)(?=\s|;|$)", notes or "")
+    return m.group(1) if m else None
+
+
 def _create_vertical(nlev: int, vertical_coord: str):
     """Create vertical coordinate (sigma or hybrid).
 
+    Sigma: ``create_sigma_coordinate(nlev)``.  Hybrid: the CAM6 L32 table
+    (``make_cam6_l32_levels``; ``nlev`` is not used) unless a #1029 probe
+    knob is set -- see ``_hybrid_table_is_analytic``.
+
     ``LEGOESM_MATRIX_TRANSITION_EXPONENT`` (#1029 probe override, 2 or 3)
-    changes only the hybrid ``B = eta**exponent`` power; the reference-state
-    level pressures do not move.  Unset -> the standard tier, unchanged.
+    changes only the analytic hybrid ``B = eta**exponent`` power; the
+    reference-state level pressures do not move.
     """
-    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    from legoesm.grids.vertical import (
+        create_sigma_coordinate, make_cam6_l32_levels, standard_hybrid_levels)
     env = os.environ.get("LEGOESM_MATRIX_TRANSITION_EXPONENT")
     exponent = None
     if env is not None:
@@ -1313,6 +1518,10 @@ def _create_vertical(nlev: int, vertical_coord: str):
         print(f"  #1029 LEGOESM_MATRIX_TRANSITION_EXPONENT override: "
               f"B = eta**{exponent}")
     if vertical_coord == "hybrid":
+        if not _hybrid_table_is_analytic():
+            return make_cam6_l32_levels()
+        print(f"  #1029 probe override: hybrid rows run the ANALYTIC "
+              f"standard_hybrid_levels({nlev}), not CAM6 L32")
         return standard_hybrid_levels(nlev, transition_exponent=exponent)
     return create_sigma_coordinate(nlev)
 
@@ -2335,16 +2544,18 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         im = None
 
         for ax, step, section in zip(axes_arr, valid_steps, sections):
-            im = ax.imshow(
-                section.T, origin="lower", aspect="auto", cmap="RdBu_r",
-                vmin=vmin, vmax=vmax,
-                extent=[axis_vals[0], axis_vals[-1],
-                        float(levels[0]), float(levels[-1])])
+            # true level coordinates, model top (level 0) at the top: the
+            # former imshow(origin="lower") drew level 0 at the BOTTOM on an
+            # evenly spaced axis labelled in sigma
+            im = ax.pcolormesh(
+                axis_vals, np.asarray(levels, dtype=np.float64), section.T,
+                shading="nearest", cmap="RdBu_r", vmin=vmin, vmax=vmax)
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             ax.set_xlabel(xlabel)
 
         axes_arr[0].set_ylabel(level_label)
+        axes_arr[0].invert_yaxis()   # sharey: all panels
         fig.suptitle(
             f"{case_name} — {field_3d_key} cross-sections", fontsize=11)
         fig.tight_layout(rect=[0.0, 0.0, 0.90, 0.95])
@@ -2844,9 +3055,11 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
         # Gravity-wave speed from the case's actual depth: the modons run
-        # on h0 = 5000 m (sqrt(g*5000) ~ 221 m/s), the Williamson cases
-        # on ~3000 m equivalent.
-        _c_grav = _m.sqrt(_consts_grav.g * (5000.0 if test_num == 8
+        # on the colliding_modons depth (Lin et al. 2017: 10 km,
+        # sqrt(g*1e4) ~ 313 m/s), the Williamson cases on ~3000 m
+        # equivalent.
+        from tests.test_cases.colliding_modons import _MODON_H0
+        _c_grav = _m.sqrt(_consts_grav.g * (_MODON_H0 if test_num == 8
                                             else 3000.0))
         dt = min(300.0, 0.5 * _dx_pole / _c_grav)
         # Biharmonic (del-4) viscosity, NOT Laplacian.  The previous
@@ -3070,7 +3283,11 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 else create_gaussian_grid(n_max))
         # CFL-safe dt for explicit SSP-RK3: gravity wave CFL ≈ 0.5
         import math
-        _c_gw = math.sqrt(constants.g * 5960.0)  # shallow-water wave speed
+        # shallow-water wave speed; the modons use their own (deeper,
+        # Lin et al. 2017: 10 km) depth so the CFL law still holds
+        from tests.test_cases.colliding_modons import _MODON_H0
+        _c_gw = math.sqrt(constants.g * (_MODON_H0 if test_num == 8
+                                         else 5960.0))
         dt = min(600.0, 0.5 * grid.radius / (n_max * _c_gw))
         # Laplacian eigenvalue at truncation, n_max(n_max+1)/a^2.
         _lap_tr = n_max * (n_max + 1) / float(constants.R_earth) ** 2
@@ -3603,7 +3820,23 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
         dt = min(1800.0, 0.5 * grid.radius / (n_max * 40.0))
-        config = SpectralSWConfig(spectral_filter_order=8)
+        # Pure transport, no topography: the exponential filter is NOT
+        # applied every step (``spectral_filter_every_step=False``, the
+        # SpectralSWConfig guidance for free-evolution cases).  Per step it
+        # cut the T21 peak (alpha=pi/4) to 818 m at 1 d and 614 m at 12 d,
+        # vs 889 m at both without it; L2 0.177 -> 0.142 (1 d), 0.382 ->
+        # 0.143 (12 d); at T42, 1 d L2 0.0168 -> 0.0139 while the peak goes
+        # 997.7 -> 987.7 m (exact on grid 999.2 m).  The
+        # spectral-transform reference practice (STSWM: unaliased quadratic
+        # grid, linear spectral diffusion) has no per-step exponential
+        # filter (PLAUSIBLE, not re-verified against the tech note).  The
+        # unfiltered T21 peak (889 m) matches the IC projected on the 2/3
+        # band (889.6 m at t=0, vs 978.6 m synthesised at full T21): the
+        # residual loss is consistent with the 2/3 state truncation
+        # (n <= 14), a shared dycore design choice.  Voted: author A,
+        # codex A (2026-11-26).
+        config = SpectralSWConfig(spectral_filter_order=8,
+                                  spectral_filter_every_step=False)
         model = SpectralShallowWaterModel(grid, config)
         state = cosine_bell_spectral(grid, beta)
         phi_init = sh_synthesis(grid, state.phi_hat.data).copy()
@@ -3817,10 +4050,6 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         return kw
 
     if tc.grid_type == "cubed_sphere":
-        if _topo:
-            raise NotImplementedError(
-                "held_suarez_topo on cube: fv3_duo matrix adapter covers flat "
-                "Held-Suarez only (no duo terrain IC for this case)")
         if radiation != "gray":
             raise NotImplementedError(
                 f"held_suarez radiation={radiation!r} on cube: the fv3_duo lane "
@@ -3829,7 +4058,10 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # scripts/matrix/_cube_duo_adapters.py.
         from scripts.matrix._cube_duo_adapters import build_duo_hydro
         n = int(tc.resolution[1:])
-        duo = build_duo_hydro(n, perturbed=True, held_suarez=True)
+        duo = (build_duo_hydro(n, held_suarez=True,
+                               shared_case="held_suarez_topo",
+                               ic_kwargs=_topo_init_kwargs()) if _topo
+               else build_duo_hydro(n, perturbed=True, held_suarez=True))
         state = duo.state
         dt = duo.dt
         nlev = duo.km
@@ -3837,7 +4069,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         _ps0 = duo.ps(state)
         _duo_note = (f"{duo.note}; matrix vertical label "
                      f"'{tc.vertical_coord}' NOT honoured (duo runs its "
-                     f"hybrid table)")
+                     f"hybrid table); vertical table: {duo.eta} (fv3_duo "
+                     f"eta table, L{duo.km})")
 
         def step_fn(s, dt_):
             return duo.step(s, dt_)
@@ -3966,6 +4199,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                     f"this grid.")
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            A_h_pressure_surfaces=_LATLON_A_H_PRESSURE_SURFACES,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
             sb81_omega_conversion=True,
             # del-4 on u, v, T (lat-lon shallow-water lane's law and per-row
@@ -4079,11 +4313,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         mesh = create_voronoi_mesh(level)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 200.0
-        ah = _laplacian_visc_ico(mesh)
-        config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True,
-            time_integrator=_mpas_integrator())
+        config = _mpas_hydro_config(mesh, sigma)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -4255,11 +4485,15 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
     if tc.grid_type == "cubed_sphere":
         notes = f"{notes}; {_duo_note}"
+    else:
+        notes = f"{notes}; {_vertical_table_label(tc.vertical_coord, sigma)}"
+        if tc.grid_type == "latlon":
+            notes = f"{notes}; {_LATLON_A_H_PRESSURE_SURFACES_NOTE}"
 
     _write_results_txt(output_dir, _augment_with_rrtmgp_overrides({
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "vertical_coord": tc.vertical_coord, "radiation": radiation,
-        "days": days, "dt": dt, "levels": nlev,
+        "days": days, "dt": dt, "levels": len(level_values),
         "status": "PASS" if ok else "FAIL", "notes": notes,
         "wall_time": f"{wall:.1f}s"}, radiation),
         diag=diag)  # iter-98: surface BLOWUP info if any
@@ -4293,15 +4527,7 @@ def _build_dcmip2008_state(case: str, grid_kind: str, grid_or_mesh, sigma):
     the returned state matches the tendency dispatch each downstream
     runner expects.
     """
-    if case == "gravity_wave_3_1":
-        from tests.test_cases.dcmip2008 import gravity_wave_3_1 as _m
-        fn = {
-            "cube": _m.gravity_wave_init,
-            "latlon": _m.gravity_wave_init_latlon,
-            "mpas": _m.gravity_wave_init_mpas,
-            "spectral": _m.gravity_wave_init_spectral,
-        }[grid_kind]
-    elif case == "inertio_gravity_3_2":
+    if case == "inertio_gravity_3_2":
         from tests.test_cases.dcmip2008 import inertio_gravity_3_2 as _m
         fn = {
             "cube": _m.inertio_gravity_init,
@@ -4334,17 +4560,30 @@ def _build_dcmip2008_state(case: str, grid_kind: str, grid_or_mesh, sigma):
 # Runner: Baroclinic Wave
 # ===========================================================================
 
+def dcmip_omega_override(case: str) -> float | None:
+    """Planetary rotation rate a ``run_baroclinic`` case must run with, or
+    ``None`` for the grid factory's default (Earth).
+
+    - ``gravity_wave_3_1``: DCMIP 2012 test 3-1 (non-rotating small planet).
+    - ``rest_state_topo``: DCMIP 2012 test 2-0-0 sets the rotation rate to
+      zero (Table XII, Omega = 0 1/s; Table VIII, "set the rotational speed
+      to zero").
+    """
+    return 0.0 if case in ("gravity_wave_3_1", "rest_state_topo") else None
+
+
 def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                    radiation: str = "gray") -> tuple[str, float, str]:
     nlev = DEFAULT_NLEV
-    # Rotated J-W variant (DCMIP 2008 §4-1 / §4-2).  ``alpha`` defaults
+    # Rotated baroclinic-wave variant (DCMIP 2008 1-3-0 / 2-3-0 rotation
+    # of the DCMIP-2016 / Ullrich 2014 state).  ``alpha`` defaults
     # to π/4 (45°) per DCMIP convention; ``perturbed=False`` selects the
-    # steady-state DCMIP §4-1 rotated test.
+    # rotated steady-state test (as DCMIP 2008 1-3-0).
     _rotated = tc.case in ("rotated_baroclinic", "rotated_steady")
     _rot_alpha = float(tc.run_kwargs.get("alpha", jnp.pi / 4.0)) if _rotated else 0.0
     _rot_perturbed = bool(tc.run_kwargs.get(
         "perturbed", tc.case == "rotated_baroclinic")) if _rotated else True
-    # Un-rotated J-W: `baroclinic` carries the perturbation, `baroclinic_steady`
+    # Un-rotated DCMIP-2016 wave: `baroclinic` carries the perturbation, `baroclinic_steady`
     # (#1028) is the SAME balanced initial state with it switched off.  A model
     # that holds the base state leaves the zonal jet where it started; one that
     # does not is losing the flow the eddies would have fed on, which is
@@ -4357,36 +4596,48 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     # terrain-following coordinates.
     _rest = tc.case == "rest_state_topo"
     _rest_h0 = float(tc.run_kwargs.get("h_0", 2000.0)) if _rest else 0.0
-    # DCMIP 2008 dry-3D family: gravity wave (§3-1), inertio-gravity
-    # wave (§3-2), mountain Rossby (§5-0), Rossby-Haurwitz (§6-0).
-    # All four use isothermal hydrostatic state + zonal solid-body
-    # flow as the base; they differ in perturbation / topography only.
+    # DCMIP 2008 dry-3D family: inertio-gravity wave (§3-2), mountain
+    # Rossby (§5-0), Rossby-Haurwitz (§6-0).  All three use isothermal
+    # hydrostatic state + zonal solid-body flow as the base; they differ in
+    # perturbation / topography only.  (gravity_wave_3_1 is DCMIP 2012
+    # test 3-1, ``_gw31`` below.)
     _dcmip2008_dry = tc.case in (
-        "gravity_wave_3_1", "inertio_gravity_3_2",
-        "mountain_rossby_5_0", "rossby_haurwitz_6_0",
+        "inertio_gravity_3_2", "mountain_rossby_5_0", "rossby_haurwitz_6_0",
     )
-    # DCMIP 2008 §3-1 is canonical *only* on a non-rotating sphere:
-    # the gravity-wave packet is supposed to disperse free of inertial
-    # effects.  When this case is selected we override the planetary
-    # rotation rate at grid-construction time (the four grid factories
-    # all accept ``omega``); ``None`` leaves the factory's default
-    # (Earth) Ω in place.
-    _omega_override: float | None = (
-        0.0 if tc.case == "gravity_wave_3_1" else None
-    )
+    # Non-rotating cases override the planetary rotation rate at
+    # grid-construction time (the four grid factories all accept
+    # ``omega``); ``None`` leaves the factory's default (Earth) Omega.
+    _omega_override = dcmip_omega_override(tc.case)
+    # DCMIP 2012 test 3-1: the X = 125 small planet (radius a_ref / X), its
+    # App. F.3 L10 table and IC, and the document's small-planet rules for
+    # the lane's step (dt / X) and explicit diffusion (K_2k / X^(2k-1));
+    # None on every other row.  (The cube takes all of it from its duo
+    # recipe, see _cube_duo_adapters.)
+    _gw31 = None
+    if tc.case == "gravity_wave_3_1":
+        from tests.test_cases.dcmip2012 import gravity_wave_3_1 as _gw31
 
     if tc.grid_type == "cubed_sphere":
         if tc.case not in ("baroclinic", "baroclinic_steady",
-                           "rotated_baroclinic", "rotated_steady"):
+                           "rotated_baroclinic", "rotated_steady") and not (
+                               _rest or _dcmip2008_dry or _gw31 is not None):
             raise NotImplementedError(
                 f"{tc.case} on cube: no fv3_duo matrix adapter for this IC")
         # FV3 duo (sole cube core): FV3DuoDynamicsModel, DCMIP16 IC; see
         # scripts/matrix/_cube_duo_adapters.py.
         from scripts.matrix._cube_duo_adapters import build_duo_hydro
         n = int(tc.resolution[1:])
-        duo = (build_duo_hydro(n, perturbed=_rot_perturbed,
-                               rotated_alpha=_rot_alpha) if _rotated
-               else build_duo_hydro(n, perturbed=_perturbed))
+        if _rest or _dcmip2008_dry or _gw31 is not None:
+            # the SAME cube IC builder as the other grids' dispatch, on the
+            # duo cells; terrain, omega, radius and table from its recipe
+            duo = build_duo_hydro(
+                n, shared_case=tc.case,
+                ic_kwargs={"h_0": _rest_h0} if _rest else None)
+        elif _rotated:
+            duo = build_duo_hydro(n, perturbed=_rot_perturbed,
+                                  rotated_alpha=_rot_alpha)
+        else:
+            duo = build_duo_hydro(n, perturbed=_perturbed)
         state = duo.state
         dt = duo.dt
         nlev = duo.km
@@ -4394,7 +4645,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         _ps0 = duo.ps(state)
         _duo_note = (f"{duo.note}; matrix vertical label "
                      f"'{tc.vertical_coord}' NOT honoured (duo runs its "
-                     f"hybrid table)")
+                     f"hybrid table); vertical table: {duo.eta} (fv3_duo "
+                     f"eta table, L{duo.km})")
 
         def step_fn(s, dt_):
             return duo.step(s, dt_)
@@ -4438,19 +4690,29 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             _ll_kwargs["omega"] = _omega_override
         if _rotated:
             # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
-            # with the flow, else the rotated JW state is not steady.
+            # with the flow, else the rotated baroclinic state is not steady.
             _ll_kwargs["coriolis_alpha"] = _rot_alpha
+        if _gw31 is not None:
+            _ll_kwargs["radius"] = _gw31.small_planet_radius()
         grid = create_latlon_grid(n_lat, n_lon, **_ll_kwargs)
-        sigma = _create_vertical(nlev, tc.vertical_coord)
+        if _gw31 is not None:
+            from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+            sigma = make_dcmip2012_gw31_levels()
+        else:
+            sigma = _create_vertical(nlev, tc.vertical_coord)
         ah = _laplacian_visc_latlon(n_lat)
+        if _gw31 is not None:
+            ah = ah / _gw31.X_SCALE        # del-2 (k = 1): K_2 / X
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        dt = _latlon_dt(_dx_pole, 200.0, tc.case)
+        dt = _latlon_dt(_dx_pole, 200.0 if _gw31 is None
+                        else 200.0 / _gw31.X_SCALE, tc.case)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            A_h_pressure_surfaces=_LATLON_A_H_PRESSURE_SURFACES,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
             sb81_omega_conversion=True,
         )
@@ -4463,9 +4725,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
             from tests.test_cases.dcmip2012.rest_state_topography import (
-                rest_state_topography_init_latlon)
-            state_cc = rest_state_topography_init_latlon(
+                lapse_rate_state_topography_init_latlon)
+            state_cc = lapse_rate_state_topography_init_latlon(
                 grid, sigma, h_0=_rest_h0)
+        elif _gw31 is not None:
+            state_cc = _gw31.gravity_wave_init_latlon(grid, sigma)
         elif _dcmip2008_dry:
             state_cc = _build_dcmip2008_state(
                 tc.case, "latlon", grid, sigma)
@@ -4523,16 +4787,23 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             _vor_kwargs["omega"] = _omega_override
         if _rotated:
             # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
-            # with the flow, else the rotated JW state is not steady.
+            # with the flow, else the rotated baroclinic state is not steady.
             _vor_kwargs["coriolis_alpha"] = _rot_alpha
+        if _gw31 is not None:
+            _vor_kwargs["radius"] = _gw31.small_planet_radius()
         mesh = create_voronoi_mesh(level, **_vor_kwargs)
-        sigma = _create_vertical(nlev, tc.vertical_coord)
-        dt = 200.0
-        ah = _laplacian_visc_ico(mesh)
-        config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True,
-            time_integrator=_mpas_integrator())
+        if _gw31 is not None:
+            from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+            sigma = make_dcmip2012_gw31_levels()
+        else:
+            sigma = _create_vertical(nlev, tc.vertical_coord)
+        dt = 200.0 if _gw31 is None else 200.0 / _gw31.X_SCALE
+        config = _mpas_hydro_config(mesh, sigma)
+        if _gw31 is not None:
+            # del-4 (k = 2): the Earth coefficient over X^3.  The lane's
+            # dx_min^4 / (48 h) on the small mesh is already the Earth
+            # value over X^4 (its fixed 48 h e-folding), so times X.
+            config = config._replace(nu_del4=config.nu_del4 * _gw31.X_SCALE)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -4542,9 +4813,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
             from tests.test_cases.dcmip2012.rest_state_topography import (
-                rest_state_topography_init_mpas)
-            state = rest_state_topography_init_mpas(
+                lapse_rate_state_topography_init_mpas)
+            state = lapse_rate_state_topography_init_mpas(
                 mesh, sigma, h_0=_rest_h0)
+        elif _gw31 is not None:
+            state = _gw31.gravity_wave_init_mpas(mesh, sigma)
         elif _dcmip2008_dry:
             state = _build_dcmip2008_state(tc.case, "mpas", mesh, sigma)
         else:
@@ -4567,7 +4840,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.abs(s.u.data))),
-                # Same J-W growth diagnostic the cube and lat-lon branches
+                # Same baroclinic-wave growth diagnostic the cube and lat-lon branches
                 # already emit (#1028/#1081): without it the icosahedral arm
                 # has no NATIVE-grid, regrid-free growth series, and the
                 # cross-grid growth comparison would rest on the regridded
@@ -4604,17 +4877,35 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             _gauss_kwargs["omega"] = _omega_override
         if _rotated:
             # DCMIP 2008 rotated tests: the planet's rotation axis is tilted
-            # with the flow, else the rotated JW state is not steady.
+            # with the flow, else the rotated baroclinic state is not steady.
             _gauss_kwargs["coriolis_alpha"] = _rot_alpha
+        if _gw31 is not None:
+            _gauss_kwargs["radius"] = _gw31.small_planet_radius()
         grid = create_gaussian_grid(n_max, **_gauss_kwargs)
-        sigma = _create_vertical(nlev, tc.vertical_coord)
-        dt = 600.0
+        if _gw31 is not None:
+            from legoesm.grids.vertical import make_dcmip2012_gw31_levels
+            sigma = make_dcmip2012_gw31_levels()
+        else:
+            sigma = _create_vertical(nlev, tc.vertical_coord)
+        dt = 600.0 if _gw31 is None else 600.0 / _gw31.X_SCALE
+        _hd = 2.338e15 * (21.0 / n_max) ** 4
+        if _gw31 is not None:
+            # del-4 (hyperdiff_order 2, k = 2): K_4 / X^3; the per-step
+            # spectral filter below needs no change (it scales with dt / X)
+            _hd = _hd / _gw31.X_SCALE ** 3
         pe_config = SpectralPEConfig(
-            hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+            hyperdiff_coeff=_hd,
             spectral_filter_order=8,
             spectral_filter_strength=0.01,
             fix_mass=True, anchor_mass_to_initial=True,
+            # Opt-in T damping on pressure surfaces: the rest_state_topo row
+            # ONLY (user decision 2026-11-24; enabled after it passed the
+            # resting-terrain validation, T21-T85).  Recorded in the notes.
+            T_damping_pressure_surfaces=_rest,
         )
+        _spec_tdamp_note = ("T filter/hyperdiffusion on pressure surfaces: "
+                            + ("on" if pe_config.T_damping_pressure_surfaces
+                               else "off"))
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -4624,9 +4915,16 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
             from tests.test_cases.dcmip2012.rest_state_topography import (
-                rest_state_topography_init_spectral)
-            state = rest_state_topography_init_spectral(
-                grid, sigma, h_0=_rest_h0)
+                lapse_rate_state_topography_init_spectral)
+            # Orography on the band the model keeps (its lnps is truncated
+            # to it every step): the first-step p_s adjustment drops from
+            # ~2.2 kPa to ~1 Pa at T21; ps_init_spec below still carries
+            # that ~1 Pa residual projection of the IC's off-band lnps.
+            state = lapse_rate_state_topography_init_spectral(
+                grid, sigma, h_0=_rest_h0,
+                dealiasing_fraction=pe_config.dealiasing_fraction)
+        elif _gw31 is not None:
+            state = _gw31.gravity_wave_init_spectral(grid, sigma)
         elif _dcmip2008_dry:
             state = _build_dcmip2008_state(
                 tc.case, "spectral", grid, sigma)
@@ -4680,8 +4978,13 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             f"Baroclinic wave not implemented for grid '{tc.grid_type}'")
 
     # --- Time loop ---
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(6 * 3600 / dt))
+    n_steps = (_gw31_n_steps(days, dt) if tc.case == "gravity_wave_3_1"
+               else int(days * 86400 / dt))
+    # DCMIP 2012 3-1: scalar diagnostics at <= 100 s (the document's
+    # output interval) and exactly on its 3000 s / 3600 s analysis times
+    # (_gw31_diag_every); 6-hourly would leave the 3600 s run one sample.
+    diag_every = (_gw31_diag_every(dt) if tc.case == "gravity_wave_3_1"
+                  else max(1, int(6 * 3600 / dt)))
 
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
@@ -4708,6 +5011,12 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
     if tc.grid_type == "cubed_sphere":
         notes = f"{notes}; {_duo_note}"
+    else:
+        notes = f"{notes}; {_vertical_table_label(tc.vertical_coord, sigma)}"
+        if tc.grid_type == "latlon":
+            notes = f"{notes}; {_LATLON_A_H_PRESSURE_SURFACES_NOTE}"
+        elif tc.grid_type == "spectral":
+            notes = f"{notes}; {_spec_tdamp_note}"
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -4717,7 +5026,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         diag=diag)  # iter-99: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir,
-        f"Baroclinic {tc.resolution} {tc.vertical_coord}",
+        f"{tc.case} {tc.resolution} {tc.vertical_coord}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=[
             ("u", "Zonal wind u (m/s)", "RdBu_r"),
@@ -4739,38 +5048,320 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 # Runner: DCMIP Transport
 # ===========================================================================
 
+# DCMIP 1-3 acceptance criteria (codex-voted user decision 2026-11-24):
+# thresholds of the per-row audit below.
+_DCMIP13_CLOSURE_TOL = 1.0e-6    # max |continuity residual| * period / dp
+_DCMIP13_UNIFORM_TOL = 1.0e-12   # max |q - 1| after one step from q = 1
+_DCMIP13_MASS_TOL = 1.0e-12      # |global tracer mass rel change| (RULE 0)
+_DCMIP13_CROSS_TOL = 0.5         # cloud height shift / terrain shift under it
+_DCMIP13_TERRAIN_MIN_M = 50.0    # terrain shift below which crossing is untested
+
+
+def duo_full_level_height(delp, ptop):
+    """Geometric height [m] of the duo's full levels in the 1-3 isothermal
+    atmosphere, ``z = -H ln(p/p0)``, from its layer mass ``delp`` (*spatial,
+    km) under the fixed lid ``ptop``: ``p`` the mean of the adjacent
+    interface pressures (the Kent et al. 2014 App. B full levels, as
+    ``dcmip13_full_level_height``, which it equals at the analytic
+    ``delp``)."""
+    from tests.test_cases.dcmip_transport import _H, _p0
+    delp = np.asarray(delp, np.float64)
+    p_full = ptop + np.cumsum(delp, axis=-1) - 0.5 * delp
+    return -_H * np.log(p_full / _p0)
+
+
+def duo13_exact_tracers(duo, state):
+    """Exact DCMIP 1-3 tracers (6, n, n, km, 4) on the duo row's levels at
+    ``state``: its levels move with the evolving p_s, so the analytic 1-3
+    clouds (the IC function) are sampled at the level heights of
+    ``state``'s own ``delp`` (:func:`duo_full_level_height`)."""
+    from tests.test_cases.dcmip_transport import dcmip13_tracers_at_points
+    z = duo_full_level_height(duo.layer_mass(state), duo.ptop)
+    return jnp.stack(dcmip13_tracers_at_points(
+        jnp.radians(jnp.asarray(duo.lon_deg)), jnp.radians(jnp.asarray(duo.lat_deg)),
+        jnp.asarray(z)), axis=-1)
+
+
+def duo_air_mass_criterion(a0, a_final, samples):
+    """``(note, failed)``: the duo 1-3 row's evolving global air mass
+    ``sum(area delp)`` against the initial ``a0`` at the end and at every
+    diagnostic sample, with the tracer-mass tolerance ``_DCMIP13_MASS_TOL``
+    (NaN fails)."""
+    a_all = np.asarray([a_final, *samples], np.float64)
+    a_dev = float(np.max(np.abs(a_all / a0 - 1.0)))
+    note = (f"global air mass max |rel| {a_dev:.3e} over {len(samples)} "
+            f"samples + final")
+    if not a_dev <= _DCMIP13_MASS_TOL:
+        return note, [f"global air-mass conservation (max |rel| {a_dev:.3e})"]
+    return note, []
+
+
+def dcmip13_snapshot_geometry(snap, area, duo, w, z):
+    """``(weights, heights)`` of one saved snapshot for the 1-3 terrain
+    moments: the steady ``w`` / analytic ``z`` on the prescribed-flux rows;
+    on the duo row (``duo`` not None) ``area * delp`` and
+    :func:`duo_full_level_height` from the ``delp_3d`` saved with that
+    snapshot (its levels move with the evolving p_s)."""
+    if duo is None:
+        return w, z
+    dp = np.asarray(snap["delp_3d"], np.float64)
+    return (np.asarray(area, np.float64)[..., None] * dp,
+            duo_full_level_height(dp, duo.ptop))
+
+
+def _dcmip13_audit(tc, grid, sigma_coord, model, state_init, state_final,
+                   snapshots, to_grid, area, dt, period_s, mass_samples=(),
+                   full_period=False, duo=None, air_samples=()):
+    """DCMIP 1-3 acceptance criteria with the row's own discrete fluxes.
+
+    Returns ``(notes, failed)``.  The analytic 1-3 atmosphere has ``p_s =
+    p0 exp(-z_s/H)`` and ``z = z_s - H ln(sigma)`` (hybrid rows: ``z = -H
+    ln(p/p0)``, ``p = A p0 + B p_s``); its flow is horizontal
+    at fixed HEIGHT, so tracers must cross sigma surfaces over the terrain.
+    Every 1-3 row (lat-lon, MPAS, spectral) transports in flux form on the
+    steady air mass ``dp`` with the consistent air fluxes
+    ``model.mass_flux`` (``consistent_mass_flux``).
+
+    * local air-mass closure: ``max |div F_k + delta W_k| / dp * period``
+      with the core's own divergence (the relative layer-mass drift those
+      fluxes would accumulate).
+    * uniform-tracer preservation: one model step from q = 1 (a round-off
+      check).
+    * global tracer conservation: ``sum area dp q`` with the model's own
+      air mass (lat-lon/MPAS ``p_s(z_s) dsigma`` or hybrid ``dA p0 + dB
+      p_s``, spectral its Orszag-band
+      ``p_s``; MPAS the state's prognostic ``dp``), every tracer at every
+      diagnostic sample.
+    * terrain crossing: q1-weighted mean height ``z`` of the cloud and mean
+      terrain ``z_s`` under it at every saved snapshot; at the snapshot of
+      largest terrain shift the ratio (cloud height shift / terrain shift)
+      is ~0 when the cloud keeps its height (crosses sigma surfaces, the
+      DCMIP design) and ~1 when it follows sigma surfaces.
+
+    The cube row (``duo``, FV3 duo transport) has no prescribed air fluxes:
+    its air mass ``delp`` evolves (Lagrangian d_sw step + remap, p_s not
+    reset).  Its closure -- a reported DIAGNOSTIC, not a gate (FV3 evolves
+    p_s; user decision 2026-11-26) -- is the layer-mass drift of ONE duo step from the
+    analytic 1-3 air mass, ``max |delp_1 - delp_0| / delp_0 * period /
+    dt`` (the same per-period scaling); the realised final drift is
+    reported beside it.  Its tracer-mass, edge-layer and terrain weights
+    are the duo's own ``delp`` (for the terrain moments the ``delp`` saved
+    with each snapshot, which also gives the level heights,
+    :func:`duo_full_level_height`).  Its evolving global air mass ``sum(area delp)``
+    is a criterion of its own (end and every diagnostic sample, the
+    tracer-mass tolerance).
+
+    A measured failure is returned in ``failed`` (the caller fails the
+    row); a run whose cloud has not met the terrain (shift under 50 m) gets
+    an "AUDIT INCOMPLETE" note instead, and fails only if it covered the
+    ``full_period``."""
+    from legoesm.atmosphere.dynamics.gcm import consistent_mass_flux as cmf
+    from tests.test_cases.dcmip_transport import (
+        _H, _mountain_height, dcmip13_full_level_height)
+    notes, failed = [], []
+    mf = None if duo is not None else model.mass_flux
+    if duo is not None:
+        lon, lat = np.radians(duo.lon_deg), np.radians(duo.lat_deg)
+    elif tc.grid_type == "icosahedral":
+        lon, lat = grid.lonCell, grid.latCell
+        resid = cmf.continuity_residual_mpas(mf, grid)
+    elif tc.grid_type == "latlon":
+        lon, lat = grid.lon2d, grid.lat2d
+        resid = cmf.continuity_residual_latlon(mf, grid)
+    else:
+        lon, lat = grid.lon2d, grid.lat2d
+        resid = cmf.continuity_residual_spectral(mf, grid, model._dealias_state)
+    zs = np.asarray(_mountain_height(lon, lat), np.float64)
+    if duo is not None:
+        dp0 = np.asarray(duo.layer_mass(state_init), np.float64)
+        w = np.asarray(area, np.float64)[..., None] * dp0
+        dp1 = np.asarray(duo.layer_mass(model.step(state_init, dt)), np.float64)
+        drift = float(np.max(np.abs(dp1 - dp0) / dp0) * period_s / dt)
+        fin = float(np.max(np.abs(np.asarray(duo.layer_mass(state_final), np.float64)
+                                  - dp0) / dp0))
+        notes.append(f"air-mass closure drift {drift:.3e} (closure (diagnostic, FV3 "
+                     f"evolves p_s; user decision 2026-11-26); duo: one step from the "
+                     f"analytic air mass x period/dt; realised final max|ddelp|/delp "
+                     f"{fin:.3e})")
+    else:
+        w = np.asarray(area, np.float64)[..., None] * np.asarray(mf.dp, np.float64)
+
+        # local air-mass closure
+        drift = float(np.max(np.abs(np.asarray(resid, np.float64))
+                             / np.asarray(mf.dp, np.float64)) * period_s)
+        notes.append(f"air-mass closure drift {drift:.3e} (|W| mean removed "
+                     f"{float(np.max(np.abs(np.asarray(mf.w_mean_removed)))):.2e} Pa/s)")
+    # the duo row's closure is a reported diagnostic, not a gate (FV3 evolves
+    # p_s; user decision 2026-11-26); its global air / tracer mass, uniform
+    # tracer and terrain crossing stay gates
+    if duo is None and not drift <= _DCMIP13_CLOSURE_TOL:          # NaN fails too
+        failed.append(f"local air-mass closure (drift {drift:.3e} > {_DCMIP13_CLOSURE_TOL:g})")
+
+    # uniform-tracer preservation (one step from q = 1)
+    ones = jnp.ones_like(to_grid(state_init).tracers.data)
+    if tc.grid_type == "spectral":
+        st_u = model.state_from_grid(ones)
+    elif duo is not None:
+        (dp_i, q_i), t_i = state_init
+        st_u = ((dp_i, jnp.ones_like(q_i)), t_i)
+    else:
+        st_u = state_init._replace(tracers=state_init.tracers.replace(data=ones))
+    q_u = np.asarray(to_grid(model.step(st_u, dt)).tracers.data, np.float64)
+    unif = float(np.max(np.abs(q_u - 1.0))) if np.all(np.isfinite(q_u)) else float("nan")
+    notes.append(f"uniform-tracer max|q-1| {unif:.3e}")
+    if not unif <= _DCMIP13_UNIFORM_TOL:              # NaN fails too
+        failed.append(f"uniform-tracer preservation (max|q-1| {unif:.3e})")
+
+    # global tracer conservation with the model's air mass, every tracer at
+    # every diagnostic sample (mass_samples, recorded during the run)
+    def _ww(s):
+        # the state's own air mass where it carries one, else the steady dp
+        if duo is not None:
+            return np.asarray(area, np.float64)[..., None] * np.asarray(
+                duo.layer_mass(s), np.float64)
+        return (np.asarray(area, np.float64)[..., None] * np.asarray(s.air_mass.data, np.float64)
+                if hasattr(s, "air_mass") else w)
+
+    def _m(s):
+        q = np.asarray(to_grid(s).tracers.data, np.float64)
+        ww = _ww(s)
+        return (ww[..., None] * q).reshape(-1, q.shape[-1]).sum(axis=0)
+    m0, m1 = _m(state_init), _m(state_final)
+    rel = np.where(m0 != 0, (m1 - m0) / np.where(m0 != 0, m0, 1.0), np.nan)
+    samp = np.asarray(list(mass_samples), np.float64).reshape(-1, m0.size)
+    if samp.size and np.all(m0 != 0) and np.all(np.isfinite(samp)):
+        dev = np.abs(samp / m0 - 1.0)
+        k_w, t_w = np.unravel_index(int(np.argmax(dev)), dev.shape)
+        peak, peak_txt = float(dev[k_w, t_w]), (
+            f"peak over {samp.shape[0]} samples q{t_w + 1} {dev[k_w, t_w]:.3e} "
+            f"(sample {k_w})")
+    else:
+        peak, peak_txt = float("nan"), "peak over samples unavailable"
+    worst = float(np.max(np.abs(np.append(rel, peak))))
+    notes.append("mass[q dp] rel " + ", ".join(
+        f"q{i + 1} {r:+.3e}" for i, r in enumerate(rel)) + ", " + peak_txt)
+    if not worst <= _DCMIP13_MASS_TOL:            # NaN (zero mass) fails too
+        failed.append(f"global tracer conservation (max |rel| {worst:.3e})")
+    if duo is not None:
+        a_note, a_fail = duo_air_mass_criterion(
+            duo.air_mass(state_init), duo.air_mass(state_final), air_samples)
+        notes.append(a_note)
+        failed += a_fail
+    # tracer that numerical mixing carried into the top / surface layers
+    # (the analytic clouds never reach them; with the h0 <= z <= z_top flow
+    # no air crosses those boundaries, so it cannot leave).  On the duo row
+    # the layers move in height with p_s, so this is the layers' tracer
+    # occupancy, not attributable to mixing alone
+    qf = np.asarray(to_grid(state_final).tracers.data, np.float64)
+    wf = _ww(state_final)
+    edge = (wf[..., [0, -1], None] * qf[..., [0, -1], :]).reshape(-1, qf.shape[-1]).sum(axis=0)
+    notes.append("final tracer mass in the top+surface layers / M0 " + ", ".join(
+        f"q{i + 1} {e:.2e}" for i, e in enumerate(edge / np.where(m0 != 0, m0, np.nan))))
+
+    # terrain crossing from the saved q1 snapshots.  Deliberately measured in
+    # the PRESCRIBED analytic geometry (analytic mountain zs and analytic-p_s
+    # level heights) on every prescribed-flux grid and both coordinates; the weights are the
+    # model's own layer masses, which on spectral come from the band-projected
+    # p_s (vote: codex A, author A -- keeps the existing sigma-path diagnostic).
+    # The duo row's levels move with its evolving p_s: its weights and level
+    # heights come from the delp saved with each snapshot (the isothermal
+    # z(p) of the analytic atmosphere at the model's own pressures)
+    if duo is not None:
+        z = None
+    elif tc.vertical_coord == "hybrid":
+        z = np.asarray(dcmip13_full_level_height(lon, lat, sigma_coord), np.float64)
+    else:
+        z = zs[..., None] - _H * np.log(np.asarray(sigma_coord.sigma_full, np.float64))
+    zbar, zsbar = [], []
+    for step in sorted(snapshots):
+        # signed q1 weights (the duo row: its own layer mass and level
+        # heights at the snapshot)
+        w_s, z_s = dcmip13_snapshot_geometry(snapshots[step], area, duo, w, z)
+        qq = np.asarray(snapshots[step]["q1_3d"], np.float64) * w_s
+        tot = qq.sum() if qq.sum() > 0 else np.nan     # empty cloud -> non-finite
+        zbar.append(float((qq * z_s).sum() / tot))
+        zsbar.append(float((qq * zs[..., None]).sum() / tot))
+    dz = np.asarray(zbar) - zbar[0]
+    dzs = np.asarray(zsbar) - zsbar[0]
+    qual = np.abs(dzs) >= _DCMIP13_TERRAIN_MIN_M
+    if not np.all(np.isfinite(dz)) or not np.all(np.isfinite(dzs)):
+        notes.append("terrain crossing: non-finite cloud moments")
+        failed.append("terrain crossing (non-finite measurement)")
+    elif not qual.any():
+        # a run too short to reach the mountain: reported, not failed; over
+        # the full period the cloud must have crossed it, so a failure
+        notes.append("AUDIT INCOMPLETE: terrain crossing untested (max terrain shift "
+                     f"under the cloud {float(np.max(np.abs(dzs))):.1f} m)")
+        if full_period:
+            failed.append("terrain crossing untested over the full period")
+    else:
+        # gate at the snapshot of largest terrain shift (the ratio is noisy
+        # where the shift is small); the worst ratio over all qualifying
+        # snapshots is reported alongside
+        i = int(np.argmax(np.abs(dzs)))
+        ratio = float(dz[i] / dzs[i])
+        worst_r = float(np.max(np.abs(dz[qual] / dzs[qual])))
+        notes.append(f"terrain crossing: cloud height shift {dz[i]:.1f} m at the largest "
+                     f"terrain shift {dzs[i]:.1f} m (ratio {ratio:.3f}; 0 = keeps height, "
+                     f"1 = sigma-following; max |ratio| over {int(qual.sum())} snapshots "
+                     f"with shift >= {_DCMIP13_TERRAIN_MIN_M:g} m: {worst_r:.3f})")
+        if abs(ratio) > _DCMIP13_CROSS_TOL:
+            failed.append(f"terrain crossing (signed ratio {ratio:.3f}, |ratio| > "
+                          f"{_DCMIP13_CROSS_TOL:g}: the cloud height does not stay fixed)")
+    return notes, failed
+
+
 def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
                         radiation: str = "gray") -> tuple[str, float, str]:
     """Run DCMIP-2012 transport test cases (Tests 1-1, 1-2, 1-3).
 
-    Supports cubed-sphere, lat-lon, and icosahedral grids.
-    Spectral grids are skipped (no tracer advection infrastructure).
+    Supports cubed-sphere, lat-lon, icosahedral and spectral (Gaussian)
+    grids.  The spectral row uses ``SpectralTracerTransportModel`` with the
+    same geographic winds and analytic initial tracers as the lat-lon row
+    (sampled on the Gaussian grid's ``lon2d``/``lat2d``).
 
     Produces tracer snapshots, lat/lon cross-sections, and vertical profiles
     via _save_case_diagnostics.
     """
     test_num = tc.run_kwargs["test_num"]
 
-    if tc.grid_type == "spectral":
-        record(tc, "SKIP", 0.0,
-               "DCMIP transport not implemented for spectral grid")
-        return "SKIP", 0.0, ""
-
     # --- Shared imports (grid-independent IC/wind helpers) ---
     from tests.test_cases.dcmip_transport import (
-        create_dcmip_sigma,
+        create_dcmip_sigma, create_dcmip13_hybrid,
         dcmip11_wind_geo, dcmip11_tracers_at_points,
         dcmip12_wind_geo, dcmip12_tracers_at_points,
         dcmip13_wind_geo, dcmip13_tracers_at_points,
     )
 
+    # ``vertical``: the prescribed-wind models' vertical transport, selected
+    # explicitly per test.  1-1/1-2 use the FV3 Lagrangian remap (split,
+    # horizontal step then remap, as FV3); 1-3 stays upwind because its
+    # terrain-crossing sigma_dot is nonzero at the top and surface, which
+    # the remap refuses (mass would leave the column).  On lat-lon, MPAS and
+    # spectral, 1-3 runs flux form on the steady 1-3 air mass with the
+    # discretely consistent air fluxes (``consistent_mass_flux``: analytic
+    # vertical air flux kept, minimal horizontal correction closing the
+    # discrete continuity; user decision 2026-11-24) of the flow restricted to
+    # h0 <= z <= z_top (``dcmip13_flow_fraction``; Kent et al. 2014 Sec. 5,
+    # codex vote), so no air or tracer crosses the top or the surface.  The
+    # cube rows of 1-1/1-2 run FV3 duo's own transport
+    # (``build_duo_dcmip_transport``: flux-form horizontal tracer_2d_1L,
+    # vertical motion implicit through the Lagrangian delp + map1_q2 remap,
+    # p_s evolving); cube 1-3 still runs the legacy cube model (terrain: out
+    # of the duo port's scope; no remap option) on sigma; on the Kent hybrid
+    # levels it runs the duo transport too (the duo's fixed-lid DCMIP L30
+    # table is the Kent table): initial p_s = p0 exp(-z_s/H) over the
+    # mountains, the banded 1-3 wind (``dcmip13_wind_geo_banded``, as the
+    # consistent air fluxes of the other rows), vertical motion implicit
+    # and p_s evolving as 1-1/1-2.  The icosahedral (MPAS) rows
+    # select their own vertical transport in their branch.
     TC_CFGS = {
         11: {"wind_geo": dcmip11_wind_geo, "period": 12.0,
-             "dt": 1800.0, "n_tracers": 4},
+             "dt": 1800.0, "n_tracers": 4, "vertical": "fv3_remap"},
         12: {"wind_geo": dcmip12_wind_geo, "period": 1.0,
-             "dt": 600.0, "n_tracers": 1},
+             "dt": 600.0, "n_tracers": 1, "vertical": "fv3_remap"},
         13: {"wind_geo": dcmip13_wind_geo, "period": 12.0,
-             "dt": 1800.0, "n_tracers": 4},
+             "dt": 1800.0, "n_tracers": 4, "vertical": "upwind"},
     }
     cfg = TC_CFGS[test_num]
     nlev = 30
@@ -4785,10 +5376,97 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             dt = 120.0   # CFL < 0.8 at pole-nearest grid point
         elif tc.grid_type == "icosahedral":
             dt = 600.0   # reduce dispersion errors in centered scheme
-    sigma_coord = create_dcmip_sigma(nlev)
+    if tc.vertical_coord == "hybrid":
+        # Kent et al. (2014, App. B) hybrid levels: 1-3 only (the
+        # flux-form rows and the cube duo transport)
+        if test_num != 13 or tc.grid_type not in ("latlon", "icosahedral", "spectral",
+                                                  "cubed_sphere"):
+            raise ValueError(f"DCMIP transport hybrid levels are wired for test 1-3 on "
+                             f"latlon/icosahedral/spectral/cubed_sphere only, not test "
+                             f"{test_num} on {tc.grid_type}")
+        sigma_coord = create_dcmip13_hybrid(nlev)
+    elif tc.vertical_coord == "sigma":
+        sigma_coord = create_dcmip_sigma(nlev)
+    else:
+        raise ValueError(f"DCMIP transport: unknown vertical coordinate "
+                         f"{tc.vertical_coord!r}")
+
+    # Grid-space view of a state.  Identity on the grid-point models; the
+    # spectral branch overrides it with the SH synthesis.  ``state_init_grid``
+    # is the analytic IC on the grid (the "exact" field for the norms).
+    def to_grid(s):
+        return s
+
+    def key_array_fn(s):
+        return s.tracers.data
+
+    # Per-layer air-mass weight of the Rule 0 audit: dsigma on the sigma
+    # rows (uniform p_s); the duo rows carry their own evolving delp.
+    _dsg_audit = np.diff(np.asarray(sigma_coord.sigma_half,
+                                    dtype=np.float64))
+
+    def layer_weight_fn(s):
+        return _dsg_audit
+    duo = None
+    state_init_grid = None
 
     # --- Grid-specific setup ---
-    if tc.grid_type == "cubed_sphere":
+    if tc.grid_type == "cubed_sphere" and (test_num in (11, 12)
+                                           or tc.vertical_coord == "hybrid"):
+        from scripts.matrix._cube_duo_adapters import (
+            build_duo_dcmip_transport)
+        from tests.test_cases.dcmip_transport import (
+            dcmip11_init_latlon, dcmip12_init_latlon, dcmip13_init_latlon)
+        n = int(tc.resolution[1:])
+        duo_kw = {}
+        wind_geo = cfg["wind_geo"]
+        if test_num == 13:
+            # 1-3 (Kent hybrid levels): p_s over the mountains and the
+            # banded flow, as the other grids' consistent air fluxes
+            from tests.test_cases.dcmip_transport import (
+                _H, _mountain_height, _p0, dcmip13_wind_geo_banded)
+            wind_geo = dcmip13_wind_geo_banded
+            duo_kw["ps_init_fn"] = (
+                lambda lo, la: _p0 * jnp.exp(-_mountain_height(lo, la) / _H))
+        # d_sw's delp transport needs a sub-step Courant number < 1: the
+        # sub-step count follows the grid, dt and the prescribed winds
+        # (automatic), and the realised Courant number is refused >= 1
+        duo = build_duo_dcmip_transport(
+            n, wind_geo=wind_geo,
+            init_latlon={11: dcmip11_init_latlon,
+                         12: dcmip12_init_latlon,
+                         13: dcmip13_init_latlon}[test_num],
+            sigma_coord=sigma_coord, n_tracers=cfg["n_tracers"], dt=dt,
+            n_sub=None, period_s=cfg["period"] * 86400.0, **duo_kw)
+
+        from legoesm.core.field import Field
+        from legoesm.core.state import TracerState
+
+        def _as_tracer_state(q, t):
+            return TracerState(
+                tracers=Field(data=jnp.asarray(q), name="tracers",
+                              dims=("face", "y", "x", "level", "tracer"),
+                              units="kg/kg"),
+                time=Field(data=jnp.asarray(t), name="time", dims=(),
+                           units="s"))
+
+        def to_grid(s):  # noqa: F811
+            return _as_tracer_state(duo.tracers(s), s[1])
+
+        def key_array_fn(s):  # noqa: F811
+            return to_grid(s).tracers.data
+
+        def layer_weight_fn(s):  # noqa: F811
+            return duo.layer_mass(s) / 1.0e5       # delp / p0
+
+        state_init = duo.carry
+        state_init_grid = _as_tracer_state(duo.q_ic, 0.0)
+        model = SimpleNamespace(step=duo.step)
+        grid = SimpleNamespace(area=duo.area)
+        coord_kind = "cube"
+        lon_deg, lat_deg = duo.lon_deg, duo.lat_deg
+
+    elif tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import (
             create_cubed_sphere, rotate_winds_geo_to_grid)
         from legoesm.atmosphere.dynamics.shared.tracer_transport import (
@@ -4832,9 +5510,25 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             13: dcmip13_init_latlon,
         }
         state_init = init_fns[test_num](grid, sigma_coord)
+        mass_flux = None
+        if test_num == 13:
+            from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+                consistent_mass_flux_latlon)
+            # benchmark state in fp64, as the MPAS row (user decision
+            # 2026-11-24): fp32 storage alone breaks q = 1 / the mass at 1e-8
+            if not jax.config.jax_enable_x64:
+                raise ValueError("DCMIP 1-3 lat-lon runs in float64: enable JAX x64")
+            state_init = state_init._replace(tracers=state_init.tracers.replace(
+                data=state_init.tracers.data.astype(jnp.float64)))
+            from tests.test_cases.dcmip_transport import (
+                _H, _mountain_height, _p0, dcmip13_wind_geo_banded)
+            mass_flux = consistent_mass_flux_latlon(
+                grid, sigma_coord, dcmip13_wind_geo_banded,
+                _p0 * jnp.exp(-_mountain_height(grid.lon2d, grid.lat2d) / _H))
         model = TracerTransportLatLonModel(
             grid, sigma_coord, latlon_wind,
-            TracerTransportLatLonConfig())
+            TracerTransportLatLonConfig(vertical_scheme=cfg["vertical"]),
+            mass_flux=mass_flux)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -4849,78 +5543,184 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         level = int(tc.resolution.replace("ico", ""))
         grid = create_voronoi_mesh(level)
 
-        # Wind wrapper: convert geographic (u_east, v_north) to edge-normal.
-        wind_geo_fn = cfg["wind_geo"]
+        # MPAS-A scalar transport (user decision 2026-11-23): edge-normal
+        # winds whose rotational part is the TRiSK curl of the DCMIP
+        # streamfunction (discretely non-divergent) plus the projected
+        # divergent part; flux form on a prognostic air mass, Skamarock-
+        # Gassmann 3rd/4th-order reconstruction, RK3 with the monotonic
+        # limiter on the last stage.  Vertical (user decision 2026-11-24):
+        # "mpas_flux" = MPAS-A flux-form vertical transport inside the 3-D
+        # monotone limiter, the vertical air-mass flux diagnosed from the
+        # discrete column continuity (the analytic sigma_dot is not used);
+        # "fv3_remap" is the opt-in comparison.  Benchmark state fp64.
+        from tests.test_cases.dcmip_transport import (
+            dcmip_wind_mpas, dcmip_air_mass_state_mpas)
 
         def mpas_wind(t, mesh, sc):
-            u_east, v_north, sigma_dot = wind_geo_fn(
-                t, mesh.lonCell, mesh.latCell, sc)
-            # Project geographic winds to edge-normal at each level.
-            # u_edge = u_east(cell) * cos(angleEdge) + v_north(cell) * sin(angleEdge)
-            # Average the two cells straddling each edge.
-            c1 = mesh.cellsOnEdge[0]  # (nEdges,)
-            c2 = mesh.cellsOnEdge[1]
-            cos_a = jnp.cos(mesh.angleEdge)  # (nEdges,)
-            sin_a = jnp.sin(mesh.angleEdge)
-            ue_c1 = u_east[c1] * cos_a[:, None] + v_north[c1] * sin_a[:, None]
-            ue_c2 = u_east[c2] * cos_a[:, None] + v_north[c2] * sin_a[:, None]
-            u_edge = 0.5 * (ue_c1 + ue_c2)  # (nEdges, nlev)
-            return u_edge, sigma_dot
+            return dcmip_wind_mpas(test_num, t, mesh, sc)
 
         init_fns = {
             11: dcmip11_init_mpas,
             12: dcmip12_init_mpas,
             13: dcmip13_init_mpas,
         }
-        state_init = init_fns[test_num](grid, sigma_coord)
+        state_init = dcmip_air_mass_state_mpas(
+            test_num, init_fns[test_num](grid, sigma_coord), grid, sigma_coord)
+        mass_flux = None
+        if test_num == 13:
+            # 1-3: steady consistent air fluxes (analytic vertical air flux
+            # of the h0 <= z <= z_top flow, closed at top/surface; horizontal
+            # flux corrected) on the state's steady air mass dp = p_s dsigma
+            from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+                consistent_mass_flux_mpas)
+            from tests.test_cases.dcmip_transport import dcmip13_flow_fraction
+            u_e13, sd13 = mpas_wind(0.0, grid, sigma_coord)
+            frac_e = dcmip13_flow_fraction(grid.lonEdge, grid.latEdge, sigma_coord)[0]
+            mask_c = dcmip13_flow_fraction(grid.lonCell, grid.latCell, sigma_coord)[1]
+            if tc.vertical_coord == "hybrid":
+                from tests.test_cases.dcmip_transport import _H, _mountain_height, _p0
+                ps13 = _p0 * jnp.exp(-_mountain_height(grid.lonCell, grid.latCell) / _H)
+            else:
+                ps13 = state_init.air_mass.data[:, -1] / sigma_coord.dsigma[-1]
+            mass_flux = consistent_mass_flux_mpas(
+                grid, sigma_coord, u_e13 * frac_e, sd13 * mask_c, ps13)
         model = TracerTransportMPASModel(
             grid, sigma_coord, mpas_wind,
-            TracerTransportMPASConfig(hyperdiff_coeff=0.0))
+            TracerTransportMPASConfig(
+                hyperdiff_coeff=0.0, time_integrator="mpas_rk3", vertical_scheme="mpas_flux",
+                fct_vertical_upwind_width_pas=1.0e-5,
+                horizontal_scheme="mpas_fct", coef_3rd_order=0.25,
+                fct_smoothing_width=1.0e-4, fct_upwind_width_ms=1.0e-3),
+            mass_flux=mass_flux)
         coord_kind = "icosa"
         lon_deg = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_spectral import (
+            SpectralTracerTransportModel, TracerTransportSpectralConfig)
+        from tests.test_cases.dcmip_transport import (
+            dcmip11_init_latlon, dcmip12_init_latlon, dcmip13_init_latlon)
+
+        n_max = int(tc.resolution.replace("T", ""))
+        wind_geo_fn = cfg["wind_geo"]
+
+        def spectral_wind(t, g, sc):
+            return wind_geo_fn(t, g.lon2d, g.lat2d, sc)
+
+        spec_cfg = TracerTransportSpectralConfig(vertical_scheme=cfg["vertical"])
+        mass_flux = None
+        if test_num == 13:
+            from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+                consistent_mass_flux_spectral)
+            from legoesm.grids.gaussian import dealiasing_mask
+            from tests.test_cases.dcmip_transport import (
+                _H, _mountain_height, _p0, dcmip13_wind_geo_banded)
+            g13 = create_gaussian_grid(n_max)
+            mass_flux = consistent_mass_flux_spectral(
+                g13, sigma_coord, dcmip13_wind_geo_banded,
+                _p0 * jnp.exp(-_mountain_height(g13.lon2d, g13.lat2d) / _H),
+                dealiasing_mask(g13, spec_cfg.dealiasing_fraction))
+        model = SpectralTracerTransportModel(
+            create_gaussian_grid(n_max), sigma_coord, spectral_wind, spec_cfg,
+            mass_flux=mass_flux)
+        grid = model.grid
+        # The lat-lon init helpers read only lon2d/lat2d/n_lat/n_lon, which
+        # the Gaussian grid exposes too: same analytic IC as the lat-lon row.
+        init_fns = {
+            11: dcmip11_init_latlon,
+            12: dcmip12_init_latlon,
+            13: dcmip13_init_latlon,
+        }
+        state_init_grid = init_fns[test_num](grid, sigma_coord)
+        # Start from the Orszag-band state the model carries (the model
+        # would otherwise drop the upper band only after the first step).
+        state_init = model.state_from_grid(state_init_grid.tracers.data)
+
+        def to_grid(s):
+            return s._replace(tracers=s.tracers.replace(data=model.grid_values(s)))
+
+        coord_kind = "gaussian"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
     else:
         record(tc, "SKIP", 0.0,
                f"DCMIP transport not implemented for grid '{tc.grid_type}'")
         return "SKIP", 0.0, ""
 
+    if tc.grid_type != "spectral" and state_init_grid is None:
+        state_init_grid = state_init
+
     # --- Extract function for tracer snapshots ---
     n_tracers = cfg["n_tracers"]
 
     def extract_fn(s):
-        q = np.asarray(s.tracers.data, dtype=np.float64)
+        q = np.asarray(to_grid(s).tracers.data, dtype=np.float64)
         out = {}
         # Surface-level (bottom) tracer for 2D map snapshots
         for i in range(min(n_tracers, 4)):
             out[f"q{i+1}"] = q[..., -1, i]
         # Full 3D for cross-sections (first tracer)
         out["q1_3d"] = q[..., 0]
+        if duo is not None and test_num == 13:
+            # the duo's evolving layer mass: the 1-3 terrain-audit weights
+            out["delp_3d"] = np.asarray(duo.layer_mass(s), np.float64)
         return out
 
     def step_fn(s, dt_):
         return model.step(s, dt_)
 
     def check_fn(s):
-        return (check_finite({"tracers": s.tracers.data}),
-                float(jnp.max(jnp.abs(s.tracers.data))))
+        q = to_grid(s).tracers.data
+        ok_ = check_finite({"tracers": q})
+        if hasattr(s, "air_mass"):    # mpas_fct: prognostic layer air mass
+            ok_ = ok_ and check_finite({"air_mass": s.air_mass.data}) and bool(
+                jnp.min(s.air_mass.data) > 0)
+        return (ok_, float(jnp.max(jnp.abs(q))))
 
     _area_for_mean = _grid_cell_area(grid)
 
+    # DCMIP 1-3 audit: per-tracer global mass sum(area dp q) with the
+    # model's own air mass at every diagnostic sample
+    _m13_samples: list = []
+    _a13_samples: list = []        # duo 1-3: global air mass sum(area delp)
+    _w13 = None
+    if test_num == 13 and (tc.grid_type in ("latlon", "spectral", "icosahedral")
+                           or duo is not None):
+        _w13 = np.asarray(_area_for_mean, np.float64)[..., None]
+
     def scalar_fn(s):
-        q = s.tracers.data
+        q = to_grid(s).tracers.data
+        if _w13 is not None:
+            qq = np.asarray(q, np.float64)
+            if duo is not None:
+                _a13_samples.append(duo.air_mass(s))
+            dp13 = (duo.layer_mass(s) if duo is not None else
+                    s.air_mass.data if hasattr(s, "air_mass") else model.mass_flux.dp)
+            _m13_samples.append((_w13[..., None] * np.asarray(dp13, np.float64)[..., None]
+                                 * qq).reshape(-1, qq.shape[-1]).sum(axis=0))
         return {
             "q1_min": float(jnp.min(q[..., 0])),
             "q1_max": float(jnp.max(q[..., 0])),
             "q1_mean": _area_weighted_mean(q[..., 0], _area_for_mean),
         }
 
-    def key_array_fn(s):
-        return s.tracers.data
-
     # --- Time loop ---
     period = min(days, cfg["period"])
-    n_steps = int(period * 86400.0 / dt)
+    _nf = period * 86400.0 / dt
+    n_steps = int(_nf)
+    if duo is not None and round(_nf) >= 1 and abs(_nf - round(_nf)) <= (
+            8 * np.spacing(float(round(_nf)))):
+        # duo rows only (the other rows' rule is unchanged): snap a request
+        # within a few ulps of an integer step count (e.g. 23 * 600 s /
+        # 86400 -> 22.999999999999996), floor otherwise
+        n_steps = int(round(_nf))
     diag_every = max(1, n_steps // 20)
+    if duo is not None and n_steps < 1:
+        # never a duo PASS with unchanged budgets and no measured omega
+        raise RuntimeError(f"DCMIP duo transport: {period:g} d is shorter "
+                           f"than one step (dt={dt:g} s); refusing")
 
     state_final, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state_init, dt, n_steps, check_fn, scalar_fn, extract_fn,
@@ -4928,23 +5728,189 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         label=f"DCMIP transport {test_num} ({tc.grid_type})",
         total_days=period)
 
-    # --- Error norms (for flow-reversal tests on cubed-sphere) ---
-    notes = ""
-    if test_num in (11, 12) and tc.grid_type == "cubed_sphere":
-        norms = compute_tracer_error_norms(state_final, state_init, grid)
-        norm_strs = [f"q{i + 1} L2={norms['l2'][i]:.4e}"
-                     for i in range(n_tracers)]
-        notes = ", ".join(norm_strs)
+    # --- Error norms (1-1 / 1-2 flow reversal, 1-3 one revolution; every grid) ---
+    # Exact solution at t = T is the analytic IC on the grid, so the norms
+    # are reported only when the run reached the full period T.
+    from tests.test_cases.dcmip_transport import compute_tracer_error_norms
+    _area_ns = SimpleNamespace(area=_area_for_mean)
+    notes_parts = []
+    # 1-1/1-2 keep the exact gate; 1-3 (new) tolerates round-off in n_steps*dt
+    full_period = bool(np.isclose(n_steps * dt, cfg["period"] * 86400.0, rtol=1e-12, atol=0.0))
+    if ok and ((test_num in (11, 12) and n_steps * dt == cfg["period"] * 86400.0)
+               or (test_num == 13 and (tc.grid_type != "cubed_sphere" or duo is not None)
+                   and full_period)):
+        exact = state_init_grid
+        if duo is not None and test_num == 13:
+            exact = _as_tracer_state(duo13_exact_tracers(duo, state_final), 0.0)
+        norms = compute_tracer_error_norms(
+            to_grid(state_final), exact, _area_ns)
+        notes_parts += [
+            f"q{i + 1} L1={norms['l1'][i]:.4e} "
+            f"L2={norms['l2'][i]:.4e} Linf={norms['linf'][i]:.4e}"
+            for i in range(n_tracers)]
+        if duo is not None and test_num == 13:
+            ni = compute_tracer_error_norms(to_grid(state_final), state_init_grid, _area_ns)
+            notes_parts.append(
+                "(1-3 duo norms: exact = analytic clouds at the final level heights; "
+                "layer-index return vs the IC: " + ", ".join(
+                    f"q{i + 1} L2={ni['l2'][i]:.4e}" for i in range(n_tracers)) + ")")
+    if ok and hasattr(state_final, "air_mass"):
+        # RULE 0 record: global air mass sum(area dp); the per-tracer mass
+        # sum(area q dp) is the audit below.
+        def _air(s):
+            if s.air_mass.data.shape != (np.asarray(_area_for_mean).shape[0], nlev):
+                raise RuntimeError(f"DCMIP air-mass audit: air_mass shape "
+                                   f"{s.air_mass.data.shape} != (nCells, {nlev})")
+            return float((np.asarray(_area_for_mean, np.float64)[:, None]
+                          * np.asarray(s.air_mass.data, np.float64)).sum())
+        am0, am1 = _air(state_init), _air(state_final)
+        notes_parts.append(f"air-mass rel change {am1 / am0 - 1.0:.3e}")
+    if test_num in (11, 12, 13) and tc.grid_type == "spectral":
+        # Initialization (projection + Orszag truncation) error alone, so
+        # the transport error can be separated from it.
+        ic_norms = compute_tracer_error_norms(
+            to_grid(state_init), state_init_grid, _area_ns)
+        notes_parts.append("IC-projection " + ", ".join(
+            f"q{i + 1} L2={ic_norms['l2'][i]:.4e}"
+            for i in range(n_tracers)))
+    # RULE 0 audit, every grid/test/scheme: per-tracer global tracer mass
+    # at the start and end and its relative residual.  Models without a
+    # prognostic air mass: sum(area * sum_k q dsigma) (uniform p_s, so
+    # dsigma ~ dp/p_s; "mass[q dsigma]"); the MPAS mpas_fct state carries
+    # dp: sum(area * sum_k q dp) [Pa m^2] ("mass[q dp]").  The
+    # advective-form prescribed-wind models do NOT conserve it (declared).
+    _q0 = np.asarray(to_grid(state_init).tracers.data, dtype=np.float64)
+    _q1 = np.asarray(to_grid(state_final).tracers.data, dtype=np.float64)
+    _ar = np.asarray(_area_for_mean, dtype=np.float64)
+    _w0 = np.broadcast_to(np.asarray(layer_weight_fn(state_init),
+                                     dtype=np.float64), _q0.shape[:-1])
+    _w1 = np.broadcast_to(np.asarray(layer_weight_fn(state_final),
+                                     dtype=np.float64), _q1.shape[:-1])
+    _want = (*_ar.shape, nlev, n_tracers)
+    if _q0.shape != _want or _q1.shape != _want:
+        # never a PASS with an unmeasured (or mis-broadcast) budget
+        raise RuntimeError(
+            f"DCMIP mass audit: tracer shapes {_q0.shape}/{_q1.shape} != "
+            f"(area {_ar.shape}, nlev {nlev}, ntr {n_tracers})")
+    if not (np.all(np.isfinite(_q0)) and np.all(np.isfinite(_q1))):
+        notes_parts.append("mass audit unavailable: non-finite tracer state")
+    else:
+        def _mass(q, s, w_layer):
+            # prognostic layer air mass (MPAS mpas_fct): the conserved
+            # tracer mass is sum(area q dp) [Pa m^2]; else the row's
+            # layer weight (dsigma, or the duo rows' evolving delp/p0)
+            w = (np.asarray(s.air_mass.data, np.float64)
+                 if hasattr(s, "air_mass") else w_layer)
+            if hasattr(s, "air_mass") and w.shape != _want[:-1]:
+                raise RuntimeError(f"DCMIP mass audit: air_mass shape {w.shape}"
+                                   f" != {_want[:-1]}")
+            col = np.sum(q * w[..., None], axis=-2)   # (..., ntr)
+            return np.sum(col * _ar[..., None],
+                          axis=tuple(range(col.ndim - 1)))
+        _m0, _m1 = (_mass(_q0, state_init, _w0),
+                    _mass(_q1, state_final, _w1))
+        if not (np.all(np.isfinite(_m0)) and np.all(np.isfinite(_m1))):
+            raise RuntimeError(f"DCMIP mass audit: non-finite budget "
+                               f"M0={_m0} M1={_m1}")
+        notes_parts.append(("mass[q dp] " if hasattr(state_final, "air_mass")
+                            else "mass[q dsigma] ") + ", ".join(
+            f"q{i + 1} M0={_m0[i]:.15e} M1={_m1[i]:.15e} "
+            f"rel={(_m1[i] - _m0[i]) / _m0[i]:+.6e}"
+            if _m0[i] != 0.0 else f"q{i + 1} M0=0 M1={_m1[i]:.15e}"
+            for i in range(n_tracers)))
+    if duo is not None:
+        # duo rows: air mass / p_s drift (p_s evolves, never reset), the
+        # implicit vertical motion vs the analytic omega (unused), Courant
+        _ps1 = duo.ps(state_final)
+        _air = [duo.air_mass(c) for c in (state_init, state_final)]
+        if duo.ps_ref is None:
+            notes_parts.append(
+                f"air-mass rel {(_air[1] - _air[0]) / _air[0]:+.3e}, p_s-p0 "
+                f"min/max {np.min(_ps1) - 1e5:+.2f}/{np.max(_ps1) - 1e5:+.2f} "
+                f"Pa (rms {np.sqrt(np.mean((_ps1 - 1e5) ** 2)):.2f})")
+        else:
+            # 1-3: departure from the initial (analytic) p_s over the terrain
+            _dps = _ps1 - duo.ps_ref
+            notes_parts.append(
+                f"air-mass rel {(_air[1] - _air[0]) / _air[0]:+.3e}, p_s-p_s(t=0) "
+                f"min/max {np.min(_dps):+.2f}/{np.max(_dps):+.2f} "
+                f"Pa (rms {np.sqrt(np.mean(_dps ** 2)):.2f})")
+        _om = duo.effective_omega()
+        if _om and test_num == 13:
+            # 1-3: the fixed-cell Lagrangian interface tendency estimates the
+            # coordinate-crossing air flux W = p_s*sigma_dot; the analytic
+            # material omega of the w = 0 flow is 0, reported as a residual
+            notes_parts.append(
+                "W_eff (fixed-cell Lagrangian interface tendency (pe_lag - "
+                "pe_start)/dt, first/last accepted step; the crossing flux "
+                "only while p_s stays steady; DCMIP sigma_dot unused) vs the "
+                "analytic coordinate-crossing air flux p_s*sigma_dot: " + ", ".join(
+                    f"t={o['t_sample']:.0f}s rms err "
+                    f"{o['abs_rms_err_fixed_cell']:.3e} Pa/s (rel "
+                    f"{o['rel_rms_err_fixed_cell']:.3e}, corr "
+                    f"{o['corr_fixed_cell']:.5f}; rms analytic "
+                    f"{o['rms_analytic']:.3e}; material omega (analytic 0) "
+                    f"rms {o['rms_effective']:.3e}, V.grad(pe) "
+                    f"{o['rms_interface_advection']:.2e})"
+                    for o in (_om["first"], _om["last"])))
+        elif _om:
+            notes_parts.append(
+                "omega_eff (material: Lagrangian interface tendency + "
+                "V.grad(pe_eul), first/last accepted step; DCMIP omega "
+                "unused) "
+                "vs analytic p0*sigma_dot: " + ", ".join(
+                    f"t={o['t_sample']:.0f}s rms err "
+                    f"{o['abs_rms_err']:.3e} Pa/s (rel {o['rel_rms_err']:.3e}"
+                    f", corr {o['corr']:.5f}; fixed-cell rel "
+                    f"{o['rel_rms_err_fixed_cell']:.3e}; rms analytic "
+                    f"{o['rms_analytic']:.3e}, V.grad(pe) "
+                    f"{o['rms_interface_advection']:.2e})"
+                    for o in (_om["first"], _om["last"])))
+        _elapsed = float(state_final[1])          # the carry's own clock
+        notes_parts.append(
+            f"integrated {int(round(_elapsed / dt))} of {n_steps} steps = "
+            f"{_elapsed / 86400.0:g} d")
+        notes_parts.append(f"n_sub {duo.n_sub_fn()}, max sub-step Courant "
+                           f"{duo.courant_max():.3f}")
+    status = "PASS" if ok else "FAIL"
+    if test_num == 13 and (tc.grid_type in ("latlon", "spectral", "icosahedral")
+                           or duo is not None):
+        if ok:
+            a_notes, a_failed = _dcmip13_audit(
+                tc, grid, sigma_coord, model, state_init, state_final, snapshots,
+                to_grid, _area_for_mean, dt, cfg["period"] * 86400.0, _m13_samples,
+                full_period, duo=duo, air_samples=_a13_samples)
+            notes_parts += a_notes
+            if a_failed:
+                # a measured acceptance failure fails the row (codex vote
+                # 2026-11-24); an untested criterion is only reported
+                notes_parts.append("CRITERION FAIL: " + "; ".join(a_failed))
+                status = "FAIL"
+        else:
+            notes_parts.append("1-3 audit not run: the run failed")
+    notes = ", ".join(notes_parts)
 
     # --- Diagnostics output ---
     level_values = np.asarray(sigma_coord.sigma_full, dtype=np.float64)
     field_specs_2d = [(f"q{i+1}", f"Tracer q{i+1}", "viridis")
                       for i in range(min(n_tracers, 4))]
 
+    vertical_scheme = (
+        "fv3_duo Lagrangian (implicit omega) + map1_q2"
+        if duo is not None else
+        "upwind (legacy cube model)"
+        if tc.grid_type == "cubed_sphere" else
+        model.config.vertical_scheme
+        if tc.grid_type == "icosahedral" else cfg["vertical"])
+    duo_rows = ({"duo": duo.note,
+                 "accepted_steps": int(round(float(state_final[1]) / dt)),
+                 "elapsed_days": float(state_final[1]) / 86400.0}
+                if duo is not None else {})
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "levels": nlev, "period_days": period, "dt": dt,
-        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "vertical_scheme": vertical_scheme, **duo_rows,
+        "status": status, "notes": notes,
         "wall_time": f"{wall:.1f}s"},
         diag=diag)  # iter-99: surface BLOWUP info if any
     _save_case_diagnostics(
@@ -4953,11 +5919,11 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=field_specs_2d,
         field_3d_key="q1_3d", level_values=level_values,
-        level_label="Sigma level",
+        level_label=("Eta level" if tc.vertical_coord == "hybrid" else "Sigma level"),
         scalar_units={"q1_min": "kg/kg", "q1_max": "kg/kg",
                       "q1_mean": "kg/kg"})
 
-    return "PASS" if ok else "FAIL", wall, notes
+    return status, wall, notes
 
 
 # ===========================================================================
@@ -4975,7 +5941,6 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
             hydrostatic_to_cgrid)
@@ -4984,7 +5949,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
         grid = create_latlon_grid(n_lat, n_lon)
-        sigma = standard_hybrid_levels(nlev)
+        sigma = _create_vertical(nlev, "hybrid")  # AMIP: hybrid only
         ah = _laplacian_visc_latlon(n_lat)
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
@@ -4994,6 +5959,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            A_h_pressure_surfaces=_LATLON_A_H_PRESSURE_SURFACES,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
             sb81_omega_conversion=True,
         )
@@ -5041,7 +6007,6 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
         from legoesm.atmosphere.forcing.idealized.held_suarez import (
@@ -5050,13 +6015,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
-        sigma = standard_hybrid_levels(nlev)
+        sigma = _create_vertical(nlev, "hybrid")  # AMIP: hybrid only
         dt = 200.0
-        ah = _laplacian_visc_ico(mesh)
-        config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True,
-            time_integrator=_mpas_integrator())
+        config = _mpas_hydro_config(mesh, sigma)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
         grid = mesh
@@ -5097,7 +6058,6 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis_3d,
         )
-        from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
@@ -5108,7 +6068,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
-        sigma = standard_hybrid_levels(nlev)
+        sigma = _create_vertical(nlev, "hybrid")  # AMIP: hybrid only
         dt = 600.0
         pe_config = SpectralPEConfig(
             hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
@@ -5188,9 +6148,12 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     ok, notes = _apply_mass_drift_tolerance(
         ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
+    if tc.grid_type == "latlon":
+        notes = f"{notes}; {_LATLON_A_H_PRESSURE_SURFACES_NOTE}"
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
+    notes = f"{notes}; {_vertical_table_label('hybrid', sigma)}"
 
     # iter-32 codex LOW + iter-35 factored: record effective GHG
     # concentrations in ``results.txt`` for reproducibility when
@@ -5228,8 +6191,12 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 # ===========================================================================
 
 
-def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
-    """Return a physics_fn suitable for the NH solver that wraps Kessler.
+def _make_kessler_nh_grid_fn(height_coord, dt_phys):
+    """Grid-space Kessler core shared by every NH grid's physics_fn.
+
+    Returns ``fn(theta_prime, rho_prime, tracers) -> (dtheta_prime_dt,
+    dtracers_dt)`` on grid-point arrays ``(..., nlev)`` /
+    ``(..., nlev, 3)`` with tracers ordered (q_v, q_c, q_r).
 
     DCMIP TC3 (squall line) requires warm-rain microphysics to bound the
     convective instability from the warm bubble perturbations.
@@ -5240,8 +6207,6 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
         Vertical coordinate with reference profiles.
     dt_phys : float
         Outer time step [s] used for Kessler saturation adjustment rate.
-    tendencies_cls : type
-        NonHydrostaticTendencies or MPASNonHydrostaticTendencies.
     """
     from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         compute_exner_perturbation,
@@ -5249,13 +6214,11 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
     from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
     from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
     from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-    from legoesm.core.field import Field
     from legoesm import constants as _c
 
     p_ref = _c.p_ref
     c_pd = _c.c_pd
     R_d = _c.R_d
-    L_v = _c.L_v
 
     theta_ref = height_coord.theta_ref   # (nlev,)
     rho_ref = height_coord.rho_ref       # (nlev,)
@@ -5263,16 +6226,14 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
     dz = height_coord.dz                 # (nlev,)
     nlev = int(dz.shape[0])
     config = KesslerConfig()
-    # Cubed-sphere tendencies have dv_dt; MPAS does not
-    has_dv = "dv_dt" in tendencies_cls._fields
 
-    def physics_fn(state, grid, hcoord, tmetric):
+    def grid_fn(theta_prime, rho_prime, tr):
         # Recover thermodynamic fields from perturbation state
-        theta_total = theta_ref + state.theta_prime.data
-        rho_total = rho_ref + state.rho_prime.data
+        theta_total = theta_ref + theta_prime
+        rho_total = rho_ref + rho_prime
 
         pi_prime = compute_exner_perturbation(
-            state.rho_prime.data, state.theta_prime.data, hcoord,
+            rho_prime, theta_prime, height_coord,
         )
         exner_total = exner_ref + pi_prime
         T = theta_total * exner_total
@@ -5286,7 +6247,6 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
         ncol = T_flat.shape[0]
 
         # Tracers: (..., nlev, 3) → separate (ncol, nlev)
-        tr = state.tracers.data
         q_v = tr[..., 0].reshape(flat_shape)
         q_c = tr[..., 1].reshape(flat_shape)
         q_r = tr[..., 2].reshape(flat_shape)
@@ -5323,6 +6283,121 @@ def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
             out.dq_c_dt.reshape(T.shape),
             out.dq_r_dt.reshape(T.shape),
         ], axis=-1)
+        return dtheta_dt, dtracers
+
+    return grid_fn
+
+
+def _tc3_bubble_box(lat, lon, radius):
+    """Mask of the DCMIP-2025 TC3 bubble region on the radius-``radius``
+    sphere (``lat``/``lon`` in radians, broadcastable).
+
+    A box around the line of warm bubbles (TC3_PARAMS: centred on
+    ``bubble_lon`` and the equator): |x| <= 5 bubble half-widths across the
+    line (room for the ~7 km shear advection of 4 min) and |y| <= the line's
+    half-length plus 2 half-widths along it.  The row's ``|w|_bubble``
+    metric is the column-max |w| inside this box -- the convective signal,
+    which the global |w|_max can miss when the large-scale flow is not in
+    balance (the former unbalanced spectral TC3 IC peaked at the POLES).
+    Returns ``(mask, (half_x, half_y))``.
+    """
+    from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import TC3_PARAMS
+    p = TC3_PARAMS
+    dlon = np.mod(np.asarray(lon) - p["bubble_lon"] + np.pi, 2 * np.pi) - np.pi
+    x = dlon * radius * np.cos(lat)
+    y = np.asarray(lat) * radius
+    half_x = 5.0 * p["bubble_rh"]
+    half_y = (p["n_bubbles"] // 2) * p["bubble_spacing"] + 2.0 * p["bubble_rh"]
+    return (np.abs(x) <= half_x) & (np.abs(y) <= half_y), (half_x, half_y)
+
+
+def _make_kessler_spectral_nh_physics_fn(height_coord, dt_phys):
+    """Kessler physics_fn for the spectral NH dycore.
+
+    Synthesizes theta' and the J-weighted J*rho', J*rho*(q_v, q_c, q_r) to
+    the Gaussian grid, divides by J (and by rho for the mixing ratios),
+    runs the shared grid-space Kessler core
+    (:func:`_make_kessler_nh_grid_fn`) directly on those grid fields, and
+    analyses theta' and the prognostic tracer tendencies
+    ``J * rho * dq/dt`` (rho is unchanged by the physics) back to spectral
+    space.  All other tendencies are zero, exactly as in the grid-point
+    wrapper.
+    """
+    from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
+
+    grid_fn = _make_kessler_nh_grid_fn(height_coord, dt_phys)
+
+    def physics_fn(state, grid, hcoord, tmetric):
+        n_sh, nlev, n_tr = state.tracers_hat.data.shape
+        theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
+        J = tmetric.jacobian
+        rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data) / J[..., None]
+        rq = sh_synthesis_3d(
+            grid, state.tracers_hat.data.reshape(n_sh, nlev * n_tr),
+        ).reshape(grid.n_lat, grid.n_lon, nlev, n_tr) / J[..., None, None]
+        from legoesm.atmosphere.physics.thermodynamics import (
+            sanitize_theta_rho,
+        )
+        _, rho = sanitize_theta_rho(
+            hcoord.theta_ref + theta_p, hcoord.rho_ref + rho_p)
+        rho = rho[..., None]
+        dtheta_dt, dq_dt = grid_fn(theta_p, rho_p, rq / rho)
+        # Tracer-mass tendency with the PROGNOSTIC density (J rho_ref +
+        # J rho', what the budget integrates); sanitized rho only forms q.
+        dtracers = J[..., None, None] * (
+            hcoord.rho_ref + rho_p)[..., None] * dq_dt
+        dtheta_hat = sh_analysis_3d(grid, dtheta_dt)
+        dtr_hat = sh_analysis_3d(
+            grid, dtracers.reshape(grid.n_lat, grid.n_lon, nlev * n_tr),
+        ).reshape(n_sh, nlev, n_tr)
+
+        def _zero(f):
+            return f.replace(data=jnp.zeros_like(f.data))
+
+        return state._replace(
+            vor_hat=_zero(state.vor_hat),
+            div_hat=_zero(state.div_hat),
+            w_hat=_zero(state.w_hat),
+            theta_prime_hat=state.theta_prime_hat.replace(data=dtheta_hat),
+            rho_prime_hat=_zero(state.rho_prime_hat).replace(units="kg/m^3/s"),
+            phis_hat=_zero(state.phis_hat),
+            tracers_hat=state.tracers_hat.replace(data=dtr_hat,
+                                                  units="kg/m^3/s"),
+        )
+
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
+        tag_tracer_tendency_encoding,
+    )
+    # Returns d(J rho q)/dt: declare it (checked by the dycore's step()).
+    physics_fn = tag_tracer_tendency_encoding(physics_fn)
+    return physics_fn
+
+
+def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
+    """Return a physics_fn suitable for the grid-point NH solvers (Kessler).
+
+    Wraps :func:`_make_kessler_nh_grid_fn` into the tendency NamedTuple of
+    the NH dycore.
+
+    Parameters
+    ----------
+    height_coord : HeightCoordinate
+        Vertical coordinate with reference profiles.
+    dt_phys : float
+        Outer time step [s] used for Kessler saturation adjustment rate.
+    tendencies_cls : type
+        NonHydrostaticTendencies or MPASNonHydrostaticTendencies.
+    """
+    from legoesm.core.field import Field
+
+    grid_fn = _make_kessler_nh_grid_fn(height_coord, dt_phys)
+    # Cubed-sphere tendencies have dv_dt; MPAS does not
+    has_dv = "dv_dt" in tendencies_cls._fields
+
+    def physics_fn(state, grid, hcoord, tmetric):
+        dtheta_dt, dtracers = grid_fn(
+            state.theta_prime.data, state.rho_prime.data,
+            state.tracers.data)
 
         z3d = jnp.zeros_like(state.theta_prime.data)
         z_w = jnp.zeros_like(state.w.data)
@@ -5436,6 +6511,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
         lon_edge = np.asarray(mesh.lonEdge, dtype=np.float64) * 180 / np.pi
         lat_edge = np.asarray(mesh.latEdge, dtype=np.float64) * 180 / np.pi
+        _bubble_mask = (_tc3_bubble_box(
+            np.asarray(mesh.latCell, dtype=np.float64),
+            np.asarray(mesh.lonCell, dtype=np.float64),
+            float(mesh.radius))[0] if test_case == "tc3" else None)
 
         if test_case == "tc3":
             from legoesm.core.state import MPASNonHydrostaticTendencies
@@ -5461,7 +6540,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             # iter-8: track total dry mass alongside |w|_max (parallel
             # to iter-7's cube NH scalar_fn extension).
             from legoesm.core.conservation import compute_nh_dry_mass_mpas
-            return {
+            out = {
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
                 "mean_theta_prime": _area_weighted_mean(
                     s.theta_prime.data, mesh.areaCell),
@@ -5470,6 +6549,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 "mass":             float(compute_nh_dry_mass_mpas(
                     s.rho_prime.data, hcoord, tmetric, mesh)),
             }
+            if _bubble_mask is not None and _bubble_mask.any():
+                w_col = jnp.max(jnp.abs(s.w.data), axis=-1)   # on device
+                out["max_abs_w_bubble"] = float(jnp.max(
+                    jnp.where(_bubble_mask, w_col, 0.0)))
+            return out
 
         def extract_fn(s):
             # u is on edges (nEdges, nlev) — use edge coordinates
@@ -5488,6 +6572,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 w_ll = np.full((181, 360), np.nan)
             return {
                 "u": u_ll, "w_mid": w_ll,
+                # native per-cell column-max |w| (bubble-region plots)
+                "w_colmax": np.abs(w_arr).max(axis=-1),
                 "theta_prime_3d": np.asarray(
                     s.theta_prime.data, dtype=np.float64),
                 "rho_prime_3d": np.asarray(
@@ -5506,14 +6592,6 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         return "SKIP", 0.0, ""
 
     elif tc.grid_type == "spectral":
-        # TC3 requires Kessler microphysics; the spectral solver does not
-        # yet support a physics_fn callback (state is in spectral space).
-        if test_case == "tc3":
-            record(tc, "SKIP", 0.0,
-                   "Spectral NH TC3 requires Kessler microphysics; "
-                   "physics_fn not yet wired for spectral solver")
-            return "SKIP", 0.0, ""
-
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis_3d,
         )
@@ -5527,12 +6605,15 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
 
+        # Orography is band-limited to the model's active band; pass the
+        # SAME fraction the SpectralNHConfig below uses (its default).
+        _df = SpectralNHConfig._field_defaults["dealiasing_fraction"]
         if test_case == "tc1":
             state, hcoord, tmetric = dcmip25_tc1_init_spectral(
-                grid, n_levels=nlev)
+                grid, n_levels=nlev, dealiasing_fraction=_df)
         elif test_case == "tc2a":
             state, hcoord, tmetric = dcmip25_tc2_init_spectral(
-                grid, n_levels=nlev, subcase="a")
+                grid, n_levels=nlev, subcase="a", dealiasing_fraction=_df)
         elif test_case == "tc3":
             state, hcoord, tmetric = dcmip25_tc3_init_spectral(
                 grid, n_levels=nlev)
@@ -5551,11 +6632,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             TC2_PARAMS as _TC2_P, TC3_PARAMS as _TC3_P,
         )
         if test_case == "tc2a":
-            sef = 20.0
+            sef = float(_TC2_P["small_earth_factor"])
             _rotating = bool(_TC2_P.get("rotating", True))
             sponge_w, sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
         elif test_case == "tc3":
-            sef = 60.0
+            sef = float(_TC3_P["small_earth_factor"])
             _rotating = bool(_TC3_P.get("rotating", True))
             sponge_w, sponge_c = 8000.0, 0.15
         else:
@@ -5563,11 +6644,52 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             _rotating = True
             sponge_w, sponge_c = 10000.0, 0.05
 
+        # TC3 resolution note (2026-11-24 diagnosis): the warm bubbles are
+        # 10 km wide on this radius/60 planet, which this core under-resolves
+        # (nominal shortest wavelength 2*pi*a/N: T42 16 km, T85 7.8 km; the
+        # slow horizontal tendencies are further masked to
+        # n <= floor(2N/3): 24 / 12 km).  An offline dry Boussinesq initial
+        # vertical acceleration of the bubbles low-passed at
+        # 2*pi*a/floor(2N/3) is 0.0007 (T42) / 0.0038 (T85) m/s^2 vs 0.027
+        # unfiltered; times 240 s that is 0.17 / 0.9 m/s, the same scale as
+        # (but below) the model's |w| at 4 min (T42 0.23, T85 1.44 m/s).
+        # Horizontal under-resolution is the leading explanation; the
+        # tested damping and acoustic controls have small effects at T42
+        # (hyperdiffusion off, sponge off, explicit acoustics, 2x substeps:
+        # each < 7 % on |w|), while halving dt moves it -16 %
+        # (timestep convergence not established).  A separate, resolved
+        # test (one 40 km x 8 km bubble, dry) gives spectral T42 1.60 vs
+        # MPAS ico5 1.45 m/s at 120 s.  Not measured: the share of the 2/3
+        # mask vs the nominal truncation.
+        # Resolution proxies (2026-11-26, a = R_earth/60 = 106.2 km): ico5
+        # has dx_mean 3.72 km (2dx 7.44 km, 10242 cells); the retained band
+        # n <= floor(2N/3) first reaches 2*pi*a/floor(2N/3) <= 7.44 km at
+        # N = 135, and (floor(2N/3)+1)^2 >= 10242 coefficients at N = 152.
+        # Current-code ladder, matrix --quick, |w|_max at 84 s: T21 0.051,
+        # T42 0.075, ico5 1.85 m/s; T85 0.353 at its 7th and last sample
+        # (~83 s) before a 50-min wall-clock timeout.  At 240 s: T21 0.019
+        # (84 s wall), T42 0.238 (13.5 min wall), ico5 7.12.  Near 84 s the
+        # maxima increase across the three spectral truncations tested
+        # (dt shrinks with N too); convergence toward ico5 is not
+        # established.  T85
+        # projects to ~2.4 h wall (wall time assumed proportional to
+        # samples done) and T135-T152 (~N^3 from it) to ~10-14 h wall, so
+        # the row stays at the matrix T21 as a smoke test whose |w| is far
+        # below ico5's (horizontal under-resolution remains a PLAUSIBLE
+        # explanation, see above).  Ballot (author / codex), options
+        # A keep T21 + document, B T42 row override, C T85 or higher:
+        # A / A.
         _dt_scale_sp = 3.0 if test_case == "tc3" else 6.0
         dt = max(0.25 if test_case == "tc3" else 0.5,
                  _dt_scale_sp * (21.0 / n_max))
         # TC2/TC3 need more acoustic substeps and stronger diffusion.
-        _base_hd = 2.338e15 * (21.0 / n_max) ** 4
+        # The del-4 coefficient scales as length^4: the Earth-radius value
+        # 2.338e15 m^4/s (T21) is divided by X^4 on the radius/X small
+        # planet so the damping RATE at a given wavenumber n is the same as
+        # on the full Earth (DCMIP small-planet convention; MPAS gets this
+        # automatically from nu_del4 ~ dx_mean^4).  Unscaled, the TC3
+        # (X=60) rate*dt at n=21 was ~94 -> non-finite from step 2.
+        _base_hd = 2.338e15 * (21.0 / n_max) ** 4 / sef ** 4
         if test_case == "tc2a":
             _n_acoustic_sp = 20
             _hd_sp = _base_hd * 4.0
@@ -5588,6 +6710,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             # iter-9: opt into anchored mass fixer (parallel to cube/ico
             # NH in iter-7/8).
             fix_mass=True, anchor_mass_to_initial=True,
+            dealiasing_fraction=_df,
         )
         # Use the small-Earth grid for tc2/tc3
         if sef != 1.0:
@@ -5597,8 +6720,21 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         model = SpectralCompressibleEulerModel(
             grid, hcoord, tmetric, nh_config)
 
-        def step_fn(s, dt_):
-            return model.step(s, dt_)
+        _bubble_mask = (_tc3_bubble_box(
+            np.asarray(grid.lat, dtype=np.float64)[:, None],
+            np.asarray(grid.lon2d, dtype=np.float64),
+            float(grid.radius))[0] if test_case == "tc3" else None)
+
+        if test_case == "tc3":
+            # Same Kessler warm-rain physics as the MPAS arm, evaluated at
+            # every RK stage through the dycore's physics_fn hook.
+            _kessler_fn = _make_kessler_spectral_nh_physics_fn(hcoord, dt)
+
+            def step_fn(s, dt_):
+                return model.step(s, dt_, physics_fn=_kessler_fn)
+        else:
+            def step_fn(s, dt_):
+                return model.step(s, dt_)
 
         def check_fn(s):
             w = sh_synthesis_3d(grid, s.w_hat.data)
@@ -5609,22 +6745,27 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             w = sh_synthesis_3d(grid, s.w_hat.data)
             theta_p = sh_synthesis_3d(grid, s.theta_prime_hat.data)
-            rho_p = sh_synthesis_3d(grid, s.rho_prime_hat.data)
+            # rho_prime_hat is the J-weighted J*rho' (spectral_nh docstring).
+            jrho_p = sh_synthesis_3d(grid, s.rho_prime_hat.data)
+            rho_p = jrho_p / tmetric.jacobian[..., None]
             # iter-9: report dry mass alongside |w|_max for spectral NH
             # (parallel to iter-7 cube / iter-8 ico instrumentation).
-            rho_total = hcoord.rho_ref + rho_p
             col_mass = jnp.sum(
-                tmetric.jacobian[..., None]
-                * rho_total
+                (tmetric.jacobian[..., None] * hcoord.rho_ref + jrho_p)
                 * hcoord.dz[None, None, :],
                 axis=-1,
             )
-            return {
+            out = {
                 "max_abs_w": float(jnp.max(jnp.abs(w))),
                 "mean_theta_prime": _area_weighted_mean(theta_p, grid.grid_area),
                 "mean_rho_prime":   _area_weighted_mean(rho_p,   grid.grid_area),
                 "mass": _area_weighted_sum(col_mass, grid.grid_area),
             }
+            if _bubble_mask is not None and _bubble_mask.any():
+                w_col = jnp.max(jnp.abs(w), axis=-1)          # on device
+                out["max_abs_w_bubble"] = float(jnp.max(
+                    jnp.where(_bubble_mask, w_col, 0.0)))
+            return out
 
         def extract_fn(s):
             from legoesm.grids.gaussian import uv_from_vordiv_3d
@@ -5644,12 +6785,15 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 "u": u_sfc,
                 "v": v_sfc,
                 "w_mid": np.asarray(w[..., w_idx], dtype=np.float64),
+                "w_colmax": np.asarray(jnp.max(jnp.abs(w), axis=-1),
+                                       dtype=np.float64),
                 "wind_speed": np.sqrt(u_sfc ** 2 + v_sfc ** 2),
                 "theta_prime_3d": np.asarray(
                     sh_synthesis_3d(grid, s.theta_prime_hat.data),
                     dtype=np.float64),
                 "rho_prime_3d": np.asarray(
-                    sh_synthesis_3d(grid, s.rho_prime_hat.data),
+                    sh_synthesis_3d(grid, s.rho_prime_hat.data)
+                    / tmetric.jacobian[..., None],
                     dtype=np.float64),
             }
 
@@ -5685,6 +6829,16 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             w_max = float("nan")
     else:
         w_max = float("nan")
+    # TC3: column-max |w| inside the bubble box (convective signal), kept
+    # next to the global max (see ``_tc3_bubble_box``).
+    _w_bub = (scalar_fn(state).get("max_abs_w_bubble")
+              if ok and test_case == "tc3" else None)
+    if _w_bub is not None:
+        _bub_note = f", |w|_bubble={_w_bub:.4f} m/s"
+    elif ok and test_case == "tc3":
+        _bub_note = ", |w|_bubble=N/A (no column centre in the bubble box)"
+    else:
+        _bub_note = ""
     # iter-10: surface mass drift in the NH notes line (parallel to the
     # SW / hydro runners).  ``diag`` is the dict accumulated from
     # ``scalar_fn``; iter-7..9 added ``"mass"`` to every NH grid path.
@@ -5692,8 +6846,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
     if _mass_series and len(_mass_series) >= 2:
         mass_drift = _compute_drift(_mass_series)
         notes = (
-            f"|w|_max={w_max:.4f} m/s, mass_drift={mass_drift:.2e}, "
-            f"dt={dt:.2f}s"
+            f"|w|_max={w_max:.4f} m/s{_bub_note}, "
+            f"mass_drift={mass_drift:.2e}, dt={dt:.2f}s"
         )
         # iter-25/26: NH PASS gate on mass drift.  With iter-7/8/9
         # fixers active every measured case sits at exact 0 or fp64
@@ -5708,7 +6862,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             n_samples=len(_mass_series),
         )
     else:
-        notes = f"|w|_max={w_max:.4f} m/s, dt={dt:.2f}s"
+        notes = f"|w|_max={w_max:.4f} m/s{_bub_note}, dt={dt:.2f}s"
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -5750,10 +6904,10 @@ RUNNERS: dict[str, Callable] = {
     "held_suarez_topo": run_held_suarez,             # M1.a (HS over topo)
     "baroclinic": run_baroclinic,
     "baroclinic_steady": run_baroclinic,             # #1028 unperturbed control
-    "rotated_baroclinic": run_baroclinic,            # M1.a (DCMIP 2008 §4-2 rotated)
-    "rotated_steady": run_baroclinic,                # M1.a (DCMIP 2008 §4-1 rotated)
+    "rotated_baroclinic": run_baroclinic,            # M1.a (rotated as DCMIP 2008 2-3-0)
+    "rotated_steady": run_baroclinic,                # M1.a (rotated as DCMIP 2008 1-3-0)
     "rest_state_topo": run_baroclinic,               # M1.a (DCMIP 2012 §2-0-0)
-    "gravity_wave_3_1":   run_baroclinic,            # M1.a (DCMIP 2008 §3-1)
+    "gravity_wave_3_1":   run_baroclinic,            # DCMIP 2012 test 3-1
     "inertio_gravity_3_2": run_baroclinic,           # M1.a (DCMIP 2008 §3-2)
     "mountain_rossby_5_0": run_baroclinic,           # M1.a (DCMIP 2008 §5-0)
     "rossby_haurwitz_6_0": run_baroclinic,           # M1.a (DCMIP 2008 §6-0)
@@ -6121,6 +7275,10 @@ def _collect_grid_results_atmosphere(
                     if ":" in line:
                         k, v = line.split(":", 1)
                         metadata[k.strip()] = v.strip()
+            if metadata.get("status") == "SKIP":
+                # a SKIP row's artifacts never enter a cross-grid
+                # comparison
+                continue
             grid_results[grid_dir.name] = {
                 "timeseries": timeseries_df,
                 "snapshots":  snapshots,
@@ -6778,6 +7936,30 @@ def _compute_cross_grid_rms_agreement(
         lat_natives[grid_name] = lat_native
 
     if len(zonal_means) < 2:
+        return None
+
+    # The rows must have run the SAME vertical table: a level-index RMS
+    # between two different tables of equal length (e.g. CAM6 L32 vs an
+    # analytic L32 probe arm) compares different pressures.  A MIX of tagged
+    # and untagged rows cannot be proven to match, so it is skipped.  Every
+    # row must carry an ID when the set is HYBRID or includes an fv3_duo
+    # hydrostatic row (the duo runs CAM6 L32 whatever the row's label, so a
+    # pre-ID tree at LEGOESM_MATRIX_NLEV=32 pairs it with a different
+    # 32-level table by index; legacy duo rows are recognised by their
+    # note).  Other untagged sets (e.g. DCMIP transport: one shared sigma-30
+    # table on every grid) keep the level-count check below.
+    _notes = {g: grid_results[g].get("metadata", {}).get("notes", "")
+              for g in zonal_means}
+    table_ids = {g: _vertical_table_id(n) for g, n in _notes.items()}
+    _ids = set(table_ids.values())
+    _need_ids = any(
+        grid_results[g].get("vertical_coord") == "hybrid"
+        or "FV3DuoDynamicsModel" in _notes[g] for g in zonal_means)
+    if len(_ids) > 1 or (_need_ids and None in _ids):
+        print(
+            f"    [comparison] cross-grid RMS for {field}: vertical tables "
+            f"differ across grids ({table_ids}); skipping metric."
+        )
         return None
 
     # Verify nlev consistency across grids.
@@ -7774,7 +8956,9 @@ def main():
             out_dir, tc,
             title=f"atmosphere test-case namelist: {tc.output_path}",
             extra={"radiation": args.radiation, "days_run": days,
-                   "quick": bool(args.quick)},
+                   "quick": bool(args.quick),
+                   **({"vertical_table": _vt}
+                      if (_vt := _namelist_vertical_table(tc)) else {})},
         )
 
         label = f"{tc.equation_set}/{tc.case}/{tc.grid_type}"

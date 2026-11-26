@@ -308,6 +308,14 @@ def main():
     base = _load_yaml(Path(suite["base"]))
     cache_dir = base.get("cache_dir", ".cache/aimip_era5")
 
+    # Pressure-surface T-damping options are not wired here: refuse them.
+    from legoesm.training.campaign_driver import refuse_pressure_surface_flags
+    for _where, _c in (("AIMIP ablation suite", suite),
+                       ("AIMIP ablation base", base),
+                       ("AIMIP ablation suite cfg_overrides",
+                        suite.get("cfg_overrides") or {})):
+        refuse_pressure_surface_flags(_c, where=_where)
+
     spec_cfg = _build_spectral_config(base)
 
     from legoesm.grids.gaussian import create_gaussian_grid

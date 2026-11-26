@@ -40,14 +40,14 @@ Run with `JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py
 
 | ID | Test | Grids | Status | Module |
 | --- | --- | --- | --- | --- |
-| JW06-BW | Classic Jablonowski-Williamson baroclinic wave | all | ✅ | `tests/test_cases/baroclinic_wave.py` |
-| JW06-BS | Un-rotated JW **base-state control** (`baroclinic_steady`, σ, perturbation OFF) — diagnostic control for #1028: any jet decay here is the dycore failing to hold the balanced state, since no wave exists to consume it | all | ✅ | `tests/test_cases/baroclinic_wave.py` |
-| JW06-RS | Rotated JW steady-state (α=π/4) | all | ✅ M1 | `tests/test_cases/dcmip2008/jablonowski_rotated.py` |
-| JW06-RB | Rotated JW baroclinic wave (α=π/4) | all | ✅ M1 | `tests/test_cases/dcmip2008/jablonowski_rotated.py` |
+| DCMIP16-BW | Dry baroclinic wave of Ullrich et al. (2014) / DCMIP-2016 (NOT Jablonowski-Williamson 2006) | all | ✅ | `tests/test_cases/baroclinic_wave.py` |
+| DCMIP16-BS | Un-rotated DCMIP-2016 **base-state control** (`baroclinic_steady`, σ, perturbation OFF) — diagnostic control for #1028: any jet decay here is the dycore failing to hold the balanced state, since no wave exists to consume it | all | ✅ | `tests/test_cases/baroclinic_wave.py` |
+| DCMIP16-RS | Rotated DCMIP-2016 steady state (α=π/4; DCMIP 2008 1-3-0 rotation recipe) | all | ✅ M1 | `tests/test_cases/dcmip2008/jablonowski_rotated.py` |
+| DCMIP16-RB | Rotated DCMIP-2016 baroclinic wave (α=π/4; DCMIP 2008 2-3-0 rotation recipe) | all | ✅ M1 | `tests/test_cases/dcmip2008/jablonowski_rotated.py` |
 | DCMIP12-2-0-0 | Atmospheric rest state with steep hydrostatic topography | all | ✅ M1 | `tests/test_cases/dcmip2012/rest_state_topography.py` |
 | DCMIP08-6-0 | Small-amplitude Rossby-Haurwitz wave (3D, isothermal background) | all | ✅ M1.b | `tests/test_cases/dcmip2008/rossby_haurwitz_6_0.py` |
 | DCMIP08-5-0 | Mountain-induced Rossby wave (3D zonal flow over isolated mountain) | all | ✅ M1.b | `tests/test_cases/dcmip2008/mountain_rossby_5_0.py` |
-| DCMIP08-3-1 | Gravity wave on non-rotating Earth (isothermal) | all | ✅ M1.b (canonical: matrix runner builds grid with `omega=0`) | `tests/test_cases/dcmip2008/gravity_wave_3_1.py` |
+| DCMIP12-3-1 | Non-orographic gravity waves on the non-rotating X = 125 small planet (constant N, App. F.3 L10, 3600 s; hydrostatic pressure-based form) | all | ✅ (`gravity_wave_3_1` row) | `tests/test_cases/dcmip2012/gravity_wave_3_1.py` |
 | DCMIP08-3-2 | Inertio-gravity wave on rotating planet | all | ✅ M1.b | `tests/test_cases/dcmip2008/inertio_gravity_3_2.py` |
 
 ## §4 — Non-hydrostatic dry 3D
@@ -58,7 +58,7 @@ Run with `JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py
 | DCMIP12-NH-2-0-1 | Atmospheric rest state with steep Schaer (NH) topography | NH | ❌ M2 | TBD `tests/test_cases/dcmip2012/rest_state_schaer_nh.py` |
 | DCMIP12-2-1 | Schaer-mountain orographic GW without shear | NH | ❌ M2 | TBD `tests/test_cases/dcmip2012/schaer_gw_no_shear.py` |
 | DCMIP12-2-2 | Schaer-mountain orographic GW with shear | NH | ❌ M2 | TBD `tests/test_cases/dcmip2012/schaer_gw_with_shear.py` |
-| DCMIP12-3-1 | Non-orographic gravity waves | NH | ❌ M2 | TBD `tests/test_cases/dcmip2012/non_orographic_gw.py` |
+| DCMIP12-3-1-NH | Non-orographic gravity waves, non-hydrostatic dycores (the hydrostatic rows run DCMIP12-3-1 above) | NH | ❌ M2 | TBD |
 | Klemp15-PGW | Quasi-planar reduced-radius orographic GW | NH | ❌ M2 | TBD `tests/test_cases/klemp2015/orographic_gw_planar.py` |
 
 ## §5 — Dynamical tracer tests
@@ -120,8 +120,9 @@ hydrostatic dycores (no new physics packages). M1.a (delivered in this PR):
 - `tests/test_cases/williamson_extended.py` — W6 Rossby-Haurwitz init
   for cubed-sphere, lat-lon, MPAS, and spectral grids; matrix-script
   wiring is active for MPAS + spectral (cube + lat-lon deferred to M1.b)
-- `tests/test_cases/dcmip2008/jablonowski_rotated.py` — DCMIP 2008
-  §4-1 (rotated steady) + §4-2 (rotated baroclinic), all four grids,
+- `tests/test_cases/dcmip2008/jablonowski_rotated.py` — DCMIP-2016
+  (Ullrich 2014) state rotated with the DCMIP 2008 recipe: 1-3-0
+  (rotated steady) + 2-3-0 (rotated baroclinic), all four grids,
   α=π/4 default
 - `tests/test_cases/dcmip2012/rest_state_topography.py` — DCMIP 2012
   §2-0-0 atmosphere-at-rest with topography, all four grids
@@ -141,8 +142,8 @@ M1.b (delivered in a second commit on this PR):
 - `tests/test_cases/dcmip2008/_shared.py` — isothermal-hydrostatic
   state builders for all four grids (factored out so the four
   DCMIP-2008 modules below can stay short)
-- `tests/test_cases/dcmip2008/gravity_wave_3_1.py` — DCMIP §3-1
-  gravity wave on (notionally) non-rotating sphere
+- (the DCMIP §3-1 gravity wave module was replaced by the DCMIP 2012
+  test 3-1 port, `tests/test_cases/dcmip2012/gravity_wave_3_1.py`)
 - `tests/test_cases/dcmip2008/inertio_gravity_3_2.py` — DCMIP §3-2
 - `tests/test_cases/dcmip2008/mountain_rossby_5_0.py` — DCMIP §5-0
 - `tests/test_cases/dcmip2008/rossby_haurwitz_6_0.py` — DCMIP §6-0
@@ -214,7 +215,7 @@ The Hughes (2026) tutorial cites:
 9. Hughes, O. K., & Jablonowski, C. (2023). A mountain-induced moist
    baroclinic wave test case for atmospheric general circulation models.
    *Geosci. Model Dev.*, 16(22), 6805–6831.
-10. DCMIP 2008 test case description (rotated JW, gravity waves,
+10. DCMIP 2008 test case description (rotation recipe, gravity waves,
     Rossby-Haurwitz, mountain-induced Rossby).
 11. DCMIP 2012 test case description (deformational tracer, Hadley
     advection, rest with topography, Schaer mountain GW, non-orographic

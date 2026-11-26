@@ -355,16 +355,16 @@ class TestLatLonTracerTransportFaceEval:
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon import (
-            _uface_coords, _vface_coords,
+            uface_coords, vface_coords,
         )
 
         grid = create_latlon_grid(16)
         sigma = create_sigma_coordinate(5)
 
-        lon_u, lat_u = _uface_coords(grid)
-        lon_v, lat_v = _vface_coords(grid)
+        lon_u, lat_u = uface_coords(grid)
+        lon_v, lat_v = vface_coords(grid)
 
-        # _uface_coords returns n_lon unique faces (no periodic wrap);
+        # uface_coords returns n_lon unique faces (no periodic wrap);
         # the caller appends the wrap column after wind evaluation.
         assert lon_u.shape == (grid.n_lat, grid.n_lon)
         assert lat_v.shape == (grid.n_lat + 1, grid.n_lon)

@@ -1,24 +1,63 @@
-"""DCMIP 2008 §6-0: small-amplitude Rossby-Haurwitz wave (3D extension).
+"""DCMIP 2008 3D Rossby-Haurwitz wave (reference test 4-0-0, Sect. 1.4).
 
-A 3D extension of the shallow-water Williamson Test 6 (Rossby-Haurwitz
-wave-4 mode).  The horizontal velocity field follows the analytic W6
-formulas at every vertical level (barotropic / depth-independent), with
-an isothermal hydrostatic background and uniform surface pressure.  The
-wave should propagate eastward as a Rossby wave with negligible
-amplitude growth.
-
-Initial conditions
-------------------
-- T(λ, φ, η) = T_0 = 300 K   (isothermal)
-- u(λ, φ, η) = u_W6(λ, φ),  v(λ, φ, η) = v_W6(λ, φ)
-  where u_W6, v_W6 are the analytic R-H wave-4 surface winds (Williamson
-  1992 Test 6).
-- p_s = p_0,  φ_s = 0   (no topography)
+The matrix row keeps its historical name ``rossby_haurwitz_6_0``; in the
+reference document this case is test **4-0-0** (its 6-x-0 family is the
+gravity waves).
 
 Reference
 ---------
-DCMIP 2008 Test Case Document §6-0 (3D Rossby-Haurwitz wave); see also
-Williamson 1992 Test 6 for the SW analogue.
+Jablonowski, C., P. H. Lauritzen, R. D. Nair and M. A. Taylor (2008):
+"Idealized test cases for the dynamical cores of Atmospheric General
+Circulation Models: A proposal for the NCAR ASP 2008 summer colloquium",
+29 May 2008, Sect. 1.4 "3D Rossby-Haurwitz wave", Eqs. (60)-(74).
+
+Initial conditions (every formula and constant from the reference)
+------------------------------------------------------------------
+- Wave number n = 4; M = K = u0 / (n a) with u0 = 50 m/s, i.e.
+  M = K ~ 1.962e-6 1/s (text below Eq. 60).  NOTE: this is NOT the
+  shallow-water Williamson (1992) case-6 amplitude (omega = K =
+  7.848e-6 1/s, ~100 m/s winds); the 3D test's peak wind is ~25 m/s.
+  ``a`` is the grid's own radius, so the duo (GFS radius) and the other
+  grids each get the reference's u0.
+- Winds, vertically uniform (Eqs. 62-63) == the Williamson case-6 wind
+  formulas with (omega, K) -> (M, K):
+  :func:`legoesm.core.williamson_sw_analytic.rossby_haurwitz_4_winds`.
+- Phi'(lambda, phi) = a^2 [A + B cos(n lambda) + C cos(2 n lambda)]
+  (Eqs. 71-74) == the Williamson case-6 geopotential with gh0 = 0 and
+  (omega, K) -> (M, K):
+  :func:`legoesm.core.williamson_sw_analytic.rossby_haurwitz_4_geopotential`.
+  (Eq. 72's last term ``-n^2 K^2/2 cos^{2(n-1)}`` is that function's
+  ``K^2/4 cos^{2n} * (-2 n^2 cos^{-2})``.)
+- p_s = p_ref (1 + Gamma Phi' / (g T0)) ** (g / (Gamma R_d))  (Eq. 70),
+  p_ref = 955 hPa, T0 = 288 K, Gamma = 0.0065 K/m, Phi_s = 0.
+- T(p) = T0 (p / p_ref) ** (Gamma R_d / g)  (Eq. 66), evaluated at the
+  model's OWN full-level pressures p = A p0 + B p_s (Eq. 68) or the sigma
+  equivalent (Eq. 67).
+- Eq. 70 and Eq. 66 are the constant-lapse-rate columns of
+  :func:`tests.test_cases.dcmip2012.rest_state_topography.lapse_rate_columns`
+  with ``p_0 = p_ref`` and surface at the equivalent height (Eq. 65)
+  ``z_s = -Phi'/g``; that helper is reused, not re-derived.
+
+Balance: with T a function of p alone, the geopotential on every pressure
+surface is ``Phi' + f(p)``, so the horizontal pressure-gradient force is
+``-grad Phi'`` at every level -- the nonlinear-balance geopotential of the
+barotropic winds; the initial divergence tendency vanishes analytically.
+
+Constants are ``legoesm.constants`` (R_d = 287.05) and the grid's own
+rotation rate (``constants.Omega`` = 7.292e-5 where the grid carries
+none; the FV3 duo cells carry FV3_OMEGA), which differ slightly from the
+reference's Appendix G (R_d = 287.04, Omega = 7.29211e-5): the area-mean
+p_s is 1000.3748 hPa with constants.Omega (a = R_earth) vs the reference's
+quoted ~1000.377 hPa.
+
+Reference run setup vs the matrix row (reported, not changed here): the
+reference integrates 30 days at ~1 deg on the CAM L26 hybrid levels
+(model top 2.194 hPa, Appendix C); the matrix row runs 14 days (2 with
+``--quick``) on CAM6 L32.  Expected behaviour: westward propagation with
+near-steady shape and amplitude.  Eq. (61) gives the BAROTROPIC
+(nondivergent) benchmark: ~-15.0 deg/day with these constants (the
+reference's prose quotes ~-15.2 deg/day, period ~24 days); the reference
+notes it is only approximate for 3D hydrostatic flow.
 """
 
 from __future__ import annotations
@@ -31,23 +70,57 @@ from legoesm.core.state import (
     HydrostaticState,
     MPASHydrostaticState,
 )
-from legoesm.core.williamson_sw_analytic import rossby_haurwitz_4_winds
+from legoesm.core.williamson_sw_analytic import (
+    RH4_WAVENUMBER,
+    rossby_haurwitz_4_geopotential,
+    rossby_haurwitz_4_winds,
+)
 from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
     SigmaCoordinate,
 )
+from tests.test_cases.dcmip2008._shared import grid_rotation_rate
+from tests.test_cases.dcmip2012.rest_state_topography import (
+    lapse_rate_columns,
+)
 
 
-_T0_RH = 300.0
+# --- DCMIP 2008 Sect. 1.4 parameters ---
+RH_U0 = 50.0          # u0 [m/s], text below Eq. (60)
+RH_T0 = 288.0         # T0 [K], text above Eq. (65)
+RH_GAMMA = 0.0065     # lapse rate Gamma [K/m], text above Eq. (65)
+RH_P_REF = 95500.0    # p_ref = 955 hPa [Pa], text below Eq. (65)
+
+
+def rh_wave_frequency(radius: float) -> float:
+    """``M = K = u0 / (n a)`` [1/s] (DCMIP 2008, text below Eq. 60)."""
+    return RH_U0 / (RH4_WAVENUMBER * radius)
 
 
 def _w6_winds_geo(lon, lat, radius):
-    """Williamson 1992 Eq. 146-147 surface winds.
+    """``(u_east, v_north)`` of DCMIP 2008 Eqs. (62)-(63), M = K = u0/(n a).
 
-    Thin adapter over the one shared analytic definition in
-    :mod:`legoesm.core.williamson_sw_analytic` (this file used to carry
-    its own copy)."""
-    return rossby_haurwitz_4_winds(lon, lat, radius=radius, xp=jnp)
+    (Name kept for its callers; these are the Williamson case-6 FORMULAS at
+    the DCMIP 2008 amplitude, not the case-6 amplitude.)"""
+    mk = rh_wave_frequency(radius)
+    return rossby_haurwitz_4_winds(lon, lat, radius=radius,
+                                   omega_wave=mk, k_wave=mk, xp=jnp)
+
+
+def rh_balanced_columns(lon, lat, radius, sigma_coord, *, omega: float):
+    """``(p_s, T)`` of DCMIP 2008 Eqs. (70)-(74) and (66).
+
+    ``p_s`` has the broadcast shape of ``lon`` and ``lat``; ``T`` adds a
+    trailing level axis on the coordinate's own full levels.  Phi_s = 0.
+    ``omega`` is the run's rotation rate (Eqs. 72-73 balance the winds for
+    the Omega the dycore integrates with).
+    """
+    mk = rh_wave_frequency(radius)
+    phi_prime = rossby_haurwitz_4_geopotential(
+        lon, lat, radius=radius, omega=omega, gh0=0.0,
+        omega_wave=mk, k_wave=mk, xp=jnp)
+    return lapse_rate_columns(-phi_prime / constants.g, sigma_coord,
+                              T_init=RH_T0, gamma=RH_GAMMA, p_0=RH_P_REF)
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +131,8 @@ def _w6_winds_geo(lon, lat, radius):
 def rossby_haurwitz_init(
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
-    *,
-    T_0: float = _T0_RH,
 ) -> HydrostaticState:
-    """DCMIP §6-0 on cubed-sphere."""
+    """DCMIP 2008 4-0-0 on cubed-sphere."""
     from legoesm.grids.cubed_sphere import rotate_winds_geo_to_grid
 
     n = grid.n
@@ -77,8 +148,8 @@ def rossby_haurwitz_init(
     u_3d = jnp.broadcast_to(u_grid_2d[..., None], shape_3d)
     v_3d = jnp.broadcast_to(v_grid_2d[..., None], shape_3d)
 
-    T_3d = jnp.full(shape_3d, T_0)
-    p_s = jnp.full(shape_2d, constants.p_ref)
+    p_s, T_3d = rh_balanced_columns(grid.lon, grid.lat, R, sigma_coord,
+                                    omega=grid_rotation_rate(grid))
     phis = jnp.zeros(shape_2d)
 
     dims_3d = ("face", "x", "y", "level")
@@ -95,10 +166,8 @@ def rossby_haurwitz_init(
 def rossby_haurwitz_init_latlon(
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
-    *,
-    T_0: float = _T0_RH,
 ) -> HydrostaticState:
-    """DCMIP §6-0 on lat-lon."""
+    """DCMIP 2008 4-0-0 on lat-lon."""
     n_lat = grid.n_lat
     n_lon = grid.n_lon
     nlev = sigma_coord.n_levels
@@ -110,8 +179,8 @@ def rossby_haurwitz_init_latlon(
     u_3d = jnp.broadcast_to(u_east[..., None], (n_lat, n_lon, nlev))
     v_3d = jnp.broadcast_to(v_north[..., None], (n_lat, n_lon, nlev))
 
-    T_3d = jnp.full((n_lat, n_lon, nlev), T_0)
-    p_s = jnp.full((n_lat, n_lon), constants.p_ref)
+    p_s, T_3d = rh_balanced_columns(lon_2d, lat_2d, R, sigma_coord,
+                                    omega=grid_rotation_rate(grid))
     phis = jnp.zeros((n_lat, n_lon))
 
     dims_3d = ("lat", "lon", "level")
@@ -128,10 +197,8 @@ def rossby_haurwitz_init_latlon(
 def rossby_haurwitz_init_mpas(
     mesh,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
-    *,
-    T_0: float = _T0_RH,
 ) -> MPASHydrostaticState:
-    """DCMIP §6-0 on MPAS Voronoi mesh."""
+    """DCMIP 2008 4-0-0 on MPAS Voronoi mesh."""
     nCells = mesh.nCells
     nEdges = mesh.nEdges
     nlev = sigma_coord.n_levels
@@ -143,8 +210,9 @@ def rossby_haurwitz_init_mpas(
                 + v_north * jnp.sin(mesh.angleEdge))
     u_data = jnp.broadcast_to(u_normal[:, None], (nEdges, nlev))
 
-    T_data = jnp.full((nCells, nlev), T_0)
-    p_s = jnp.full((nCells,), constants.p_ref)
+    p_s, T_data = rh_balanced_columns(mesh.lonCell, mesh.latCell, R,
+                                      sigma_coord,
+                                      omega=grid_rotation_rate(mesh))
     phis = jnp.zeros((nCells,))
 
     return MPASHydrostaticState(
@@ -158,10 +226,8 @@ def rossby_haurwitz_init_mpas(
 def rossby_haurwitz_init_spectral(
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
-    *,
-    T_0: float = _T0_RH,
 ):
-    """DCMIP §6-0 in spectral (Gaussian-grid) space."""
+    """DCMIP 2008 4-0-0 in spectral (Gaussian-grid) space."""
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
     from legoesm.grids.gaussian import (
         sh_analysis,
@@ -201,12 +267,11 @@ def rossby_haurwitz_init_spectral(
         - one_over_a * sh_analysis_dmu_3d(grid, v_cos)
     )
 
-    T_grid = jnp.full((n_lat, n_lon, nlev), T_0, dtype=jnp.float64)
-    T_hat = sh_analysis_3d(grid, T_grid)
-    lnps_grid = jnp.full(
-        (n_lat, n_lon), jnp.log(constants.p_ref), dtype=jnp.float64,
-    )
-    lnps_hat = sh_analysis(grid, lnps_grid)
+    p_s_grid, T_grid = rh_balanced_columns(lon_2d, lat_2d, R, sigma_coord,
+                                           omega=grid_rotation_rate(grid))
+    T_hat = sh_analysis_3d(grid, jnp.asarray(T_grid, dtype=jnp.float64))
+    lnps_hat = sh_analysis(
+        grid, jnp.log(jnp.asarray(p_s_grid, dtype=jnp.float64)))
     phis_hat = jnp.zeros(n_sh, dtype=jnp.complex128)
 
     dims_3d = ("spectral", "level")

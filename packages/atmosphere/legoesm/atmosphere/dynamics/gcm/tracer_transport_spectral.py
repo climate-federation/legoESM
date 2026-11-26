@@ -28,7 +28,19 @@ coincide and the global mean (the ``(n=0, m=0)`` coefficient) is invariant.
 Vertical advection (optional): the shared upwind advective-form operator
 ``grids.vertical.vertical_advection`` (``-sigma_dot dq/dsigma``), evaluated
 in grid space and transformed back — identical operator to the lat-lon
-sibling.  Pass ``sigma_dot=None`` from the wind function for pure
+sibling.  ``vertical_scheme="fv3_remap"`` instead runs the horizontal
+step alone and then the split FV3 Lagrangian remap
+(``grids.vertical.vertical_remap_sigma_fv3``) in grid space, sigma_dot at
+the step mid-time, followed by analysis and the Orszag-band truncation.
+KNOWN DIFFERENCE (RULE 0): the grid-space remap closes every column's
+tracer integral to round-off, but projecting the result back onto the
+truncated band keeps only the GLOBAL integral exactly (the (0,0)
+coefficient is the Gaussian-quadrature mean; tested), not each column's:
+the column budget misses by the field's out-of-band content (measured
+7.6e-12 absolute on 0.117 column integrals, DCMIP 1-2 at T21 L30, one
+600 s step, vertical wind only).  The same projection follows the upwind
+path's grid-space vertical tendency.
+Pass ``sigma_dot=None`` from the wind function for pure
 horizontal transport (the classic solid-body / Williamson-1 protocols).
 
 Green's-function structure (what the unit tests pin): for solid-body
@@ -66,7 +78,9 @@ from legoesm.grids.gaussian import (
     sh_synthesis_3d,
     spectral_hyperdiffusion_3d,
 )
-from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
+from legoesm.grids.vertical import (
+    SigmaCoordinate, check_tracer_vertical_scheme, vertical_advection,
+    vertical_remap_sigma_fv3)
 from legoesm.parallel.metal import place_spectral_grid
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
@@ -100,12 +114,16 @@ class TracerTransportSpectralConfig(NamedTuple):
     dealiasing_fraction : float
         Orszag-rule fraction for the quadratic advection products
         (default 0.667, matching the spectral dycores).
+    vertical_scheme : str
+        "upwind" (default, in-tendency) or "fv3_remap" (split remap after
+        the horizontal step; see module docstring).
     """
 
     time_integrator: str = "ssp_rk3"
     hyperdiff_coeff: float = 0.0
     hyperdiff_order: int = 2
     dealiasing_fraction: float = 0.667
+    vertical_scheme: str = "upwind"
 
 
 def spectral_tracer_state(
@@ -157,6 +175,7 @@ def tracer_tendencies_spectral(
 
     Returns a ``TracerState`` tendency pytree (``dq_hat_dt``, ``dtime_dt=1``).
     """
+    check_tracer_vertical_scheme(config.vertical_scheme)
     t = state.time.data
     q_hat = state.tracers.data                     # (n_sh, nlev, n_tracers)
     n_sh, nlev, n_tracers = q_hat.shape
@@ -198,12 +217,12 @@ def tracer_tendencies_spectral(
 
     # --- advective-form correction + optional vertical advection ---
     corr_grid = q_flat * div_b                     # q * div(V)
-    if sigma_dot is not None:
-        if sigma_coord is None:
-            raise ValueError(
-                "wind_fn returned sigma_dot but sigma_coord is None; pass "
-                "the SigmaCoordinate to enable vertical transport."
-            )
+    if sigma_dot is not None and sigma_coord is None:
+        raise ValueError(
+            "wind_fn returned sigma_dot but sigma_coord is None; pass "
+            "the SigmaCoordinate to enable vertical transport."
+        )
+    if sigma_dot is not None and config.vertical_scheme != "fv3_remap":
         q4 = q                                      # (n_lat, n_lon, nlev, ntr)
 
         def _vert_one(q_one):
@@ -237,6 +256,49 @@ def tracer_tendencies_spectral(
     )
 
 
+def tracer_tendencies_spectral_mass_flux(
+    state: TracerState,
+    grid: GaussianGrid,
+    mass_flux,
+    mask: jax.Array,
+) -> TracerState:
+    """Flux-form tendency of the layer tracer mass ``Q = dp q`` (state
+    coefficients, Orszag band) on the steady band-limited air mass ``dp`` of
+    :func:`legoesm.atmosphere.dynamics.gcm.consistent_mass_flux.
+    consistent_mass_flux_spectral`::
+
+        dQ_hat/dt = mask (-div_hat(F q) - analysis(g_{k+1/2} - g_{k-1/2}))
+
+    ``q = Q / dp`` on the grid, ``div_hat`` the same Bourke transform
+    divergence as the advective path, ``g`` the donor-cell vertical flux of
+    the interface air flux ``W`` (positive down; nonzero at the top/surface = open).  With
+    ``mask (div_hat F + analysis(delta W)) = 0`` a uniform ``q`` stays
+    uniform; the global tracer mass is the (0,0) coefficient, which the
+    divergence never changes, so ``sum area dp q`` changes only by the
+    tracer flux through an open top or surface."""
+    from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+        donor_cell_vertical_flux, spectral_flux_divergence_hat)
+    t = state.time.data
+    q_hat = state.tracers.data
+    n_sh, nlev, ntr = q_hat.shape
+    qm = sh_synthesis_3d(grid, q_hat.reshape(n_sh, nlev * ntr)).reshape(
+        grid.n_lat, grid.n_lon, nlev, ntr)
+    q = qm / mass_flux.dp[..., None]
+    fu, fv = mass_flux.flux_h
+    q_flat = q.reshape(grid.n_lat, grid.n_lon, nlev * ntr)
+    if ntr > 1:
+        fu, fv = jnp.repeat(fu, ntr, axis=-1), jnp.repeat(fv, ntr, axis=-1)
+    div_hat = spectral_flux_divergence_hat(grid, q_flat * fu, q_flat * fv)
+    g = donor_cell_vertical_flux(q, mass_flux.w)
+    vert_hat = sh_analysis_3d(grid, (g[..., 1:, :] - g[..., :-1, :]).reshape(
+        grid.n_lat, grid.n_lon, nlev * ntr))
+    dq_hat = -(div_hat + vert_hat) * mask[:, None]
+    return TracerState(
+        tracers=state.tracers.replace(data=dq_hat.reshape(n_sh, nlev, ntr)),
+        time=state.time.replace(data=jnp.ones_like(t)),
+    )
+
+
 class SpectralTracerTransportModel(IntegrationMixin):
     """Prescribed-wind tracer transport on the spectral Gaussian grid.
 
@@ -264,6 +326,14 @@ class SpectralTracerTransportModel(IntegrationMixin):
     config : TracerTransportSpectralConfig, optional
     allow_unsupported_backend : bool
         Forwarded to ``place_spectral_grid`` (Metal opt-out escape hatch).
+    mass_flux : PrescribedMassFlux, optional
+        Steady consistent air fluxes (``consistent_mass_flux_spectral`` with
+        this model's dealiasing mask): the state then carries the layer
+        tracer MASS ``dp q`` (use :meth:`state_from_grid` /
+        :meth:`grid_values`) and steps
+        :func:`tracer_tendencies_spectral_mass_flux` (``wind_fn`` unused);
+        needs ``vertical_scheme="upwind"``, no hyperdiffusion and a
+        dealiasing mask.  ``None`` (default): unchanged.
     """
 
     def __init__(
@@ -274,8 +344,23 @@ class SpectralTracerTransportModel(IntegrationMixin):
         config: TracerTransportSpectralConfig | None = None,
         *,
         allow_unsupported_backend: bool = False,
+        mass_flux=None,
     ):
         self.config = config or TracerTransportSpectralConfig()
+        check_tracer_vertical_scheme(self.config.vertical_scheme)
+        if mass_flux is not None and (self.config.vertical_scheme != "upwind"
+                                      or self.config.hyperdiff_coeff != 0.0
+                                      or self.config.dealiasing_fraction <= 0.0):
+            raise ValueError("mass_flux needs vertical_scheme='upwind', "
+                             "hyperdiff_coeff=0 and dealiasing_fraction > 0")
+        self.mass_flux = mass_flux
+        # (after the grid placement below) the fluxes must close THIS model's
+        # band: a builder mask differing from the model's leaves an unbalanced
+        # divergence that moves a uniform tracer
+        # step() is not jitted (Metal CPU routing); jit the remap once so
+        # its k-scans are not re-traced every step.
+        self._remap_jit = jax.jit(
+            lambda q, sd, dt, sc: vertical_remap_sigma_fv3(q, sd, sc, dt))
         placement = place_spectral_grid(
             grid, allow_unsupported=allow_unsupported_backend
         )
@@ -291,8 +376,47 @@ class SpectralTracerTransportModel(IntegrationMixin):
             )
         else:
             self._dealias_state = None
+        if mass_flux is not None:
+            from legoesm.atmosphere.dynamics.gcm.consistent_mass_flux import (
+                continuity_residual_spectral)
+            if not bool(jnp.all(jnp.isfinite(mass_flux.dp)) and jnp.all(mass_flux.dp > 0)):
+                raise ValueError("mass_flux.dp must be finite and strictly positive")
+            rate = jnp.max(jnp.abs(continuity_residual_spectral(
+                mass_flux, self.grid, self._dealias_state)) / mass_flux.dp)
+            # 1e-15 /s: q = 1 kept to <= 1e-12 over a 1000 s step
+            if not float(rate) <= 1.0e-15:
+                raise ValueError(f"mass_flux does not close this model's spectral band "
+                                 f"(relative air-mass tendency {float(rate):.2e} /s): build "
+                                 "it with the model's dealiasing mask")
+            # and its air mass must lie in the band (q = 1 representable)
+            dp_band = sh_synthesis_3d(self.grid, self._dealias_state[:, None]
+                                      * sh_analysis_3d(self.grid, mass_flux.dp))
+            off = float(jnp.max(jnp.abs(dp_band - mass_flux.dp) / mass_flux.dp))
+            if not off <= 1.0e-12:
+                raise ValueError(f"mass_flux.dp is not in this model's spectral band "
+                                 f"(relative out-of-band part {off:.2e}): build it with "
+                                 "the model's dealiasing mask")
+
+    def state_from_grid(self, q_grid: jax.Array, time: float = 0.0) -> TracerState:
+        """Truncated model state from grid tracers ``q`` (n_lat, n_lon, nlev,
+        ntr): the coefficients of ``q`` (default) or, with ``mass_flux``, of
+        the layer tracer mass ``dp q``."""
+        if self.mass_flux is not None:
+            q_grid = q_grid * self.mass_flux.dp[..., None]
+        return self._truncate(spectral_tracer_state(self.grid, q_grid, time))
+
+    def grid_values(self, state: TracerState) -> jax.Array:
+        """Grid tracers ``q`` of a state (the grid values of the retained,
+        truncated state built by :meth:`state_from_grid`)."""
+        q = spectral_tracer_grid_values(self.grid, state)
+        if self.mass_flux is not None:
+            q = q / self.mass_flux.dp[..., None]
+        return q
 
     def tendencies(self, state: TracerState) -> TracerState:
+        if self.mass_flux is not None:
+            return tracer_tendencies_spectral_mass_flux(
+                state, self.grid, self.mass_flux, self._dealias_state)
         return tracer_tendencies_spectral(
             state, self.grid, self.sigma_coord, self.wind_fn, self.config,
         )
@@ -310,6 +434,9 @@ class SpectralTracerTransportModel(IntegrationMixin):
         """Advance one time step (CPU-routed on Metal, then truncated)."""
 
         def tendency_fn(s):
+            if self.mass_flux is not None:
+                return tracer_tendencies_spectral_mass_flux(
+                    s, self.grid, self.mass_flux, self._dealias_state)
             return tracer_tendencies_spectral(
                 s, self.grid, self.sigma_coord, self.wind_fn, self.config,
             )
@@ -318,7 +445,37 @@ class SpectralTracerTransportModel(IntegrationMixin):
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
             result = dispatch_integrator(state_cpu, tendency_fn, dt, integrator)
-            result = self._truncate(result)
+            result = self._vertical_remap(state_cpu, result, dt)
             return jax.device_put(result, self._default_device)
         result = dispatch_integrator(state, tendency_fn, dt, integrator)
-        return self._truncate(result)
+        return self._vertical_remap(state, result, dt)
+
+    def _vertical_remap(self, state0: TracerState, new: TracerState,
+                        dt: float) -> TracerState:
+        """Split FV3 vertical remap (``vertical_scheme="fv3_remap"``) of the
+        horizontally advected, NOT yet truncated state ``new``, then the
+        Orszag truncation (the truncation alone for "upwind").  Remapping
+        before truncating keeps the out-of-band content in the remap's
+        column budget; only the final projection drops it."""
+        if self.config.vertical_scheme != "fv3_remap":
+            return self._truncate(new)
+        _, _, sigma_dot = self.wind_fn(state0.time.data + 0.5 * dt,
+                                       self.grid, self.sigma_coord)
+        if sigma_dot is None:              # pure horizontal transport
+            return self._truncate(new)
+        if self.sigma_coord is None:
+            raise ValueError(
+                "wind_fn returned sigma_dot but sigma_coord is None; pass "
+                "the SigmaCoordinate to enable vertical transport.")
+        sigma_coord = self.sigma_coord
+        if self._use_cpu_for_spectral:
+            # Metal CPU routing: every remap input on the CPU device with
+            # the (CPU) tracer state, so the jitted remap never mixes
+            # committed devices.
+            sigma_dot = jax.device_put(sigma_dot, self._cpu_device)
+            sigma_coord = jax.device_put(sigma_coord, self._cpu_device)
+        q = self._remap_jit(spectral_tracer_grid_values(self.grid, new),
+                            sigma_dot, dt, sigma_coord)
+        q_hat = spectral_tracer_state(self.grid, q).tracers.data
+        return self._truncate(new._replace(
+            tracers=new.tracers.replace(data=q_hat)))

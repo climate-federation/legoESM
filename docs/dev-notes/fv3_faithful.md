@@ -40,8 +40,21 @@ halo (multi-tile compare) vs FV3 — the crux. Assets /tmp/fv3_poc{,_a2b,_dsw3}/
   cosine_bell pass. cosine_bell (codex iter109): cube xppm boundary, 99% residual = panel-INTERIOR PPM
   dissipation plateau (cube≈ico), not edge. iter139: ATM cross-grid projection VERIFIED CLEAN (localized
   features ALIGN: cosine_bell -68° + W5 mountain -90° on cube/latlon/ico; consistent [-180,180)).
-- **3D rest_state_topo "13× artifact" = FLOAT32 precision** (iter97-101): cube 3D PGF EXACTLY well-balanced
-  in f64; PE runs f32 by design. Optional f32 fix.
+- **3D rest_state_topo "13× artifact" = FLOAT32 precision** (iter97-101): that claim was for an OLDER cube
+  path. **SUPERSEDED for the duo core (2026-11-25):** the duo hydrostatic PGF (`one_grad_p`, Lin 1997) is
+  exactly well-balanced only ALOFT (pure-pressure levels) and only with a discretely balanced IC
+  (T_k = dPhi/(Rd dlnp)); over terrain a2b_ord4 interpolates gz and p^kappa to corners separately, so the
+  corner pairs leave the hydrostatic curve (C36 2-0-0: static bottom error 1.66e-4 m/s2; analytic corners
+  0.03-0.08e-4). The C36 rest_state_topo 1-d max wind (13.5 m/s) is dominated by FV3's per-acoustic-substep
+  vtdm4 del-6 damping (`damp_v`, which acts on delp, pt and vorticity together; the measured wind
+  sensitivity below is to that combined operator, e.g. `fv_tp_2d(delp, ..., nord=nord_v, damp_c=damp_v)`,
+  sw_core.F90:886): its coefficient carries no dt factor, its delp part smooths ps over the unfiltered mountain (max ~246 Pa after one
+  full 8-substep step, the same at dt=0.25/1/4 s probes), and the generic CFL clamp
+  (1920 -> 200 s at fixed n_split=8) runs ~9.6x more substeps per day than the deck. C36 1-d max |V|:
+  dt=200 damp_v=0.12 13.5; dt=1920 damp_v=0.12 7.4 (probe; the matrix row at 1920 s gives 7.25); damp_v=0 at dt=1920 2.1 / at dt=200 2.2 m/s. damp_v also
+  damps pt and vorticity; the delp/pt/vorticity split is NOT isolated, and no native-Fortran run exists to
+  confirm the port at seams/corners. FV3's own test_case 52 setup (its 12 km L30 hybrid grid, layer-mean pt,
+  f=0; several choices changed together) at dt=200 is similar (13.3), at dt=1920 lower (5.6 vs 7.4).
 - **ocean cross-grid** (iter105/111): geostrophic cube 0.0143 ≈ latlon 0.0159 ≈ mpas 0.0169; IGW omega
   1.09e-4 identical 3 grids; rest 9/9 machine-zero. barotropic_wave (iter136-138): a 180° lon-projection
   bug in the OCEAN comparison harness (cube/latlon mislabeled vs mpas) — user+codex flagged, **FIXED iter138**

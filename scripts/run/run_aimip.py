@@ -265,6 +265,19 @@ def _build_spectral_config(cfg: dict[str, Any]):
             "the lat-lon C-grid lane, or set aimip_grid: gaussian."
         )
 
+    # Pressure-surface T damping (DycoreConfig / run_amip key names, default
+    # off). This driver builds the spectral core only, so the lat-lon key is
+    # refused; sfno_full runs no spectral PE dycore, so the spectral key would
+    # be inert there and is refused too.
+    from legoesm.training.campaign_driver import pressure_surface_flags
+    _t_damp_p = pressure_surface_flags(cfg, "spectral", where="AIMIP suite")[
+        "spectral_t_damping_pressure_surfaces"]
+    if _t_damp_p and _variant == "sfno_full":
+        raise SystemExit(
+            "spectral_t_damping_pressure_surfaces is set but variant sfno_full "
+            "replaces the spectral PE dycore with the SFNO (no T damping to "
+            "correct); it would be silently inert. Remove the key for sfno_full.")
+
     return NeuralGCMSpectralConfig(
         n_max=int(cfg["n_max"]),
         # Config key drift (nlev vs n_levels, CLAUDE.md naming debt): a merge
@@ -300,6 +313,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
             vertical_advection_scheme=str(
                 cfg.get("vertical_advection_scheme", "sb_centered")),
             frictional_heating=bool(cfg.get("frictional_heating", True)),
+            T_damping_pressure_surfaces=_t_damp_p,
         ),
         sfno_embed_dim=sfno_embed,
         sfno_n_blocks=sfno_n_blocks,
@@ -635,7 +649,10 @@ def _train_aimip_classical(
     # deserialising a bundle checkpoint into a bare AIMIPClassicalParams
     # restores only the classical half and silently re-initialises every
     # trained scheme parameter on each chain link.
-    params, start_epoch = maybe_resume_model(params, resume_from_dir)
+    from legoesm.training.neural_gcm_spectral import spectral_dycore_options
+    params, start_epoch = maybe_resume_model(
+        params, resume_from_dir,
+        dycore_options=spectral_dycore_options(spec_cfg.pe_config))
 
     logger.info(
         f"AIMIP classical physics: conv={conv_scheme} turb={turb_scheme} "
@@ -1201,6 +1218,12 @@ def main():
             # params.eqx; the scorecard records which weights were scored.
             eval_model = model
             eval_weights = "raw"
+            # dycore options this variant ran with (checkpoint records)
+            from legoesm.training.neural_gcm_spectral import (
+                spectral_dycore_options,
+            )
+            _dyo = spectral_dycore_options(
+                _build_spectral_config(cfg).pe_config)
             ema_ckpt_path = None
             if float(cfg.get("aimip_ema_decay", 0.0)) > 0.0:
                 import equinox as eqx
@@ -1235,10 +1258,13 @@ def main():
                     and _newest_ema.stat().st_mtime >= _newest_raw_mt
                 ):
                     from legoesm.ml.checkpoint_io import (
-                        load_checkpoint_or_fail,
+                        load_checked, load_checkpoint_or_fail,
                     )
-                    eval_model = load_checkpoint_or_fail(
-                        _newest_ema, model, what="the EMA weights")
+                    eval_model = load_checked(
+                        _newest_ema, _dyo,
+                        lambda: load_checkpoint_or_fail(
+                            _newest_ema, model, what="the EMA weights"),
+                        what="the EMA weights")
                     eval_weights = "ema"
                     logger.info(
                         f"{variant}: evaluating EMA weights "
@@ -1284,10 +1310,10 @@ def main():
             ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
             from legoesm.ml.training import save_checkpoint
-            save_checkpoint(model, ckpt_path)
+            save_checkpoint(model, ckpt_path, dycore_options=_dyo)
             if eval_weights == "ema":
                 ema_ckpt_path = output_dir / variant / "params_ema.eqx"
-                save_checkpoint(eval_model, ema_ckpt_path)
+                save_checkpoint(eval_model, ema_ckpt_path, dycore_options=_dyo)
 
             results["variants"][variant] = {
                 "train_loss_history": [float(x) for x in loss_history],
@@ -1296,6 +1322,9 @@ def main():
                 "eval_metrics_train_period": eval_metrics_train,
                 "checkpoint": str(ckpt_path),
                 "eval_weights": eval_weights,
+                # dycore option record (default off): the AIMIP spectral core
+                "spectral_t_damping_pressure_surfaces":
+                    _dyo["spectral_t_damping_pressure_surfaces"],
                 **(
                     {"checkpoint_ema": str(ema_ckpt_path)}
                     if ema_ckpt_path is not None else {}

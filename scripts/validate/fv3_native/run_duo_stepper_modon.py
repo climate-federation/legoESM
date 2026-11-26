@@ -4,9 +4,10 @@ stepper — the bounded-conventions lane's answer to the production cube's
 soliton dispersal (2026-07-18 battery: ico5 preserves the dipoles at
 day 100, production A-L C36 disperses them into wave debris).
 
-IC: the faithful case-8 port from tests/test_cases/colliding_modons
-(two zonal Gaussian bursts, Umax=50, r0=750 km, h0=5000 m, NON-rotating
-planet omega=0), projected to D-grid covariant winds with the certified
+IC: tests/test_cases/colliding_modons (two zonal Gaussian bursts with the
+Lin et al. 2017 values U0=40 m/s, r0=500 km, h0=10 km -- the module's
+constants; FV3's case-8 namelist defaults are 50 m/s / 750 km / 5 km --
+NON-rotating planet omega=0), projected to D-grid covariant winds with the certified
 analytic_swcore_state edge-midpoint recipe (wind_fn/scalars_fn hooks).
 
 Output: u/v geographic frames on the 1-degree grid via the c2l_ord2

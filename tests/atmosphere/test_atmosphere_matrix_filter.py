@@ -62,7 +62,7 @@ def test_dcmip2008_excludes_canonical_jw(matrix_module):
     # M1.a + M1.b DCMIP 2008 cases.
     assert cases == {
         "rotated_baroclinic", "rotated_steady",
-        "gravity_wave_3_1", "inertio_gravity_3_2",
+        "inertio_gravity_3_2",
         "mountain_rossby_5_0", "rossby_haurwitz_6_0",
     }
 
@@ -77,6 +77,7 @@ def test_dcmip2012_includes_only_2012_cases(matrix_module):
     cases = _names_for(matrix_module, family="dcmip2012")
     assert cases == {
         "rest_state_topo",
+        "gravity_wave_3_1",   # DCMIP 2012 test 3-1
         "dcmip_transport_11",
         "dcmip_transport_12",
         "dcmip_transport_13",

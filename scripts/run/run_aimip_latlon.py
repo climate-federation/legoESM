@@ -186,6 +186,14 @@ def build_latlon_config(args):
     if args.ice_skin_prognostic is not None:
         argv.append("--ice-skin-prognostic" if args.ice_skin_prognostic
                     else "--no-ice-skin-prognostic")
+    # Pressure-surface A_h T diffusion: run_amip's flag, forwarded only when
+    # on (off leaves the argv unchanged).  Recorded by the driver manifest.
+    _ah_p = getattr(args, "latlon_ah_pressure_surfaces", False)
+    if not isinstance(_ah_p, bool):
+        raise ValueError(
+            f"latlon_ah_pressure_surfaces must be a bool, got {_ah_p!r}")
+    if _ah_p:
+        argv.append("--latlon-ah-pressure-surfaces")
     parsed = ra.build_arg_parser().parse_args(argv)
     # Land surface model.  This lane builds its ExperimentConfig from a FIXED
     # argv that passes no land flags and no --topography, so until now it
@@ -614,9 +622,22 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
     vdir = outdir / variant
     vdir.mkdir(parents=True, exist_ok=True)
     ckpt = vdir / "params.eqx"
-    eqx.tree_serialise_leaves(str(ckpt), trained)
-    from legoesm.ml.checkpoint_io import write_knob_record
+    import os
+    from legoesm.ml.checkpoint_io import (
+        DYCORE_OPTION_KEYS, write_dycore_record, write_knob_record,
+    )
+    # payload via temp + rename under the two-phase dycore-record protocol
+    # (checkpoint_io.write_dycore_record): an interrupted save is refused
+    _tmp = ckpt.with_name(f"{ckpt.name}.tmp-{os.getpid()}")
+    _dyo = {k: getattr(config.dycore, k) for k in DYCORE_OPTION_KEYS}
+    try:
+        eqx.tree_serialise_leaves(str(_tmp), trained)
+        _stamp = write_dycore_record(ckpt, _dyo, payload=_tmp, committed=False)
+        os.replace(_tmp, ckpt)
+    finally:
+        _tmp.unlink(missing_ok=True)   # consumed by os.replace on success
     write_knob_record(trained, ckpt)
+    write_dycore_record(ckpt, _dyo, stamp=_stamp)   # commit
 
     return {
         "variant": variant,
@@ -675,6 +696,12 @@ def build_parser():
     # default sub-cycles (N=6 -> ~hourly at dt~600s, ~15 min at the T106
     # CFL dt~155s) — never every step.  Moot for the NN-replacement variants.
     p.add_argument("--rad-update-steps", type=int, default=6)
+    p.add_argument("--latlon-ah-pressure-surfaces",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   dest="latlon_ah_pressure_surfaces",
+                   help="lat-lon PE: A_h T diffusion partially corrected to "
+                        "pressure surfaces (CAM3 eq. 3.80); default off "
+                        "(run_amip's flag)")
     p.add_argument("--ice-skin-prognostic",
                    action=argparse.BooleanOptionalAction, default=None,
                    help="Prognostic sea-ice skin (#2106); unset = auto (on "

@@ -6,7 +6,11 @@ second order in dt; on the coupled slab deck at fp64 it created 2.5e-6 of a
 day's precipitation (the whole atmosphere residual).
 
 KNOWN DIFFERENCE vs the legacy form, measured on the fixture below (12x24,
-8 levels, dt 600 s, polar filter on, 4 steps), pinned per case:
+8 levels, dt 600 s, polar filter on, 4 steps), pinned per case.  Re-pinned
+after the pole-row v / polar-cap vorticity fix (#2639 follow-up): every pin
+moved by <= 1.2%; with grid.global_poles=False the old pins return to
+every digit, so the shift is the pole fix alone.  The mass-weighted step
+still conserves ~50x better than the legacy update.
 """
 import numpy as np
 import pytest
@@ -31,14 +35,14 @@ fp64 = _pf.fp64
 
 # relative change of each tracer's mass over the 4 steps
 _MASS = {
-    ("sigma", True): {"q_v": -4.070872832671914e-10, "q_c": 9.961077796448026e-11},
-    ("sigma", False): {"q_v": -2.1677186923374937e-08, "q_c": -1.069473857696347e-09},
-    ("hybrid", False): {"q_v": -2.124673924993928e-08, "q_c": -1.1752222789263992e-09},
+    ("sigma", True): {"q_v": -4.079417973597815e-10, "q_c": 9.849726936235415e-11},
+    ("sigma", False): {"q_v": -2.1684814028531837e-08, "q_c": -1.0698386758825048e-09},
+    ("hybrid", False): {"q_v": -2.1255574859590977e-08, "q_c": -1.1744393796154918e-09},
 }
 # max |q_mass_weighted - q_legacy| / max |q_legacy| after the 4 steps
 _GAP = {
-    "sigma": {"q_v": 4.7611108868804483e-07, "q_c": 6.963691301453067e-07},
-    "hybrid": {"q_v": 1.2057976945094213e-06, "q_c": 1.7626579911584825e-06},
+    "sigma": {"q_v": 4.7626983119430156e-07, "q_c": 6.966465708577796e-07},
+    "hybrid": {"q_v": 1.2063852513064226e-06, "q_c": 1.763639178611702e-06},
 }
 
 

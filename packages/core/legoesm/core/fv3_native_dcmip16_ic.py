@@ -74,7 +74,8 @@ def _newton_march(p_target, lat, z_start, c: DCMIP16Constants):
 
 
 def _edge_winds(corner_lonlat, pair_shift, shape, ak, bk, km,
-                c: DCMIP16Constants, do_pert, great_circle_dist):
+                c: DCMIP16Constants, do_pert, great_circle_dist,
+                use_dcmip2016_perturbation=False):
     """The u- and v-point loops, which are identical except for the stencil.
 
     ``pair_shift`` selects which corner pair spans the edge: ``(1, 0)`` gives
@@ -117,7 +118,8 @@ def _edge_winds(corner_lonlat, pair_shift, shape, ak, bk, km,
                 uu = float(uwind(0.5 * (z + z0), pt_e, lat_e, c))
                 if do_pert:                      # :6656 / :6703
                     uu += float(uwind_pert(0.5 * (z + z0), lat_e, lon_e,
-                                           c, great_circle_dist))
+                                           c, great_circle_dist,
+                                           use_dcmip2016_perturbation=use_dcmip2016_perturbation))
                 out[i, j, k] = proj * uu         # :6659 / :6706
                 gz, peln = z, pl
     return out
@@ -125,7 +127,7 @@ def _edge_winds(corner_lonlat, pair_shift, shape, ak, bk, km,
 
 def dcmip16_bc_face(grid_corner_lonlat, agrid_lonlat, ak, bk, km, *,
                     constants: DCMIP16Constants, do_pert: bool,
-                    great_circle_dist) -> dict:
+                    great_circle_dist, use_dcmip2016_perturbation: bool = False) -> dict:
     """Build ``ps``, ``delp``, ``pt``, ``u``, ``v`` for ONE face.
 
     ``grid_corner_lonlat`` is ``(ni+1, nj+1, 2)`` cell CORNERS (radians,
@@ -135,6 +137,9 @@ def dcmip16_bc_face(grid_corner_lonlat, agrid_lonlat, ak, bk, km, *,
     compute window and fill halos separately.
 
     ``do_pert=True`` is test_case = -13; ``False`` is -12.
+    ``use_dcmip2016_perturbation`` -- see :func:`fv3_native_dcmip16_bc.uwind_pert`
+    (False: the FV3 oracle; True: the DCMIP-2016 document's Eqs. 14-15,
+    truncated at R_p and above z_p).
     """
     c = constants
     ak = np.asarray(ak, dtype=np.float64)
@@ -179,9 +184,9 @@ def dcmip16_bc_face(grid_corner_lonlat, agrid_lonlat, ak, bk, km, *,
 
     # --- D-grid winds: :6620-6712 --------------------------------------
     u = _edge_winds(corners, (1, 0), (ni, nj + 1), ak, bk, km, c, do_pert,
-                    great_circle_dist)
+                    great_circle_dist, use_dcmip2016_perturbation)
     v = _edge_winds(corners, (0, 1), (ni + 1, nj), ak, bk, km, c, do_pert,
-                    great_circle_dist)
+                    great_circle_dist, use_dcmip2016_perturbation)
 
     return {"ps": ps, "delp": delp, "pt": pt, "gz": gz, "u": u, "v": v}
 
@@ -301,6 +306,7 @@ def dcmip16_bc_sphum(ak, bk, agrid_lat, km: int) -> np.ndarray:
 def dcmip16_bc_six_face_state(ctx: dict, ak, bk, km: int, *,
                               hydrostatic: bool = True,
                               do_pert: bool = True,
+                              use_dcmip2016_perturbation: bool = False,
                               constants: DCMIP16Constants | None = None,
                               with_sphum: bool = True,
                               zvir: float = 0.0):
@@ -373,7 +379,8 @@ def dcmip16_bc_six_face_state(ctx: dict, ak, bk, km: int, *,
         ce = np.stack([np.asarray(gs["agrid_lon"])[cs, cs],
                        np.asarray(gs["agrid_lat"])[cs, cs]], -1)
         o = dcmip16_bc_face(co, ce, ak, bk, km, do_pert=do_pert,
-                            constants=constants, great_circle_dist=gcdr)
+                            constants=constants, great_circle_dist=gcdr,
+                            use_dcmip2016_perturbation=use_dcmip2016_perturbation)
         st[t]["delp"][cs, cs, :] = o["delp"]
         st[t]["pt"][cs, cs, :] = o["pt"]
         st[t]["u"][cs, cc, :] = o["u"]

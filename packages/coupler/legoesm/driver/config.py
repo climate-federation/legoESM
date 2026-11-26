@@ -487,6 +487,15 @@ class DycoreConfig(NamedTuple):
     mpas_edge_scaled_damping: bool = False
     mpas_damping_exp_del2: float = 2.0
     mpas_damping_exp_del4: float = 4.0
+    # T damping corrected to pressure surfaces, one opt-in per core (user
+    # decision 2026-11-24; both default OFF = bit-identical to 97ddee4056):
+    # lat-lon C-grid PE A_h Laplacian on T, CAM3 eq. 3.80 partial correction
+    # (CGridLatLonPrimitiveEquationConfig.A_h_pressure_surfaces); spectral PE
+    # hyperdiffusion / filter on T, quadratic correction on the area-mean
+    # profile (SpectralPEConfig.T_damping_pressure_surfaces).  Each is refused
+    # on any other core (validate_strict and the dycore factory).
+    latlon_ah_pressure_surfaces: bool = False
+    spectral_t_damping_pressure_surfaces: bool = False
 
 
 class EvaluationConfig(NamedTuple):
@@ -4644,6 +4653,39 @@ class ExperimentConfig(NamedTuple):
                 "dycore.spectral_sponge_nu_top_m2s needs dycore.column_lane and "
                 "dycore.energy_fixer: only the column-lane ssp_rk54 step returns the "
                 "sponge's energy loss (global energy fixer); legacy/leapfrog steps do not.")
+        for _pk in ("latlon_ah_pressure_surfaces", "spectral_t_damping_pressure_surfaces"):
+            if not isinstance(getattr(d, _pk), bool):
+                errors.append(f"dycore.{_pk} must be a bool (got {getattr(d, _pk)!r})")
+        if d.latlon_ah_pressure_surfaces is True:
+            if (d.model_type != "hydrostatic"
+                    or d.discretization not in ("finite_volume", "centered", "latlon_cgrid")
+                    or normalize_grid_type(g.grid_type) != "latlon"):
+                errors.append(
+                    "dycore.latlon_ah_pressure_surfaces is wired into the hydrostatic "
+                    "lat-lon C-grid dycore only; with discretization="
+                    f"{d.discretization!r}, model_type={d.model_type!r}, grid="
+                    f"{g.grid_type!r} it would be silently inert.")
+            elif not (isinstance(d.a_h_scale, (int, float)) and d.a_h_scale > 0):
+                errors.append(
+                    "dycore.latlon_ah_pressure_surfaces corrects the A_h T diffusion; "
+                    f"with dycore.a_h_scale={d.a_h_scale!r} there is none (inert).")
+        if d.spectral_t_damping_pressure_surfaces is True:
+            if (d.model_type != "hydrostatic" or d.discretization != "spectral"
+                    or normalize_grid_type(g.grid_type) != "gaussian"):
+                errors.append(
+                    "dycore.spectral_t_damping_pressure_surfaces is wired into the "
+                    "hydrostatic spectral dycore only; with discretization="
+                    f"{d.discretization!r}, model_type={d.model_type!r}, grid="
+                    f"{g.grid_type!r} it would be silently inert.")
+            elif not (isinstance(d.hyperdiff_scale, (int, float)) and d.hyperdiff_scale > 0):
+                errors.append(
+                    "dycore.spectral_t_damping_pressure_surfaces corrects the T "
+                    f"hyperdiffusion; with dycore.hyperdiff_scale={d.hyperdiff_scale!r} "
+                    "there is none (inert).")
+            elif g.nlev < 3:
+                errors.append(
+                    "dycore.spectral_t_damping_pressure_surfaces needs grid.nlev >= 3 "
+                    f"(got {g.nlev!r}).")
         _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
         if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
             errors.append(

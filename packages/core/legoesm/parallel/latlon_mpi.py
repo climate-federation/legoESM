@@ -2685,7 +2685,7 @@ def build_padded_grid(grid, layout: LatLonBandLayout, halo: int = 1):
         radius=float(grid.radius),
         omega=omega_eff,
         dtype=grid.lat.dtype,
-    )
+    )._replace(global_poles=getattr(grid, "global_poles", False))
 
 
 # ============================================================================

@@ -626,6 +626,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="mpas_kh_pressure_surfaces",
                         help="MPAS K_h temperature diffusion on pressure surfaces "
                              "(CAM3 leading-term terrain correction)")
+    parser.add_argument("--latlon-ah-pressure-surfaces",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.latlon_ah_pressure_surfaces,
+                        dest="latlon_ah_pressure_surfaces",
+                        help="lat-lon PE: A_h T diffusion partially corrected to "
+                             "pressure surfaces (CAM3 eq. 3.80); default off")
+    parser.add_argument("--spectral-t-damping-pressure-surfaces",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.spectral_t_damping_pressure_surfaces,
+                        dest="spectral_t_damping_pressure_surfaces",
+                        help="spectral PE: T hyperdiffusion/filter corrected to "
+                             "pressure surfaces (area-mean quadratic); default off")
     parser.add_argument("--mpas-edge-scaled-damping",
                         action=argparse.BooleanOptionalAction,
                         default=_DYCORE_DEFAULTS.mpas_edge_scaled_damping,
@@ -3334,6 +3346,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_fct_smoothing_width=args.mpas_fct_smoothing_width,
         mpas_fct_upwind_width_ms=args.mpas_fct_upwind_width_ms,
         mpas_kh_pressure_surfaces=args.mpas_kh_pressure_surfaces,
+        latlon_ah_pressure_surfaces=args.latlon_ah_pressure_surfaces,
+        spectral_t_damping_pressure_surfaces=args.spectral_t_damping_pressure_surfaces,
         mpas_edge_scaled_damping=args.mpas_edge_scaled_damping,
         mpas_damping_exp_del2=args.mpas_damping_exp_del2,
         mpas_damping_exp_del4=args.mpas_damping_exp_del4,

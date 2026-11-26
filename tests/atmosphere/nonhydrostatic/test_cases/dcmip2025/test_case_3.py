@@ -54,8 +54,19 @@ def dcmip25_tc3_init(
     grid: CubedSphereGrid,
     n_levels: int = 40,
     params: dict | None = None,
+    balanced: bool = True,
 ) -> tuple[NonHydrostaticState, HeightCoordinate, TerrainMetric, CubedSphereGrid]:
     """Initialize DCMIP-2025 Test Case 3 (squall line).
+
+    ``balanced=True`` (default): the same DCMIP2016 / Klemp et al. (2015)
+    balanced state as the spectral and MPAS arms, discretized on the cube --
+    ``u_east = u_eq(z) cos(lat)`` rotated to the grid and the hydrostatic +
+    cyclostrophic theta', rho' at the cell centres
+    (:func:`~legoesm.atmosphere.dynamics.gcm.dcmip2025_ic.tc3_balanced_perturbations`).
+    ``balanced=False``: the former latitude-independent ``u_eq(z)`` with
+    rho' = theta' = 0.  NOTE: no cubed-sphere NH dycore currently runs this
+    IC (the height-coordinate cube Euler is retired and the fv3_duo NH arm
+    has no DCMIP adapter; cube_duo_only_retirement.md).
 
     Parameters
     ----------
@@ -106,8 +117,9 @@ def dcmip25_tc3_init(
     u_data = jnp.zeros(shape_3d)
     v_data = jnp.zeros(shape_3d)
     v_north_2d = jnp.zeros(shape_2d)
+    _cos_lat = jnp.cos(small_grid.lat) if balanced else jnp.ones(shape_2d)
     for k in range(n_levels):
-        u_east_2d = jnp.full(shape_2d, u_profile[k])
+        u_east_2d = u_profile[k] * _cos_lat
         u_k, v_k = rotate_winds_geo_to_grid(
             u_east_2d, v_north_2d, small_grid.angle,
         )
@@ -168,8 +180,20 @@ def dcmip25_tc3_init(
         theta_pert = theta_pert + bubble
 
     # The bubble is a perturbation on top of the reference theta
-    theta_prime_data = theta_pert
-    rho_prime_data = jnp.zeros(shape_3d)
+    if balanced:
+        from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (
+            tc3_balanced_perturbations,
+        )
+        theta_bal_p, rho_bal_p = tc3_balanced_perturbations(
+            small_grid.lat.reshape(-1), height_coord, u_profile)
+        theta_bal_p = theta_bal_p.reshape(shape_3d)
+        rho_bal_p = rho_bal_p.reshape(shape_3d)
+    else:
+        theta_bal_p = jnp.zeros(shape_3d)
+        rho_bal_p = jnp.zeros(shape_3d)
+    # Bubbles on top of the balanced theta' at fixed rho' (as before).
+    theta_prime_data = theta_bal_p + theta_pert
+    rho_prime_data = rho_bal_p
 
     # Stack tracers: vapor, cloud, rain
     tracers_data = jnp.stack([q_v_data, q_c_data, q_r_data], axis=-1)

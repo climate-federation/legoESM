@@ -59,6 +59,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import (
 )
 from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
+    latlon_cell_ke,
     nu_del4_row_profiles,
 )
 from legoesm.core.operators_fv_latlon_3d import (
@@ -77,6 +78,7 @@ from legoesm.grids.vertical import (
     pressure_from_sigma,
     pressure_from_hybrid,
     dp_from_hybrid,
+    cam_pi_B_dT_dp,
     compute_geopotential,
     compute_geopotential_hybrid,
     vertical_advection,
@@ -274,6 +276,16 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # Hybrid only; sigma retains its existing upwind tracer operator.
     tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
     tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
+    # A_h temperature diffusion partially corrected to pressure surfaces
+    # (CAM3, Collins et al. 2004, eq. 3.80 with the eq. 3.194-3.196 vertical
+    # differences): lap_p T = lap_eta T - (pi B dT/dp) lap(ln pi).  Without it
+    # a stratified atmosphere at rest over terrain is heated / cooled along the
+    # sloping eta surfaces (~140 K/day at the lowest level of DCMIP 2012 2-0-0
+    # on 72x144).  OPT-IN (user decision 2026-11-24): False (default) is the
+    # eta-surface Laplacian, bit-identical to commit 97ddee4056; the
+    # atmosphere matrix sets it explicitly; drivers via
+    # DycoreConfig.latlon_ah_pressure_surfaces.  Needs A_h > 0 to act.
+    A_h_pressure_surfaces: bool = False
     # APPENDED LAST.  Tracers advance through the RK step as layer mass Q = dp*q (q = Q/dp
     # after the step): each stage's mass-form tendency then sums exactly, so
     # sum(q dp) is conserved across the stages.  False = the legacy
@@ -565,6 +577,12 @@ def latlon_dissipation(du_dt, dv_dt, dT_dt, u, v, T, p_s, grid, sigma_coord,
         du_dt = du_dt + config.A_h * lap_u
         dv_dt = dv_dt + config.A_h * lap_v
         lap_T = laplacian_cgrid(T, grid)
+        if config.A_h_pressure_surfaces:
+            # Opt-in partial correction to pressure surfaces (CAM3 eq. 3.80,
+            # see the config field): lap_p T = lap_eta T - (pi B dT/dp)
+            # lap(ln pi).  Isothermal columns: dT/dp = 0, unchanged.
+            lap_lnps = laplacian_cgrid(jnp.log(p_s)[..., jnp.newaxis], grid)
+            lap_T = lap_T - cam_pi_B_dT_dp(T, p_s, sigma_coord) * lap_lnps
         dT_dt = dT_dt + config.A_h * lap_T
 
     # --- 13a. Biharmonic hyperdiffusion (optional) ---
@@ -747,7 +765,7 @@ def latlon_legacy_pe_tendencies(
     # --- 3. KE at cell centres from C-grid face velocities ---
     u_c = _face_to_cell_u(u)
     v_c = _face_to_cell_v(v)
-    KE = 0.5 * (u_c**2 + v_c**2)
+    KE = latlon_cell_ke(u_c, v_c, v, grid)   # pole rows: no wall-v=0 sample
 
     # --- 4. Bernoulli function B = Φ + KE ---
     B = Phi + KE
@@ -1789,12 +1807,12 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # Borrow (default) is frozen-MSE-neutral for vapour AND condensate; the
         # hard-floor fallback adds the per-species latent-heat T correction incl
         # ice.  dp = TRUE layer mass from the FINAL (post-mass-fix) p_s.
-        # ponytail: the borrow's GLOBAL net-negative-column residual uses
-        # jnp.sum; under lat-band SPMD that reduces per-band, not globally — a
-        # tiny correction that only fires on fully net-negative columns (rare on
-        # smooth water fields).  A band-aware psum sum_fn is the SPMD upgrade.
+        # The borrow's GLOBAL net-negative-column residual reduces with
+        # latlon_decomposition_sum: across bands (SPMD psum) / ranks (MPI), so
+        # water is conserved globally, not per band; serial is jnp.sum.
         if state.tracers:
-            from legoesm.core.conservation import apply_water_positivity
+            from legoesm.core.conservation import (
+                apply_water_positivity, latlon_decomposition_sum)
             _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
             if _hybrid:
                 _dp = jnp.maximum(dp_from_hybrid(sigma_coord, state.p_s), 0.0)  # +weight
@@ -1804,7 +1822,10 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 state.tracers, state.T, _dp,
                 conservative=self.config.conservative_tracer_clamp,
                 energy_consistent=self.config.energy_consistent_moisture_clip,
-                area=grid.area,
+                area=grid.area, sum_fn=latlon_decomposition_sum,
+                # partition-independent reference: the GLOBAL mean cell area
+                area_ref=(latlon_decomposition_sum(grid.area)
+                          / latlon_decomposition_sum(jnp.ones_like(grid.area))),
                 condensate_from_vapour=self.config.positivity_condensate_from_vapour)
             state = state._replace(tracers=_tr_out, T=_T_out)
 

@@ -880,6 +880,17 @@ def create_atmosphere_dycore(
     logger.info("Tracer vertical scheme: %s", tracer_scheme or "lane existing operator")
     refuse_unwired_energy_fixer(config, solver_name)
     warn_if_vapour_floor_creates_water(config, solver_name)
+    # Pressure-surface T-damping options: each only on its own core (also
+    # checked by validate_strict; repeated here for paths that skip it).
+    for _flag, _core in (("latlon_ah_pressure_surfaces", "latlon_cgrid_primitive_equations"),
+                         ("spectral_t_damping_pressure_surfaces",
+                          "spectral_primitive_equations")):
+        if not isinstance(getattr(dc, _flag), bool):
+            raise ValueError(f"dycore.{_flag} must be a bool, got {getattr(dc, _flag)!r}")
+        if getattr(dc, _flag) and solver_name != _core:
+            raise ValueError(
+                f"dycore.{_flag} is wired into the {_core} dycore only; this run "
+                f"builds {solver_name!r}, where it would be silently inert.")
     if coeff_grid is None:
         coeff_grid = grid
     diff = compute_diffusion(coeff_grid, dc)
@@ -977,7 +988,12 @@ def create_atmosphere_dycore(
             # legacy step does not and is refused above with it on
             energy_fixer=bool(dc.energy_fixer and dc.column_lane),
             sponge_del2_nu_top_m2s=float(dc.spectral_sponge_nu_top_m2s),
+            T_damping_pressure_surfaces=bool(dc.spectral_t_damping_pressure_surfaces),
         )
+        if pe_config.T_damping_pressure_surfaces and not hyperdiff > 0:
+            raise ValueError(
+                "dycore.spectral_t_damping_pressure_surfaces: this run has no T "
+                "hyperdiffusion to correct (hyperdiff_scale <= 0); it would be inert.")
         model = SpectralPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma, config=pe_config,
         )
@@ -1531,7 +1547,12 @@ def create_atmosphere_dycore(
             # smallest-cell / dx_min^2 value is wrong on a lat-lon grid).
             nu_div4_scale=dc.mpas_div_damp4_scale,
             vertical_form=dc.vertical_form,
+            A_h_pressure_surfaces=bool(dc.latlon_ah_pressure_surfaces),
         )
+        if cfg.A_h_pressure_surfaces and not _A_h > 0:
+            raise ValueError(
+                "dycore.latlon_ah_pressure_surfaces: this run has A_h = 0 (no "
+                "Laplacian T diffusion to correct); it would be inert.")
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)
         model.effective_dt = _effective_dt

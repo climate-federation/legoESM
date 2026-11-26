@@ -13,7 +13,10 @@ References
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax.numpy as jnp
+import numpy as np
 
 
 # ============================================================================
@@ -1524,3 +1527,195 @@ def vector_laplacian_row_sum(mesh):
     g = ((s_cell[jnp.maximum(c0, 0)] + s_cell[jnp.maximum(c1, 0)]) / jnp.where(dc > 0, dc, 1.0)
          + (t_vert[jnp.maximum(v0, 0)] + t_vert[jnp.maximum(v1, 0)]) / jnp.where(dv > 0, dv, 1.0))
     return jnp.where(complete, g, 0.0)
+
+
+# ============================================================================
+# MPAS-Atmosphere 3rd/4th-order scalar edge reconstruction
+# (Skamarock & Gassmann 2011, doi:10.1175/MWR-D-10-05056.1)
+# ============================================================================
+
+class MPASAdvectionCoefs(NamedTuple):
+    """Per-edge stencil of the MPAS-A scalar edge reconstruction.
+
+    ``adv_cells`` (nAdvMax, nEdges) int32 cell indices (padding -> 0 with zero
+    weight); ``adv_coefs`` / ``adv_coefs_3rd`` (nAdvMax, nEdges) the MPAS
+    ``adv_coefs`` / ``adv_coefs_3rd`` WITHOUT the ``dvEdge`` factor (the
+    TRiSK divergence here applies it) and WITHOUT ``config_coef_3rd_order``
+    (applied by the caller, as ``atm_couple_coef_3rd_order`` does).  The edge
+    value for an edge-normal flow ``u`` (positive c1 -> c2) is
+    ``sum_j (adv_coefs + sign(u) * coef_3rd * adv_coefs_3rd)_j q[adv_cells_j]``.
+    """
+    adv_cells: jnp.ndarray
+    adv_coefs: jnp.ndarray
+    adv_coefs_3rd: jnp.ndarray
+
+
+def _arc_length(a, b):
+    """MPAS ``arc_length`` (unit sphere): ``r * 2 asin(|b - a| / 2r)``."""
+    r = np.sqrt(np.sum(a * a))
+    c = np.sqrt(np.sum((b - a) ** 2))
+    return r * 2.0 * np.arcsin(c / (2.0 * r))
+
+
+def _sphere_angle(a, b, c):
+    """MPAS ``sphere_angle``: signed angle at A of the spherical triangle ABC
+    (half-angle formula, eq. 28), positive when ``(AB x AC) . A >= 0``."""
+    sa, sb, sc = _arc_length(b, c), _arc_length(a, c), _arc_length(a, b)
+    d = np.cross(b - a, c - a)
+    s = 0.5 * (sa + sb + sc)
+    sin_angle = np.sqrt(min(1.0, max(0.0, (np.sin(s - sb) * np.sin(s - sc))
+                                     / (np.sin(sb) * np.sin(sc)))))
+    ang = 2.0 * np.arcsin(max(min(sin_angle, 1.0), -1.0))
+    return ang if np.dot(d, a) >= 0.0 else -ang
+
+
+def _arc_bisect(a, b):
+    """MPAS ``arc_bisect``: great-circle midpoint of A and B."""
+    r = np.sqrt(np.sum(a * a))
+    c = 0.5 * (a + b)
+    return r * c / np.sqrt(np.sum(c * c))
+
+
+def mpas_deriv_two(mesh):
+    """Port of MPAS-A ``atm_initialize_advection_rk`` (init_atmosphere
+    ``mpas_atm_advection.F``), spherical branch, ``polynomial_order = 2``,
+    ``least_squares`` with unit weights: per cell, a least-squares quadratic
+    ``1, x, y, x^2, xy, y^2`` through the cell and its ``nEdgesOnCell``
+    neighbours on the local tangent plane (``x`` along the local meridian
+    direction ``theta_abs``), then for each of the cell's edges the second
+    derivative along the cell-centre -> edge-midpoint direction
+    ``2 cos^2 b4 + 2 cos sin b5 + 2 sin^2 b6`` as weights on the stencil.
+
+    Returns ``deriv_two`` (maxEdges + 1, 2, nEdges) float64: index 0 the cell
+    itself, ``1 + i`` its neighbour ``cellsOnCell[i]``; slot 0/1 of axis 1 for
+    ``cellsOnEdge[0]`` / ``[1]``.  A cell with a missing neighbour keeps zero
+    weights (MPAS skips cells whose stencil leaves the halo).  Host-side numpy:
+    mesh geometry is static.  Raises on a zonally periodic (seam-shifted) mesh,
+    whose 3-D cell positions do not give the stencil's geometry.
+    """
+    xc_all = np.stack([np.asarray(mesh.xCell, np.float64), np.asarray(mesh.yCell, np.float64),
+                       np.asarray(mesh.zCell, np.float64)], axis=1)
+    xv_all = np.stack([np.asarray(mesh.xVertex, np.float64), np.asarray(mesh.yVertex, np.float64),
+                       np.asarray(mesh.zVertex, np.float64)], axis=1)
+    xc_all /= np.linalg.norm(xc_all, axis=1, keepdims=True)
+    xv_all /= np.linalg.norm(xv_all, axis=1, keepdims=True)
+    radius = float(mesh.radius)
+    neoc = np.asarray(mesh.nEdgesOnCell)
+    eoc = np.asarray(mesh.edgesOnCell)
+    coc = np.asarray(mesh.cellsOnCell)
+    coe = np.asarray(mesh.cellsOnEdge)
+    voe = np.asarray(mesh.verticesOnEdge)
+    dc = np.asarray(mesh.dcEdge, np.float64)
+    max_edges = eoc.shape[0]
+    deriv_two = np.zeros((max_edges + 1, 2, coe.shape[1]))
+    north = np.array([0.0, 0.0, 1.0])
+    for ic in range(xc_all.shape[0]):
+        ne = int(neoc[ic])
+        nbrs = coc[:ne, ic]
+        if np.any(nbrs < 0):
+            continue                                   # stencil leaves the mesh
+        pts = np.concatenate([[ic], nbrs])
+        xc = xc_all[pts]
+        n = ne + 1
+        # periodic-seam guard: the arc between neighbours must be dcEdge
+        arcs = np.array([radius * _arc_length(xc[0], xc[i + 1]) for i in range(ne)])
+        if np.any(np.abs(arcs - dc[eoc[:ne, ic]]) > 1.0e-3 * dc[eoc[:ne, ic]]):
+            raise ValueError("mpas_deriv_two: cell-centre arcs disagree with dcEdge "
+                             f"at cell {ic} (zonally periodic seam mesh?); unsupported")
+        if xc[0, 2] == 1.0:
+            theta_abs = 0.5 * np.pi
+        else:
+            theta_abs = 0.5 * np.pi - _sphere_angle(xc[0], xc[1], north)
+        thetav = np.empty(n - 1)
+        for i in range(n - 1):
+            ip2 = i + 2 if i + 2 < n else 1
+            thetav[i] = _sphere_angle(xc[0], xc[i + 1], xc[ip2])
+        thetat = np.empty(n - 1)
+        thetat[0] = theta_abs
+        for i in range(1, n - 1):
+            thetat[i] = thetat[i - 1] + thetav[i - 1]
+        xp = np.cos(thetat) * arcs
+        yp = np.sin(thetat) * arcs
+        amat = np.zeros((n, 6))
+        amat[0, 0] = 1.0
+        amat[1:, 0] = 1.0
+        amat[1:, 1] = xp
+        amat[1:, 2] = yp
+        amat[1:, 3] = xp ** 2
+        amat[1:, 4] = xp * yp
+        amat[1:, 5] = yp ** 2
+        # poly_fit_2 with unit weights: b = (A^T A)^{-1} A^T
+        bmat = np.linalg.solve(amat.T @ amat, amat.T)          # (6, n)
+        for i in range(ne):
+            ie = eoc[i, ic]
+            xe = _arc_bisect(xv_all[voe[0, ie]], xv_all[voe[1, ie]])
+            thetae = _sphere_angle(xc[0], xc[i + 1], xe) + thetat[i]
+            ct, st = np.cos(thetae), np.sin(thetae)
+            slot = 0 if ic == coe[0, ie] else 1
+            deriv_two[:n, slot, ie] = (2.0 * ct * ct * bmat[3] + 2.0 * ct * st * bmat[4]
+                                       + 2.0 * st * st * bmat[5])
+    return deriv_two
+
+
+def mpas_advection_coefficients(mesh) -> MPASAdvectionCoefs:
+    """Port of MPAS-A ``atm_adv_coef_compression`` (``mpas_atm_core.F``) on
+    top of :func:`mpas_deriv_two`: edge stencil = cell1, cell2, cell1's other
+    neighbours, then cell2's neighbours not yet listed;
+
+        adv_coefs     = -dcEdge^2/12 (d2_cell1 + d2_cell2) + 1/2 (cell1 + cell2)
+        adv_coefs_3rd = -dcEdge^2/12 (d2_cell1 - d2_cell2)
+
+    (Skamarock & Gassmann 2011 eqs. 10-11).  Unlike MPAS the ``dvEdge`` factor
+    and ``config_coef_3rd_order`` are left to the caller.  Host-side numpy."""
+    d2 = mpas_deriv_two(mesh)
+    neoc = np.asarray(mesh.nEdgesOnCell)
+    coc = np.asarray(mesh.cellsOnCell)
+    coe = np.asarray(mesh.cellsOnEdge)
+    dc = np.asarray(mesh.dcEdge, np.float64)
+    n_edges = coe.shape[1]
+    n_max = 2 + 2 * (coc.shape[0] - 1)
+    cells = np.zeros((n_max, n_edges), np.int32)
+    c4 = np.zeros((n_max, n_edges))
+    c3 = np.zeros((n_max, n_edges))
+    for ie in range(n_edges):
+        c1, c2 = int(coe[0, ie]), int(coe[1, ie])
+        lst = [c1, c2]
+        lst += [int(c) for c in coc[:neoc[c1], c1] if c != c2]
+        lst += [int(c) for c in coc[:neoc[c2], c2] if c not in lst]
+        if any(c < 0 for c in lst):
+            raise ValueError(f"mpas_advection_coefficients: edge {ie} stencil leaves the mesh")
+        idx = {c: j for j, c in enumerate(lst)}
+        for slot, cell, sgn in ((0, c1, 1.0), (1, c2, -1.0)):
+            stencil = [cell] + [int(c) for c in coc[:neoc[cell], cell]]
+            for k, c in enumerate(stencil):
+                c4[idx[c], ie] += d2[k, slot, ie]
+                c3[idx[c], ie] += sgn * d2[k, slot, ie]
+        c4[:len(lst), ie] *= -dc[ie] ** 2 / 12.0
+        c3[:len(lst), ie] *= -dc[ie] ** 2 / 12.0
+        c4[idx[c1], ie] += 0.5
+        c4[idx[c2], ie] += 0.5
+        cells[:len(lst), ie] = lst
+    return MPASAdvectionCoefs(jnp.asarray(cells), jnp.asarray(c4), jnp.asarray(c3))
+
+
+def mpas_edge_reconstruction(q_cell, coefs: MPASAdvectionCoefs):
+    """Edge values of a cell field from the MPAS stencil: returns
+    ``(sum adv_coefs q, sum adv_coefs_3rd q)``, each (nEdges, ...) for
+    ``q_cell`` (nCells, ...).  The 3rd-order edge value for a flow of sign
+    ``s`` is ``first + s * coef_3rd_order * second``."""
+    g = q_cell[coefs.adv_cells]                                  # (nAdv, nEdges, ...)
+    extra = (None,) * (q_cell.ndim - 1)
+    w4 = coefs.adv_coefs.astype(q_cell.dtype)[(...,) + extra]
+    w3 = coefs.adv_coefs_3rd.astype(q_cell.dtype)[(...,) + extra]
+    return jnp.sum(w4 * g, axis=0), jnp.sum(w3 * g, axis=0)
+
+
+def edge_normal_velocity_from_streamfunction(psi_vertex, mesh):
+    """Edge-normal velocity ``u . n = -(psi[v1] - psi[v0]) / dvEdge`` of the
+    rotational wind ``u = k x grad(psi)`` (so ``u_east = -dpsi/(a dphi)``),
+    with ``n`` the c1 -> c2 normal and ``v0 -> v1`` along ``k x n``.  Its TRiSK
+    divergence is zero to round-off (each vertex value enters a cell's edge
+    sum twice with opposite signs).  ``psi_vertex`` (nVertices, ...)."""
+    v0, v1 = mesh.verticesOnEdge[0], mesh.verticesOnEdge[1]
+    dv = mesh.dvEdge.astype(psi_vertex.dtype).reshape((-1,) + (1,) * (psi_vertex.ndim - 1))
+    return -(psi_vertex[v1] - psi_vertex[v0]) / dv

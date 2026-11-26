@@ -1,6 +1,6 @@
 """Direct unit tests for the colliding-modons shallow-water IC (#521).
 
-Guards the faithful FV3 case-8 initial condition: two zonal Gaussian wind
+Guards the Lin et al. (2017) initial condition: two zonal Gaussian wind
 bursts of peak speed ``Umax`` and size ``r0`` on a non-rotating sphere with
 constant fluid depth ``h0``.  Tests the grid-agnostic wind/height kernels
 plus the cubed-sphere and lat-lon assemblers.
@@ -70,7 +70,9 @@ def test_cube_ic_nonrotating_constant_depth():
     non-rotating grid (omega=0) actually has f == 0 everywhere."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
 
-    grid = create_cubed_sphere(12, omega=0.0)
+    # C24 (~420 km cells): the r0 = 500 km burst is sampled by a cell
+    # centre within ~300 km of its peak (C12 cells, ~830 km, miss it)
+    grid = create_cubed_sphere(24, omega=0.0)
     assert np.allclose(np.asarray(grid.f), 0.0), "modons require f=0"
 
     state = colliding_modons(grid)
@@ -94,3 +96,19 @@ def test_latlon_ic_constant_depth_and_zonal():
     assert np.allclose(np.asarray(state.v.data), 0.0)
     assert np.all(np.isfinite(np.asarray(state.u.data)))
     assert np.abs(np.asarray(state.u.data)).max() <= _MODON_UMAX + 1e-6
+
+
+def test_parameters_are_lin_et_al_2017():
+    """Lin et al. (2017) Sect. 2.1: U0 = 40 m/s, r0 = 500 km, uniform 10 km
+    depth, centres (pi/2, 0) and (3pi/2, 0) (Eqs. 1-2) -- written out here,
+    not read back from the module (the FV3 namelist defaults 50 m/s /
+    750 km / 5 km are not the paper's)."""
+    assert (_MODON_UMAX, _MODON_SIZE, _MODON_H0) == (40.0, 500.0e3, 1.0e4)
+    assert (_MODON_LON1, _MODON_LON2, _MODON_LAT0) == (
+        0.5 * np.pi, 1.5 * np.pi, 0.0)
+    # u = U0 exp(-(r1/r0)^2) - U0 exp(-(r2/r0)^2) at 500 km north of
+    # centre 1 (r2 ~ half the globe, negligible)
+    lat = 500.0e3 / _R
+    u, v = _modon_winds_geo(jnp.array([0.5 * np.pi]), jnp.array([lat]), _R)
+    np.testing.assert_allclose(float(u[0]), 40.0 * np.exp(-1.0), rtol=1e-6)
+    assert float(v[0]) == 0.0

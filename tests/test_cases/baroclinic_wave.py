@@ -1,7 +1,11 @@
 """Baroclinic wave test case for all grid types (DCMIP 2016).
 
-Implements the Jablonowski-Williamson baroclinic instability test, the
-gold-standard benchmark for hydrostatic dynamical cores.
+Implements the dry baroclinic-wave test of Ullrich, Melvin, Jablonowski &
+Staniforth (2014), as specified in the DCMIP-2016 test-case document
+(Sect. 1, dry, shallow atmosphere, X = 1).  This is NOT the
+Jablonowski & Williamson (2006) / DCMIP 2008 test (eta-based winds with a
+35 m/s jet, T0 = 288 K, a non-zero surface geopotential and a perturbation
+at all heights); it is the later, height-based balanced state.
 
 The test has two components:
 
@@ -19,18 +23,17 @@ then mapped to sigma levels by inverting p(z) via bisection.
 
 Supported grids: cubed-sphere, lat-lon, MPAS Voronoi, spectral (Gaussian).
 
-Expected results (C48, 26 levels, 10 days with perturbation):
-- Subtropical jet ~35 m/s at ~250 hPa
-- Wave packet develops in Northern Hemisphere midlatitudes
-- 850 hPa relative vorticity shows frontal features (~1e-4 s^-1)
-- Surface pressure minimum drops to ~960 hPa by day 9
+Initial jet: the analytic state's maximum lies near 45 N, eta ~0.25; the
+initial max|V| measured on the C36 duo matrix row is 27.99 m/s.
 
 References
 ----------
-- Jablonowski, C., & Williamson, D. L. (2006). A baroclinic instability
-  test case for atmospheric model dynamical cores. QJRMS, 132, 2943-2975.
-- Ullrich, P. A., et al. (2016). DCMIP2016 Test Case Document.
-  https://github.com/ClimateGlobalChange/DCMIP2016
+- Ullrich, P. A., Melvin, T., Jablonowski, C., & Staniforth, A. (2014).
+  A proposed baroclinic wave test case for deep- and shallow-atmosphere
+  dynamical cores. QJRMS, 140, 1590-1602.
+- Ullrich, P. A., Jablonowski, C., et al. (2016). DCMIP-2016 Test Case
+  Document, Sect. 1 (perturbation: Eqs. 14-15).
+- (Related, different test: Jablonowski & Williamson 2006, QJRMS 132.)
 """
 
 from __future__ import annotations
@@ -503,7 +506,7 @@ def baroclinic_wave_init_mpas(
     moist: bool = False,
     rh_init: float = 0.7,
 ):
-    """Initialize Jablonowski-Williamson baroclinic wave on MPAS mesh.
+    """Initialize the DCMIP-2016 (Ullrich 2014) baroclinic wave on MPAS.
 
     Uses the same DCMIP 2016 analytic solution as the cubed-sphere and
     spectral initializations, ensuring identical balanced states across
@@ -618,9 +621,9 @@ def baroclinic_wave_init_spectral(
     moist: bool = False,
     rh_init: float = 0.7,
 ):
-    """Initialize Jablonowski-Williamson baroclinic wave in spectral space.
+    """Initialize the DCMIP-2016 (Ullrich 2014) baroclinic wave in spectral space.
 
-    Evaluates the analytic JW06 balanced state on Gaussian grid points,
+    Evaluates the analytic Ullrich (2014) balanced state on Gaussian points,
     then transforms u,v -> vorticity/divergence via spectral analysis.
 
     Parameters
@@ -723,7 +726,7 @@ def baroclinic_wave_init_spectral(
     # Temperature to spectral
     T_hat = sh_analysis_3d(grid, T_jax)
 
-    # Uniform surface pressure (no topography for JW06)
+    # Uniform surface pressure (flat, DCMIP-2016 baroclinic wave)
     lnps_grid = jnp.full(
         (n_lat, n_lon), jnp.log(P0), dtype=jnp.float64,
     )

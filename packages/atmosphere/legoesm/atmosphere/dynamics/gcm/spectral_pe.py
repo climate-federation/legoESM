@@ -72,6 +72,7 @@ from legoesm.grids.vertical import (
     vertical_advection,
     vertical_advection_hybrid,
     compute_omega_hybrid,
+    local_quadratic_dT_dp,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import (
@@ -375,6 +376,36 @@ class SpectralPEConfig(NamedTuple):
     # so rigid rotation, n=1, is not damped).  0 = off (bitwise the old step).
     # (appended last: positional ABI)
     sponge_del2_nu_top_m2s: float = 0.0
+    # T damping corrected to pressure surfaces: every linear isotropic T
+    # damping L acting along the eta surfaces (explicit and implicit
+    # hyperdiffusion: L = -nu del^2q; post-step spectral filter or implicit
+    # hyperdiffusion factor G(n): L = G - 1) gets a quadratic-in-p correction
+    # toward L on the pressure surfaces, built on the AREA-MEAN T profile
+    # (``T_pressure_surface_correction_hat``):
+    #   L_p T ~ L T - T_p B L(pi) - 1/2 T_pp B^2 [L(pi^2) - 2 pi L(pi)],
+    # T_p, T_pp from the area-mean profile, so where the local lapse rate
+    # differs from the mean a first-order error remains (removes the
+    # terrain-locked eta-surface structure of the mean stratification, not
+    # of local anomalies).  The first-order term is CAM3's
+    # partial correction (Collins et al. 2004, eqs. 3.79-3.81, 3.84, in its
+    # del_eta p = B del pi form).  KNOWN DIFFERENCES from CAM3, both measured
+    # on DCMIP 2012 2-0-0 under the matrix's 0.01 spectral filter: (1) the
+    # curvature term -- CAM's first-order ln(pi) form leaves a one-signed
+    # global heating of +69 W/m2 at T42 (second order in the terrain); (2) the
+    # vertical derivatives come from the area-mean profile, not the local
+    # column (CAM's T*) -- with the local column the correction feeds back on
+    # T's vertical structure with a per-step gain > 1 under an O(1)-per-step
+    # filter and blows up at T42 within 0.25 d (CAM's ln(pi) form by 1 d).
+    # Exact for a horizontally uniform quadratic T(p) up to the Jensen term of
+    # the level means (mean T_k = T(mean p_k) + T_pp/2 B_k^2 Var(pi)); its
+    # size at rest, max corrected filter heating with the plain mean fit vs a
+    # fit on the mean p and mean p^2: T21 0.213 vs 0.212, T42 0.95 vs 0.67
+    # K/day (uncorrected 5.3 / 101).  The moment fit is not used: its 3x3
+    # system can be singular on hybrid columns.
+    # The top sponges are not corrected.  OPT-IN (user decision 2026-11-24):
+    # False (default) is bit-identical to commit 97ddee4056; drivers select it
+    # via DycoreConfig.spectral_t_damping_pressure_surfaces.
+    T_damping_pressure_surfaces: bool = False
 
 
 # =============================================================================
@@ -1057,6 +1088,17 @@ def spectral_pe_tendencies(
         dvor_hat = dvor_hat + base_diff_stack[..., 0]
         ddiv_hat = ddiv_hat + base_diff_stack[..., 1]
         dT_hat = dT_hat + base_diff_stack[..., 2]
+        if config.T_damping_pressure_surfaces:
+            # Pressure-surface correction of the T hyperdiffusion (CAM3
+            # eq. 3.84 + curvature term): the same operator (coefficient,
+            # order, level scale) applied to pi and pi^2.
+            _corr_hd = T_pressure_surface_correction_hat(
+                grid, sigma_coord, T, p_s,
+                lambda c: spectral_hyperdiffusion_3d(
+                    grid, c, hyperdiff_coeff, config.hyperdiff_order))
+            if config.hyperdiff_pscale > 0:
+                _corr_hd = _corr_hd * scale[None, :]
+            dT_hat = dT_hat + _corr_hd
 
         if config.frictional_heating:
             # Return the KE removed by the vor/div hyperdiffusion as LOCAL
@@ -1479,6 +1521,114 @@ def apply_spectral_filter_to_state(state, spectral_filter, *,
     )
 
 
+def T_pressure_surface_correction_hat(grid, sigma_coord, T, p_s, apply_L):
+    """Spectral coefficients ``L_p T - L T`` that take a linear isotropic T
+    damping ``L`` from the eta surfaces to the pressure surface through each
+    point (see ``SpectralPEConfig.T_damping_pressure_surfaces``).
+
+    With ``p_k = A_k p_ref + B_k pi`` and ``delta = p_k(y) - p_k(x)``, a
+    column ``T = T(p)`` gives ``T(y) = T(x) + T_p delta + T_pp delta^2 / 2``
+    on the eta surface, so (``L 1 = 0``)
+
+        L_p T - L T = -T_p B L(pi) - 1/2 T_pp B^2 [L(pi^2) - 2 pi L(pi)],
+
+    with ``T_p``, ``T_pp`` those of the AREA-MEAN profile ``(p_bar_k,
+    T_bar_k)`` (three-level quadratic, ``local_quadratic_dT_dp``), evaluated
+    at the local ``p_k`` along that quadratic.  Over terrain the level means
+    carry a Jensen term (the mean of a quadratic T(p) is T(p_bar_k) +
+    T_pp/2 B_k^2 Var(pi)), so the scheme is exact for a uniform quadratic
+    T(p) only up to that term (measured on DCMIP 2012 2-0-0: see
+    ``SpectralPEConfig.T_damping_pressure_surfaces``).  The first term is CAM3's
+    partial correction (Collins et al. 2004, eqs. 3.79-3.81 / 3.84); the
+    second makes it exact for a horizontally uniform T quadratic in p, up to
+    the Jensen term of the area means (above).  The horizontal-gradient terms
+    of eq. 3.79 are neglected, as in CAM.  The mean profile (CAM uses the
+    local column) keeps the correction from feeding back on the local
+    vertical T structure: with the local column it is unstable under a strong
+    per-step filter (see ``SpectralPEConfig.T_damping_pressure_surfaces``).  ``L(pi)``, ``L(pi^2)`` are applied in spectral
+    space; the products are formed on the Gaussian grid and analysed back
+    (CAM eqs. 3.178 / 3.193); the caller's 2/3 truncation removes the
+    super-cutoff part, as for every other nonlinear term.
+
+    ``T`` (n_lat, n_lon, nlev), ``p_s`` (n_lat, n_lon) grid fields;
+    ``apply_L`` maps spectral coefficients (n_sh, k) to (n_sh, k).
+    Returns (n_sh, nlev).
+    """
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        B = sigma_coord.B_full.astype(T.dtype)
+        p_full = pressure_from_hybrid(sigma_coord, p_s)
+    else:
+        B = sigma_coord.sigma_full.astype(T.dtype)
+        p_full = p_s[..., None] * B
+    w = (grid.grid_area / jnp.sum(grid.grid_area))[..., None]
+    T_bar = jnp.sum(T * w, axis=(0, 1))
+    p_bar = jnp.sum(p_full * w, axis=(0, 1))
+    T_p_bar, T_pp = local_quadratic_dT_dp(T_bar, p_bar)
+    T_p = T_p_bar + T_pp * (p_full - p_bar)
+    # pi enters only through L, and L 1 = 0: work with q = pi - mean(pi) so
+    # L(q^2) - 2 q L(q) = L(pi^2) - 2 pi L(pi) loses no digits (fp32).
+    q = p_s - jnp.mean(p_s)
+    L_q = sh_synthesis_3d(grid, apply_L(
+        sh_analysis_3d(grid, jnp.stack([q, q * q], axis=-1))))
+    L1, L2 = L_q[..., 0:1], L_q[..., 1:2]
+    corr = -T_p * B * L1 - 0.5 * T_pp * B * B * (L2 - 2.0 * q[..., None] * L1)
+    return sh_analysis_3d(grid, corr)
+
+
+def correct_T_damping_pressure_surfaces(grid, sigma_coord, pre, post, factor,
+                                        dealias_mask=None):
+    """``post`` plus the pressure-surface correction of a post-step
+    multiplicative T damping ``factor(n)`` (``L = factor - 1``; see
+    ``SpectralPEConfig.T_damping_pressure_surfaces``), evaluated on the
+    pre-damping state ``pre`` and, when ``dealias_mask`` is given, truncated
+    to that band.  Shared by ``SpectralPrimitiveEquationModel`` and the
+    functional training rollouts (``neural_gcm_spectral``); callers apply it
+    only when the option is on."""
+    T = sh_synthesis_3d(grid, pre.T_hat.data)
+    p_s = jnp.exp(sh_synthesis(grid, pre.lnps_hat.data))
+    corr = T_pressure_surface_correction_hat(
+        grid, sigma_coord, T, p_s,
+        lambda c: (factor[:, None] - 1.0) * c)
+    if dealias_mask is not None:
+        corr = corr * dealias_mask[:, None]
+    return post._replace(
+        T_hat=post.T_hat.replace(data=post.T_hat.data + corr))
+
+
+def check_T_damping_pressure_surfaces(pe_config, sigma_coord):
+    """Refuse an inert or ill-posed ``T_damping_pressure_surfaces`` for the
+    functional rollouts (same refusals as the dycore factory / the model
+    constructor: non-bool; no T hyperdiffusion to correct; fewer than 3
+    levels).  Also refused with ``implicit_hyperdiff``: the functional
+    rollouts apply no implicit hyperdiffusion to the state (only the model
+    class does), so there would be no hyperdiffusion to correct."""
+    flag = pe_config.T_damping_pressure_surfaces
+    if not isinstance(flag, bool):
+        raise ValueError(
+            f"T_damping_pressure_surfaces must be a bool, got {flag!r}")
+    if not flag:
+        return
+    if pe_config.implicit_hyperdiff:
+        raise ValueError(
+            "spectral_t_damping_pressure_surfaces with implicit_hyperdiff: the "
+            "tendency then carries no explicit T hyperdiffusion and the "
+            "functional training rollouts run no implicit one on the state, so "
+            "there is no hyperdiffusion to correct.")
+    # the coefficient spectral_pe_tendencies actually uses
+    _hd = pe_config.hyperdiff_coeff
+    if pe_config.semi_implicit and pe_config.si_hyperdiff_boost != 1.0:
+        _hd = _hd * pe_config.si_hyperdiff_boost
+    if not (pe_config.hyperdiff_coeff > 0 and _hd > 0):
+        raise ValueError(
+            "spectral_t_damping_pressure_surfaces: this run has no T "
+            "hyperdiffusion to correct (hyperdiff_coeff <= 0, or zeroed by "
+            "si_hyperdiff_boost); it would be inert.")
+    if sigma_coord.n_levels < 3:
+        raise ValueError(
+            "T_damping_pressure_surfaces needs nlev >= 3 (three-level "
+            f"vertical quadratic), got nlev={sigma_coord.n_levels}")
+
+
 def apply_filter_to_tracers(tracers, multiplicative_filter, grid):
     """Apply a per-SH-mode multiplicative filter to grid-space tracers.
 
@@ -1783,6 +1933,10 @@ class SpectralPrimitiveEquationModel:
         # the state (mountainous ICs, restarts, user states).  Truncating
         # the state post-step enforces the band-limit the 2/3 rule
         # assumes; exact no-op for band-limited states.
+        if self.config.T_damping_pressure_surfaces and sigma_coord.n_levels < 3:
+            raise ValueError(
+                "T_damping_pressure_surfaces needs nlev >= 3 (three-level "
+                f"vertical quadratic), got nlev={sigma_coord.n_levels}")
         self._dealias_state = None
         if self.config.dealiasing_fraction > 0.0:
             self._dealias_state = dealiasing_mask(
@@ -1900,12 +2054,34 @@ class SpectralPrimitiveEquationModel:
             return state
         hf_3d = self._hyperdiff_filter[:, None]  # (n_sh, 1) for 3D fields
         hf_div_3d = self._hyperdiff_filter_div[:, None]
-        return state._replace(
+        out = state._replace(
             vor_hat=state.vor_hat.replace(data=state.vor_hat.data * hf_3d),
             div_hat=state.div_hat.replace(data=state.div_hat.data * hf_div_3d),
             T_hat=state.T_hat.replace(data=state.T_hat.data * hf_3d),
             # lnps and phis are NOT diffused (mass conservation)
         )
+        return self._correct_T_damping(state, out, self._hyperdiff_filter)
+
+    def _correct_T_damping(self, pre, post, factor):
+        """Add the pressure-surface correction of a post-step multiplicative
+        T damping ``factor(n)`` (``L = factor - 1``, see
+        ``SpectralPEConfig.T_damping_pressure_surfaces``), evaluated on the
+        pre-damping state and truncated to the 2/3 band (the implicit
+        hyperdiffusion runs after the state truncation; the products would
+        otherwise repopulate the discarded modes).  Identity when the option
+        is off."""
+        if not self.config.T_damping_pressure_surfaces:
+            return post
+        return correct_T_damping_pressure_surfaces(
+            self.grid, self.sigma_coord, pre, post, factor,
+            self._dealias_state)
+
+    def _apply_spectral_filter(self, state):
+        """Post-step spectral filter on vor/div/T, with the optional
+        pressure-surface term for T."""
+        return self._correct_T_damping(
+            state, apply_spectral_filter_to_state(state, self._spectral_filter),
+            self._spectral_filter)
 
     def _ensure_tracer_filter(self, dt: float):
         """Lazily precompute the combined post-step filter applied to
@@ -2122,7 +2298,7 @@ class SpectralPrimitiveEquationModel:
 
         # Apply spectral filter (damps highest wavenumbers)
         if self._spectral_filter is not None:
-            result = apply_spectral_filter_to_state(result, self._spectral_filter)
+            result = self._apply_spectral_filter(result)
 
         # 2/3-rule STATE truncation (masked tendencies alone freeze, not
         # remove, pre-existing upper-third modes — see __init__ note).
@@ -2506,7 +2682,7 @@ class SpectralPrimitiveEquationModel:
             if self._sponge_factor is not None:
                 result = apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
             if self._spectral_filter is not None:
-                result = apply_spectral_filter_to_state(result, self._spectral_filter)
+                result = self._apply_spectral_filter(result)
             # 2/3-rule state truncation (see _apply_state_truncation)
             result = self._apply_state_truncation(result)
             # Implicit hyperdiffusion (unconditionally stable)
@@ -2548,9 +2724,7 @@ class SpectralPrimitiveEquationModel:
                     state_np1, self._sponge_factor, self._sponge_factor_T,
                 )
             if self._spectral_filter is not None:
-                state_np1 = apply_spectral_filter_to_state(
-                    state_np1, self._spectral_filter,
-                )
+                state_np1 = self._apply_spectral_filter(state_np1)
             # 2/3-rule state truncation (see _apply_state_truncation)
             state_np1 = self._apply_state_truncation(state_np1)
             # Implicit hyperdiffusion (unconditionally stable with leapfrog)

@@ -51,3 +51,18 @@ def test_rotated_coriolis_reaches_both_contexts(grids):
         for k in ("f0", "fC"):
             np.testing.assert_array_equal(np.asarray(gr.ctx_jax.gs6[t][k]),
                                           np.asarray(gs[k]))
+
+
+def test_omega_reaches_both_contexts_and_none_is_byte_identical(grids):
+    """``create_fv3_duo_grid(omega=...)``: 0.0 is the non-rotating planet
+    (DCMIP 2008 3-1) in both contexts; None is the FV3_OMEGA default."""
+    g0 = grids[0]
+    gn = create_fv3_duo_grid(N, omega=None)
+    g_still = create_fv3_duo_grid(N, omega=0.0)
+    for t in range(6):
+        for k in ("f0", "fC"):
+            assert np.asarray(g0.ctx_np["gs6"][t][k]).tobytes() == \
+                np.asarray(gn.ctx_np["gs6"][t][k]).tobytes()
+            assert np.all(np.asarray(g_still.ctx_np["gs6"][t][k]) == 0.0)
+            assert np.all(np.asarray(g_still.ctx_jax.gs6[t][k]) == 0.0)
+            assert np.abs(np.asarray(g0.ctx_np["gs6"][t][k])).max() > 1e-5

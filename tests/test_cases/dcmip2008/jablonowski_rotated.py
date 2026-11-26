@@ -1,7 +1,9 @@
-"""DCMIP 2008 4-x: rotated Jablonowski-Williamson tests.
+"""Rotated baroclinic-wave tests (DCMIP 2008 rotation recipe, 1-3-0 / 2-3-0).
 
-Rotates the standard Jablonowski-Williamson (2006) baroclinic-wave test
-about the y-axis by an angle ``alpha``, exposing dycore biases tied to
+Rotates the DCMIP-2016 / Ullrich et al. (2014) baroclinic-wave state of
+:mod:`tests.test_cases.baroclinic_wave` (NOT the Jablonowski-Williamson
+2006 state the DCMIP 2008 tests use) about the y-axis by an angle
+``alpha`` with the DCMIP 2008 Appendix E rotation recipe, exposing dycore biases tied to
 the polar lat-lon singularities or to cubed-sphere face/edge alignments.
 
 Two flavours are exposed:
@@ -9,16 +11,16 @@ Two flavours are exposed:
 - ``rotated_steady_init*``  — α-rotated steady-state (no perturbation).
   Should remain steady to within discretisation error indefinitely.
 - ``rotated_baroclinic_init*`` — α-rotated baroclinic wave (with the
-  exponential perturbation). Wave growth begins around day 4 in any
-  rotated frame.
+  exponential perturbation).
 
-The default ``alpha = π/4 = 45°`` is the canonical DCMIP-2008 4-1 / 4-2
+The default ``alpha = π/4 = 45°`` is the DCMIP 2008 1-3-0 (rotated
+steady state, Sect. 1.1.1) / 2-3-0 (rotated baroclinic wave, Sect. 1.2.1)
 choice: it pushes the jet stream over the cubed-sphere corners and
 across the lat-lon poles where most discretisations are weakest.
 
 Implementation strategy
 -----------------------
-The analytic JW06 solution is zonally symmetric in the unrotated frame.
+The unperturbed Ullrich (2014) base state is zonally symmetric in the unrotated frame.
 We therefore:
 
 1. Rotate every (lon, lat) grid point about the y-axis by -α to obtain
@@ -68,7 +70,7 @@ def _rotate_to_rotated_frame(
 
     Rotation is about the y-axis (i.e. the axis through (lon=π/2, lat=0)
     and (lon=3π/2, lat=0)). The rotated frame's North Pole sits at
-    (-sin(α), 0, cos(α)), i.e. (lon=π, lat=π/2-α): the DCMIP 2008 / JW06 /
+    (-sin(α), 0, cos(α)), i.e. (lon=π, lat=π/2-α): the DCMIP 2008 (Appendix E) /
     Williamson-1992 convention, so ``sin(lat_r)`` equals
     ``legoesm.core.williamson_sw_analytic.rotated_sin_lat`` and the
     rotated-planet Coriolis ``rotated_coriolis`` balances this state.
@@ -216,16 +218,16 @@ def rotated_baroclinic_init(
     perturbed: bool = True,
     alpha: float = jnp.pi / 4.0,
 ) -> HydrostaticState:
-    """Rotated J-W on a cubed-sphere grid (DCMIP 2008 §4-1 / §4-2).
+    """Rotated baroclinic wave on a cubed-sphere grid (DCMIP 2008 1-3-0 / 2-3-0 rotation).
 
     Parameters
     ----------
     grid : CubedSphereGrid
     sigma_coord : SigmaCoordinate
     perturbed : bool
-        If False, returns the steady-state (DCMIP §4-1 rotated). If True
-        (default), adds the exponential perturbation that triggers the
-        baroclinic instability (DCMIP §4-2 rotated).
+        If False, returns the steady state (rotated, as DCMIP 2008 1-3-0).
+        If True (default), adds the exponential perturbation that triggers
+        the baroclinic instability (rotated, as DCMIP 2008 2-3-0).
     alpha : float
         Rotation angle [rad]. Default π/4 is the canonical DCMIP value.
     """
@@ -271,7 +273,7 @@ def rotated_baroclinic_init_latlon(
     perturbed: bool = True,
     alpha: float = jnp.pi / 4.0,
 ) -> HydrostaticState:
-    """Rotated J-W on a lat-lon grid."""
+    """Rotated baroclinic wave on a lat-lon grid."""
     lat_1d = jnp.asarray(grid.lat)
     lon_1d = jnp.asarray(grid.lon)
     lat = lat_1d[:, None]  # (n_lat, 1)
@@ -308,7 +310,7 @@ def rotated_baroclinic_init_mpas(
     perturbed: bool = True,
     alpha: float = jnp.pi / 4.0,
 ):
-    """Rotated J-W on an MPAS Voronoi mesh."""
+    """Rotated baroclinic wave on an MPAS Voronoi mesh."""
     from legoesm.core.state import MPASHydrostaticState
 
     nCells = mesh.nCells
@@ -376,7 +378,7 @@ def rotated_baroclinic_init_spectral(
     perturbed: bool = True,
     alpha: float = jnp.pi / 4.0,
 ):
-    """Rotated J-W in spectral (Gaussian) space."""
+    """Rotated baroclinic wave in spectral (Gaussian) space."""
     import numpy as np
 
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
@@ -439,7 +441,7 @@ def rotated_baroclinic_init_spectral(
 
 
 # ---------------------------------------------------------------------------
-# Steady-state (no perturbation) convenience wrappers — DCMIP §4-1 rotated
+# Steady-state (no perturbation) convenience wrappers — rotated, as 1-3-0
 # ---------------------------------------------------------------------------
 
 

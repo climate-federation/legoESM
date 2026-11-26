@@ -175,7 +175,9 @@ class FV3DuoGridBundle(NamedTuple):
 def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
                         phis_filter_iter: int = 0,
                         phis6=None,
-                        rotation_alpha: float = 0.0) -> FV3DuoGridBundle:
+                        rotation_alpha: float = 0.0,
+                        omega: float | None = None,
+                        radius: float | None = None) -> FV3DuoGridBundle:
     """Build the certified six-face duo-cube context pair for C``resolution``.
 
     Wraps ``build_six_face_duo_context`` (ext-bundle + oracle
@@ -197,6 +199,16 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
     straight to ``build_six_face_duo_context``; 0.0 (default) is the
     standard planet, byte-identical to omitting it.  Used by the DCMIP
     2008 rotated Jablonowski-Williamson tests.
+
+    ``omega`` [rad/s]: the planet's rotation rate for the Coriolis terms,
+    passed straight to ``build_six_face_duo_context``; ``None`` (default)
+    is its FMS ``FV3_OMEGA``, byte-identical to omitting it.  ``0.0`` is
+    the non-rotating planet of DCMIP 2008 test 3-1.
+
+    ``radius`` [m]: the sphere radius of every grid metric, passed
+    straight to ``build_six_face_duo_context``; ``None`` (default) is its
+    FMS ``FV3_RADIUS_M``, byte-identical to omitting it.  The DCMIP 2012
+    test 3-1 small planet passes ``a_ref / 125``.
     """
     if phis6 is not None and phis_fn is not None:
         raise ValueError("create_fv3_duo_grid: phis6 (a ready terrain "
@@ -218,7 +230,8 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
                                         use_ext_bundle=True,
                                         oracle_conventions=True,
                                         topo_fn=phis_fn,
-                                        rotation_alpha=float(rotation_alpha))
+                                        rotation_alpha=float(rotation_alpha),
+                                        omega=omega, radius=radius)
     ctx_jax = build_jax_duo_stepper_context(ctx_np)
     if phis_fn is not None and phis_filter_iter > 0:
         # orography (route A, M4): phis_fn(lon, lat) evaluated on the

@@ -151,6 +151,29 @@ def test_rotated_coriolis_segment_matches_serial():
     assert np.max(np.abs(serial_out["u"] - flat_out["u"])) > 1e-6
 
 
+def test_water_positivity_borrow_is_decomposition_independent():
+    """A net-negative water column is borrowed from the GLOBAL positive
+    total: the lat-band SPMD step reduces that residual across bands (and
+    uses the global mean cell area as the weight reference), so the banded
+    result equals serial.  Before, each band redistributed its own residual:
+    total water still closed, but q differed from serial by ~7.5e-4 relative."""
+    mesh = _mesh()
+    ser_model, c0 = _model_and_state(use_ppm_transport=False)
+    seg_model, _ = _model_and_state(use_ppm_transport=False)
+    rng = np.random.default_rng(5)
+    q = 1e-3 * (1.0 + 0.1 * rng.random(np.shape(c0.T)))
+    q[3, 5, :] = -2e-4          # net-negative column in the south band
+    c0 = c0._replace(tracers={"q_v": jnp.asarray(q)})
+    s, _ = ser_model._step_cgrid(c0, DT)
+    seg = make_sharded_atm_latlon_segment(seg_model, mesh, 1)
+    c_seg, ok = seg(shard_state_atm_latlon(c0, mesh), DT)
+    assert bool(ok)
+    g = gather_state_atm_latlon(c_seg, mesh)
+    a, b = np.asarray(s.tracers["q_v"]), np.asarray(g.tracers["q_v"])
+    assert a.min() >= 0.0 and b.min() >= 0.0
+    np.testing.assert_allclose(b, a, rtol=0, atol=1e-12 * np.abs(a).max())
+
+
 @pytest.mark.parametrize("use_ppm", [False, True])
 def test_segment_matches_sequential_and_serial(use_ppm):
     mesh = _mesh()
