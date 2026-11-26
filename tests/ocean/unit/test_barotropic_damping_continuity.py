@@ -7,13 +7,14 @@ Before the damping was booked as a transport the two differed by centimetres
 per step in a wind driven box and the uniform tracer drifted.
 """
 import numpy as np
+import pytest
 
 import jax
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
-from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy  # noqa: E402
 from legoesm.grids.factory import create_regional_grid  # noqa: E402
 from legoesm.grids.operators_latlon_cgrid import divergence_cgrid  # noqa: E402
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel  # noqa: E402
@@ -25,9 +26,18 @@ from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig  #
 from legoesm.ocean.state import LatLonCGridOceanConfig, OceanSurfaceForcing  # noqa: E402
 from legoesm.ocean.vertical import compute_layer_thickness, create_z_star_from_thicknesses  # noqa: E402
 
-set_policy(PrecisionPolicy.fp64())
 DT = 1800.0
 N_STEPS = 40
+
+
+@pytest.fixture(autouse=True)
+def _fp64():
+    prev = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(prev)
 
 
 def test_damping_booked_in_tracer_transports():

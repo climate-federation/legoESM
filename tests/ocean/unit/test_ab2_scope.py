@@ -272,7 +272,7 @@ def test_advective_momentum_diss_is_nonzero_and_withheld():
 # --------------------------------------- steady-state fixed-point invariance
 
 @pytest.mark.xfail(
-    strict=True,
+    strict=True, raises=AssertionError,
     reason="KNOWN OPEN: the channel is not motionless -- the thermal front "
            "drives a flow (max|u| at step 500: 8.6 m/s before the eta "
            "damping was booked into the barotropic transport, 74 after, 102 "
