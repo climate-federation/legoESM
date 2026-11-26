@@ -210,6 +210,10 @@ def build_vertical_mixing_config_from_args(
         tke_cfg = tke_fesom2_card()
     else:
         raise ValueError(f"unknown --tke-card {tke_card!r}")
+    if args.kpp_bld_structure == "cvmix" and args.kpp_vt2_velocity_scale != "candidate":
+        raise ValueError(
+            "--kpp-bld-structure cvmix requires --kpp-vt2-velocity-scale candidate "
+            f"(got {args.kpp_vt2_velocity_scale!r})")
     return VerticalMixingConfig(
         scheme=scheme,
         tke=tke_cfg,

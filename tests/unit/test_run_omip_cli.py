@@ -41,8 +41,12 @@ def test_kpp_bld_structure_flag_flows_to_config():
     off = build_config_from_args(parse_args(["--grid", "latlon"]))
     assert off.vertical_mixing.kpp.bld_structure == "legacy"
     on = build_config_from_args(parse_args(
-        ["--grid", "latlon", "--kpp-bld-structure", "cvmix"]))
-    assert on.vertical_mixing.kpp.bld_structure == "cvmix"
+        ["--grid", "latlon", "--kpp-bld-structure", "cvmix", "--kpp-vt2-velocity-scale", "candidate"]))
+    assert (on.vertical_mixing.kpp.bld_structure, on.vertical_mixing.kpp.vt2_velocity_scale) == (
+        "cvmix", "candidate")
+    for extra in ([], ["--kpp-vt2-velocity-scale", "column"]):
+        with pytest.raises(ValueError, match="requires --kpp-vt2-velocity-scale candidate"):
+            build_config_from_args(parse_args(["--grid", "latlon", "--kpp-bld-structure", "cvmix", *extra]))
     with pytest.raises(SystemExit):
         parse_args(["--grid", "latlon", "--kpp-bld-structure", "cvmx"])
 
