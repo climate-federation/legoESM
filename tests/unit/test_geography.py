@@ -648,7 +648,8 @@ def test_coupled_ocean_forcing_carries_the_ice_concentration(tmp_path):
     d._atm._carry_aux = {k: z for k in (
         "seg_evap_ow", "seg_lhflx_ow", "seg_ow_lw_net", "seg_ow_sw_net",
         "seg_precip_ice", "seg_precip_ow", "seg_runoff_land", "seg_shflx_ow",
-        "seg_taux_ow", "seg_tauy_ow")}
+        "seg_taux_ow", "seg_tauy_ow", "held_sw_net_sfc", "held_lw_net_sfc",
+        "seg_precip", "seg_precip_frozen")}
     ice = d._sfc_state.ice
     shp = ice.concentration.data.shape
     ncat = shp[-1] if "category" in tuple(ice.concentration.dims) else 1
