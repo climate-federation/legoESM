@@ -172,3 +172,12 @@ def test_cvmix_structure_applies_limit(ustar, Bf):
     L = ustar**3 / (KAPPA * -Bf)
     assert L < h_off
     np.testing.assert_allclose(h_on, L, rtol=1e-12)
+
+
+def test_cvmix_structure_floor_after_limit():
+    """L = 0.3 m < top layer 5 m: MOM6's top-cell floor applies after the limit (floor-then-limit would give L)."""
+    ustar, Bf = BINDING[3]
+    base = dict(bld_structure="cvmix", vt2_velocity_scale="candidate", bl_min_depth_width_frac=0.0, **HARD)
+    _, dz, *_ = _column()
+    assert ustar**3 / (KAPPA * -Bf) < dz[0]
+    np.testing.assert_allclose(float(_h(KPPConfig(**base), ustar, Bf)), dz[0], rtol=1e-12)
