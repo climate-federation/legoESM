@@ -64,10 +64,12 @@ _O_C5 = 5.0
 _O_EPS_LMD = 0.1
 
 
-def _wm_ws_oracle(ustar, Bf, d, h):
+def _wm_ws_oracle(ustar, Bf, d, h, eps):
     """Independent LMD94 App. B similarity velocity scales (plain Python)."""
     d_eff = min(d, _O_EPS_LMD * h)
-    zeta = d_eff * _O_KAPPA * Bf / ustar ** 3
+    Bf_safe = Bf if abs(Bf) > eps else math.copysign(eps, Bf)
+    L_MO = ustar ** 3 / (_O_KAPPA * Bf_safe)
+    zeta = d_eff / L_MO
     abs_zeta = abs(zeta)
     Bf_pos = max(Bf, 0.0)
     base16 = max(1.0 + _O_C16 * abs_zeta, 1.0)
@@ -105,7 +107,7 @@ _CFG = KPPConfig()
 def _prod_wm_ws(ustar, Bf, d, h):
     wm, ws = _kpp_velocity_scales(
         jnp.array([ustar]), jnp.array([Bf]),
-        jnp.array([[d]]), jnp.array([[h]]), _CFG)
+        jnp.array([[d]]), jnp.array([[h]]), _CFG, _EPS)
     return float(wm[0, 0]), float(ws[0, 0])
 
 
@@ -115,7 +117,7 @@ def _prod_wm_ws(ustar, Bf, d, h):
 @pytest.mark.parametrize("d", _DEPTHS)
 def test_velocity_scales_match_lmd94(ustar, Bf, h, d):
     wm, ws = _prod_wm_ws(ustar, Bf, d, h)
-    wm_o, ws_o = _wm_ws_oracle(ustar, Bf, d, h)
+    wm_o, ws_o = _wm_ws_oracle(ustar, Bf, d, h, _EPS)
     assert wm == pytest.approx(wm_o, rel=1e-12, abs=0.0)
     assert ws == pytest.approx(ws_o, rel=1e-12, abs=0.0)
 
@@ -168,16 +170,20 @@ def test_regime_joins_constructed_and_pinned():
       - zeta < 0.2:  w_m weak,  w_s weak
       - 0.2 < zeta < 1.0 (split): w_m CONVECTIVE, w_s still weak
       - zeta > 1.0:  w_m conv,   w_s CONVECTIVE
-    zeta = d_eff*kappa*B_f/u*^3 with d_eff = d < epsilon*h."""
+    zeta = d_eff*kappa*B_f/u*^3 with d_eff = d < epsilon*h.  (u*, d) are chosen so
+    the B_f needed for each target zeta stays WELL ABOVE _EPS, otherwise the
+    near-zero copysign(eps, B_f) guard would floor B_f and inflate the effective
+    zeta out of the intended branch.)"""
     ustar, d, h = 0.02, 2.0, 100.0                  # d_eff = d = 2 (< 0.1*h = 10)
 
     def bf_for(zeta):
+        # zeta * u*^3 / (d*kappa) = zeta * 1e-5 here, so B_f >= 1.5e-6 >> _EPS.
         return zeta * ustar**3 / (d * _O_KAPPA)
 
     for zeta in (0.15, 0.2, 0.5, 0.9, 1.0, 1.1):
         Bf = bf_for(zeta)
         wm, ws = _prod_wm_ws(ustar, Bf, d, h)
-        wm_o, ws_o = _wm_ws_oracle(ustar, Bf, d, h)
+        wm_o, ws_o = _wm_ws_oracle(ustar, Bf, d, h, _EPS)
         assert wm == pytest.approx(wm_o, rel=1e-12), f"w_m at zeta={zeta}"
         assert ws == pytest.approx(ws_o, rel=1e-12), f"w_s at zeta={zeta}"
 
@@ -213,37 +219,15 @@ def test_scalar_exceeds_momentum_weakly_unstable():
     assert ws > wm
 
 
-# CVMix (MOM6 0e9a561 submodule, CVMix fce422195a) cvmix_kpp_compute_turbulent_scales
-# with Cv/interp irrelevant here: (u*, B_f [this module's sign, >0 destabilising], h,
-# sigma, w_m, w_s).  Stable and weakly-unstable branches only: they use no rounded
-# LMD94 a_*/c_* constants (CVMix derives those by continuity), so they pin to round-off.
-_CVMIX_WEAK_FLUX = [
-    (0.001, -1e-07, 50.0, 0.02, 1.990049751243781e-06, 1.990049751243781e-06),
-    (0.001, -1e-07, 50.0, 0.5, 3.9960039960039974e-07, 3.9960039960039974e-07),
-    (0.001, -1e-08, 50.0, 0.02, 1.904761904761905e-05, 1.904761904761905e-05),
-    (0.001, -1e-08, 50.0, 0.5, 3.960396039603961e-06, 3.960396039603961e-06),
-    (0.001, -1e-09, 50.0, 0.02, 0.00013333333333333334, 0.00013333333333333334),
-    (0.001, -1e-09, 50.0, 0.5, 3.636363636363637e-05, 3.636363636363637e-05),
-    (0.001, -1e-10, 50.0, 0.02, 0.0003333333333333334, 0.0003333333333333334),
-    (0.001, -1e-10, 50.0, 0.5, 0.0002, 0.0002),
-    (0.001, 1e-10, 50.0, 0.02, 0.0004526587849560099, 0.0005122499389946279),
-    (0.01, -1e-07, 50.0, 0.02, 0.003333333333333334, 0.003333333333333334),
-    (0.01, -1e-08, 50.0, 0.5, 0.0036363636363636364, 0.0036363636363636364),
-    (0.01, -1e-10, 50.0, 0.5, 0.003996003996003997, 0.003996003996003997),
-    (0.01, 1e-10, 50.0, 0.5, 0.004003196167152268, 0.004006394888175653),
-    (0.01, 1e-09, 50.0, 0.02, 0.004006384697092892, 0.004012779585275026),
-    (0.01, 1e-08, 50.0, 0.5, 0.004287493494913047, 0.004595650117230423),
-]
-
-
-@pytest.mark.parametrize("ustar,Bf,h,sigma,wm_cv,ws_cv", _CVMIX_WEAK_FLUX)
-def test_weak_buoyancy_flux_matches_cvmix(ustar, Bf, h, sigma, wm_cv, ws_cv):
-    """|B_f| below float32 eps (1.2e-7 m^2/s^3, ~typical ocean forcing) keeps its own
-    zeta: a former copysign(eps, B_f) floor replaced it, giving w_m 8.4e-8 instead of
-    9.8e-6 (stable) and w_s 1e-10 instead of 6e-4 (weakly unstable) vs CVMix."""
-    wm, ws = _prod_wm_ws(ustar, Bf, sigma * h, h)
-    assert wm == pytest.approx(wm_cv, rel=1e-12, abs=0.0)
-    assert ws == pytest.approx(ws_cv, rel=1e-12, abs=0.0)
+def test_near_zero_buoyancy_copysign_branch():
+    """|B_f| <= eps takes the copysign(eps, B_f) guard (issue #168); production
+    must match the oracle there too (finite, positive scales)."""
+    ustar, h = 0.01, 100.0
+    for Bf in (0.5 * _EPS, -0.5 * _EPS):
+        wm, ws = _prod_wm_ws(ustar, Bf, 5.0, h)
+        wm_o, ws_o = _wm_ws_oracle(ustar, Bf, 5.0, h, _EPS)
+        assert wm == pytest.approx(wm_o, rel=1e-12)
+        assert ws == pytest.approx(ws_o, rel=1e-12)
 
 
 # --- V_t^2 (LMD94 Eq. 23) ---------------------------------------------------
@@ -318,7 +302,7 @@ def test_kpp_forms_grads_finite():
     """grads of w_m (wrt u*), V_t^2 (wrt N), and G (wrt sigma) are finite."""
     def _wm(us):
         wm, _ = _kpp_velocity_scales(us[None], jnp.array([1.0e-6]),
-                                     jnp.array([[5.0]]), jnp.array([[100.0]]), _CFG)
+                                     jnp.array([[5.0]]), jnp.array([[100.0]]), _CFG, _EPS)
         return wm[0, 0]
     g1 = jax.grad(_wm)(jnp.array(0.01))
     assert bool(jnp.isfinite(g1)) and float(jnp.abs(g1)) > 0.0

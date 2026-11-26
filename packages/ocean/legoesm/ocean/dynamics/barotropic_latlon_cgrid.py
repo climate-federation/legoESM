@@ -1780,6 +1780,7 @@ def _run_substep_loop(
     nemo_t_pivot_north_neighbor_test_override=False,
     nemo_fold_top_v_wet=None,
     return_boundary_association_trace=False,
+    open_boundary=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1807,6 +1808,17 @@ def _run_substep_loop(
      div_damp_coeff, div_damp_area_u, div_damp_area_v) = coeffs
     use_div_damp = div_damp_coeff is not None
     use_diffusion = nu_face_u is not None
+    if use_diffusion and open_boundary is not None:
+        # No sea level damping across an open face: the boundary condition
+        # alone sets the flow there.  Otherwise the damping flux, booked as a
+        # transport, takes a share of the prescribed inflow (1.3 % in a flat
+        # 4000 m box at the default alpha, 5 % at four times it).
+        if open_boundary.west_ubar is not None:
+            diff_u_mask = diff_u_mask.at[:, 1].set(0.0)
+        if open_boundary.south_vbar is not None:
+            diff_v_mask = diff_v_mask.at[1].set(0.0)
+        if open_boundary.north_vbar is not None:
+            diff_v_mask = diff_v_mask.at[-2].set(0.0)
 
     # BEBT semi-implicit parameter and MAXVEL clipping
     bebt = config.barotropic.bebt
@@ -2066,6 +2078,19 @@ def _run_substep_loop(
             H_u_flux, H_v_flux = H_u, H_v
         flux_u = H_u_flux * U_mid * u_mask
         flux_v = H_v_flux * V_mid * v_mask
+        if open_boundary is not None:
+            # Volume constraint of the open boundaries on the fluxes the
+            # continuity and the transport average below actually use.
+            if (_transport_evaluation == "nemo_literal"
+                    or _continuity_evaluation == "nemo_literal"):
+                raise ValueError("open boundaries need the generic barotropic "
+                                 "transport and continuity evaluation")
+            from legoesm.ocean.dynamics.open_boundary_latlon import (
+                constrain_open_face_fluxes,
+            )
+            flux_u, flux_v = constrain_open_face_fluxes(
+                flux_u, flux_v, H_u_flux * u_mask, H_v_flux * v_mask, grid,
+                open_boundary)
 
         # Accumulate transport (always box-filtered for volume conservation).
         # Keep the generic statements unchanged: non-fidelity cards retain
@@ -2376,6 +2401,15 @@ def _run_substep_loop(
             eta_new = (
                 eta_new + divergence_cgrid(flux_x, flux_y, grid).astype(dtype)
             ) * mask
+            # The damping moves volume, so it must reach the tracers: adding
+            # div(F) to eta is the continuity update of the transport
+            # G = -F/dt_s, booked with this substep's transport weight so
+            # div(Hu_avg) == (eta_old - eta_avg)/dt keeps holding (except where
+            # the eta floor or an open-boundary ring rewrites eta, which book
+            # no transport).  Unbooked, the tracer step saw transports that
+            # disagreed with the new layer thicknesses and uniform tracers drift.
+            Hu_sum_new = Hu_sum_new - w_tr_i * (flux_x / dt_s).astype(dtype)
+            Hv_sum_new = Hv_sum_new - w_tr_i * (flux_y / dt_s).astype(dtype)
             if local_subcycle_clamp:
                 eta_new = jnp.maximum(eta_new, eta_floor) * mask
             else:
@@ -2421,6 +2455,18 @@ def _run_substep_loop(
         elif nemo_external_mode_association_component_test_override.startswith(
                 "v_"):
             V_bar_new = association_post[1]
+
+        # Open lateral boundaries (regional runs): characteristic normal
+        # velocity on the open faces, zero-gradient sea level in the ring,
+        # volume correction -- CROCO u2dbc/v2dbc/zetabc/obc_volcons, once per
+        # fast substep.  None (every non-regional caller) changes nothing.
+        if open_boundary is not None:
+            from legoesm.ocean.dynamics.open_boundary_latlon import (
+                apply_barotropic_open_boundary,
+            )
+            U_bar_new, V_bar_new, eta_new = apply_barotropic_open_boundary(
+                eta_c, U_bar_c, V_bar_c, eta_new, U_bar_new, V_bar_new,
+                H_bathy, grid, dt_s, g, open_boundary, u_mask, v_mask, mask)
 
         # Primary average.  In NEMO's RK3 flux-form branch this is a transport,
         # not a velocity: dynspg_ts.F90:823-834 accumulates
@@ -2854,6 +2900,10 @@ def _reconcile_targets(config, *, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
       so it is a fidelity gap in the divisor convention, not a path
       difference -- see the F1 note on
       ``BarotropicConfig.barotropic_reconcile_target``.
+      With the split-explicit eta damping on, ``Hu_avg`` includes the
+      damping's volume flux (booked so tracers see the transport that moved
+      eta), so this target puts that flux into the depth-mean velocity;
+      ``"velocity_avg"`` does not.
 
     Shared by BOTH barotropic entry points (standard-halo and wide-halo) so
     the dispatch — and the raise on an unknown value — exists once.
@@ -3010,6 +3060,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_final_mean_association_test_override=False,
     _nemo_t_pivot_north_neighbor_test_override=False,
     _nemo_boundary_association_trace_test_hook=False,
+    open_boundary=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -3550,6 +3601,7 @@ def barotropic_substeps_latlon_cgrid(
                 "raw barotropic-history substitution requires six arrays")
     _loop_result = _run_substep_loop(
         eta, U_bar, V_bar,
+        open_boundary=open_boundary,
         dt_s=dt_s, n_loop=n_loop, w_filter=w_filter, w_transport=w_transport,
         grid=grid, config=config, g=g, H_bathy=H_bathy, mask=mask,
         u_mask=u_mask, v_mask=v_mask, min_water_col=min_water_col,

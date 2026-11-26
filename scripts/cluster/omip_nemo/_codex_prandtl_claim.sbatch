@@ -9,9 +9,12 @@
 #
 # Adversarial review of a CLAIM, before it drives any code change.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 REPO=/burg-archive/glab/users/pg2328/_omip_merge; cd $REPO || exit 1
 echo "HEAD: $(git log --oneline -1)"
 P=$REPO/scripts/cluster/omip_nemo/_codex_prandtl_claim.prompt
 [ -e "$P" ] || { echo "FATAL: missing $P"; exit 1; }
 codex exec --sandbox read-only -C "$REPO" "$(cat $P)" < /dev/null 2>&1
 echo "=== rc=$? ==="
+exit ${RC:-0}

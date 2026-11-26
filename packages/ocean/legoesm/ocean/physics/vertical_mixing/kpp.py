@@ -74,6 +74,8 @@ import jax.numpy as jnp
 from legoesm.core.smooth import smooth_max_c1, validate_smoothing_width
 from legoesm.ocean.eos import (
     compute_buoyancy_frequency,
+    compute_buoyancy_frequency_adiabatic,
+    compute_hydrostatic_pressure,
 )
 from legoesm.ocean.eos import (
     rho_0 as rho_0_ref,
@@ -140,6 +142,61 @@ __physics_contract__ = {
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 
+def _unbroadcast(g, like):
+    """Sum a cotangent over the axes that broadcasting added, back to ``like``'s shape and dtype."""
+    shape = jnp.shape(like)
+    g = jnp.sum(g, axis=tuple(range(g.ndim - len(shape)))) if g.ndim > len(shape) else g
+    axes = tuple(i for i, (n, m) in enumerate(zip(g.shape, shape)) if m == 1 and n != 1)
+    if axes:
+        g = jnp.sum(g, axis=axes, keepdims=True)
+    return g.astype(jnp.result_type(like))
+
+
+def _make_surrogate_gate(width):
+    """``where(x > 0, a, b)`` with the exact forward value and a surrogate for the switch in the backward pass.
+
+    Forward: the same jnp.where as the model, so every forward result is bitwise unchanged.
+    Backward: the derivative of the logistic blend s a + (1 - s) b, s = sigmoid(x / width), as specified in
+    docs/88 6.12 (a2) before the check: g s for a, g (1 - s) for b, g (a - b) s (1 - s) / width for x.
+    (The variant with exact branch cotangents, g where x > 0 for a and g elsewhere for b, was also run after
+    the review and passed 6 of 9 components; not adopted.) Reverse mode only (custom_vjp). Used only when
+    ``KPPConfig.gradient_surrogates`` is True (widths are numerical, stated, never fitted)."""
+    if not width > 0.0:
+        raise ValueError(f"surrogate width must be positive, got {width!r}")
+
+    @jax.custom_vjp
+    def gate(x, a, b):
+        return jnp.where(x > 0.0, a, b)
+
+    def fwd(x, a, b):
+        return jnp.where(x > 0.0, a, b), (x, a, b)
+
+    def bwd(res, g):
+        x, a, b = res
+        s = jax.nn.sigmoid(x / width)
+        gx = g * (a - b) * s * (1.0 - s) / width
+        return (_unbroadcast(gx, x), _unbroadcast(g * s, a), _unbroadcast(g * (1.0 - s), b))
+
+    gate.defvjp(fwd, bwd)
+    return gate
+
+
+def _surrogate_for(cfg, which):
+    """The surrogate gate when cfg.gradient_surrogates is on and ``which`` ('bl_base': x = 1 - sigma at the
+    interface, width in sigma; 'convective': x = Ri_conv - N2, width in s^-2) is listed in
+    cfg.surrogate_switches; None otherwise, in which case the caller keeps its original exact expression."""
+    if not getattr(cfg, "gradient_surrogates", False):
+        return None
+    switches = [s.strip() for s in cfg.surrogate_switches.split(",") if s.strip()]
+    unknown = set(switches) - {"bl_base", "convective"}
+    if unknown:
+        raise ValueError(f"KPPConfig.surrogate_switches: unknown {sorted(unknown)}")
+    if which not in switches:
+        return None
+    width = {"bl_base": cfg.surrogate_width_sigma, "convective": cfg.surrogate_width_n2}[which]
+    return _make_surrogate_gate(float(width))
+
+
 def _kpp_ice_attenuation(ice_frac, eice):
     """Under-ice attenuation factor ``(1 - eff)`` for the KPP velocity scales.
 
@@ -169,7 +226,7 @@ def _kpp_ice_attenuation(ice_frac, eice):
     return jnp.maximum(1.0 - eff, 0.0)[..., jnp.newaxis]
 
 
-def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, ice_frac=None):
+def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps, ice_frac=None):
     """LMD94 (Appendix B) turbulent velocity scales at depth(s) ``d``.
 
     Returns the momentum (``w_m``) and scalar (``w_s``) similarity velocity
@@ -199,6 +256,7 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, ice_frac=None):
         [m^2/s^3] (positive = destabilising, this module's sign convention).
     d : (..., nlev) depth(s) below the surface [m, positive down].
     h_bl_col : (..., 1) boundary-layer depth [m].
+    eps : small positive floor.
 
     Returns
     -------
@@ -210,9 +268,21 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, ice_frac=None):
     d_eff = jnp.minimum(d, cfg.epsilon_lmd * h_bl_col)
     B_f_e = B_f[..., jnp.newaxis]
     ustar_e = u_star[..., jnp.newaxis]
-    # zeta = d/L_MO with B_f in the numerator (CVMix form): no buoyancy-flux floor
-    # is needed (u* > 0 on both u* paths), and weak fluxes keep their own zeta.
-    zeta = d_eff * kappa * B_f_e / ustar_e ** 3
+    if getattr(cfg, "actual_buoyancy_flux", False):
+        # zeta from the actual flux, written without dividing by it (CVMix 1d_OBL:
+        # zeta = sigma * OBL_depth * surf_buoy_force * vonkar / surf_fric_vel**3; u* is
+        # floored by its callers), so weak fluxes are used as they are and the gradient is
+        # finite down to B_f = 0 in float32 as well
+        zeta = d_eff * kappa * B_f_e / ustar_e ** 3
+    else:
+        # legacy: copysign(eps, B_f) preserves the stability sign near zero (issue #168), but
+        # replaces every |B_f| below eps (float32 machine epsilon, 1.19e-7 m^2/s^3) by eps; that
+        # covers most tropical surface fluxes (about 4e-8 to 1e-7 for 50 to 150 W/m^2)
+        B_f_safe = jnp.where(
+            jnp.abs(B_f_e) > eps, B_f_e, jnp.copysign(eps, B_f_e),
+        )
+        L_MO = ustar_e ** 3 / (kappa * B_f_safe)
+        zeta = d_eff / L_MO
     abs_zeta = jnp.abs(zeta)
     Bf_pos = jnp.maximum(B_f_e, 0.0)
     is_unstable = B_f_e > 0.0
@@ -262,6 +332,37 @@ def _kpp_shape_function(sigma):
     """
     sigma_clip = jnp.clip(sigma, 0.0, 1.0)
     return sigma_clip * (1.0 - sigma_clip) ** 2
+
+
+def _kpp_interface_n2(rho, T, S, eta, z_coord, jacobian, cfg, g, eos_fn=None, p_cell=None, h_k=None):
+    """N^2 at interior interfaces [s^-2], signed, for V_t^2, the interior Ri and the convective trigger (core-0030).
+
+    ``cfg.n2_mode``:
+
+    - ``"adiabatic"``: the local buoyancy gradient, g (alpha dT/dz - beta dS/dz): both cells of an interface at
+      one pressure (the upper cell's, ``eos.compute_buoyancy_frequency_adiabatic``, the function CATKE uses).
+      LMD94 Eqs. 23 and 27 and every reference code difference two parcels at one pressure (MOM6 and MITgcm at
+      the interface or lower cell, POP at the lower cell), so none carries g^2 / c_s^2.
+    - ``"insitu_signed"``: the earlier difference of in-situ densities at each cell's own pressure, biased too
+      stable by g^2 / c_s^2 (about +4e-5 s^-2 near the surface), unchanged bit for bit (same call as before).
+
+    ``p_cell`` (Pa, cell centres) is used when given; otherwise it is the hydrostatic pressure from ``rho`` and
+    ``eta`` (``h_k`` the partial-cell thicknesses, if any).  Raises ``ValueError`` on an unknown mode.
+    """
+    mode = getattr(cfg, "n2_mode", "adiabatic")
+    if mode == "insitu_signed":
+        return compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
+    if mode != "adiabatic":
+        raise ValueError(f"KPPConfig.n2_mode must be 'adiabatic' or 'insitu_signed', got {mode!r}")
+    if p_cell is None:
+        p_cell = compute_hydrostatic_pressure(rho, eta, z_coord.dz_ref, jacobian, rho_0_ref, g, h_actual=h_k)
+    # Partial cells: divide by the live centre spacing, not the reference one.
+    dz_half = (None if (h_k is None or getattr(z_coord, "is_active", None) is None)
+               else 0.5 * (h_k[..., :-1] + h_k[..., 1:]))
+    return compute_buoyancy_frequency_adiabatic(
+        T, eos_salinity(S, eos_fn), p_cell, z_coord.dz_ref, jacobian,
+        eos_fn=eos_fn, rho_ref=rho_0_ref, g=g, dz_half=dz_half,
+    )
 
 
 def _kpp_unresolved_shear_variance(N, d, w_s, cfg, eps):
@@ -446,6 +547,7 @@ def _boundary_layer_depth(
     h_bl_prev: jnp.ndarray | None = None,
     eos_fn=None,
     ice_frac: jnp.ndarray | None = None,
+    N2: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Estimate boundary layer depth h via bulk Richardson number.
 
@@ -454,6 +556,9 @@ def _boundary_layer_depth(
     supercritical cell for one crossing, average of upward-crossing centres for
     several; never interpolated).  ``"cvmix"``: CVMix first-crossing
     quadratic interpolation, smoothed (``_cvmix_first_crossing_depth``).
+
+    ``N2`` is the interface N^2 from ``_kpp_interface_n2``; if None (direct
+    callers) it is computed here with ``cfg.n2_mode`` and eta = 0.
 
     Returns shape (...) boundary layer depth [m, positive downward].
     """
@@ -467,6 +572,12 @@ def _boundary_layer_depth(
         raise ValueError(
             f"Unknown KPPConfig.bld_structure={cfg.bld_structure!r} "
             f"(boundary-layer structure variant); expected one of {_BLD_STRUCTURES}.")
+    if cfg.bld_structure == "cvmix" and cfg.vt2_velocity_scale != "candidate":
+        # the cvmix branch always takes w_s per trial depth (MOM6 Vt_layer); a "column"
+        # request would otherwise be silently ignored
+        raise ValueError(
+            "KPPConfig.bld_structure='cvmix' requires vt2_velocity_scale='candidate', "
+            f"got {cfg.vt2_velocity_scale!r}.")
     # Buoyancy (density) and velocity differences from the surface for the
     # bulk Richardson number.  LMD94 Eq. 21 requires density referenced to a
     # COMMON pressure: the previous ``rho - rho[..., :1]`` differenced two
@@ -480,8 +591,8 @@ def _boundary_layer_depth(
     # _mom6_surface_layer_deltas).  ``eos_fn`` defaults to
     # ``wright_eos`` so the reference density matches how the in-situ ``rho``
     # was built when the caller does not thread an explicit EOS.  (The legacy
-    # N^2 / V_t^2 below still use the in-situ ``rho`` gradient; cvmix mode
-    # builds MOM6's interface-pressure N instead.)
+    # V_t^2 N^2 comes from ``_kpp_interface_n2``, core-0030; cvmix mode builds
+    # MOM6's interface-pressure N instead.)
     if eos_fn is None:
         from legoesm.ocean.eos import wright_eos
         eos_fn = wright_eos
@@ -516,7 +627,7 @@ def _boundary_layer_depth(
     if cfg.bld_structure == "cvmix":
         # MOM6 KPP_compute_BLD (Vt_layer = 1): w_s at sigma = 1 with each
         # trial depth as the OBL depth, not at d / h_est.
-        _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, z_depth, cfg,
+        _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, z_depth, cfg, eps,
                                          ice_frac=ice_frac)
         N_cell = _mom6_cell_n(T, S, dz_actual, eos_fn, g)
         V_t2 = _kpp_unresolved_shear_variance(N_cell, z_depth, w_s_vt, cfg, eps)
@@ -525,16 +636,26 @@ def _boundary_layer_depth(
         h = _cvmix_first_crossing_depth(Ri_b, z_depth, cfg)
         return jnp.maximum(h, dz_actual[..., 0])
 
-    N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
+    if N2 is None:
+        N2 = _kpp_interface_n2(rho, T, S, jnp.zeros_like(rho[..., 0]), z_coord, jacobian, cfg, g, eos_fn=eos_fn)
     N2_full = jnp.concatenate([N2[..., :1], N2], axis=-1)
     # N = sqrt(max(N^2, 0)): only STABLE stratification (N^2 > 0) contributes to
     # the unresolved-shear variance (LMD94 / CVMix); convective layers (N^2 < 0)
     # give V_t^2 = 0 there.  (Floored at 1e-30 for an AD-safe gradient.)
     N_full = jnp.sqrt(jnp.maximum(N2_full, 1e-30))  # [1/s]
     max_depth = z_depth[..., -1]
-    h_est = max_depth if h_bl_prev is None else h_bl_prev
-    h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
-    _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg,
+    _vt2_scale = getattr(cfg, "vt2_velocity_scale", "column")
+    if _vt2_scale == "candidate":
+        # CVMix / MOM6: every candidate depth is its own boundary-layer depth, so
+        # _kpp_velocity_scales' cap min(d, epsilon*h) gives d_eff = epsilon*d.
+        h_safe = jnp.maximum(z_depth, eps)
+    elif _vt2_scale == "column":
+        h_est = max_depth if h_bl_prev is None else h_bl_prev
+        h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
+    else:
+        raise ValueError(
+            f"KPPConfig.vt2_velocity_scale must be 'column' or 'candidate', got {_vt2_scale!r}")
+    _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg, eps,
                                      ice_frac=ice_frac)
     V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)
 
@@ -615,8 +736,20 @@ def kpp_vertical_mixing(
     eos_fn=None,
     u_stokes: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
+    h_k: jnp.ndarray | None = None,
+    p_cell: jnp.ndarray | None = None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
+
+    ``h_k`` (optional, (..., nlev)): the live layer thicknesses with partial
+    bottom cells.  When given, the non-local flux divergence divides by these
+    and the flux is kept only at interfaces between two wet cells, so the
+    column content change h_k * dT/dt sums to zero.  Without it the divisor is
+    dz_ref * jacobian, which is thicker than a partial bottom cell.
+
+    ``p_cell`` (optional, (..., nlev), Pa): cell-centre pressure for
+    ``KPPConfig.n2_mode = "adiabatic"``.  If None it is integrated here from
+    ``rho`` and ``eta`` (with ``h_k`` when given).
 
     Parameters
     ----------
@@ -674,10 +807,13 @@ def kpp_vertical_mixing(
         # caller to provide B_f explicitly when convective KPP matters.
         B_f = jnp.zeros_like(rho[..., 0])
 
+    # --- N^2 at interfaces (V_t^2, interior Ri and convective trigger, core-0030) ---
+    N2 = _kpp_interface_n2(rho, T, S, eta, z_coord, jacobian, cfg, g, eos_fn=eos_fn, p_cell=p_cell, h_k=h_k)
+
     # --- Boundary layer depth ---
     h_bl = _boundary_layer_depth(
         rho, T, S, u, v, z_coord, jacobian, u_star, B_f, cfg, g,
-        h_bl_prev=h_bl_prev, eos_fn=eos_fn, ice_frac=ice_frac,
+        h_bl_prev=h_bl_prev, eos_fn=eos_fn, ice_frac=ice_frac, N2=N2,
     )
 
     # --- Depth coordinate ---
@@ -697,7 +833,7 @@ def kpp_vertical_mixing(
     # convection (F-OCEAN-1), while w_m feeds the momentum viscosity.
     d = sigma_clip * h_bl[..., jnp.newaxis]
     w_m, w_s = _kpp_velocity_scales(
-        u_star, B_f, d, h_bl[..., jnp.newaxis], cfg, ice_frac=ice_frac,
+        u_star, B_f, d, h_bl[..., jnp.newaxis], cfg, eps, ice_frac=ice_frac,
     )
 
     # --- Langmuir turbulence enhancement (KPP-Langmuir) ---
@@ -739,8 +875,7 @@ def kpp_vertical_mixing(
     K_bl_m_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_m * G, cfg.K_max)
     K_bl_s_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_s * G, cfg.K_max)
 
-    # --- Interior mixing: Richardson-number dependent ---
-    N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
+    # --- Interior mixing: Richardson-number dependent (N2 from above) ---
     # Interface spacing — also reused by the surface T/S gradient terms below.
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
     # Interior Ri = N^2 / S^2 (#518: shared helper; no clip here — KPP clamps
@@ -752,7 +887,12 @@ def kpp_vertical_mixing(
     Ri_shear_curve = cfg.K_0_shear * (1.0 - Ri_ratio**2) ** 3
 
     # Interior static instability: enhanced mixing where N2 < 0
-    K_conv = jnp.where(N2 < cfg.Ri_conv, cfg.K_conv, 0.0)
+    _conv = _surrogate_for(cfg, "convective")
+    if _conv is None:
+        K_conv = jnp.where(N2 < cfg.Ri_conv, cfg.K_conv, 0.0)
+    else:
+        # (N2 < Ri_conv) as x = Ri_conv - N2 > 0 (the same decisions), surrogate backward pass
+        K_conv = _conv(cfg.Ri_conv - N2, jnp.full_like(N2, cfg.K_conv), jnp.zeros_like(N2))
 
     # Build separate interior floors for tracer (K_v) and momentum (A_v).
     # The shear-instability + convective enhancement is shared, but the
@@ -777,7 +917,7 @@ def kpp_vertical_mixing(
         sig_i = jnp.clip(sigma_half, 0.0, 1.0)
         w_m_i, w_s_i = _kpp_velocity_scales(
             u_star, B_f, sig_i * h_bl[..., jnp.newaxis], h_bl[..., jnp.newaxis],
-            cfg, ice_frac=ice_frac)
+            cfg, eps, ice_frac=ice_frac)
         G_i = _kpp_shape_function(sig_i)
         K_bl_m_half = jnp.minimum(
             h_bl[..., jnp.newaxis] * w_m_i * eps_langmuir * G_i, cfg.K_max)
@@ -792,8 +932,14 @@ def kpp_vertical_mixing(
     # floor (K_bg for tracers, A_bg for momentum) so the merged field
     # honors the configured background levels in BOTH the BL and the
     # interior.
-    K_v = jnp.where(in_bl, K_bl_s_half + cfg.K_bg, K_interior)   # scalar  ← w_s
-    A_v = jnp.where(in_bl, K_bl_m_half + cfg.A_bg, A_interior)   # momentum ← w_m
+    _bl = _surrogate_for(cfg, "bl_base")
+    if _bl is None:
+        K_v = jnp.where(in_bl, K_bl_s_half + cfg.K_bg, K_interior)   # scalar  ← w_s
+        A_v = jnp.where(in_bl, K_bl_m_half + cfg.A_bg, A_interior)   # momentum ← w_m
+    else:
+        # in_bl = sigma_half < 1 as x = 1 - sigma_half > 0 (the same decisions), surrogate backward pass
+        K_v = _bl(1.0 - sigma_half, K_bl_s_half + cfg.K_bg, K_interior)
+        A_v = _bl(1.0 - sigma_half, K_bl_m_half + cfg.A_bg, A_interior)
     K_v = jnp.minimum(K_v, cfg.K_max)
     A_v = jnp.minimum(A_v, cfg.K_max)
 
@@ -890,7 +1036,13 @@ def kpp_vertical_mixing(
     # but the 0/0 division produces NaN gradients in the backward
     # pass.  Safe denominator (``where dz>0, dz, 1``) gives clean
     # gradients while the where-mask still zeroes the forward output.
-    dz_safe = jnp.where(dz_actual > 0.0, dz_actual, 1.0)
+    dz_nl = dz_actual
+    if h_k is not None:
+        dz_nl = h_k
+        wet_iface = (h_k[..., :-1] > 0.0) & (h_k[..., 1:] > 0.0)
+        G_half = jnp.where(wet_iface, G_half, 0.0)
+        F_T = cfg.gamma_T * Q_T[..., jnp.newaxis] * G_half
+    dz_safe = jnp.where(dz_nl > 0.0, dz_nl, 1.0)
     dT_nonlocal_top = -F_T[..., :1] / dz_safe[..., :1]
     dT_nonlocal_int = (F_T[..., :-1] - F_T[..., 1:]) / dz_safe[..., 1:-1]
     dT_nonlocal_bot = F_T[..., -1:] / dz_safe[..., -1:]
@@ -898,7 +1050,7 @@ def kpp_vertical_mixing(
         [dT_nonlocal_top, dT_nonlocal_int, dT_nonlocal_bot], axis=-1
     )  # (..., nlev)  [K/s]
     dT_nonlocal = jnp.where(
-        is_unstable_col[..., jnp.newaxis] & (dz_actual > 0.0),
+        is_unstable_col[..., jnp.newaxis] & (dz_nl > 0.0),
         dT_nonlocal, 0.0,
     )
 
@@ -911,7 +1063,7 @@ def kpp_vertical_mixing(
         [dS_nonlocal_top, dS_nonlocal_int, dS_nonlocal_bot], axis=-1
     )  # (..., nlev)  [psu/s]
     dS_nonlocal = jnp.where(
-        is_unstable_col[..., jnp.newaxis] & (dz_actual > 0.0),
+        is_unstable_col[..., jnp.newaxis] & (dz_nl > 0.0),
         dS_nonlocal, 0.0,
     )
 

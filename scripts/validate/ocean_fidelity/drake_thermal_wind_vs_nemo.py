@@ -78,7 +78,8 @@ def _rho(T, S, gdept):
 def _double_integral(drho, dz, wet):
     """Depth-integrate twice: proportional to baroclinic transport.
 
-    inner(z) = integral from z up to the surface of drho
+    inner(z) = integral of drho from the BOTTOM up to z (thermal-wind
+               velocity relative to the bottom, #2525: it ran surface-down)
     D        = integral over depth of inner
     Only wet levels contribute; a dry level contributes nothing rather than
     carrying a zero-filled density into the sum, which is the mistake that
@@ -87,7 +88,7 @@ def _double_integral(drho, dz, wet):
     """
     d = np.where(wet, drho, 0.0)
     h = np.where(wet, dz, 0.0)
-    inner = np.cumsum(d * h)          # surface-down running integral
+    inner = np.cumsum((d * h)[::-1])[::-1]   # bottom-up running integral
     return float(np.sum(inner * h))
 
 
@@ -227,7 +228,9 @@ def main() -> int:
     do = np.asarray(out["models"]["ours"]["drho_by_level"], dtype=float)
     dn = np.asarray(out["models"]["nemo"]["drho_by_level"], dtype=float)
     ok = np.isfinite(do) & np.isfinite(dn)
-    diff = np.abs(np.where(ok, do - dn, 0.0))
+    # Thickness-weighted (#2525): a per-level sum over-counts the thin upper
+    # levels of the ladder.
+    diff = np.abs(np.where(ok, do - dn, 0.0)) * dz[jj, i, :].mean(axis=0)
     tot = diff.sum()
     if tot > 0:
         upper = diff[gdept <= 300.0].sum() / tot

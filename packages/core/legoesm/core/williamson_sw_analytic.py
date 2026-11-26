@@ -102,6 +102,22 @@ def solid_body_winds(lon, lat, *, u0: float, alpha: float = 0.0, xp=_np):
             -u0 * xp.sin(lon) * xp.sin(alpha))
 
 
+def rotated_sin_lat(lon, lat, *, alpha: float, xp=_np):
+    """``S = -cos(lon) cos(lat) sin(alpha) + sin(lat) cos(alpha)``: the sine
+    of latitude in a frame whose pole sits at (lon=pi, lat=pi/2-alpha)
+    (Williamson et al. 1992 test case 2; ``test_cases.F90:1203-1205``; DCMIP
+    2008 / JW06 rotated tests).  ``alpha = 0`` is exactly ``sin(lat)``."""
+    return (-xp.cos(lon) * xp.cos(lat) * xp.sin(alpha)
+            + xp.sin(lat) * xp.cos(alpha))
+
+
+def rotated_coriolis(lon, lat, *, omega: float, alpha: float, xp=_np):
+    """Coriolis parameter of the alpha-rotated planet, ``2 omega S``
+    (Williamson et al. 1992 test case 2; FV3 ``fC``/``f0`` with
+    ``rotation_alpha``).  ``alpha = 0`` is the standard ``2 omega sin(lat)``."""
+    return 2.0 * omega * rotated_sin_lat(lon, lat, alpha=alpha, xp=xp)
+
+
 def solid_body_geopotential(lon, lat, *, radius: float, omega: float,
                             u0: float, gh0: float, alpha: float = 0.0,
                             xp=_np):
@@ -113,8 +129,7 @@ def solid_body_geopotential(lon, lat, *, radius: float, omega: float,
     geopotential is NOT subtracted here -- case 5's ``- phis`` is the
     caller's business, since ``h`` and ``h_free`` differ by exactly that.
     """
-    s = (-xp.cos(lon) * xp.cos(lat) * xp.sin(alpha)
-         + xp.sin(lat) * xp.cos(alpha))
+    s = rotated_sin_lat(lon, lat, alpha=alpha, xp=xp)
     # The oracle's operation tree, both terms (:1203-1205):
     # (Ubar*Ubar)/2. not 0.5*u0*u0, and S**2 not s*s (codex r1 #1: the
     # s*s form is one fp32 ULP off the ** tree at phi=0.8517...).

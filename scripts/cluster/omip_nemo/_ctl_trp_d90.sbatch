@@ -65,6 +65,7 @@
 # equally what two runs with different effective mixing look like mid
 # transient. See retraction 7fcce5615; structural-versus-transient is OPEN,
 # and NEMO's own core is still accelerating at every longitude at day 90.
+# NOT REPRODUCIBLE FROM THE REPO ALONE (#2525): its command line is read from the untracked _ctl_trp_d90.txt. Refused up front if absent.
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge; cd $ROOT || exit 1
 echo "HEAD: $(git -C $ROOT log --oneline -1)"
@@ -72,6 +73,7 @@ echo "dirty: $(git -C $ROOT status --porcelain | wc -l)"
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_ENABLE_X64=1
+[ -r /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_ctl_trp_d90.txt ] || { echo "FATAL: untracked command file _ctl_trp_d90.txt is absent"; exit 1; }
 CMD=$(cat /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_ctl_trp_d90.txt)
 # ADOPTED 2026-09-23, BY THE USER, AFTER MEASUREMENT -- same change as the
 # 30-day pinned card, and the same assertion. This lane now restores surface

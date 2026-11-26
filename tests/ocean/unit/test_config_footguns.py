@@ -139,16 +139,15 @@ def test_shipped_global_ocean_templates_load_with_their_eos():
         )
 
 
-def test_kpp_cvmix_template_selects_cvmix_structure():
-    """The committed cvmix KPP template reaches KPPConfig.bld_structure."""
+def test_kpp_cvmix_template_selects_the_opt_in_kpp_options():
     from pathlib import Path
 
     from legoesm.ocean.config import OceanExperimentConfig
 
     p = Path("config/templates/global_ocean/omip_latlon_kpp_cvmix.yaml")
-    rt = OceanExperimentConfig.from_yaml(str(p)).to_ocean_config()
-    assert rt.physics.vertical_mixing.scheme == "kpp"
-    assert rt.physics.vertical_mixing.kpp.bld_structure == "cvmix"
+    kpp = OceanExperimentConfig.from_yaml(str(p)).to_ocean_config().physics.vertical_mixing.kpp
+    assert (kpp.vt2_velocity_scale, kpp.actual_buoyancy_flux, kpp.gradient_surrogates,
+            kpp.bld_structure) == ("candidate", True, True, "cvmix")
 
 
 def test_vertical_mixing_reachable_via_the_yaml_ocean_key():

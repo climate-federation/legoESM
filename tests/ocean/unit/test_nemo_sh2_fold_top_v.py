@@ -229,6 +229,7 @@ def _bottom_bc_production_case(flag: bool, fold: bool = True):
         ),
         _tke_post_mixing_active=lambda: False,
         _lat_dependent_constant_vmix=lambda: False,
+        _epbl_vmix=lambda: False,
     )
     from types import MethodType
     for name in ("_tke_bottom_dirichlet", "_tke_bottom_level",

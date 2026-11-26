@@ -2045,3 +2045,13 @@ def test_jax_chain_matches_numpy_lane_on_the_oracle_fixture(km):
         _cmp(f"oracle km={km} {name}", j, n, 5.2e-14)
     # Non-vacuity: the chain moved the D-grid winds.
     assert float(np.abs(np.asarray(u_j) - f["u"]).max()) > 0.0
+
+
+def test_geopk_scans_take_the_unroll_setting(monkeypatch):
+    import legoesm.core.fv3_pgrad as pgrad_mod
+    st = _synthetic(3)
+    kw = _geopk_kw(3, cg=False, computehalo=True, fill=0.0)
+    monkeypatch.setattr(pgrad_mod, "geopk_kscan_unroll", lambda: 7)
+    text = str(jax.make_jaxpr(lambda d, t, h: geopk(d, t, h, BD, **kw))(
+        st["delp"], st["pt"], st["hs"]))
+    assert text.count("unroll=7") == 2

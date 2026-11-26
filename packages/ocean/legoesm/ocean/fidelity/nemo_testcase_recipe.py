@@ -1910,8 +1910,9 @@ ORCA2_DECK_INITIAL_ICE = ORCA2InitialIce(
 )
 
 
-def orca2_initial_ice_ssh(temperature, salinity, tmask, f_t, e1e2t,
-                          ice: ORCA2InitialIce) -> np.ndarray:
+def orca2_initial_ice_ssh(
+    temperature, salinity, tmask, f_t, e1e2t, ice: ORCA2InitialIce, *, ln_teos10: bool
+) -> np.ndarray:
     """Initial SSH after SI3's levitating initial snow+ice+pond mass.
 
     iceistate.F90:262-291 creates one-category ice from the surface T/S and
@@ -1922,11 +1923,11 @@ def orca2_initial_ice_ssh(temperature, salinity, tmask, f_t, e1e2t,
 
     surface_s = salinity[..., 0]
     surface_t = temperature[..., 0]
-    freezing_t = (
-        -0.0575
-        + 1.710523e-3 * np.sqrt(surface_s)
-        - 2.154996e-4 * surface_s
-    ) * surface_s
+    from legoesm.ocean.eos import nemo_eos_fzp, nemo_eos_fzp_eos80
+
+    freezing_t = np.asarray(
+        nemo_eos_fzp(surface_s) if ln_teos10 else nemo_eos_fzp_eos80(surface_s)
+    )
     surface_wet = tmask[..., 0]
     initial_ice = (((surface_t - freezing_t) * surface_wet < ice.thres_sst)
                    & surface_wet)
@@ -1982,6 +1983,7 @@ def build_orca2_istate_for_mode(
     f_t,
     e1e2t,
     initial_state: str,
+    ln_teos10: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build ORCA2 initial ``(T, S, ssh)`` for an explicit card ``initial_state`` mode.
 
@@ -2002,7 +2004,8 @@ def build_orca2_istate_for_mode(
             mask_evaluation="where_zero",
         )
         initial_ssh = orca2_initial_ice_ssh(
-            t_init, s_init, tmask, f_t, e1e2t, ORCA2_DECK_INITIAL_ICE
+            t_init, s_init, tmask, f_t, e1e2t, ORCA2_DECK_INITIAL_ICE,
+            ln_teos10=ln_teos10,
         )
         return t_init, s_init, initial_ssh
     if initial_state == "nemo_k0_istate":
@@ -2243,13 +2246,37 @@ def build_orca2_zps_card(
         nemo_e3t_jpk=jnp.asarray(e3t_jpk, dtype=jnp.float64),
     )
 
+    model_config = _model_config(
+        barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.09,
+        n_barotropic_substeps=65,
+        bbl_adv_option=0,
+        bbl_gamma_s=0.0,
+        bbl_diffusive_option=1,
+        bbl_aht_m2_s=1000.0,
+        whole_step_identity="orca2_vector_een_c2",
+        # ln_lc: the literal Langmuir source, imlc = mbkt+1 when no level
+        # crosses (zdftke.f90:311-378, :354; Decision 135, round 312).
+        tke_langmuir_evaluation="nemo_literal",
+    )
+    if model_config.eos == "nemo_teos10":
+        freezing_ln_teos10 = True
+    elif model_config.eos == "nemo_eos80":
+        freezing_ln_teos10 = False
+    else:
+        raise ValueError(
+            "ORCA2 initial freezing point requires a NEMO TEOS-10 or EOS-80 "
+            f"model_config.eos, got {model_config.eos!r}"
+        )
+
     if initial_state == "si3_iceistate":
         temperature, salinity = build_orca2_initial_ts(
             temperature_path, salinity_path, tmask)
 
         initial_ssh = orca2_initial_ice_ssh(
             temperature, salinity, tmask, np.asarray(grid.f_T),
-            metric["e1t"] * metric["e2t"], ORCA2_DECK_INITIAL_ICE)
+            metric["e1t"] * metric["e2t"], ORCA2_DECK_INITIAL_ICE,
+            ln_teos10=freezing_ln_teos10)
     else:
         temperature, salinity, initial_ssh = build_orca2_istate_for_mode(
             temperature_path,
@@ -2258,6 +2285,7 @@ def build_orca2_zps_card(
             f_t=np.asarray(grid.f_T),
             e1e2t=metric["e1t"] * metric["e2t"],
             initial_state=initial_state,
+            ln_teos10=freezing_ln_teos10,
         )
 
     state = rest_state_latlon_cgrid_ocean(
@@ -2277,19 +2305,6 @@ def build_orca2_zps_card(
         eta=state.eta.replace(data=jnp.asarray(initial_ssh, dtype=jnp.float64)),
     )
 
-    model_config = _model_config(
-        barotropic_time_filter="nemo_ab3am4",
-        nemo_barotropic_filter_alpha=0.09,
-        n_barotropic_substeps=65,
-        bbl_adv_option=0,
-        bbl_gamma_s=0.0,
-        bbl_diffusive_option=1,
-        bbl_aht_m2_s=1000.0,
-        whole_step_identity="orca2_vector_een_c2",
-        # ln_lc: the literal Langmuir source, imlc = mbkt+1 when no level
-        # crosses (zdftke.f90:311-378, :354; Decision 135, round 312).
-        tke_langmuir_evaluation="nemo_literal",
-    )
     # Geometry-ladder G1 rounds 2-3: ORCA2's T-pivot fold retains NEMO's
     # fold-image V transport in vor_een and in the split-explicit live face
     # depth. These are deck-invariant geometry statements, so every hierarchy
@@ -2524,8 +2539,12 @@ def build_orca2_zps_card(
         # Moving this card to "nemo_bn2" is the card owner's decision.
         n2_mode="insitu",
     )
+    # NEMO's zdf_ddm switches are hard: pin the four RULE 5 widths to 0
+    # (#2578 added them with smooth defaults; width 0 = the hard reference).
     ddm_config = model_config.physics.vertical_mixing.ddm._replace(
-        enabled=True, form="nemo_literal", rn_avts=1.0e-4, rn_hsbfr=1.6)
+        enabled=True, form="nemo_literal", rn_avts=1.0e-4, rn_hsbfr=1.6,
+        regime_width=0.0, n2_gate_width=0.0, k_max_width=0.0,
+        avm_max_width=0.0)
     model_config = model_config._replace(
         physics=model_config.physics._replace(
             vertical_mixing=model_config.physics.vertical_mixing._replace(

@@ -1,0 +1,14 @@
+--- icealb.F90
++++ icealb.F90
+@@ -23,0 +24,3 @@
++! O7_OBSERVER_BEGIN
++   USE o7_si3_writer, ONLY : o7_alb_entry, o7_alb_exit
++! O7_OBSERVER_END
+@@ -120,0 +124,3 @@
++! O7_OBSERVER_BEGIN
++      CALL o7_alb_entry( pt_su, ph_ice, ph_snw, pafrac_pnd, ph_pnd, ph_lid, pcloud_fra, smask0 )
++! O7_OBSERVER_END
+@@ -189,0 +196,3 @@
++! O7_OBSERVER_BEGIN
++      CALL o7_alb_exit( palb_ice )
++! O7_OBSERVER_END

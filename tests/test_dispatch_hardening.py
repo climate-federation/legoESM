@@ -135,6 +135,8 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py",
+         "latlon_tracer_tendencies"),
         # KPP boundary-layer structure ("legacy" | "cvmix"): an unknown value
         # must raise, never run the legacy structure silently.
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py",
@@ -297,6 +299,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # bare ``else: # PM``, so a typo silently runs Penman-Monteith. Guarded
         # at the config validator AND at the solver entry (direct-call path).
         ("packages/land/legoesm/land/canopy/solver.py", "solve_canopy_closure"),
+        # Two-leaf canopy shortwave dispatch (ryu|two_stream), 2026-11-17:
+        # CanopyConfig.validate (above) at setup and the surface-scheme call site.
+        ("packages/land/legoesm/land/surface_scheme/two_leaf_canopy.py",
+         "compute_two_leaf_canopy_fluxes"),
         # CLM-ML canopy-airspace turbulence dispatch (rsl_bonan|most): selects
         # whether the Harman & Finnigan roughness-sublayer correction is active.
         # An unknown value must raise, not fall through to the RSL default —

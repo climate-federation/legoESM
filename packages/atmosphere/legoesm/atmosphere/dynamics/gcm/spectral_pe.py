@@ -903,6 +903,17 @@ def spectral_pe_tendencies(
 
     # --- 12. Horizontal tendencies ---
     dvor_hat = -flux_vor_div
+    # PGF curl: the momentum force -(Fx, Fy) enters the vorticity equation
+    # as -curl(Fx, Fy) (solenoidal torque -R_d ∇T×∇ln p), same curl convention
+    # as ``flux_vor_curl`` / ``vert_vor_tend``.
+    _pgf_oc2_raw, _pgf_dmu_raw = sh_analysis_oc2_dmu_3d(
+        grid, jnp.stack([pgf_Fx_cos, pgf_Fy_cos], axis=-1).reshape(
+            n_lat_p, n_lon_p, nlev_p * 2),
+    )
+    dvor_hat = dvor_hat - (
+        im_over_a[:, None] * _pgf_oc2_raw.reshape(-1, nlev_p, 2)[..., 1]
+        + one_over_a * _pgf_dmu_raw.reshape(-1, nlev_p, 2)[..., 0]
+    )
     # Build ``ddiv_hat`` with the KE contribution to ``KPhi_hat``
     # already in place; the geopotential ``Phi`` contribution is added
     # after the batched sh_analysis_3d below (Loop 145).

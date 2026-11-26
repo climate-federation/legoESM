@@ -29,13 +29,15 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.atmosphere.physics import _ifs_smooth
+from legoesm.atmosphere.physics import _ifs_thermo
 from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+from legoesm.atmosphere.physics.convection import _ifs_cuascent
 
 FIXTURE = (Path(__file__).resolve().parents[4] / "tests" / "atmosphere"
            / "oracle_fixtures" / "bechtold_ifs.npz")
 GROUPS = ("L32", "L137", "STRESS")
 DX = 1.0e5   # m, the grid length make_fixture.py encoded in PGAW
-MODULES = (M,)
+MODULES = (M, _ifs_cuascent, _ifs_thermo)
 # one-sided windows: active for 0 < (a - b)/w < 1 (target 0.5); centred: |d| < 0.5
 _ONE_SIDED = ("pos", "max", "min", "on", "off", "neg1")
 _CENTRED = ("gt", "ge", "lt", "le")
@@ -61,7 +63,15 @@ def sites():
     for mod in MODULES:
         src = inspect.getsource(mod)
         lines = src.splitlines()
-        for node in ast.walk(ast.parse(src)):
+        tree = ast.parse(src)
+        # calls in the body of ``if sm.hard:`` run only with the exact switches
+        # (kept as IfsSmooth calls so switch_scales.py samples them): not sites
+        exact = {id(n) for i in ast.walk(tree)
+                 if isinstance(i, ast.If) and ast.unparse(i.test) == "sm.hard"
+                 for b in i.body for n in ast.walk(b)}
+        for node in ast.walk(tree):
+            if id(node) in exact:
+                continue
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and isinstance(node.func.value, ast.Name) and node.func.value.id == "sm"
                     and node.func.attr in _SITE_METHODS):
@@ -89,10 +99,13 @@ def instrument(record=None, hard_sites=(), inject=None):
     """Patch IfsSmooth: ``record(site, d)`` gets every call's normalised
     window position d (in window: 0 < d < 1 one-sided, |d| < 0.5 centred);
     calls from ``hard_sites`` take the exact form; ``inject = {site: s}``
-    moves each such site's switched operand to ``mid + (s - 1) w`` (the
-    offset under stop_gradient, so the operand keeps its upstream
-    derivative): at s = 1 every evaluation of the site sits mid-window, and
-    s spans the window in units of 1."""
+    replaces each such site's switched operand by ``mid + (s - 1) w``: at
+    s = 1 every evaluation of the site sits mid-window, and s spans the
+    window in units of 1.  The operand is an honest function of s (and of a
+    traced bound through ``mid``), value and derivative alike: keeping the
+    upstream derivative of a pinned value made autodiff disagree with finite
+    differences by 7-100 % at sites inside a level recursion (vote 3,
+    2026-11-19)."""
     inject = dict(inject or {})
     files = {inspect.getsourcefile(m) for m in MODULES}
     hard_sites = set(hard_sites)
@@ -111,7 +124,7 @@ def instrument(record=None, hard_sites=(), inject=None):
                 one = name in ("pos", "neg1")
                 a, w = args[0], args[1] if one else args[2]
                 tgt = _mid(name, None if one else args[1], w)
-                a = a + jax.lax.stop_gradient(tgt - a) + (inject[site] - 1.0) * w
+                a = tgt + (inject[site] - 1.0) * w
                 args = (a,) + tuple(args[1:])
             if site is not None and not self.hard:
                 if name in ("pos", "neg1"):
@@ -129,6 +142,10 @@ def instrument(record=None, hard_sites=(), inject=None):
             return f(self, *args, **kw)
         return g
 
+    # JAX caches traces by function identity, blind to the patched methods:
+    # drop them on entry and exit so no instrumented (or uninstrumented)
+    # trace is reused on the other side
+    jax.clear_caches()
     try:
         for n in orig:
             setattr(_ifs_smooth.IfsSmooth, n, wrap(n))
@@ -136,6 +153,7 @@ def instrument(record=None, hard_sites=(), inject=None):
     finally:
         for n, f in orig.items():
             setattr(_ifs_smooth.IfsSmooth, n, f)
+        jax.clear_caches()
 
 
 def column(fix, g, c):
@@ -164,11 +182,21 @@ class _Line:
         _, f, self.range = next(d for d in DIRECTIONS if d[0] == direction)
         x0 = column(fix, g, c)
         self.rec = {}
-        with instrument(lambda s, d: self.rec.setdefault(s, []).append(d.ravel())):
+        # held open until close(): instrument() drops every trace on exit, so
+        # a later call would retrace without the recorder
+        self._cm = instrument(lambda s, d: self.rec.setdefault(s, []).append(d.ravel()))
+        self._cm.__enter__()
+        try:
             self._f = jax.jit(lambda s: output(fix, f(x0, s)))
             self._f(jnp.asarray(float(0.5 * sum(self.range)))).block_until_ready()
+        except BaseException:
+            self.close()
+            raise
         self.rec.clear()
         self.fix, self.x = fix, lambda s: f(x0, jnp.asarray(float(s)))
+
+    def close(self):
+        self._cm.__exit__(None, None, None)
 
     def positions(self, s):
         self.rec.clear()
@@ -230,26 +258,28 @@ def search(fix, todo, cols, n_grid=24):
             if not left:
                 return found
             line = _Line(fix, g, c, name)
-            grid = np.linspace(lo, hi, n_grid)
-            pos = [line.positions(s) for s in grid]
-            for site in left:
-                done = False
-                for i in range(n_grid - 1):
-                    d0, d1 = pos[i].get(site), pos[i + 1].get(site)
-                    if d0 is None or d1 is None or d0.shape != d1.shape:
-                        continue
-                    f0, f1 = d0 - _target(site), d1 - _target(site)
-                    for e in np.nonzero(np.sign(f0) != np.sign(f1))[0]:
-                        m = _bisect(line, site, e, grid[i], grid[i + 1], f0[e])
-                        if m is not None and line.changes_when_hard(site, m):
-                            found[site] = (g, int(c), name, float(m),
-                                           _fd_step(line, site, e, m))
-                            done = True
+            try:
+                grid = np.linspace(lo, hi, n_grid)
+                pos = [line.positions(s) for s in grid]
+                for site in left:
+                    done = False
+                    for i in range(n_grid - 1):
+                        d0, d1 = pos[i].get(site), pos[i + 1].get(site)
+                        if d0 is None or d1 is None or d0.shape != d1.shape:
+                            continue
+                        f0, f1 = d0 - _target(site), d1 - _target(site)
+                        for e in np.nonzero(np.sign(f0) != np.sign(f1))[0]:
+                            m = _bisect(line, site, e, grid[i], grid[i + 1], f0[e])
+                            if m is not None and line.changes_when_hard(site, m):
+                                found[site] = (g, int(c), name, float(m),
+                                               _fd_step(line, site, e, m))
+                                done = True
+                                break
+                        if done:
                             break
-                    if done:
-                        break
+            finally:
+                line.close()
             del line
-            jax.clear_caches()
     return found
 
 

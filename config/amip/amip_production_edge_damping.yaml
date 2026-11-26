@@ -1,0 +1,11 @@
+# Saved-mesh production deck with per-edge damping scaled by mesh density.
+#
+# Everything is amip_production_saved_mesh.yaml except
+# mpas_edge_scaled_damping.  That mesh is quasi-uniform (meshDensity 1
+# everywhere), so every factor is exactly 1.0 and the run is bitwise the
+# saved-mesh deck; the option acts once a variable-resolution mesh file
+# (mpas_mesh_variable) replaces it.  Ported from the ENSO fork (Isma Di
+# Carlo).  Not a production candidate: an A/B arm against
+# amip_production_saved_mesh.yaml.
+include: amip_production_saved_mesh.yaml
+mpas_edge_scaled_damping: true

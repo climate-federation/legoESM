@@ -409,6 +409,70 @@ def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_back
 
 
 
+def overhead_sink(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend):
+    """Net radiation absorbed ABOVE the model top on the captured state.
+
+    With ``rrtmgp_overhead_layer`` the solver carries one layer from p_top to a
+    1 Pa lid whose heating is discarded (CAM-RRTMG style) while face 0 of the
+    returned fluxes is that lid.  Per column, the absorbed power is
+    (lid net - surface net) minus the model-layer heating integrated with the
+    solver's own dp, c_p and g; it is zero to round-off with the layer off
+    (``tests/atmosphere/test_rrtmgp_overhead_layer.py``).  One production
+    radiation call at the captured time: every local time is sampled once, so
+    the global mean is a diurnal mean only to the extent the sunlit half is
+    representative.
+    """
+    import inspect
+    import jax
+    from legoesm.atmosphere.physics.radiation.rrtmgp import constants as RC
+    sig_b = inspect.signature(real_backend)
+    got = []
+
+    def spy(*a, **kw):
+        out = real_backend(*a, **kw)
+        b = sig_b.bind(*a, **kw).arguments
+        if not isinstance(b.get("T"), jax.core.Tracer):
+            got.append((b, out))
+        return out
+    fn = fns["radiation"]
+    kw = {"forcing": forcing} if getattr(fn, "_wants_forcing", False) else {}
+    if getattr(fn, "_wants_phys_state_ro", False):
+        kw["phys_state"] = phys_state
+    rad_int._call_radiation_backend = spy
+    try:
+        fn(state, mesh, sig, **kw)
+    finally:
+        rad_int._call_radiation_backend = real_backend
+    allsky = [(b, o) for b, o in got if b.get("q_cloud") is not None] or got
+    if len(allsky) != 1:
+        raise SystemExit(f"expected one all-sky radiation solve, got {len(allsky)}")
+    b, o = allsky[0]
+    area = np.asarray(mesh.areaCell, dtype=np.float64)
+    ph = np.asarray(b["p_half"], dtype=np.float64)
+    if ph.shape[0] != area.size:
+        raise SystemExit(f"radiation columns {ph.shape[0]} != cells {area.size}")
+    w = area / area.sum()
+    dp = ph[:, 1:] - ph[:, :-1]
+
+    def gap(up, dn, hr):
+        net = np.asarray(dn, np.float64) - np.asarray(up, np.float64)
+        col = (np.asarray(hr, np.float64) * dp).sum(1) * RC.CP_D / RC.G
+        return net[:, 0] - net[:, -1] - col
+    g_sw = gap(o.sw_flux_up, o.sw_flux_down, o.sw_heating_rate)
+    g_lw = gap(o.lw_flux_up, o.lw_flux_down, o.lw_heating_rate)
+    ins = (np.asarray(o.toa_insolation, np.float64) if o.toa_insolation is not None
+           else np.full(area.size, np.nan))
+    d_ins = ins - np.asarray(o.sw_flux_down[:, 0], np.float64)
+    m = lambda x: float((x * w).sum())
+    print(f"p_half top face: min {ph[:, 0].min():.3g} max {ph[:, 0].max():.3g} Pa")
+    print(f"above-top absorption [W/m2, area mean]: SW {m(g_sw):+.4f}  LW {m(g_lw):+.4f}  "
+          f"total {m(g_sw + g_lw):+.4f}")
+    print(f"  SW range {g_sw.min():+.3f}..{g_sw.max():+.3f}, LW range {g_lw.min():+.3f}..{g_lw.max():+.3f}")
+    print(f"prescribed insolation - solver SW down at face 0 [W/m2]: {m(d_ins):+.2e} "
+          f"(max |.| {np.nanmax(np.abs(d_ins)):.2e})")
+    return 0
+
+
 def replace_deck(argv: list[str], deck: str) -> list[str]:
     """``argv`` with its single ``--config`` value replaced by ``deck``."""
     idx = [i for i, a in enumerate(argv) if a == "--config"]
@@ -455,6 +519,9 @@ def main(argv=None):
                          "default: profile_rh_split's climatology")
     ap.add_argument("--target", type=float, default=None,
                     help="rlutcs model-minus-obs error to be explained [W/m2]")
+    ap.add_argument("--overhead-sink", action="store_true",
+                    help="net radiation absorbed above the model top on the "
+                         "captured state (one production radiation call)")
     ap.add_argument("--n-times", type=int, default=8)
     ap.add_argument("--nc-budget", action="store_true",
                     help="#2216: cloud-droplet number budget by process over one step "
@@ -573,6 +640,9 @@ def main(argv=None):
 
     pf_full = real_make_physics(phys_cfg, *pargs, **pkw)
     T0 = np.asarray(state.T.data, dtype=np.float64)
+    if args.overhead_sink:
+        return overhead_sink(fns, state, mesh, sig, forcing, phys_state, rad_int,
+                             real_backend)
     if args.rlutcs_replay:
         return rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend,
                              args.ref_run or args.run, args.profile_era5, args.target)

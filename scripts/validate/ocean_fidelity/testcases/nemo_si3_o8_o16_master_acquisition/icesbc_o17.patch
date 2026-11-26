@@ -1,0 +1,10 @@
+--- icesbc.F90
++++ icesbc.F90
+@@ -28,0 +29,3 @@
++! O8O16_OBSERVER_BEGIN
++   USE o17_master_writer, ONLY : o17_state
++! O8O16_OBSERVER_END
+@@ -436,0 +440,3 @@
++! O8O16_OBSERVER_BEGIN
++      CALL o17_state(31)
++! O8O16_OBSERVER_END

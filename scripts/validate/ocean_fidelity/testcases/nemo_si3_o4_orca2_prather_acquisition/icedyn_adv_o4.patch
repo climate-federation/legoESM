@@ -1,0 +1,24 @@
+--- icedyn_adv.F90
++++ icedyn_adv.F90
+@@ -24,6 +24,9 @@
+    USE iom            ! I/O manager library
+    USE lib_mpp        ! MPP library
+    USE timing         ! Timing
++   ! O4_OBSERVER_BEGIN
++   USE o4_prather_writer, ONLY : o4_capture_adv
++   ! O4_OBSERVER_END
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -88,5 +91,11 @@
+       CASE( np_advPRA )                ! PRATHER scheme        !
++         ! O4_OBSERVER_BEGIN
++         CALL o4_capture_adv( 2, kt )
++         ! O4_OBSERVER_END
+          !                             !-----------------------!
+          CALL ice_dyn_adv_pra(         kt, u_ice, v_ice, h_i, h_s, h_ip, &
+             &                          ato_i, v_i, v_s, sv_i, oa_i, a_i, a_ip, v_ip, v_il, e_s, e_i, szv_i )
++         ! O4_OBSERVER_BEGIN
++         CALL o4_capture_adv( 5, kt )
++         ! O4_OBSERVER_END
+       END SELECT

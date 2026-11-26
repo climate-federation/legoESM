@@ -36,15 +36,16 @@ from legoesm.land.canopy.config import (
 )
 from legoesm.land.canopy.photosynthesis import co2_compensation_point
 from legoesm.land.canopy.radiative_transfer import (
-    split_sw_components, canopy_shortwave_rt,
+    split_sw_components, canopy_shortwave_rt, canopy_shortwave_two_stream,
+    TwoStreamLeafOptics,
 )
 from legoesm.land.canopy.sif import two_leaf_canopy_sif
 from legoesm.land.canopy.stability import (
-    compute_aerodynamics, sat_specific_humidity,
+    compute_aerodynamics, sat_specific_humidity, screen_level_temperature,
 )
 from legoesm.land.canopy.solver import (
     CanopyForcingBundle, solve_canopy_closure_diag, canopy_forward,
-    canopy_state_admissible,
+    canopy_state_admissible, ground_heat_conductance,
 )
 from legoesm.land.canopy.energy_balance import soil_surface_evap_resistance
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
@@ -197,6 +198,10 @@ def static_canopy_roughness(lp, ncol):
         _get(lp, "hc", jnp.full(ncol, _DEFAULT_HC)), LAI,
         _get(lp, "rz0m", jnp.full(ncol, _DEFAULT_RZ0M)),
         _get(lp, "rd", jnp.full(ncol, _DEFAULT_RD)))
+
+
+_TWO_STREAM_OPTICS_FIELDS = ("rho_vis", "tau_vis", "rho_nir", "tau_nir",
+                             "phi1", "phi2", "kd", "cos2_theta")
 
 
 def _get(lp, name: str, fallback):
@@ -424,10 +429,26 @@ def compute_two_leaf_canopy_fluxes(
     PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV = split_sw_components(
         forcing.sw_down, cos_zenith)
 
-    sw_rt = canopy_shortwave_rt(
-        PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
-        SZA, LAI, CI, ALB_VIS, ALB_NIR,
-        Vc3_leaf_stressed, Vc4_leaf_stressed, kn)
+    if cc.sw_scheme == "ryu":
+        sw_rt = canopy_shortwave_rt(
+            PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
+            SZA, LAI, CI, ALB_VIS, ALB_NIR,
+            Vc3_leaf_stressed, Vc4_leaf_stressed, kn)
+    elif cc.sw_scheme == "two_stream":
+        _optics = [_get(lp, f"leaf_{n}", None) for n in _TWO_STREAM_OPTICS_FIELDS]
+        if any(o is None for o in _optics):
+            raise ValueError(
+                "sw_scheme='two_stream' needs per-column leaf optics (CanopyLandParams "
+                f"leaf_{'/'.join(_TWO_STREAM_OPTICS_FIELDS)}); this driver does not build "
+                "them (fill them with radiative_transfer.two_stream_leaf_optics(pft))")
+        sw_rt = canopy_shortwave_two_stream(
+            PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
+            SZA, LAI, CI, ALB_VIS, ALB_NIR,
+            Vc3_leaf_stressed, Vc4_leaf_stressed, kn,
+            TwoStreamLeafOptics(*_optics), cc.two_stream_clip_width)
+    else:
+        raise ValueError(f"unknown sw_scheme {cc.sw_scheme!r}; must be one of "
+                         "('ryu', 'two_stream')")
 
     # ---- Thermodynamic / atmosphere variables ----
     Ps    = forcing.p_surface
@@ -572,7 +593,14 @@ def compute_two_leaf_canopy_fluxes(
         # root: it reports converged=False, and the multilayer land step closes
         # their energy into sensible heat and accepts the column (or reverts it
         # if non-finite or beyond the fallback guards).
-        x_final = jnp.where(converged[:, None], x_final, cold_state)
+        if cc.fallback_from_last_iterate:
+            # CLM5 2.5.3.2: an unconverged column keeps its last iterate when
+            # that is an admissible canopy state; otherwise the cold state.
+            _fb_state = jnp.where(
+                canopy_state_admissible(x_final)[:, None], x_final, cold_state)
+        else:
+            _fb_state = cold_state
+        x_final = jnp.where(converged[:, None], x_final, _fb_state)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
@@ -684,7 +712,10 @@ def compute_two_leaf_canopy_fluxes(
     T_surface = (LW_emit / jnp.maximum(eps_eff * constants.sigma_sb, 1e-12)) ** 0.25
 
     # SW_net and the (conservative) external LW_net = La − LW_out.
-    sw_net = (1.0 - alpha_canopy) * forcing.sw_down
+    # Below 1 W/m2 the exported albedo is albedo_land (no ratio of vanishing
+    # fluxes), so sw_net is the absorption itself there (#2650).
+    sw_net = jnp.where(forcing.sw_down < 1.0, sw_absorbed,
+                       (1.0 - alpha_canopy) * forcing.sw_down)
     lw_net = forcing.lw_down - LW_out_col
     lw_up_out = LW_out_col   # true top-of-canopy upward LW (emission + reflection)
 
@@ -695,6 +726,21 @@ def compute_two_leaf_canopy_fluxes(
 
     # Safety clamp on G: extreme non-converged values corrupt T_soil.
     G_clamped = jnp.clip(G, -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
+
+    # Semi-implicit ground flux (CanopyConfig.implicit_ground_flux; CLM5 eqs.
+    # 2.5.123-2.5.124 into 2.6.15).  G above was evaluated at the last Picard
+    # pass's ground temperature ``bundles_k.Ts_bc``; the soil solve linearises
+    # about it.  Where the clamp binds G no longer depends on the ground
+    # temperature, so lambda is 0 there (the explicit clamped flux, as before).
+    if cc.implicit_ground_flux:
+        lam_g = jax.vmap(
+            lambda x_, b_, c_: ground_heat_conductance(x_, b_, cc, c_))(
+                x_final, bundles_k, converged)
+        surface_conductance = jnp.where(G == G_clamped, jnp.maximum(lam_g, 0.0), 0.0)
+        surface_conductance_T_ref = bundles_k.Ts_bc
+    else:
+        surface_conductance = None
+        surface_conductance_T_ref = None
 
     # ---- Wind stress from MOST ustar ----
     # Sign: stress ON THE AIR (opposes the wind), the convention of the ocean
@@ -737,6 +783,8 @@ def compute_two_leaf_canopy_fluxes(
         Tf_Sun=Tf_Sun,
         Tf_Sh=Tf_Sh,
         T_canopy_air=Tc_cvg,
+        T_2m=screen_level_temperature(Ta, Tc_cvg, z_ref - displa,
+                                      fluxes_per_col["obu"], z0m),
         gs_Sun=gs_Sun,
         gs_Sh=gs_Sh,
         n_iters=n_iters,
@@ -763,4 +811,6 @@ def compute_two_leaf_canopy_fluxes(
         tau_mag=tau_mag,
         L_soil=L_cond,
         condensation=condensation,
+        surface_conductance=surface_conductance,
+        surface_conductance_T_ref=surface_conductance_T_ref,
     )

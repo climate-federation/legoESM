@@ -496,9 +496,9 @@ def _production_case():
     from legoesm.core.field import Field
     from legoesm.ice.bitz_lipscomb import (
         SI3SurfaceForcing,
-        ice_enthalpy_from_temperature,
-        option2_salinity_profile,
-        snow_enthalpy_from_temperature,
+        _si3_502_ice_enthalpy_from_temperature,
+        _si3_502_option2_salinity_profile,
+        _si3_502_snow_enthalpy_from_temperature,
     )
     from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_si3_lane_card
     from legoesm.ice.state import SI3ColumnState
@@ -509,11 +509,13 @@ def _production_case():
     hi = np.random.default_rng(18).uniform(0.3, 3.0, n)
     sss = np.full(n, 34.0)
     s_bulk = np.full(n, 5.0)
-    s_lay = option2_salinity_profile(jnp.asarray(s_bulk), jnp.asarray(sss))
+    s_lay = _si3_502_option2_salinity_profile(jnp.asarray(s_bulk), jnp.asarray(sss))
     ice_c = card.config.ice_constants
     t_ice = jnp.broadcast_to(jnp.linspace(265.0, 271.0, 3), (n, 3))
-    e_i = ice_enthalpy_from_temperature(t_ice, s_lay, ice_c)
-    e_s = snow_enthalpy_from_temperature(jnp.full((n, 3), 266.0), ice_c)
+    e_i = _si3_502_ice_enthalpy_from_temperature(t_ice, s_lay, ice_c)
+    e_s = _si3_502_snow_enthalpy_from_temperature(
+        jnp.full((n, 3), 266.0), ice_c
+    )
 
     def fld(v, layered=False):
         dims = ("column", "layer") if layered else ("column",)

@@ -248,7 +248,8 @@ from legoesm.core.fv3_native_d_sw import (
     A2B_R3,
 )
 from legoesm.core.fv3_native_sw_core import BIG_NUMBER
-from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
+from legoesm.core.fv3_phase3d_common import (
+    geopk_kscan_unroll, require_uniform_float_jax)
 
 __all__ = [
     "a2b_gridstruct_view",
@@ -1006,7 +1007,8 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
 
     p1d0 = jnp.full((n_bi, n_bj), ptop, dtype=delp.dtype)
     _, (p1d_k, logp_k, pk_k) = lax.scan(
-        _down, p1d0, jnp.moveaxis(delp[box_i, box_j, 0:km], 2, 0))
+        _down, p1d0, jnp.moveaxis(delp[box_i, box_j, 0:km], 2, 0),
+        unroll=geopk_kscan_unroll())
 
     pk = pk.at[box_i, box_j, 1:km + 1].set(jnp.moveaxis(pk_k, 0, 2))
     pe = pe.at[pe_i, 1:km + 1, pe_j].set(
@@ -1034,7 +1036,8 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
             gz_k = gz_kp1 + cp_air * pt_k * dpk_k
         return gz_k, gz_k
 
-    _, gz_k = lax.scan(_up, hs_box, (pt_box, dpk), reverse=True)
+    _, gz_k = lax.scan(_up, hs_box, (pt_box, dpk), reverse=True,
+                       unroll=geopk_kscan_unroll())
     gz = gz.at[box_i, box_j, 0:km].set(jnp.moveaxis(gz_k, 0, 2))
 
     # --- pkz :2781-2787: only when `.not. CG`, only on [is,ie]x[js,je],

@@ -1,0 +1,11 @@
+# Production deck with flux-form, Zalesak-limited horizontal tracer transport
+# on the MPAS shared PE core.
+#
+# Everything is amip_production.yaml except mpas_tracer_horizontal_scheme:
+# flux_fct (tracer flux on the continuity's layer mass flux, upwind plus
+# Zalesak FCT, limiter clips C1 at the default mpas_fct_limiter_sharpness)
+# instead of the centred advective operator.  Ported from the ENSO fork
+# (Isma Di Carlo).  Not a production candidate: an A/B arm against
+# amip_production.yaml.
+include: amip_production.yaml
+mpas_tracer_horizontal_scheme: flux_fct

@@ -109,6 +109,27 @@ def test_column_physics_is_the_native_operator_split_bitwise(setup):
     assert col._sfc_diag is not None
     assert col._sfc_diag[2].data.shape == (g.n_lat * g.n_lon,)
     assert float(jnp.max(jnp.abs(col._sfc_diag[2].data - 1.0))) == 0.0
+    assert col._step_ledger is None             # no ledger rows: none
+
+
+def test_column_step_publishes_the_physics_ledger_rows(setup):
+    """The physics' per-process ledger rows (budget_ledger on) reach the
+    driver through the step, as on the MPAS lane."""
+    from legoesm.diagnostics.process_ledger import N_LEDGER
+    g, s, nat = setup
+    n = g.n_lat * g.n_lon
+    rows = jnp.arange(n * N_LEDGER * 2, dtype=jnp.float64).reshape(
+        n, N_LEDGER, 2)
+
+    def col_phys(cols, mesh, sigma, phys_state=None, forcing=None):
+        return _tend(cols.T.data, cols.p_s.data, precip=1.0,
+                     lat=mesh.latCell, lon=mesh.lonCell)._replace(
+                         ledger_rows=rows)
+
+    col = LatLonCGridColumnModel(_dyn(g, s))
+    col.step(col.from_bundle(nat), DT, physics_fn=col_phys)
+    np.testing.assert_array_equal(np.asarray(col._step_ledger),
+                                  np.asarray(rows))
 
 
 def test_refuses_physics_without_the_meridional_tendency(setup):
@@ -195,14 +216,10 @@ def test_driver_column_lane_steps_the_native_dycore(tmp_path):
 
 
 def test_driver_refusals(tmp_path):
-    from legoesm.driver.config import OutputConfig
     from legoesm.driver.model_driver import ModelDriver
-    ledger = OutputConfig(diag_days=0, checkpoint_days=0,
-                          output_dir=str(tmp_path), budget_ledger=True)
     for over, frag in ((dict(sponge_enabled=True), "sponge_enabled"),
                        (dict(mpas_qv_smooth_del4_m4s=1e14), "Voronoi mesh"),
                        (dict(ensemble_size=2), "single device"),
-                       (dict(output=ledger), "budget_ledger"),
                        (dict(convection="kuo"), "grid operator")):
         drv = ModelDriver(_driver_cfg(tmp_path, **over), output_dir=tmp_path)
         with pytest.raises(ValueError, match=frag):
@@ -660,3 +677,45 @@ def test_driver_checkpoint_div4_stamp_refuses_a_different_scale(tmp_path):
     for f, scale in ((off, 1.0), (old, 1.0), (on, 0.0)):
         with pytest.raises(ValueError, match="div-4 damping scale"):
             resume(f, scale)
+
+
+def test_driver_checkpoint_vertical_form_stamp_refuses_a_different_form(tmp_path):
+    """Checkpoints record the run's vertical form; a file without the stamp
+    counts as legacy; a resume under a different form is refused (#2548)."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    def cfg(d, form, **over):
+        c = _driver_cfg(d, **over)
+        return c._replace(dycore=c.dycore._replace(vertical_form=form))
+
+    def written(form):
+        d = tmp_path / f"w{form}"
+        d.mkdir()
+        c = cfg(d, form, days=1)
+        c = c._replace(output=c.output._replace(checkpoint_days=1))
+        drv = ModelDriver(c, output_dir=d)
+        drv.setup()
+        assert drv.run() == "COMPLETED"
+        f = d / "checkpoint_day_0001.npz"
+        with np.load(f) as z:
+            assert str(z["latloncol_vertical_form"]) == form
+            unstamped = {k: z[k] for k in z.files if k != "latloncol_vertical_form"}
+        old = d / "checkpoint_day_0002.npz"
+        np.savez(old, **unstamped)
+        return f, old
+
+    def resume(f, form):
+        d = tmp_path / f"r{form}_{f.parent.name}_{f.stem}"
+        d.mkdir()
+        drv = ModelDriver(cfg(d, form, days=1), output_dir=d)
+        drv.setup()
+        return drv.load_checkpoint(f)
+
+    leg, old = written("legacy")
+    as83, _ = written("as83")
+    assert resume(leg, "legacy")[1] == pytest.approx(1.0)
+    assert resume(old, "legacy")[1] == pytest.approx(1.0)   # no stamp == legacy
+    assert resume(as83, "as83")[1] == pytest.approx(1.0)
+    for f, form in ((leg, "as83"), (old, "as83"), (as83, "legacy")):
+        with pytest.raises(ValueError, match="vertical_form="):
+            resume(f, form)

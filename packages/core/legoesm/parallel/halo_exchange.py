@@ -145,79 +145,100 @@ _MPI_TAG_RANK_STRIDE = 100_000
 
 
 # ======================================================================
-# AD-safe sendrecv wrapper (custom_vjp)
+# AD-safe sendrecv wrapper (linear primitive)
 # ======================================================================
 
 def _make_sendrecv_vjp(mpi4jax_mod):
     """Build an AD-safe sendrecv once mpi4jax is imported.
 
-    mpi4jax.sendrecv has a transpose rule that swaps source/dest, but
-    the XLA lowering raises RuntimeError when ``_must_transpose=True``.
-    This wrapper bypasses that by using ``@jax.custom_vjp``: the forward
-    calls sendrecv normally, and the backward calls sendrecv with
-    swapped endpoints as a fresh forward call (no transpose flag).
+    mpi4jax's own sendrecv AD is unusable here: its JVP tags the tangent
+    message ``_must_transpose`` and the lowering raises on that flag, so
+    forward mode fails, and its transpose takes the RECV-shaped cotangent
+    as the receive template (wrong when send and recv shapes differ).
 
-    Non-JAX arguments (source, dest, sendtag, recvtag, comm) are
-    declared via ``nondiff_argnums`` so JAX does not attempt to trace
-    them.  They are passed through to fwd/bwd as leading static args.
+    So the exchange is its own LINEAR primitive (the pattern of the
+    replicated allreduce in :mod:`legoesm.parallel.reductions`): its JVP
+    is the same sendrecv of the tangent and its transpose is the sendrecv
+    with source and dest swapped and a SEND-shaped receive (the
+    cotangent flows back to the sender). Both rules bind this primitive
+    again, so forward mode, reverse mode and every higher order
+    (grad-of-grad, jvp-of-vjp) work, as do jit and vmap. Every rank
+    must differentiate through the same exchanges: a symbolic-zero
+    tangent/cotangent that reaches a rule is instantiated so that rank
+    still sends, but a rank whose input carries no tangent at all (e.g.
+    ``stop_gradient`` on one rank only) skips the tangent message and its
+    peer then waits on it forever (as for ``global_sum_mpi``).
+
+    The returned callable keeps the historical signature
+    ``(send_buf, recv_template, source, dest, sendtag, recvtag, comm)``;
+    only the template's shape and dtype are used, and it carries no
+    derivative.
     """
+    from jax.extend.core import Primitive
+    from jax.interpreters import ad, batching, mlir
+    from mpi4py import MPI
 
-    def _sendrecv_impl(send_buf, recv_template, source, dest,
-                       sendtag, recvtag, comm):
+    from legoesm.parallel.reductions import CommParam
+
+    def raw(x, *, source, dest, sendtag, recvtag, comm, recv_shape,
+            recv_dtype):
         return mpi4jax_array_result(
             mpi4jax_mod.sendrecv(
-                send_buf, recv_template,
+                x, jnp.zeros(recv_shape, recv_dtype),
                 source=source, dest=dest,
-                sendtag=sendtag, recvtag=recvtag, comm=comm,
+                sendtag=sendtag, recvtag=recvtag, comm=comm.comm,
             )
         )
 
-    _sendrecv = jax.custom_vjp(
-        _sendrecv_impl, nondiff_argnums=(2, 3, 4, 5, 6),
-    )
+    # mpi4jax's ordered effect, read off its own jaxpr (trace only, no
+    # message is sent); without it the lowering has no MPI token to thread.
+    effects = jax.make_jaxpr(lambda v: raw(
+        v, source=0, dest=0, sendtag=0, recvtag=0,
+        comm=CommParam(MPI.COMM_WORLD), recv_shape=(), recv_dtype=v.dtype,
+    ))(0.0).effects
 
-    def _fwd(send_buf, recv_template, source, dest, sendtag, recvtag, comm):
-        # fwd has the same signature as the primal function.
-        result = mpi4jax_array_result(
-            mpi4jax_mod.sendrecv(
-                send_buf, recv_template,
-                source=source, dest=dest,
-                sendtag=sendtag, recvtag=recvtag, comm=comm,
-            )
-        )
-        # Save the send buffer as residual: the BACKWARD recv template must
-        # be SEND-shaped (the returned cotangent d_send pairs with send_buf).
-        # Cubed-sphere strips have send.shape == recv.shape so zeros_like(g)
-        # used to work by accident; Voronoi per-neighbor send/recv counts
-        # generally DIFFER, which would mis-shape the backward message and
-        # the returned cotangent.  Bit-identical for equal-shape callers.
-        #
-        # NOTE: a metadata-only residual (shape, dtype) to avoid retaining the
-        # send activation (codex integration review 2026-06-10, MINOR) was
-        # tried and REVERTED — both numpy-dtype-object and dtype-name-str
-        # forms hit "not a valid JAX type" in the backward zeros/sendrecv on
-        # this jax/mpi4jax stack.  Correctness of this shared AD primitive
-        # outranks the memory micro-opt; revisit with an on-device-verified
-        # ShapeDtypeStruct idiom, not a login-node guess.
-        return result, (send_buf,)
+    prim = Primitive("legoesm_sendrecv")
+    prim.def_impl(raw)
+    prim.def_effectful_abstract_eval(
+        lambda x, *, recv_shape, recv_dtype, **_: (
+            jax.core.ShapedArray(recv_shape, recv_dtype), effects))
+    mlir.register_lowering(prim, mlir.lower_fun(raw, multiple_results=False))
+    ad.primitive_jvps[prim] = lambda primals, tangents, **params: (
+        prim.bind(primals[0], **params),
+        prim.bind(ad.instantiate_zeros(tangents[0]), **params))
 
-    def _bwd(source, dest, sendtag, recvtag, comm, res, g):
-        # bwd receives nondiff args first, then residuals, then cotangent.
-        # Reverse: swap source<->dest so cotangent flows back to sender.
-        # ``g`` is RECV-shaped (cotangent of the output); the message we
-        # receive back carries the peer's cotangent for OUR send_buf, so
-        # the template must be SEND-shaped.
-        (send_buf,) = res
-        d_send = mpi4jax_array_result(
-            mpi4jax_mod.sendrecv(
-                g, jnp.zeros_like(send_buf),
-                source=dest, dest=source,
-                sendtag=sendtag, recvtag=recvtag, comm=comm,
-            )
-        )
-        return d_send, jnp.zeros_like(g)
+    def _transpose(ct, x, *, source, dest, sendtag, recvtag, comm,
+                   recv_shape, recv_dtype):
+        # ``ct`` is RECV-shaped; the message received back is the peer's
+        # cotangent for OUR send buffer, so the receive is SEND-shaped.
+        # Tags swap with the endpoints so the reverse message matches the
+        # forward pairing (identical for the callers' equal tags).
+        return [prim.bind(
+            ad.instantiate_zeros(ct), source=dest, dest=source,
+            sendtag=recvtag, recvtag=sendtag, comm=comm,
+            recv_shape=x.aval.shape, recv_dtype=x.aval.dtype)]
 
-    _sendrecv.defvjp(_fwd, _bwd)
+    ad.primitive_transposes[prim] = _transpose
+
+    def _batch(args, dims, *, recv_shape, **params):
+        # Batch axis leading on BOTH ends, so the contiguous message of B
+        # stacked buffers lines up between sender and receiver.
+        (x,), (d,) = args, dims
+        x = jnp.moveaxis(x, d, 0)
+        return prim.bind(x, recv_shape=(x.shape[0], *recv_shape),
+                         **params), 0
+
+    batching.primitive_batchers[prim] = _batch
+
+    def _sendrecv(send_buf, recv_template, source, dest, sendtag, recvtag,
+                  comm):
+        return prim.bind(
+            jnp.asarray(send_buf), source=source, dest=dest,
+            sendtag=sendtag, recvtag=recvtag,
+            comm=CommParam(MPI.COMM_WORLD if comm is None else comm),
+            recv_shape=tuple(recv_template.shape),
+            recv_dtype=jnp.dtype(recv_template.dtype))
+
     return _sendrecv
 
 

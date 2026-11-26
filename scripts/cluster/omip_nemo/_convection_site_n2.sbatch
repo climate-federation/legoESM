@@ -44,6 +44,8 @@
 # cloud with a different state shape and is NOT covered. Do not report this
 # as three-grid agreement.
 set -uo pipefail
+# Any failing command fails the job (#2525: it ended in echo and exited 0).
+trap 'RC=$?' ERR
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge
 R=/burg-archive/glab/users/pg2328/legoESM
 cd $ROOT || exit 1
@@ -79,3 +81,4 @@ $PY -u scripts/plot/plot_convection_site_n2.py \
   --confounded labrador,greenland \
   --out "$R/results/omip_nemo/convection_sites/n2_sites_d30.png"
 echo "=== rc=$? ==="
+exit ${RC:-0}

@@ -1,20 +1,11 @@
-# legoESM experiment template — OMIP global lat-lon ocean with the full physics
-# pipeline configured via nested YAML (#382).
+# legoESM experiment template -- OMIP global lat-lon ocean, KPP in its CVMix / MOM6 options.
 #
-# omip_latlon_kpp.yaml with KPP bld_structure: cvmix (CVMix/MOM6 boundary-layer
-# reference, first-crossing interpolation, interface diffusivity).
-#
-# Same OMIP setup as omip_latlon.yaml, but the vertical-mixing / convection /
-# shortwave-penetration pipeline and the GM/Redi lateral mixing are expressed
-# directly in YAML via the nested `ocean.physics` / `ocean.gm_redi` sections
-# (previously Python-only). Demonstrates KPP vertical mixing with a custom
-# Ri_crit, enhanced-diffusion convection, Jerlov type-II shortwave penetration,
-# and triad GM/Redi.
-#
-# On the lat-lon C-grid, horizontal/lateral mixing is selected via the flat
-# `ocean.A_h`/`ocean.B_h` fields and the top-level `ocean.gm_redi` block —
-# `physics.lateral_mixing.scheme` must stay `none` (the physics lateral-mixing
-# factory is cubed-sphere-only; the runtime validator rejects anything else).
+# Same as omip_latlon_kpp.yaml except three opt-in KPP options (Isma Di Carlo's ENSO
+# fork): the unresolved-shear velocity scale of the CVMix/MOM6 form, velocity scales
+# from the actual surface buoyancy flux (no float32-epsilon floor), and surrogate
+# gradients through the boundary-layer-base and convective switches (forward
+# unchanged), plus the CVMix/MOM6 boundary-layer structure (bld_structure: cvmix).
+# Defaults elsewhere stay as in omip_latlon_kpp.yaml.
 experiment:
   tier: tier3
   complexity: primitive_equation
@@ -22,13 +13,13 @@ experiment:
   maturity: structurally_validated   # config passes validate_strict; not run end-to-end
   description: >
     OMIP-style forced global ocean (lat-lon C-grid) with the physics pipeline
-    configured via nested YAML: KPP vertical mixing (Ri_crit=0.3),
+    configured via nested YAML: KPP vertical mixing (Ri_crit=0.3, CVMix/MOM6 options),
     enhanced-diffusion convection, Jerlov-II shortwave penetration, and triad
     GM/Redi (kappa_GM=kappa_Redi=1000). Requires CORE-II forcing + WOA18 IC.
   data: [core2_nyf, woa18]
   conservation_gates: [volume, heat, salt]
 model:
-  name: "OMIP-latlon-kpp"
+  name: "OMIP-latlon-kpp-cvmix"
   type: ocean_only
 grid:
   type: latlon_cgrid
@@ -51,7 +42,10 @@ ocean:
       scheme: kpp
       kpp:
         Ri_crit: 0.3          # critical bulk Richardson number (Large et al. 1994)
-        bld_structure: cvmix  # CVMix/MOM6 boundary-layer structure (KPPConfig)
+        vt2_velocity_scale: candidate   # CVMix / MOM6 w_s at sigma = epsilon of each candidate depth
+        actual_buoyancy_flux: true      # zeta from the actual B_f (CVMix 1d_OBL)
+        gradient_surrogates: true       # logistic-blend backward pass through the two switches
+        bld_structure: cvmix            # CVMix/MOM6 BL structure: surface-layer reference, (1-eps/2) Ri, first-crossing interp, interface K
     lateral_mixing:
       scheme: none            # lat-lon: lateral mixing via A_h / gm_redi (see header)
     convection:
@@ -75,4 +69,4 @@ forcing:
   path: ""
 output:
   format: zarr
-  path: output/omip_latlon_kpp/
+  path: output/omip_latlon_kpp_cvmix/

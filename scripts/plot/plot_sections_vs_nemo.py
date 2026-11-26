@@ -57,7 +57,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 _HERE = Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parents[1] / "validate"))
 sys.path.insert(0, str(_HERE.parents[1] / "validate" / "ocean_fidelity"))
-from compare_omip_nemo import _load_legoesm, regrid_curv_to_latlon  # noqa: E402
+from compare_omip_nemo import (  # noqa: E402
+    _load_legoesm, regrid_curv_to_latlon, require_window)
 # Nearest-wet classification, reused from the three-way scorecard rather than
 # re-derived. The regridder's own flag is a DISTANCE-TO-DATA flag, not a
 # land/sea test: a target cell on land or below the sea floor keeps it as long
@@ -331,6 +332,10 @@ def main() -> int:
 
     trp = _load_legoesm(a.tripole, use_mean=a.use_mean_fields)
     mps = _load_legoesm(a.mpas, use_mean=a.use_mean_fields) if a.mpas else None
+    # A window mean must span the oracle's record length (#2525).
+    require_window(trp, a.use_mean_fields, what="tripole")
+    if mps is not None:
+        require_window(mps, a.use_mean_fields, what="mpas")
     nem = load_nemo_3d(a.nemo_gridt, a.nemo_time_idx)
     print(f"[fields] {'WINDOW MEAN (T_mean_hw/S_mean_hw)' if a.use_mean_fields else 'INSTANTANEOUS'} "
           f"vs NEMO record {a.nemo_time_idx} (a window mean)")

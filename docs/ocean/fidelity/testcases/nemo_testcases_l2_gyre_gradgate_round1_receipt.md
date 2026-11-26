@@ -26,7 +26,7 @@ The earlier `cpu_agreement_1step.json` belongs to superseded instrument commit
 The instrument builds `build_nemo_testcase_card("GYRE-zco")`, uses the
 campaign forcing helper, and enters every modeled step through the production
 `LatLonCGridOceanModel._step_jitted` implementation at
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13210`.
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13229`.
 It reuses the four-field live-volume-normalized loss and per-step Python
 composition from `origin/feat/gyre-gradient-twin-2` commit `901cfe0d8`. It also
 reuses that lane's Decision 49 construction: each `_step_jitted` call has its

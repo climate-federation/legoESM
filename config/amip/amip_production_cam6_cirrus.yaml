@@ -1,0 +1,14 @@
+# Production deck + CAM6 cirrus ice nucleation (Liu-Penner 2005 with
+# pre-existing ice, nucleate_ice.F90; MG2 applies naai as micro_mg2_0.F90:1117-1129),
+# non-default arm.  Ported from the ENSO fork (Isma Di Carlo).  The aerosol file
+# is CAM's prescribed MAM3 climatology mapped to the run's cells
+# (cam6_cirrus_aerosol.map_to_cells), relative to the run directory as in the
+# fork's decks; it is NOT staged on Ginsburg.  Everything else is
+# amip_production.yaml.
+include: amip_production.yaml
+morrison_cirrus_nucleation: cam6_liu_penner
+cirrus_aerosol_file: inputs/cesm_prescribed_aero/mam3_2000clim_mpas.npz
+morrison_cirrus_T_width_K: 0.1   # NAMED, equals the code default: RULE 5 width of the
+                                 # temperature switches (0 = CAM6's hard switches)
+morrison_cirrus_rel_width: 0.01  # NAMED, equals the code default: RULE 5 relative
+                                 # width of the humidity/updraft/ice/number switches

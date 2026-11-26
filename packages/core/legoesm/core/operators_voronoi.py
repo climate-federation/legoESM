@@ -1491,3 +1491,36 @@ def scalar_del2_cell_cfl_factor(mesh):
         np.where(mask, dv / np.maximum(dc, 1e-30), 0.0),
         axis=0) / np.asarray(mesh.areaCell)
     return float(np.max(g_cell))
+
+
+def vector_laplacian_row_sum(mesh):
+    """Per-edge Gershgorin row sum ``G_e`` [1/m^2] of :func:`vector_laplacian_del2_3d`.
+
+    The operator is ``grad(div u) - grad_t(curl u)``.  Its row at edge e takes
+    the divergence of the edge's two cells (``(1/A_c) sum dvEdge``) over
+    ``dcEdge_e`` and the curl of its two vertices (``(1/A_v) sum dcEdge``) over
+    ``dvEdge_e``, so the sum of the absolute coefficients is
+
+        G_e = (S_c0 + S_c1) / dcEdge_e + (T_v0 + T_v1) / dvEdge_e ,
+        S_c = (1/areaCell_c) sum_{e' of c} dvEdge_e' ,
+        T_v = (1/areaTriangle_v) sum_{e' of v} dcEdge_e' .
+
+    It bounds the operator's eigenvalues touching that edge from the actual
+    local geometry (32 / dc**2 on a regular hexagon), unlike a spacing taken
+    from meshDensity.  Edges with a missing cell or vertex (the outer ring of a
+    partition's local mesh, padding) get 0.  jax.numpy, so it can run inside a
+    traced step on a rank-local mesh.
+    """
+    eoc = jnp.asarray(mesh.edgesOnCell)
+    eov = jnp.asarray(mesh.edgesOnVertex)
+    dv = jnp.asarray(mesh.dvEdge)
+    dc = jnp.asarray(mesh.dcEdge)
+    s_cell = jnp.sum(jnp.where(eoc >= 0, dv[jnp.maximum(eoc, 0)], 0.0), axis=0) / jnp.asarray(mesh.areaCell)
+    t_vert = jnp.sum(jnp.where(eov >= 0, dc[jnp.maximum(eov, 0)], 0.0), axis=0) / jnp.where(
+        jnp.asarray(mesh.areaTriangle) > 0, jnp.asarray(mesh.areaTriangle), 1.0)
+    c0, c1 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
+    v0, v1 = mesh.verticesOnEdge[0], mesh.verticesOnEdge[1]
+    complete = (c0 >= 0) & (c1 >= 0) & (v0 >= 0) & (v1 >= 0) & (dc > 0) & (dv > 0)
+    g = ((s_cell[jnp.maximum(c0, 0)] + s_cell[jnp.maximum(c1, 0)]) / jnp.where(dc > 0, dc, 1.0)
+         + (t_vert[jnp.maximum(v0, 0)] + t_vert[jnp.maximum(v1, 0)]) / jnp.where(dv > 0, dv, 1.0))
+    return jnp.where(complete, g, 0.0)

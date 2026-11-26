@@ -1,0 +1,14 @@
+--- sbcblk.F90
++++ sbcblk.F90
+@@ -68,0 +69,3 @@
++! O8O16_OBSERVER_BEGIN
++   USE o17_master_writer, ONLY : o17_raw_blk1, o17_raw_blk2
++! O8O16_OBSERVER_END
+@@ -1076,0 +1080,3 @@
++! O8O16_OBSERVER_BEGIN
++      CALL o17_raw_blk1(pwndi,pwndj,ptair,pqair,pslp,ptsui,rhoa,smask0)
++! O8O16_OBSERVER_END
+@@ -1216,0 +1223,3 @@
++! O8O16_OBSERVER_BEGIN
++      CALL o17_raw_blk2(ptair,pqair,pslp,pdqlw,pprec,psnow,qsr,emp)
++! O8O16_OBSERVER_END

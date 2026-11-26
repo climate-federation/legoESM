@@ -3,11 +3,15 @@
 usage: python switch_scales.py [fixture.npz]
 
 User rule (as CLOUDSC): a smooth window is 0.01 x a characteristic scale of
-the SWITCHED quantity; the scale is the 2nd percentile of |x| > 1e-14 over the
-oracle fixture.  This runs CUMASTRN with the exact (OpenIFS) switches on every
-fixture column (arm L, the legoESM constants) and records, per quantity class,
-the first operand of every IfsSmooth call: the quantity being floored, capped
-or tested.  A class is identified by its width constant ``_W_<CLASS>`` (set to
+the SWITCHED quantity; the scale is the 2nd percentile of |x| over the oracle
+fixture, counting only |x| > max(1e-14, 1e-6 median|x|) (fp noise of
+sign-changing quantities excluded; vote 2026-11-15).  This runs CUMASTRN with
+the exact (OpenIFS) switches on every fixture column (arm L, the legoESM
+constants) and records, per quantity class, x = the operand's distance to the
+switch point: x itself for one-argument calls, a - b for the two-argument ones
+(vote 2026-11-15: invariant to a common offset such as absolute T or static
+energy).  The part-1 closure constants in _ifs_cumastrn predate the a - b
+convention and are migrated in a follow-up PR (vote 2026-11-15).  A class is identified by its width constant ``_W_<CLASS>`` (set to
 a sentinel while recording; ``RG * _W_<CLASS>`` counts as the same class).
 Values of lanes the scheme discards (inactive levels) are recorded too.
 Prints ``_S_<CLASS> = <P2>  (n = <count>)`` per class.
@@ -24,15 +28,18 @@ import numpy as np
 
 from legoesm.atmosphere.physics import _ifs_smooth
 from legoesm.atmosphere.physics._ifs_thermo import lego_thermo, satur_qsat
+from legoesm.atmosphere.physics import _ifs_thermo
 from legoesm.atmosphere.physics.convection import _ifs_cumastrn as M
+from legoesm.atmosphere.physics.convection import _ifs_cuascent
 
 FIXTURE = (Path(__file__).resolve().parents[4] / "tests" / "atmosphere"
            / "oracle_fixtures" / "bechtold_ifs.npz")
 GROUPS = ("L32", "L137", "STRESS")
-MODULES = (M,)
+MODULES = (M, _ifs_cuascent, _ifs_thermo)
 _ONE_ARG = ("pos", "neg1", "abs")
 _TWO_ARG = ("max", "min", "gt", "ge", "lt", "le", "on", "off")
 _FLOOR = 1.0e-14
+_REL_FLOOR = 1.0e-6     # samples below 1e-6 x median|x| are fp noise (vote 2026-11-15)
 
 
 def _classes():
@@ -41,12 +48,13 @@ def _classes():
     for mod in MODULES:
         for name in dir(mod):
             if name.startswith("_S_") and hasattr(mod, "_W_" + name[3:]):
-                out[(mod, "_W_" + name[3:])] = name[3:]
+                tag = "" if mod is M else "[" + mod.__name__.rsplit(".", 1)[1] + "]"
+                out[(mod, "_W_" + name[3:])] = name[3:] + tag
     return out
 
 
 def measure(fix, groups=GROUPS):
-    """{class: |x| samples} from exact-switch CUMASTRN runs on ``groups``."""
+    """{class: |x| samples (x = distance to the switch point)} from exact-switch CUMASTRN runs on ``groups``."""
     classes = _classes()
     th = lego_thermo()
     sentinel = {}
@@ -78,10 +86,11 @@ def measure(fix, groups=GROUPS):
                 return f(self, x, w, *a, **k)
         else:
             def g(self, x, b, w, *a, **k):
-                record(tag(w), x)
+                record(tag(w), x - b)   # distance to the switch point (vote 2026-11-15)
                 return f(self, x, b, w, *a, **k)
         return g
 
+    jax.clear_caches()   # traces are cached blind to the patched methods/widths
     try:
         for n in orig:
             setattr(_ifs_smooth.IfsSmooth, n, wrap(n))
@@ -101,14 +110,17 @@ def measure(fix, groups=GROUPS):
             setattr(_ifs_smooth.IfsSmooth, n, f)
         for (mod, wname), v in saved.items():
             setattr(mod, wname, v)
+        jax.clear_caches()
     return {c: np.concatenate(v) for c, v in store.items()}
 
 
 def p2(samples):
-    """{class: (2nd percentile of |x| > 1e-14, count)}."""
+    """{class: (2nd percentile of |x| above max(1e-14, 1e-6 median|x|), count)}."""
     out = {}
     for c, v in samples.items():
         v = v[np.isfinite(v) & (v > _FLOOR)]
+        if v.size:
+            v = v[v > _REL_FLOOR * np.median(v)]
         out[c] = (float(np.percentile(v, 2.0)) if v.size else float("nan"), int(v.size))
     return out
 

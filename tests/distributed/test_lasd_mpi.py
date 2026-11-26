@@ -12,10 +12,9 @@ distributed FFT is not bit-identical to the serial ``rfft2`` (transpose vs
 monolithic summation order, ~1e-10), and the dynamic procedure's quintic β-root
 plus the ``LM/MM`` division amplify that into O(1e-2) on the raw C_s² — the
 dynamic SGS is intrinsically noisy, which is exactly why it planar/box-averages
-and clips. The physically meaningful invariant is the integrated STATE: the ν_t
-noise is damped by the projection, the spectral filter and time integration, so a
-full dynamic-SGS ``step()`` trajectory matches single-rank to ~1e-4 (checked
-last). Same non-bit-identical class as the CRM fix_mass / moist-mean reductions.
+and clips. On the smooth step() fixture below none of that amplification occurs:
+the full dynamic-SGS trajectory matches single-rank to round-off (checked last at
+1e-12; the earlier 1e-4 tolerance was never a measured gap).
 
 Run::
 
@@ -132,8 +131,7 @@ def test_lasd_cs2_matches_serial():
 
 @pytest.mark.skipif(NY % NPROC != 0, reason="NY must divide by n_ranks")
 def test_dynamic_sgs_step_matches_serial():
-    """Full dynamic-LASD step() trajectory == single-rank (the integrated state,
-    the physically meaningful invariant — see module docstring)."""
+    """Full dynamic-LASD step() trajectory == single-rank to round-off."""
     cfg = SpectralLESConfig(nx=NX, ny=NY, nz=NZ, Lx=300.0, Ly=225.0, Lz=100.0,
                             dealias=False, smagorinsky_dynamic=True,
                             spectral_filter=True, time_scheme="ab2")
@@ -169,4 +167,4 @@ def test_dynamic_sgs_step_matches_serial():
                             ("w", st_dist.w, st_ser.w)):
         np.testing.assert_allclose(
             np.asarray(_gather_y(dist)), np.asarray(ser),
-            rtol=1e-4, atol=1e-4, err_msg=f"{name} mismatch")
+            rtol=1e-12, atol=1e-12, err_msg=f"{name} mismatch")

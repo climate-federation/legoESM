@@ -41,15 +41,50 @@ belongs in the kernel module that owns it.
 """
 from __future__ import annotations
 
+import os
+
+import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.core.fv3_native_state_3d import field_shape
+
+# ``lax.scan`` ``unroll`` for the hot k-recurrences: the rezone's two inner
+# scans and geopk's two.  Unrolling keeps the sequential association order
+# (whole-model C768 L40 state bit-identical at 24 GPUs); it trades
+# while-loop iterations (one set of GPU kernel launches each) for a larger
+# fused body.  GPU defaults 40/8 (96 GPUs: 384 -> 262 ms/step); CPU stays 1.
+# Resolved at trace time so importing never initialises a backend; the env
+# vars override on any backend.  Set them before the first trace: a
+# compiled executable keeps the value it was traced with.  The default
+# follows jax.default_backend(), not a jit pinned to another backend.
+_GPU_DEFAULT_UNROLL = {"LEGOESM_FV3_REMAP_UNROLL": 40, "LEGOESM_FV3_GEOPK_UNROLL": 8}
+
+
+def _kscan_unroll(name: str) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return _GPU_DEFAULT_UNROLL[name] if jax.default_backend() == "gpu" else 1
+    value = int(raw)
+    if value < 1:
+        raise ValueError(f"{name} must be >= 1, got {value}")
+    return value
+
+
+def remap_kscan_unroll() -> int:
+    return _kscan_unroll("LEGOESM_FV3_REMAP_UNROLL")
+
+
+def geopk_kscan_unroll() -> int:
+    return _kscan_unroll("LEGOESM_FV3_GEOPK_UNROLL")
+
 
 __all__ = [
     "CSW_OUT_LIKE",
     "PER_FACE_FLAG_FIELDS",
     "batch_size",
     "build_batched_gs",
+    "geopk_kscan_unroll",
+    "remap_kscan_unroll",
     "require_f64_jax",
     "require_uniform_float_jax",
     "require_bool",

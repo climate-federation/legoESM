@@ -52,11 +52,11 @@ Only afterwards does it build and apply the barotropic correction at
 
 The private field and conflict guard are
 `ocean_model_latlon_cgrid.py:1304` and
-`ocean_model_latlon_cgrid.py:2806-2830`.  The production capture is immediately
+`ocean_model_latlon_cgrid.py:2822-2846`.  The production capture is immediately
 before the existing deferred correction at
-`ocean_model_latlon_cgrid.py:9506-9513`; the captured U/V replace returned
+`ocean_model_latlon_cgrid.py:9525-9532`; the captured U/V replace returned
 diagnostic slots only after the ordinary step at
-`ocean_model_latlon_cgrid.py:9665-9669`.
+`ocean_model_latlon_cgrid.py:9684-9688`.
 
 The direct raw-Kaa row remains 707 / 16,900 unequal in both arms, with maximum
 absolute error `0.04480131363770535` m/s.  That large common error is not an

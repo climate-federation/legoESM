@@ -10,6 +10,7 @@ import math as _math
 from pathlib import Path
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 
 from legoesm.core.bulk_flux import GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH
@@ -44,6 +45,20 @@ def _frozen_condensate(state):
             d = tr[k].data
             total = d if total is None else total + d
     return total
+
+
+def _most_2m_impl(*args, **kwargs):
+    from legoesm.core.bulk_flux import compute_most_fluxes
+    return compute_most_fluxes(*args, return_2m=True, **kwargs)
+
+
+# The 2 m diagnostic runs on the host every interval.  Called eagerly, the
+# Obukhov loop inside was traced with a fresh closure and recompiled at every
+# call, and each executable kept its code mapping until a long MPAS run failed
+# with LLVM "Cannot allocate memory".  One cached jit, options static.
+_most_2m_jit = jax.jit(_most_2m_impl, static_argnames=(
+    "scheme", "stability_scheme", "unstable_scheme", "most_zeta_cap_width",
+    "gfs_unstable_join_width"))
 
 
 # Sidecar key carrying the CMOR lat sampling stamp (see CFWriter append guard).
@@ -823,7 +838,8 @@ class DiagnosticCollector:
         return idx_lo, idx_hi, alpha
 
     def _tas_2m(self, state, q_v, sst, sic, T_ice, u_low=None, v_low=None,
-                *, T_land=None, q_land=None, land_fraction=None):
+                *, T_land=None, q_land=None, land_fraction=None,
+                T2m_land=None):
         """2 m air temperature for CMIP ``tas`` from the MOST surface-layer
         similarity profile (interpolate the lowest model level down to 2 m).
         Returns the lowest-level T when the surface inputs (SST / sigma) are
@@ -838,6 +854,14 @@ class DiagnosticCollector:
         land branch uses the same MOST profile anchored on the land skin; do
         not read the result as a sub-canopy screen temperature.
 
+        ``T2m_land`` (keyword-only, optional) is the land scheme's OWN 2 m air
+        temperature (two-leaf canopy: CLM5 ``t_ref2m`` from its roughness,
+        displacement, Obukhov length and canopy-air node).  Where it is finite
+        it REPLACES the profile above on the land leg, which runs the ocean
+        bulk law (Charnock roughness, no displacement) over the land skin.
+        Non-finite entries (held columns, schemes that solve none) keep that
+        profile.
+
         ``u_low`` / ``v_low`` override the lowest-level winds (lets the MPAS
         path pass the reconstructed CELL winds from
         ``reconstruct_cell_velocity`` instead of the edge-normal ``state.u``,
@@ -848,13 +872,27 @@ class DiagnosticCollector:
         import jax.numpy as jnp
         from legoesm import constants
         from legoesm.thermo import saturation_mixing_ratio
-        from legoesm.core.bulk_flux import compute_most_fluxes
         u_low = state.u.data[..., -1] if u_low is None else u_low
         v_low = state.v.data[..., -1] if v_low is None else v_low
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         p_s = state.p_s.data
         p_low = jnp.asarray(self._p_full(p_s))[..., -1]
         rho_low = p_low / (constants.R_d * T_low)
+        # The lowest model level sits at z_low above the surface (about 60 m
+        # on L32), not at 10 m, and the similarity laws integrate POTENTIAL
+        # temperature (CESM camsrfexch hands shr_flux_atmOcn zbot = zm(pver)
+        # and thbot = T exner).  Handing them the level as 10 m and T as theta
+        # published a 2 m value about g z_low / c_p ~ 0.6 K too cold over sea
+        # (measured with this port's own tref at SST 301 K, z_low 60 m).  The
+        # height is the same hypsometric half-thickness the flux path uses
+        # (compute_layer_dz: R T_v dp / (g p_mid), midpoint = half of it) and
+        # the theta pairing is the flux path's surface_reference_state.
+        from legoesm.core.bulk_flux import surface_reference_state
+        from legoesm.thermo import virtual_temperature
+        dp_low = jnp.asarray(self._dp(p_s))[..., -1]
+        z_low = 0.5 * constants.R_d * virtual_temperature(T_low, q_low) * dp_low / (
+            constants.g * p_low)
+        theta_low, _ = surface_reference_state(T_low, 10.0, z_low)
         # Similarity profile matched to the experiment's surface fluxes:
         # SAME bulk scheme (constant -> the historical coare3 stand-in, see
         # __init__) and SAME stable-branch selector (codex 2026-08-02: a
@@ -883,23 +921,25 @@ class DiagnosticCollector:
                 # CESM shr_flux_atmOcn's own ``tref`` diagnostic (2 m).
                 from legoesm.core.bulk_flux import compute_sam_oceflx_fluxes
                 *_, T_2m = compute_sam_oceflx_fluxes(
-                    u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
-                    z_bot=10.0, variant="cesm", return_2m=True,
+                    u_low, v_low, theta_low, q_low, T_sfc, q_sfc, rho_low,
+                    z_bot=z_low, variant="cesm", return_2m=True,
                     t_bot=T_low, zeta_cap_width=self.surface_most_zeta_cap_width,
                 )
                 return T_2m
-            *_, T_2m = compute_most_fluxes(
-                u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+            *_, T_2m = _most_2m_jit(
+                u_low, v_low, theta_low, q_low, T_sfc, q_sfc, rho_low,
+                z_ref=z_low,
                 scheme=(self.tas_profile_scheme
                         if self.tas_profile_scheme != "large_yeager_cesm"
                         else "large_yeager"),
-                return_2m=True,
                 stability_scheme=self.surface_stability_scheme,
                 unstable_scheme=self.surface_unstable_scheme,
                 most_zeta_cap_width=self.surface_most_zeta_cap_width,
                 gfs_unstable_join_width=self.surface_gfs_unstable_join_width,
             )
-            return T_2m
+            # The MOST branch integrates theta down to z_diag; CESM's tref
+            # applies the same potential-to-temperature step (0.01 K/m x 2 m).
+            return T_2m - (constants.g / constants.c_pd) * 2.0
 
         T_sfc_sea = blend_surface_temperature(sst, sic, T_ice)
         q_sfc_sea = saturation_mixing_ratio(T_sfc_sea, p_s)
@@ -921,6 +961,9 @@ class DiagnosticCollector:
         q_sfc_land = (saturation_mixing_ratio(T_land, p_s) if q_land is None
                       else q_land)
         T_2m_land = _profile_to_2m(T_land, q_sfc_land, ocean=False)
+        if T2m_land is not None:
+            T2m_land = jnp.asarray(T2m_land, dtype=T_2m_land.dtype)
+            T_2m_land = jnp.where(jnp.isfinite(T2m_land), T2m_land, T_2m_land)
         T_2m_sea = _profile_to_2m(T_sfc_sea, q_sfc_sea, ocean=True)
         f_land = jnp.clip(jnp.asarray(land_fraction, dtype=T_2m_land.dtype),
                           0.0, 1.0)
@@ -1760,6 +1803,9 @@ class DiagnosticCollector:
         hfls=None,
         evspsbl=None,
         prsn=None,
+        tauu=None,
+        tauv=None,
+        prc=None,
         rsutcs=None,
         rlutcs=None,
         rsds=None,
@@ -1960,7 +2006,7 @@ class DiagnosticCollector:
         # the PHASE-2 commits between the two calendar bins.
         _FLUX_2D = ("pr", "prsn", "rlut", "rsut", "rsdt", "hfss", "hfls",
                     "evspsbl", "rsutcs", "rlutcs", "rsds", "rsus", "rlds", "rlus",
-                    "rtmt")
+                    "rtmt", "tauu", "tauv", "prc")
         # Daily copies of fed 2-D fields (CMIP6 ``day``/``CFday``/``Oday``,
         # placed by ``_DAILY_VARIABLE_REMAP``); the flux ones are the
         # ``_FLUX_2D`` members, binned at the interval midpoint like monthly.
@@ -2011,6 +2057,9 @@ class DiagnosticCollector:
         hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
         evspsbl_np = None if evspsbl is None else np.asarray(evspsbl, dtype=_f64)
         prsn_np = None if prsn is None else np.asarray(prsn, dtype=_f64)
+        tauu_np = None if tauu is None else np.asarray(tauu, dtype=_f64)
+        tauv_np = None if tauv is None else np.asarray(tauv, dtype=_f64)
+        prc_np = None if prc is None else np.asarray(prc, dtype=_f64)
         rsutcs_np = None if rsutcs is None else np.asarray(rsutcs, dtype=_f64)
         rlutcs_np = None if rlutcs is None else np.asarray(rlutcs, dtype=_f64)
         rsds_np = None if rsds is None else np.asarray(rsds, dtype=_f64)
@@ -2049,6 +2098,9 @@ class DiagnosticCollector:
             ("hfls", hfls_np, (_ncol,)),
             ("evspsbl", evspsbl_np, (_ncol,)),
             ("prsn", prsn_np, (_ncol,)),
+            ("tauu", tauu_np, (_ncol,)),
+            ("tauv", tauv_np, (_ncol,)),
+            ("prc", prc_np, (_ncol,)),
             ("rsutcs", rsutcs_np, (_ncol,)),
             ("rlutcs", rlutcs_np, (_ncol,)),
             ("rsds", rsds_np, (_ncol,)),
@@ -2107,6 +2159,9 @@ class DiagnosticCollector:
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
                 ('prsn', prsn_np),   # CMOR kg/m2/s — the frozen part of pr
+                ('tauu', tauu_np),   # CMOR Pa, positive down (stress on the surface)
+                ('tauv', tauv_np),
+                ('prc', prc_np),     # CMOR kg/m2/s — the convective part of pr
                 ('psl', psl),
                 ('rlut', rlut_np),
                 ('rsut', rsut_np),
@@ -2695,7 +2750,7 @@ class DiagnosticCollector:
             energy_toa_net=np.array(self.energy_tracker.toa_net),
             energy_column=np.array(self.energy_tracker.column_energy),
             energy_dE_dt=np.array(self.energy_tracker.dE_dt),
-            energy_residual=np.array(self.energy_tracker.residual),
+            energy_toa_minus_dE_dt=np.array(self.energy_tracker.toa_minus_dE_dt),
             moisture_column_water=np.array(self.moisture_tracker.column_water),
             moisture_precip_rate=np.array(self.moisture_tracker.precip_rate),
             moisture_evap_rate=np.array(self.moisture_tracker.evap_rate),

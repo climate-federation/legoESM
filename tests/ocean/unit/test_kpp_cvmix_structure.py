@@ -26,7 +26,7 @@ from legoesm.ocean.physics.vertical_mixing import kpp as K
 from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
 from legoesm.ocean.vertical import create_z_star_from_thicknesses
 
-CFG = KPPConfig(bld_structure="cvmix")
+CFG = KPPConfig(bld_structure="cvmix", vt2_velocity_scale="candidate")
 HARD = CFG._replace(crossing_sharpness=1e12)
 
 
@@ -534,3 +534,13 @@ def test_legacy_structure_unchanged():
                       (out.dS_dt, _LEGACY_DS_DT), (out.du_dt, _LEGACY_DU_DT)):
         w = np.asarray(want)
         np.testing.assert_allclose(np.asarray(got), w, rtol=1e-13, atol=1e-13 * np.abs(w).max())
+
+
+def test_cvmix_structure_refuses_column_vt2_velocity_scale():
+    """bld_structure='cvmix' always uses w_s per trial depth, so 'column' must raise, not be ignored."""
+    with pytest.raises(ValueError, match="vt2_velocity_scale='candidate'"):
+        n = 4
+        zc = create_z_star_from_thicknesses(np.ones(n))
+        T = jnp.full((1, n), 15.0)
+        K._boundary_layer_depth(T, T, T, T, T, zc, jnp.ones(1), jnp.array([0.01]),
+                                jnp.zeros(1), CFG._replace(vt2_velocity_scale="column"))

@@ -22,7 +22,9 @@ include: amip_production.yaml
 grid_type: latlon
 resolution: 48              # n_lat 48 (n_lon 96): 3.75 deg, ~417 km at the equator (C24 class, design row P3)
 discretization: latlon_cgrid
-vertical_form: legacy       # lat-lon production stays legacy (user 2026-11-11)
+vertical_form: as83         # Arakawa-Suarez, as MPAS (user 2026-11-19, overturns the
+                            # 2026-11-11 keep-legacy ruling): legacy runs a jet away over
+                            # terrain near day 108 (#2548)
 column_lane: true           # the lat-lon dycore is the dynamics operator of the CAM6 column loop
 use_polar_filter: true      # Fourier polar filter: the dt below is set by the EQUATORIAL CFL (as
                             # amip_sundqvist_latlon24.yaml); filter off, the pole-cell clamp is 36 s.
@@ -60,6 +62,9 @@ mpas_div_damp4_scale: 1.0
 # counterpart of the MPAS top sponge (B1 on the duo) was NOT matched here.
 mpas_sponge_del2_top_layers: 0
 mpas_sponge_del2_top_factor: 1.0
+tracer_vertical_scheme: sb
+tracer_van_leer_width: 1.0e-10  # VOTED W4: mixing-ratio increments [kg/kg]
+tracer_van_leer_flux_width: 1.0e-6  # VOTED W4: mass flux [Pa/s]
 mpas_vert_advection_scheme: upwind
 mpas_qv_smooth_del2_m2s: 0.0
 mpas_qv_smooth_del4_m4s: 0.0        # refused non-zero on the column lane (edge operator)

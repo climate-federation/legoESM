@@ -3601,13 +3601,22 @@ def nemo_eos_fzp_eos80(S_psu):
     its true derivative there is infinite and land cells carry ``S = 0``.
     """
     S = jnp.asarray(S_psu, dtype=jnp.float64)
-    positive = S > 0.0
-    root = jnp.where(positive, jnp.sqrt(jnp.where(positive, S, 1.0)),
-                     lax.stop_gradient(jnp.sqrt(S)))
+    nonnegative = S >= 0.0
+    valid_S = jnp.where(nonnegative, S, 0.0)
+    positive = valid_S > 0.0
+    root = jnp.where(
+        positive, jnp.sqrt(jnp.where(positive, valid_S, 1.0)),
+        lax.stop_gradient(jnp.sqrt(valid_S)),
+    )
     rd = nemo_source_round
     poly = rd(rd(_TFRZ_S_LINEAR + rd(_TFRZ_S_ONEHALF * rd(root)))
-              + rd(_TFRZ_S_SQUARE * S))
-    return rd(poly * S)
+              + rd(_TFRZ_S_SQUARE * valid_S))
+    valid = rd(poly * valid_S)
+    raw_root = jnp.sqrt(S)
+    raw_poly = rd(rd(_TFRZ_S_LINEAR + rd(_TFRZ_S_ONEHALF * rd(raw_root)))
+                  + rd(_TFRZ_S_SQUARE * S))
+    raw = rd(raw_poly * S)
+    return jnp.where(nonnegative, valid, lax.stop_gradient(raw))
 
 
 def slab_freeze_point_K(T_freeze_const, scheme: str = "constant"):
@@ -3636,6 +3645,7 @@ def slab_freeze_point_K(T_freeze_const, scheme: str = "constant"):
 
 def nemo_qco_r3t_ratio(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray, *,
+    linear_free_surface: bool,
     evaluation: str = "quotient",
 ) -> jnp.ndarray:
     """NEMO ``dom_qco_r3c`` T-point ratio without a thickness floor."""
@@ -3643,7 +3653,7 @@ def nemo_qco_r3t_ratio(
         raise ValueError(
             f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
             "or 'nemo_reciprocal'")
-    if getattr(z_coord, "linear_free_surface", False):
+    if linear_free_surface:
         return jnp.zeros_like(jnp.asarray(eta))
     H = jnp.asarray(H_bathy)
     wet_H = H > 0.0

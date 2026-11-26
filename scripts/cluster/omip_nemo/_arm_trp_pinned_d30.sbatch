@@ -48,6 +48,7 @@
 # thirteen flags: main's driver is OLDER than the branch the control ran on.
 # The control's own manifest says so -- package_path is under _omip_merge --
 # and reproducing a run means reproducing its TREE, not just its flags.
+# NOT REPRODUCIBLE FROM THE REPO ALONE (#2525): its command line is read from the untracked _arm_trp_pinned_d30.txt. Refused up front if absent.
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge; cd $ROOT || exit 1
 echo "HEAD: $(git -C $ROOT log --oneline -1)"
@@ -55,6 +56,7 @@ echo "dirty: $(git -C $ROOT status --porcelain | wc -l)"
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_ENABLE_X64=1
+[ -r /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_arm_trp_pinned_d30.txt ] || { echo "FATAL: untracked command file _arm_trp_pinned_d30.txt is absent"; exit 1; }
 CMD=$(cat /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_arm_trp_pinned_d30.txt)
 # ADOPTED 2026-09-23, BY THE USER, AFTER MEASUREMENT: this lane now restores
 # surface salinity the way the oracle does -- as a real freshwater flux --

@@ -34,10 +34,32 @@ from legoesm.timestepping.pytree_ops import pytree_linear_combination as _pytree
 State = TypeVar("State")
 
 
+class TracerMassHooks(NamedTuple):
+    """Conservative tracer transport for :func:`split_explicit_step` (#2641).
+
+    Tracers are moved once per RK stage, after the acoustic substeps, with
+    the stage's own mass flux (MPAS-A / WRF), and RK blends act on
+    ``rho*q``. ``acoustic_update_fn`` may then return ``(state, aux)``;
+    ``finish_stage(base, eval_state, state_slow, acoustic_out, slow_tend,
+    dt_eff)`` returns the stage state with conservatively updated tracers.
+    ``density(state)`` broadcasts against ``tracers(state)[..., 0]``.
+    """
+
+    density: Callable
+    tracers: Callable
+    with_tracers: Callable
+    finish_stage: Callable
+
+
 class SplitExplicitConfig(NamedTuple):
     """Configuration for split-explicit time integration."""
     n_substeps: int = 6
     outer_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
+    # fp32-storage-safe SSP-RK3: stage combinations in increment form
+    # x + b*(y - x) (tracers too, as rho*q under conservative transport), so
+    # small increments are not rounded away against the stored value. Equal
+    # in exact arithmetic.
+    rounding_safe_combinations: bool = False
 
 
 def select_n_outer_split(
@@ -185,6 +207,7 @@ def split_explicit_step(
     acoustic_update_fn: Callable,
     dt: float,
     config: SplitExplicitConfig,
+    tracer_mass: TracerMassHooks | None = None,
 ) -> State:
     """One full time step: RK3 outer + forward-backward acoustic inner.
 
@@ -203,6 +226,9 @@ def split_explicit_step(
         Full time step [seconds].
     config : SplitExplicitConfig
         Substep configuration.
+    tracer_mass : TracerMassHooks, optional
+        Conservative tracer transport; ``None`` keeps the tracers on the
+        slow tendency like every other field.
 
     Returns
     -------
@@ -210,15 +236,29 @@ def split_explicit_step(
         State after one time step.
     """
     integrator = config.outer_integrator.lower()
+    if config.rounding_safe_combinations and integrator not in ("ssp_rk3", "ssp3", "rk3"):
+        raise ValueError(
+            "rounding_safe_combinations is implemented for ssp_rk3 only; "
+            f"got outer_integrator={config.outer_integrator!r}.")
     if integrator in ("ssp_rk3", "ssp3", "rk3"):
         return _split_explicit_ssp_rk3(
             state, slow_tendency_fn, acoustic_update_fn, dt, config,
+            tracer_mass,
         )
     if integrator in ("ssp_rk34", "ssp34", "rk34"):
         return _split_explicit_ssp_rk34(
             state, slow_tendency_fn, acoustic_update_fn, dt, config,
+            tracer_mass,
         )
     if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
+        if tracer_mass is not None:
+            # Stage 5 applies two evaluation states' tendencies under one
+            # acoustic run, so no single stage mass flux carries the tracers.
+            raise ValueError(
+                "Conservative tracer transport supports ssp_rk3 and ssp_rk34; "
+                f"outer_integrator={config.outer_integrator!r} mixes two "
+                "evaluation states in one acoustic stage."
+            )
         return _split_explicit_ssp_rk54(
             state, slow_tendency_fn, acoustic_update_fn, dt, config,
         )
@@ -231,27 +271,36 @@ def _split_explicit_ssp_rk3(
     acoustic_update_fn: Callable,
     dt: float,
     config: SplitExplicitConfig,
+    tracer_mass: TracerMassHooks | None = None,
 ) -> State:
     """SSP-RK3 outer integrator with acoustic substeps at each stage."""
     # Stage 1: k1 = state + dt * F(state) + acoustic_update
     tend_0 = slow_tendency_fn(state)
     k1 = _rk_stage_with_acoustics(
         state, tend_0, dt, 1.0, acoustic_update_fn, config,
+        state, tracer_mass,
     )
 
     # Stage 2: k2 = 3/4 * state + 1/4 * (k1 + dt * F(k1) + acoustic)
     tend_1 = slow_tendency_fn(k1)
     k1_stepped = _rk_stage_with_acoustics(
-        k1, tend_1, dt, 1.0, acoustic_update_fn, config,
+        k1, tend_1, dt, 1.0, acoustic_update_fn, config, k1, tracer_mass,
     )
-    k2 = _pytree_linear_combination(state, k1_stepped, 0.75, 0.25)
+    k2 = _blend(state, k1_stepped, 0.75, 0.25, tracer_mass,
+               config.rounding_safe_combinations)
 
     # Stage 3: k3 = 1/3 * state + 2/3 * (k2 + dt * F(k2) + acoustic)
     tend_2 = slow_tendency_fn(k2)
     k2_stepped = _rk_stage_with_acoustics(
-        k2, tend_2, dt, 1.0, acoustic_update_fn, config,
+        k2, tend_2, dt, 1.0, acoustic_update_fn, config, k2, tracer_mass,
     )
-    return _pytree_linear_combination(state, k2_stepped, 1.0 / 3.0, 2.0 / 3.0)
+    return _blend(state, k2_stepped, 1.0 / 3.0, 2.0 / 3.0, tracer_mass,
+                  config.rounding_safe_combinations)
+
+
+def _increment_combination(x, y, b):
+    """``x + b*(y - x)``: equals ``(1-b)*x + b*y``, rounding only the increment."""
+    return jax.tree.map(lambda xi, yi: xi + b * (yi - xi), x, y)
 
 
 def _split_explicit_ssp_rk54(
@@ -319,38 +368,72 @@ def _split_explicit_ssp_rk34(
     acoustic_update_fn: Callable,
     dt: float,
     config: SplitExplicitConfig,
+    tracer_mass: TracerMassHooks | None = None,
 ) -> State:
     """SSP-RK(4,3) outer integrator with acoustic substeps at each stage."""
     # Stage 1: u1 = u0 + 1/2 dt F(u0)
     f0 = slow_tendency_fn(state)
     u1 = _rk_stage_with_acoustics(
-        state, f0, dt, 0.5, acoustic_update_fn, config,
+        state, f0, dt, 0.5, acoustic_update_fn, config, state, tracer_mass,
     )
 
     # Stage 2: u2 = u1 + 1/2 dt F(u1)
     f1 = slow_tendency_fn(u1)
     u2 = _rk_stage_with_acoustics(
-        u1, f1, dt, 0.5, acoustic_update_fn, config,
+        u1, f1, dt, 0.5, acoustic_update_fn, config, u1, tracer_mass,
     )
 
     # Stage 3: u3 = 2/3 u0 + 1/3 u2 + 1/6 dt F(u2)
     f2 = slow_tendency_fn(u2)
-    u3_base = _pytree_linear_combination(state, u2, 2.0 / 3.0, 1.0 / 3.0)
+    u3_base = _blend(state, u2, 2.0 / 3.0, 1.0 / 3.0, tracer_mass)
     u3 = _rk_stage_with_acoustics(
         u3_base, f2, dt, 1.0 / 6.0, acoustic_update_fn, config,
+        u2, tracer_mass,
     )
 
     # Stage 4: u4 = u3 + 1/2 dt F(u3)
     f3 = slow_tendency_fn(u3)
     return _rk_stage_with_acoustics(
-        u3, f3, dt, 0.5, acoustic_update_fn, config,
+        u3, f3, dt, 0.5, acoustic_update_fn, config, u3, tracer_mass,
     )
+
+
+def _blend(x, y, a, b, tracer_mass, increment=False):
+    """``a*x + b*y``; with ``tracer_mass`` the tracers blend as ``rho*q``.
+
+    ``increment`` (``rounding_safe_combinations``, needs ``a + b == 1``):
+    ``x + b*(y - x)``, which rounds only the increment in low-precision
+    storage; equal to ``a*x + b*y`` in exact arithmetic.
+    """
+    if increment:
+        if abs(a + b - 1.0) > 1e-12:
+            raise ValueError(f"increment-form blend needs a + b == 1, got {a} + {b}")
+        out = _increment_combination(x, y, b)
+    else:
+        out = _pytree_linear_combination(x, y, a, b)
+    if tracer_mass is None:
+        return out
+    tm = tracer_mass
+    if increment:
+        mx = tm.density(x)[..., None] * tm.tracers(x)
+        my = tm.density(y)[..., None] * tm.tracers(y)
+        mq = mx + b * (my - mx)
+    else:
+        mq = (a * tm.density(x)[..., None] * tm.tracers(x)
+              + b * tm.density(y)[..., None] * tm.tracers(y))
+    return tm.with_tracers(out, mq / tm.density(out)[..., None])
 
 
 def _rk_stage_with_acoustics(
     state, slow_tend, dt, weight, acoustic_update_fn, config,
+    eval_state=None, tracer_mass=None,
 ):
-    """Apply slow tendency to u/v/tracers, then run acoustic substeps."""
+    """Apply slow tendency to u/v/tracers, then run acoustic substeps.
+
+    With ``tracer_mass`` the tracers are then re-transported from ``state``
+    by ``finish_stage`` with the stage mass flux; ``eval_state`` is the
+    state the slow tendency was evaluated at.
+    """
     # First, apply the slow tendency update to the full state
     state_slow = _pytree_axpy(state, slow_tend, dt * weight)
 
@@ -359,6 +442,10 @@ def _rk_stage_with_acoustics(
     state_out = acoustic_update_fn(
         state_slow, slow_tend, dt_substep, config.n_substeps, config,
     )
-    return state_out
+    if tracer_mass is None:
+        return state_out
+    return tracer_mass.finish_stage(
+        state, eval_state, state_slow, state_out, slow_tend, dt * weight,
+    )
 
 

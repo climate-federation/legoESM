@@ -2876,6 +2876,8 @@ class PhysicsPipeline:
                 self, "_cloud_saturation_scheme", None),
             cover_condensate_q_ref=getattr(
                 self, "_cloud_cover_condensate_q_ref", None),
+            clubb_mf_cloud=getattr(self, "_clubb_mf_cloud", None),
+            mf_cldfrac_fac=getattr(self, "_cloud_clubb_mf_cldfrac_fac", None),
         )
 
     def _sundqvist_kwargs(self, ad, q_i, cell_area=None):
@@ -2896,6 +2898,7 @@ class PhysicsPipeline:
                                solar_weights, s_0,
                                o3_vmr_precomputed, aerosol_od_precomputed,
                                aerosol_lw_od_precomputed=None,
+                               aerosol_sw_volc_precomputed=None,
                                aerosol_ccn_aod=None,
                                o3_top_vmr=None,
                                tau_equator=None, tau_pole=None,
@@ -3318,6 +3321,7 @@ class PhysicsPipeline:
             o3_vmr_precomputed = _shard(o3_vmr_precomputed)
             aerosol_od_precomputed = _shard(aerosol_od_precomputed)
             aerosol_lw_od_precomputed = _shard(aerosol_lw_od_precomputed)
+            aerosol_sw_volc_precomputed = _shard(aerosol_sw_volc_precomputed)
             o3_top_vmr = _shard(o3_top_vmr)
             if cloud_kwargs:
                 cloud_kwargs = {k: (v if k == "cloud_rho_ice" else _shard(v))
@@ -3334,6 +3338,8 @@ class PhysicsPipeline:
             ghg_vmr_override=ghg_vmr_override,
             aerosol_lw_od_col=aerosol_lw_od_precomputed,
             o3_top_vmr_col=o3_top_vmr,
+            **({} if aerosol_sw_volc_precomputed is None
+               else {"aerosol_sw_volc_col": aerosol_sw_volc_precomputed}),
             # only the rrtmgp radiation_fn takes it (cesm_ocean_albedo)
             **({} if open_ocean_frac_col is None
                else {"open_ocean_frac_col": open_ocean_frac_col}),
@@ -3545,6 +3551,7 @@ class PhysicsPipeline:
                          albedo_ocean=pipeline.albedo_ocean,
                          ghg_vmr_override=None,
                          aerosol_lw_od=None,
+                         aerosol_sw_volc=None,
                          aerosol_ccn_aod=None,
                          o3_top_vmr=None,
                          T_land=None,
@@ -3626,6 +3633,7 @@ class PhysicsPipeline:
                         day_of_year, seconds_of_day,
                         solar_weights, s_0, o3_vmr, aerosol_od,
                         aerosol_lw_od_precomputed=aerosol_lw_od,
+                        aerosol_sw_volc_precomputed=aerosol_sw_volc,
                         aerosol_ccn_aod=aerosol_ccn_aod,
                         o3_top_vmr=o3_top_vmr,
                         tau_equator=tau_equator, tau_pole=tau_pole,
@@ -3841,8 +3849,11 @@ def _build_none_radiation_fn(config):
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_rho_ice=None,
-                     cloud_fraction=None):
+                     cloud_fraction=None, aerosol_sw_volc_col=None):
         del aerosol_lw_od_col, o3_top_vmr_col  # zero-radiation: no-ops
+        if aerosol_sw_volc_col is not None:
+            raise ValueError("zero radiation cannot consume the volcanic SW "
+                             "per-band aerosol optics; use rrtmgp radiation.")
         ncol, nlev = T_col.shape
         z_full = jnp.zeros((ncol, nlev), dtype=T_col.dtype)
         z_half = jnp.zeros((ncol, nlev + 1), dtype=T_col.dtype)
@@ -3861,7 +3872,7 @@ def _build_gray_radiation_fn(config):
     from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation,
-        earth_orbit, earth_sun_distance_factor,
+        earth_sun_distance_factor,
     )
     from legoesm.driver.kernel_registry import (
         RADIATION_REGISTRY, resolve_kernel,
@@ -3872,7 +3883,8 @@ def _build_gray_radiation_fn(config):
     S_0 = config.S_0
     # Realistic (Berger 1978) orbit for AMIP-II/CMIP; None ⇒ circular orbit,
     # so idealized runs are bit-for-bit unchanged.
-    orbit = earth_orbit() if getattr(config, "orbital_insolation", False) else None
+    from legoesm.driver.orbit import experiment_orbit
+    orbit = experiment_orbit(config)
 
     gray_config = GrayRadiationConfig(
         tau_equator=config.tau_equator,
@@ -3895,9 +3907,12 @@ def _build_gray_radiation_fn(config):
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_rho_ice=None,
-                     cloud_fraction=None):
+                     cloud_fraction=None, aerosol_sw_volc_col=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
         del aerosol_lw_od_col, o3_top_vmr_col  # gray: no aerosol LW od / ozone
+        if aerosol_sw_volc_col is not None:
+            raise ValueError("gray radiation cannot consume the volcanic SW "
+                             "per-band aerosol optics; use rrtmgp radiation.")
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
         del cloud_rho_ice
         del cloud_path_liq_lw, cloud_path_ice_lw  # gray: no cloud optics
@@ -3992,7 +4007,7 @@ def _build_rrtmgp_radiation_fn(config):
     from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation, daylight_fraction,
-        earth_orbit, earth_sun_distance_factor,
+        earth_sun_distance_factor,
     )
     from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 
@@ -4000,7 +4015,8 @@ def _build_rrtmgp_radiation_fn(config):
     S_0 = config.S_0
     # Realistic (Berger 1978) orbit for AMIP-II/CMIP; None ⇒ circular orbit,
     # so idealized runs are bit-for-bit unchanged.
-    orbit = earth_orbit() if getattr(config, "orbital_insolation", False) else None
+    from legoesm.driver.orbit import experiment_orbit
+    orbit = experiment_orbit(config)
 
     rrtmg_config = rrtmgp_config_from_experiment(
         config,
@@ -4024,7 +4040,8 @@ def _build_rrtmgp_radiation_fn(config):
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_rho_ice=None,
-                     cloud_fraction=None, open_ocean_frac_col=None):
+                     cloud_fraction=None, open_ocean_frac_col=None,
+                     aerosol_sw_volc_col=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
         _sw_scale = None
         # Eccentricity scales the incident SW *flux* by (a/r)^2; the orbital
@@ -4090,6 +4107,8 @@ def _build_rrtmgp_radiation_fn(config):
             o3_vmr=o3_vmr_col,
             aerosol_optical_depth=aerosol_od_col,
             aerosol_absorption_optical_depth_lw=aerosol_lw_od_col,
+            **({} if aerosol_sw_volc_col is None
+               else {"aerosol_volcanic_moments_sw": aerosol_sw_volc_col}),
             solar_spectral_fraction=solar_weights if solar_weights.size > 0 else None,
             ghg_vmr_override=ghg_vmr_override,
             cloud_path_liq=cloud_path_liq,
@@ -4495,6 +4514,7 @@ def _resolve_convection(config):
                 config, 'bechtold_use_ifs_capdcycl', True),
             ifs_shallow_nosupply=config.bechtold_ifs_shallow_nosupply,
             ifs_hard_switches=config.bechtold_ifs_hard_switches,
+            ifs_openifs_cloud_top_fixer=config.bechtold_ifs_openifs_cloud_top_fixer,
             use_ifs_land_rhebc=getattr(
                 config, 'bechtold_use_ifs_land_rhebc', True),
             use_ifs_snow_melt=getattr(
@@ -4534,6 +4554,7 @@ def _resolve_convection(config):
             conv_config = conv_config._replace(
                 land_fraction=config.zm_land_fraction,
                 transport_cloud_tracers=config.zm_transport_cloud_tracers,
+                positivity_after_zm=config.positivity_after_zm,
                 **_zm_set)
 
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
@@ -4757,6 +4778,16 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_mg2_drop_early_reset_log_width", None)),
         ("morrison_mg2_drop_sed_reset_log_width", "mg2_drop_sed_reset_log_width",
          getattr(config, "morrison_mg2_drop_sed_reset_log_width", None)),
+        ("morrison_qsfm_freeze_ramp_K", "qsfm_freeze_ramp_K",
+         getattr(config, "morrison_qsfm_freeze_ramp_K", None)),
+        ("morrison_cirrus_T_width_K", "cirrus_T_width_K",
+         getattr(config, "morrison_cirrus_T_width_K", None)),
+        ("morrison_cirrus_rel_width", "cirrus_rel_width",
+         getattr(config, "morrison_cirrus_rel_width", None)),
+        ("morrison_boutle_fsd_factor", "boutle_fsd_factor",
+         getattr(config, "morrison_boutle_fsd_factor", None)),
+        ("morrison_boutle_overcast_ramp_width", "boutle_overcast_ramp_width",
+         getattr(config, "morrison_boutle_overcast_ramp_width", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),
@@ -4788,11 +4819,15 @@ def thread_morrison_scalars(config, scheme, micro_config):
                        _ExpCfg._field_defaults["morrison_warm_rain_incloud"])
     _prog_nc = getattr(config, "morrison_prognostic_droplet_number",
                        _ExpCfg._field_defaults["morrison_prognostic_droplet_number"])
+    _sed_spec = getattr(config, "morrison_specified_nc_droplet_sedimentation",
+                        _ExpCfg._field_defaults[
+                            "morrison_specified_nc_droplet_sedimentation"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
                     ("morrison_sed_cfl_substeps_strict", _sed_strict),
                     ("morrison_do_graupel", _graupel),
                     ("morrison_warm_rain_incloud", _incloud),
-                    ("morrison_prognostic_droplet_number", _prog_nc)):
+                    ("morrison_prognostic_droplet_number", _prog_nc),
+                    ("morrison_specified_nc_droplet_sedimentation", _sed_spec)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
     if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
@@ -4817,9 +4852,20 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _prog_nc = (None if _prog_nc
                 is _ExpCfg._field_defaults["morrison_prognostic_droplet_number"]
                 else _prog_nc)
+    _sed_spec = (None if _sed_spec is _ExpCfg._field_defaults[
+        "morrison_specified_nc_droplet_sedimentation"] else _sed_spec)
+    _cirrus = getattr(config, "morrison_cirrus_nucleation",
+                      _ExpCfg._field_defaults["morrison_cirrus_nucleation"])
+    _cirrus = (None if _cirrus == _ExpCfg._field_defaults["morrison_cirrus_nucleation"]
+               else _cirrus)
+    _relvar = getattr(config, "morrison_relvar_scheme",
+                      _ExpCfg._field_defaults["morrison_relvar_scheme"])
+    _relvar = (None if _relvar == _ExpCfg._field_defaults["morrison_relvar_scheme"]
+               else _relvar)
     if (not _touched and _flavor is None and _sed_sub is None
             and _sed_strict is None and _sed_max is None and _graupel is None
-            and _wrs is None and _incloud is None and _prog_nc is None):
+            and _wrs is None and _incloud is None and _prog_nc is None
+            and _sed_spec is None and _cirrus is None and _relvar is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4831,7 +4877,10 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_sed_cfl_substeps_strict=_sed_strict,
         morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs,
         morrison_warm_rain_incloud=_incloud,
-        morrison_prognostic_droplet_number=_prog_nc)
+        morrison_prognostic_droplet_number=_prog_nc,
+        morrison_specified_nc_droplet_sedimentation=_sed_spec,
+        morrison_cirrus_nucleation=_cirrus,
+        morrison_relvar_scheme=_relvar)
 
 
 def _resolve_microphysics(config):
@@ -4960,9 +5009,13 @@ def _resolve_microphysics(config):
         # runs make_physics instead, whose factory applies the same guard.
         from legoesm.atmosphere.physics.microphysics.integration import (
             require_relvar_for_kk2000_cam6,
+            require_relvar_scheme_lane,
         )
         require_relvar_for_kk2000_cam6(
             MicrophysicsConfig(scheme="morrison", morrison=micro_config), False)
+        # no CLUBB cloud fraction either: a non-default relvar_scheme is refused
+        require_relvar_scheme_lane(
+            MicrophysicsConfig(scheme="morrison", morrison=micro_config), "pipeline")
 
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (
@@ -5213,6 +5266,37 @@ def turbulence_config_for(config):
                     "the liquid handed back is the post-advance PDF closure's "
                     "rcm, which the diagnostic path does not produce.")
             tc = tc._replace(liquid_partition=True)
+        # CLUBB's mean vertical velocity from the host omega (CAM
+        # clubb_intr.F90:1677-1679).  Same threading and refusals.
+        if getattr(config, "clubb_host_omega", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_host_omega=True requires turbulence='clubb', got "
+                    f"{tc.scheme!r}. The host omega is CLUBB's wm input.")
+            if not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    "clubb_host_omega=True requires clubb_prognostic=True: only "
+                    "the prognostic closure takes the host omega.")
+            tc = tc._replace(host_omega=True)
+        # CAM7 CLUBB-MF on the prognostic closure.  Same threading and refusals.
+        if getattr(config, "clubb_mf", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_mf=True requires turbulence='clubb', got {tc.scheme!r}.")
+            if not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    "clubb_mf=True requires clubb_prognostic=True: the plume "
+                    "flux is the prognostic closure's thl/rt forcing.")
+            tc = tc._replace(clubb_mf=True)
+        _alph = getattr(config, "clubb_mf_alphturb", None)
+        if _alph is not None:
+            if not getattr(config, "clubb_mf", False):
+                raise ValueError("clubb_mf_alphturb requires clubb_mf=True.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(mf_alphturb=float(_alph)))
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => the scheme's own default stands (CLUBBConfig, CAM6 100 Pa).
@@ -5347,6 +5431,22 @@ def turbulence_config_for(config):
                 f"{getattr(tc, 'liquid_partition', None)!r}). The override is "
                 "authoritative, so set TurbulenceConfig(liquid_partition=True) "
                 "on it rather than relying on the experiment-level flag.")
+    if getattr(config, "clubb_host_omega", False):
+        if tc.scheme != "clubb" or not getattr(tc, "host_omega", False):
+            raise ValueError(
+                "clubb_host_omega=True but an explicit turbulence_override is "
+                "in force and does not select it (override "
+                f"scheme={tc.scheme!r}, host_omega="
+                f"{getattr(tc, 'host_omega', None)!r}). The override is "
+                "authoritative, so set TurbulenceConfig(host_omega=True) on it "
+                "rather than relying on the experiment-level flag.")
+    if getattr(config, "clubb_mf", False):
+        if tc.scheme != "clubb" or not getattr(tc, "clubb_mf", False):
+            raise ValueError(
+                "clubb_mf=True but an explicit turbulence_override is in force "
+                f"and does not select it (override scheme={tc.scheme!r}, "
+                f"clubb_mf={getattr(tc, 'clubb_mf', None)!r}). Set "
+                "TurbulenceConfig(clubb_mf=True) on the override.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the
@@ -5791,9 +5891,8 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
     pipeline.rrtmgp_radiation = rad_scheme in ("rrtmgp", "rrtmg")
     pipeline.cesm_ocean_albedo = (bool(config.dynamic_albedo)
                                   and pipeline.rrtmgp_radiation)
-    from legoesm.atmosphere.physics.radiation.solar import earth_orbit
-    pipeline.orbit = (earth_orbit()
-                      if getattr(config, 'orbital_insolation', False) else None)
+    from legoesm.driver.orbit import experiment_orbit
+    pipeline.orbit = experiment_orbit(config)
     # Slab-land interface flux law (see _step_slab_land).  Checked here so a
     # config that dodged validate_strict (direct pipeline builders) still
     # fails at BUILD time — not at trace time inside the compiled step — when
@@ -5874,6 +5973,10 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
         config, 'cloud_diagnostic_condensate_scheme', None)
     pipeline._cloud_adiabatic_lwc_rate = getattr(
         config, 'cloud_adiabatic_lwc_rate', None)
+    # CAM7 CLUBB-MF plume cloud into the cam6_clubb deep cloud (opt-in).
+    pipeline._clubb_mf_cloud = bool(getattr(config, 'clubb_mf', False)) or None
+    pipeline._cloud_clubb_mf_cldfrac_fac = getattr(
+        config, 'cloud_clubb_mf_cldfrac_fac', None)
     pipeline._cloud_saturation_scheme = getattr(
         config, 'cloud_saturation_scheme', None)
     pipeline._cloud_cover_condensate_q_ref = getattr(
