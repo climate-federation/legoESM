@@ -21,6 +21,19 @@ mg = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mg)
 
 
+@pytest.fixture(autouse=True)
+def _restore_precision():
+    """The drivers built here set the global precision policy; restore it so
+    later tests in the same worker do not inherit it."""
+    from legoesm.core import precision
+    pol, ovr = precision.get_policy(), precision.get_module_overrides()
+    yield
+    precision.set_policy(pol)
+    precision.clear_module_overrides()
+    for mod, roles in ovr.items():
+        precision.set_module_override(mod, **{r: d for r, d in roles.items() if d is not None})
+
+
 @pytest.fixture(scope="module")
 def mesh():
     from legoesm.grids.voronoi import create_voronoi_mesh
@@ -691,6 +704,11 @@ def test_terrain_is_bitwise_the_pre_geography_loader(x64, tmp_path):
     import xarray as xr
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.core import precision
+    # the pinned run's state: default fp32 policy, no module overrides (other
+    # test modules change both at import; the autouse fixture restores them)
+    precision.set_policy(precision.PrecisionPolicy.fp32())
+    precision.clear_module_overrides()
     mesh = create_voronoi_mesh(3)   # built under x64, as the pinned run was
     rng = np.random.default_rng(0)
     lat_e, lon_e = np.arange(89.5, -90.0, -1.0), np.arange(-179.5, 180.0, 1.0)
