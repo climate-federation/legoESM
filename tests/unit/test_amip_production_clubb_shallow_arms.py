@@ -31,7 +31,7 @@ def _flat(x, prefix=""):
 @pytest.mark.parametrize("deck, rows", [
     ("amip_production_clubb_host_omega.yaml", {"clubb_host_omega": True}),
     ("amip_production_boutle_relvar.yaml", {"morrison_relvar_scheme": "boutle2014"}),
-    ("amip_production_clubb_mf.yaml", {"clubb_mf": True}),
+    ("amip_production_clubb_mf.yaml", {"clubb_mf": True, "cloud_clubb_mf_cldfrac_fac": 1.75}),
 ])
 def test_arm_differs_from_production_only_in_its_rows(deck, rows):
     prod, arm = _flat(_cfg("amip_production.yaml")), _flat(_cfg(deck))
