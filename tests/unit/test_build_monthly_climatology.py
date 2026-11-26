@@ -88,3 +88,15 @@ def test_optics_weights_skip_missing_values():
                                rtol=1e-12)               # the 2006 value alone
     ds["ssa"].values[24, 0, 0] = np.nan                  # both years missing
     assert np.isnan(bmc.climatology(ds, 2005, 2006, optics=True)["ssa"].values[0, 0, 0])
+
+
+def test_months_since_needs_a_day_one_reference():
+    with pytest.raises(ValueError, match="day 1"):
+        bmc.climatology(_ds("months since 2004-01-16"), 2005, 2006)
+
+
+def test_an_integer_field_keeps_its_fractional_mean():
+    ds = _ds("days since 2004-01-01")
+    ds["n"] = ("time", np.arange(36) % 2)      # 2005-01 = 0, 2006-01 = 0 ... alternating
+    ds["n"].values[12], ds["n"].values[24] = 1, 2
+    assert bmc.climatology(ds, 2005, 2006)["n"].values[0] == 1.5

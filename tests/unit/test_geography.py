@@ -621,8 +621,8 @@ def test_mpas_rest_state_takes_a_per_cell_surface_temperature(mesh):
     from legoesm.ocean.init_mpas import _SCALE_DEPTH, rest_state_mpas_ocean
     from legoesm.ocean.vertical import create_ocean_z_star
     z = create_ocean_z_star(10, H_max=5500.0)
-    scalar = rest_state_mpas_ocean(mesh, z, T_water_init_C=20.0)
-    want = 2.0 + (20.0 - 2.0) * jnp.exp(z.z_full_ref / _SCALE_DEPTH)  # the old formula
+    scalar = rest_state_mpas_ocean(mesh, z, T_water_init_C=8.85)   # not fp32-exact
+    want = 2.0 + (8.85 - 2.0) * jnp.exp(z.z_full_ref / _SCALE_DEPTH)  # the old formula
     assert np.array_equal(np.asarray(scalar.T.data),
                           np.broadcast_to(np.asarray(want), scalar.T.data.shape))
     ts = np.linspace(0.0, 27.0, mesh.nCells)

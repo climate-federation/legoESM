@@ -25,7 +25,11 @@ def record_year_month(time_values, units: str, calendar: str):
     """(year, month) of each monthly record."""
     t = np.asarray(time_values, dtype=np.float64)
     if units.startswith("months since"):
-        y0, m0 = (int(x) for x in units.split()[2].split("-")[:2])
+        y0, m0, d0 = ([int(float(x)) for x in units.split()[2].split("-")] + [1])[:3]
+        if d0 != 1:
+            # floor(t) is the month index only from a reference on day 1
+            raise ValueError(f"'{units}': months-since time needs a reference on "
+                             "day 1 of a month")
         k = (m0 - 1) + np.floor(t).astype(int)
         return y0 + k // 12, k % 12 + 1
     import cftime
@@ -66,7 +70,9 @@ def climatology(ds, first: int, last: int, optics: bool = False):
                 means[v].append(sub[v].mean("time"))
     time = xr.DataArray(tv.values[first_idx], dims="time", attrs=tv.attrs)
     for v in timed:
-        da = xr.concat(means[v], dim="time").astype(ds[v].dtype)
+        da = xr.concat(means[v], dim="time")
+        if np.issubdtype(ds[v].dtype, np.floating):   # an integer field keeps its float mean
+            da = da.astype(ds[v].dtype)
         da = da.transpose(*ds[v].dims)
         da.attrs = ds[v].attrs
         out[v] = da.assign_coords(time=time)
