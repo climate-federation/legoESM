@@ -891,7 +891,19 @@ DCMIP2008_EUL_K4: dict[int, float] = {
 }
 DCMIP2008_DRY_CASES = frozenset(
     {"inertio_gravity_3_2", "mountain_rossby_5_0", "rossby_haurwitz_6_0"})
-# Matrix spectral-PE lane default (every other run_baroclinic row): del4 at
+# Baroclinic-wave family rows (DCMIP-2016 / Ullrich et al. 2014 state; the
+# rotated pair uses the DCMIP 2008 rotation recipe).  They run the SAME
+# DCMIP 2008 Table 4 CAM-EUL K4 as the dry rows, BORROWED: the DCMIP 2008
+# steady-state / baroclinic-wave tests (Sects. 1.1-1.2.1: 1-0-0 / 2-0-0,
+# rotated 1-3-0 / 2-3-0) use the closely related Jablonowski & Williamson
+# (2006) state, and that document is the one listing a spectral-EUL
+# dissipation for this flow.
+# This is NOT a DCMIP-2016 prescription.
+SPECTRAL_BAROCLINIC_TABLE4_CASES = frozenset(
+    {"baroclinic", "baroclinic_steady", "rotated_baroclinic",
+     "rotated_steady"})
+SPECTRAL_TABLE4_CASES = DCMIP2008_DRY_CASES | SPECTRAL_BAROCLINIC_TABLE4_CASES
+# Matrix spectral-PE lane default (every other spectral row): del4 at
 # 2.338e15 (21/n)^4 plus the order-8, 0.01-retention exp filter per step.
 _SPECTRAL_PE_LANE_HD_T21 = 2.338e15
 _SPECTRAL_PE_LANE_FILTER = 0.01
@@ -901,32 +913,59 @@ def _spectral_pe_dissipation(case: str, n_max: int) -> tuple[float, float, str]:
     """(del4 coeff [m^4/s], exp-filter strength, note) of the run_baroclinic
     spectral lane for ``case`` at truncation ``T<n_max>``.
 
-    DCMIP-2008 dry rows (6-3-0 IG, 5-0-0 mountain, 4-0-0 RH) run the
-    reference EUL dissipation of their own document: Table 4 K4, no
-    exponential filter.  The lane's per-step filter (exp(-ln100 (n/N)^8)
-    per 600 s step) e-folds n=14 -- the top of the 2/3 band -- in ~55 min
-    at T21; with it off (K4 unchanged) the 5-0-0 day-2 max wind is 50.2
-    vs 39.1 m/s.  Measured for the combined change (filter off AND K4
-    2.338e15 -> 2.0e16) at T21: 5-0-0 day-2 49.9, 6-3-0 0.5-d peak 6.2
-    m/s (cube/ico/latlon 51.2/50.1/54.0 and 6.4/6.5/6.4).  Evidence is at
-    T21 and T42 only; the lane's fixed 600 s step is not checked here
-    for the higher Table 4 truncations.  K4 is
-    taken from the table only; a truncation the table does not list is
-    refused rather than interpolated.  The reference's del2 K2 = 2.5e5
-    m^2/s on the top three levels is NOT applied (no per-level del2 in
-    SpectralPEConfig) -- disclosed in the note.
+    ``SPECTRAL_TABLE4_CASES`` run DCMIP 2008 Sect. 2.1 Table 4 CAM-EUL
+    dissipation: del4 K4 for the truncation, no exponential filter.
 
-    Every other row keeps the lane default unchanged (bit-identical).
+    * DCMIP-2008 dry rows (6-3-0 IG, 5-0-0 mountain, 4-0-0 RH): their own
+      document's reference.  The lane's per-step filter (exp(-ln100
+      (n/N)^8) per 600 s step) e-folds n=14 -- the top of the 2/3 band --
+      in ~55 min at T21; with it off (K4 unchanged) the 5-0-0 day-2 max
+      wind is 50.2 vs 39.1 m/s.  Combined change (filter off AND K4
+      2.338e15 -> 2.0e16) at T21: 5-0-0 day-2 49.9, 6-3-0 0.5-d peak 6.2
+      m/s (cube/ico/latlon 51.2/50.1/54.0 and 6.4/6.5/6.4).
+    * Baroclinic-wave family rows (baroclinic, baroclinic_steady,
+      rotated_baroclinic, rotated_steady; DCMIP-2016 / Ullrich 2014
+      state): the SAME Sect. 2.1 Table 4 K4, borrowed because the DCMIP
+      2008 steady-state / baroclinic-wave tests (Sects. 1.1-1.2.1:
+      1-0-0 / 2-0-0, rotated 1-3-0 / 2-3-0) use the closely related
+      Jablonowski & Williamson (2006) state -- it is NOT a DCMIP-2016
+      prescription.  Paired T21 runs (filter+2.338e15 -> Table 4):
+      baroclinic day-9 min p_s 999.45
+      hPa @(60N,110E) (wave essentially absent) -> 990.6 @(50N,122E)
+      (cube/latlon/ico 974.9/979.9/969.7 @~51-54N,120-124E);
+      baroclinic_steady --quick ps_pert 18.7 -> 1.8 Pa (others 4-8);
+      rotated_steady 23.5 -> 1.2 Pa.
+
+    Known gaps (same for both groups): the lane keeps only n <= 14 at
+    "T21" (2/3 state truncation, dealiasing_fraction 0.667) while Table 4
+    K4 is tuned for CAM EUL keeping n <= 21: for the same K4 the del4
+    decay rate at the lane's cutoff mode n=14 is [14*15/(21*22)]^2 ~ 0.21
+    of that at the reference cutoff n=21 (continuous decay rates, not
+    per-step attenuation); and the
+    reference's del2 K2 = 2.5e5 m^2/s on the top three levels is NOT
+    applied (no per-level del2 in SpectralPEConfig) -- disclosed in the
+    note.  Evidence is at T21 (and T42 for the dry rows); the lane's
+    fixed 600 s step is not checked for the higher Table 4 truncations.
+    K4 is taken from the table only; a truncation the table does not
+    list is refused rather than interpolated.
+
+    Every other row (held_suarez*, amip, gravity_wave_3_1,
+    rest_state_topo, transport) keeps the lane default unchanged
+    (bit-identical).
     """
-    if case in DCMIP2008_DRY_CASES:
+    if case in SPECTRAL_TABLE4_CASES:
         if n_max not in DCMIP2008_EUL_K4:
             raise ValueError(
                 f"{case} on spectral T{n_max}: DCMIP 2008 Table 4 lists EUL K4 "
                 f"only for T{sorted(DCMIP2008_EUL_K4)}; refusing to guess one")
         k4 = DCMIP2008_EUL_K4[n_max]
+        src = ("" if case in DCMIP2008_DRY_CASES else
+               " (borrowed from the DCMIP 2008 Jablonowski & Williamson 2006 wave "
+               "tests; not a DCMIP-2016 prescription)")
         return (k4, 0.0,
-                f"DCMIP 2008 Table 4 EUL dissipation: del4 K4={k4:.2e} m^4/s, "
-                f"no exp spectral filter; top-3-level del2 K2=2.5e5 NOT applied")
+                f"DCMIP 2008 Table 4 EUL dissipation{src}: del4 K4={k4:.2e} "
+                f"m^4/s, no exp spectral filter; top-3-level del2 K2=2.5e5 NOT "
+                f"applied; state truncated to 2/3 band")
     return (_SPECTRAL_PE_LANE_HD_T21 * (21.0 / n_max) ** 4,
             _SPECTRAL_PE_LANE_FILTER, "")
 
@@ -4993,8 +5032,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         else:
             sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 600.0 if _gw31 is None else 600.0 / _gw31.X_SCALE
-        # DCMIP-2008 dry rows: reference EUL dissipation (Table 4 K4, no
-        # exp filter); every other row: the lane default, unchanged.
+        # DCMIP-2008 dry rows + baroclinic-wave rows: DCMIP 2008
+        # Table 4 EUL dissipation (K4, no exp filter); every other row:
+        # the lane default, unchanged.
         _hd, _spec_filter, _spec_diss_note = _spectral_pe_dissipation(
             tc.case, n_max)
         if _gw31 is not None:
