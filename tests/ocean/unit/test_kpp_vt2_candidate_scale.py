@@ -16,7 +16,7 @@ Tests:
 1. the w_s that _boundary_layer_depth passes to V_t^2 under "candidate" equals the CVMix reference to 1e-12,
    stable and unstable, weak and convective regimes;
 2. the depth argument it passes is each candidate depth itself;
-3. the default stays "column" and its V_t^2 velocity scale is unchanged (the full column depth);
+3. the default is "candidate"; "column" stays selectable and its V_t^2 velocity scale is unchanged;
 4. an unknown option raises;
 5. the boundary-layer depth under "candidate" is finite with finite gradients.
 """
@@ -108,17 +108,21 @@ def test_candidate_passes_each_depth_as_its_own_layer():
     np.testing.assert_allclose(np.broadcast_to(seen["h"], z.shape), z, rtol=0, atol=1e-12)
 
 
-def test_default_is_column_and_unchanged():
-    assert KPPConfig().vt2_velocity_scale == "column"
-    z, seen, _ = _capture_ws(KPPConfig(), 0.01, 2e-7)
+def test_default_is_candidate():
+    assert KPPConfig().vt2_velocity_scale == "candidate"
+
+
+def test_column_still_selectable_and_unchanged():
+    col = KPPConfig(vt2_velocity_scale="column")
+    z, seen, _ = _capture_ws(col, 0.01, 2e-7)
     np.testing.assert_allclose(np.ravel(seen["h"]), [z[-1]], rtol=0, atol=1e-12)   # the full column depth
-    z, seen, _ = _capture_ws(KPPConfig(), 0.01, 2e-7, h_bl_prev=jnp.asarray(35.0))
+    z, seen, _ = _capture_ws(col, 0.01, 2e-7, h_bl_prev=jnp.asarray(35.0))
     np.testing.assert_allclose(np.ravel(seen["h"]), [35.0], rtol=0, atol=1e-12)
 
 
 def test_candidate_shallows_a_convective_layer():
     """Under night-time cooling the capped scale gives a smaller V_t^2, so the layer is not deeper."""
-    _, _, h_col = _capture_ws(KPPConfig(), 0.008, 3e-7)
+    _, _, h_col = _capture_ws(KPPConfig(vt2_velocity_scale="column"), 0.008, 3e-7)
     _, _, h_cand = _capture_ws(KPPConfig(vt2_velocity_scale="candidate"), 0.008, 3e-7)
     assert h_cand <= h_col + 1e-9
 

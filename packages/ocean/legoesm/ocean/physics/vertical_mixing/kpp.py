@@ -516,10 +516,43 @@ def _boundary_layer_depth(
     blend = jax.nn.sigmoid(cfg.crossing_sharpness * (crossing_strength - cfg.crossing_threshold))
     h = blend * h_crossing + (1.0 - blend) * h_fallback
 
+    if cfg.monin_obukhov_limit:
+        h = _monin_obukhov_limit(h, u_star, B_f, max_depth, cfg)
+
     # At least one layer thick
     h = jnp.maximum(h, dz_actual[..., 0])
 
     return h
+
+
+def _monin_obukhov_limit(h, u_star, B_f, max_depth, cfg):
+    """Stable-forcing depth limit h <= L = u*^3 / (kappa * B_stab) (LMD94 Sec. 4).
+
+    CVMix ``cvmix_kpp_compute_OBL_depth`` (lMonOb, not Stokes-MOST): stable when
+    its surf_buoy > 0, i.e. B_f < 0 here (B_f > 0 destabilising); unstable or
+    neutral columns are limited only by the column depth.  Kept: the stable-only
+    selection, u* = 0 with stable forcing giving L = 0 (the top-layer floor then
+    applies, as CVMix's ``OBL_depth >= zt_cntr(1)``).  Dropped: CVMix's
+    surf_buoy(nlev), the buoyancy flux through the whole boundary layer including
+    penetrating shortwave; this kernel only has the surface B_f.  RULE 5: B_stab
+    is the C1 positive part over ``mo_stable_width_bf`` and the min is C1 over
+    ``mo_limit_width_m``; both 0 reproduce CVMix's hard limit.
+    """
+    from legoesm.core.smooth import positive_part_c1, smooth_min_c1, validate_smoothing_width
+
+    validate_smoothing_width("KPPConfig.mo_stable_width_bf", cfg.mo_stable_width_bf)
+    validate_smoothing_width("KPPConfig.mo_limit_width_m", cfg.mo_limit_width_m)
+    w_bf = cfg.mo_stable_width_bf
+    b_stab = (jnp.maximum(-B_f, 0.0) if w_bf == 0
+              else positive_part_c1(-B_f, 1.0 / w_bf))
+    stable = b_stab > 0.0
+    ustar3 = u_star ** 3
+    # denominator floored at u*^3/(kappa*H) so L <= H and never overflows as
+    # B_stab -> 0 (an inf L would give 0*inf = NaN in the backward pass); the
+    # floor's kink at L = H moves h only where h is within the width of the bottom
+    denom = cfg.kappa_vk * jnp.maximum(jnp.where(stable, b_stab, 1.0), ustar3 / (cfg.kappa_vk * max_depth))
+    L = jnp.where(stable, ustar3 / denom, max_depth)
+    return smooth_min_c1(h, L, cfg.mo_limit_width_m)
 
 
 def kpp_vertical_mixing(
