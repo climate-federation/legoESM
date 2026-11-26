@@ -115,6 +115,10 @@ def test_injected_atmosphere_source_fails_the_bar():
     (["--deck", "d.yaml", "--energy-terms"], "--energy-terms"),
     (["--deck", "d.yaml", "--days", "1.5"], "whole --days"),
     (["--deck", "d.yaml", "--dt", "300"], "the deck sets --dt"),
+    (["--land", "none"], "--land none needs --geography"),
+    (["--geography", "g.nc"], "--land none needs --geography"),
+    (["--land", "none", "--geography", "g.nc", "--energy-terms"],
+     "--land none has none"),
 ])
 def test_real_case_options_refuse_missing_or_stray_paths(argv, msg, capsys):
     with pytest.raises(SystemExit):
@@ -170,6 +174,30 @@ def test_duo_column_lane_closes_atmosphere_water(tmp_path, capsys):
     e_atm = abs(res["fluxes"]["E_atm"])
     assert abs(res["rows"]["atm_water"]) < 1.0e-6 * e_atm, (
         res["rows"]["atm_water"], e_atm)
+
+
+@pytest.mark.slow
+def test_all_ocean_run_closes_without_a_land_model(tmp_path):
+    """--land none on an all-ocean geography: no land model, the coupler's
+    ice/lake handback alone enters the atmosphere's flux kernel.  The
+    atmosphere, ice and system water rows close over three coupling windows
+    and the land store stays empty."""
+    import json
+    import subprocess
+    import sys
+    geo = tmp_path / "aqua.nc"
+    subprocess.run([sys.executable, str(_P.parents[1] / "data"
+                                        / "make_geography.py"),
+                    "aquaplanet", "-o", str(geo)], check=True)
+    out = tmp_path / "aqua.json"
+    assert probe.main(["--land", "none", "--geography", str(geo),
+                       "--days", "0.0625", "--json", str(out)]) == 0
+    res = json.loads(out.read_text())
+    rows, e_atm = res["rows"], abs(res["fluxes"]["E_atm"])
+    assert res["stores0"]["W_land"] == res["stores1"]["W_land"] == 0.0
+    assert res["fluxes"]["H_recv"] != 0.0     # the handback really enters
+    for r in ("atm_water", "ice_water", "system_water"):
+        assert abs(rows[r]) < 1.0e-6 * e_atm, (r, rows[r], e_atm)
 
 
 def _latlon_run(tmp_path, capsys):

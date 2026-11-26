@@ -205,8 +205,13 @@ def main(argv=None) -> int:
     ap.add_argument("--vertical-coord", default="hybrid")
     ap.add_argument("--nlev", type=int, default=None,
                     help="levels (default: the gate's 8)")
-    ap.add_argument("--land", choices=("synthetic", "real"),
-                    default="synthetic")
+    ap.add_argument("--land", choices=("synthetic", "real", "none"),
+                    default="synthetic",
+                    help="none: no land model on an all-ocean --geography "
+                    "(the coupler's ice/lake handback alone enters the "
+                    "atmosphere's flux kernel); land rows are then zero")
+    ap.add_argument("--geography", default="",
+                    help="geography file (--land none)")
     ap.add_argument("--land-mask-file", default="")
     ap.add_argument("--clm-surfdata-path", default="")
     ap.add_argument("--surfdata", default="")
@@ -278,6 +283,11 @@ def main(argv=None) -> int:
         ap.error("--replay-copy-col needs --nan-stages")
     if deck_argv and not args.deck:
         ap.error(f"unrecognized arguments: {' '.join(deck_argv)}")
+    if (args.land == "none") != bool(args.geography):
+        ap.error("--land none needs --geography, and --geography needs "
+                 "--land none")
+    if args.land == "none" and args.energy_terms:
+        ap.error("--energy-terms books land emission; --land none has none")
     if args.deck and args.energy_terms:
         ap.error("--energy-terms is not wired for --deck")
     if args.deck and args.days != int(args.days):
@@ -332,6 +342,9 @@ def main(argv=None) -> int:
     mp = MonkeyPatch()
     if args.deck:
         land_cfg = {}
+    elif args.land == "none":
+        # the geography rows of config/esoteric/em2009_base.yaml
+        land_cfg = dict(geography=args.geography, geography_regrid="binned")
     elif args.land == "synthetic":
         lp._patch_land_loaders(mp)
         land_cfg = dict(land_mask_path="synthetic.nc")
@@ -377,10 +390,12 @@ def main(argv=None) -> int:
         days=args.days, dataset="analytical", radiation="rrtmgp",
         convection=args.convection, turbulence="louis", microphysics=args.micro,
         precision="fp64", **land_cfg,
-        use_multilayer_land=True, multilayer_n_layers=4,
-        multilayer_soil_depth=2.0, land_beta_soil=True,
-        land_surface_scheme="simple_seb", land_params_refresh=False,
-        land_update_seconds=args.land_update_s,
+        **(dict(use_multilayer_land=False, land_update_seconds=0.0)
+           if args.land == "none" else dict(
+               use_multilayer_land=True, multilayer_n_layers=4,
+               multilayer_soil_depth=2.0, land_beta_soil=True,
+               land_surface_scheme="simple_seb", land_params_refresh=False,
+               land_update_seconds=args.land_update_s)),
         rad_update_steps=args.rad_update_steps, **extra)
     cc = PRESETS["aquaplanet"]()._replace(
         coupling_dt=win, atm_owns_surface=True, f_land_mode="analytical")
@@ -427,8 +442,13 @@ def main(argv=None) -> int:
     n = area.size
     f_land = _np(tc.f_land).reshape(-1)
     f_lake = _np(tc.f_lake).reshape(-1)
+    land_on = atm._land_ml_state is not None
+    if not land_on and np.any(f_land > 0.0):
+        raise SystemExit("land fraction without a land model: its water "
+                         "store is not booked")
     k = dict(area=area, f_land=f_land, f_water=1.0 - f_land - f_lake,
-             dz=np.asarray(atm._land_soil_dz(), dtype=np.float64),
+             dz=(np.asarray(atm._land_soil_dz(), dtype=np.float64)
+                 if land_on else np.zeros(1)),
              # one-layer slab only: the two-layer slab's deep layer and its
              # restoring are not booked, so its heat row is N/A (NaN)
              C_mix=(ocfg.rho_ocean * ocfg.c_ocean * ocfg.h_mix
@@ -455,11 +475,12 @@ def main(argv=None) -> int:
     carried = [s for s in WATER if atm.current_tracer(s) is not None]
     land0 = atm._land_ml_state
     print("STORES water species", carried, "land extras",
-          {f: getattr(land0, f) is not None for f in (
+          {f: getattr(land0, f, None) is not None for f in (
               "surface_water", "W_canopy", "snow_bands", "ice_bands",
               "snow_ice_layers", "canopy_state")})
-    if land0.snow_bands is not None or land0.ice_bands is not None \
-            or land0.canopy_state is not None:
+    if land_on and (land0.snow_bands is not None
+                    or land0.ice_bands is not None
+                    or land0.canopy_state is not None):
         raise SystemExit("land store not covered by this probe")
 
     def layer_dp():
@@ -493,12 +514,18 @@ def main(argv=None) -> int:
         L = atm._land_ml_state
         z = np.zeros(n)
         st = d._sfc_state.ice
+        if L is None:   # --land none: an empty land store
+            land = dict(theta=np.zeros((n, 1)), snow=z, pond=z, canopy=z)
+        else:
+            land = dict(
+                theta=_np(L.theta_soil).reshape(n, -1),
+                snow=_np(L.snow_depth).reshape(-1),
+                pond=z if L.surface_water is None else _np(L.surface_water)
+                .reshape(-1),
+                canopy=z if L.W_canopy is None else _np(L.W_canopy)
+                .reshape(-1))
         return dict(
-            q_tot=q, dp=dp, theta=_np(L.theta_soil).reshape(n, -1),
-            snow=_np(L.snow_depth).reshape(-1),
-            pond=z if L.surface_water is None else _np(L.surface_water)
-            .reshape(-1),
-            canopy=z if L.W_canopy is None else _np(L.W_canopy).reshape(-1),
+            q_tot=q, dp=dp, **land,
             h_ice=_np(st.h_ice).reshape(-1),
             conc=_np(st.concentration).reshape(-1),
             # zeros, not NaN, under the 3-D ocean: the NaN trap reads these
@@ -910,8 +937,10 @@ def main(argv=None) -> int:
                       _np(sd[SL["precip"]]).reshape(-1))
         pend_rec[0] = rec
         L = atm._land_ml_state   # land's own runoff rate x f_land, per step
-        F["R_state"] += float(np.sum(f_land * _np(
-            L.runoff_surface + L.runoff_subsurface).reshape(-1) * area)) * DT
+        if L is not None:
+            F["R_state"] += float(np.sum(f_land * _np(
+                L.runoff_surface + L.runoff_subsurface).reshape(-1)
+                * area)) * DT
         if args.energy_terms:
             eterm_step(sd)
         n_steps[0] += 1
@@ -1026,7 +1055,7 @@ def main(argv=None) -> int:
     K = max(1, int(round(cfg.land_update_seconds / DT)))
     lw = atm._land_window or {}
     n_w = int(lw.get("land_win_n", 0))
-    F["pend_land"] = land_in_flight(
+    F["pend_land"] = 0.0 if not land_on else land_in_flight(
         f_land, area,
         _np(lw["land_win_sum_precip_total"]).reshape(-1) if n_w > 0 else 0.0,
         _np(lw["land_held_evap"]).reshape(-1), n_w, K, DT,
@@ -1062,9 +1091,10 @@ def main(argv=None) -> int:
     ctrl = {}
     i = int(np.argmax(f_land))
     j = int(np.argmax(k["f_water"]))
-    for store, key, idx, delta, expect in (
+    for store, key, idx, delta, expect in ((
             ("W_land", "theta", (i, 0), 1e-3,
              1e-3 * k["dz"][0] * constants.rho_water * f_land[i] * area[i]),
+            ) if land_on else ()) + (
             ("W_ice", "h_ice", (j,), 1e-2,
              constants.rho_ice * 1e-2 * a1["conc"][j] * k["f_water"][j]
              * area[j]),
