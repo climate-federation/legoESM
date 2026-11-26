@@ -276,16 +276,16 @@ def test_geography_has_land(tmp_path):
     assert not geo.geography_has_land(_write(ds, tmp_path, "zero_lf.nc"))
 
 
-def test_coupled_refuses_an_all_ocean_geography_with_atm_owned_surface(tmp_path):
-    """The ice/lake handback rides the atmosphere land model's flux channel,
-    which an all-ocean mask never builds; refused at setup, not at step 1."""
+def test_coupled_refuses_a_land_model_on_an_all_ocean_geography(tmp_path):
+    """An all-ocean geography runs no land model (the handback needs none);
+    one asked for would build no soil column -- refused at setup."""
     from legoesm.driver.coupled_config import CoupledConfig
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
     d = CoupledESMDriver(_mpas_cfg(_gen(tmp_path, "aquaplanet"), use_multilayer_land=True),
                          CoupledConfig(f_land_mode="analytical", land_mode="none",
                                        atm_owns_surface=True),
                          output_dir=str(tmp_path / "run"))
-    with pytest.raises(ValueError, match="is all ocean"):
+    with pytest.raises(ValueError, match="use_multilayer_land=False"):
         d.setup()
 
 

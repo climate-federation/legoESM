@@ -1176,16 +1176,16 @@ class CoupledESMDriver:
                 "geography has land but no land model runs on it: use "
                 "atm_owns_surface=True (the atmosphere's land reads the geography)")
         if (self._atm.config.geography and cfg.atm_owns_surface
+                and self._atm.config.use_multilayer_land
                 and not geography_has_land(self._atm.config.geography)):
-            # the ice/lake handback rides the atmosphere land model's flux
-            # channel, which an all-ocean mask never builds (it would raise
-            # at the first step); refused at setup, on every rank
+            # an all-ocean geography runs no land model (the ice/lake handback
+            # enters the atmosphere's flux kernel directly); a land model
+            # here would build no soil column; refused at setup, on every rank
             raise ValueError(
-                f"geography {self._atm.config.geography} is all ocean, and "
-                "atm_owns_surface needs the atmosphere's land model, which builds "
-                "no land columns there (the coupler's ice/lake handback rides its "
-                "flux channel); an all-ocean geography with atm_owns_surface is "
-                "not supported yet")
+                f"geography {self._atm.config.geography} is all ocean: the "
+                "atmosphere's land model would build no land columns there. "
+                "Set use_multilayer_land=False (the coupler's ice/lake "
+                "handback needs no land model on an all-ocean geography).")
         if (self._atm.config.geography and cfg.atm_owns_surface
                 and not self._atm.config.use_multilayer_land
                 and geography_has_land(self._atm.config.geography)):

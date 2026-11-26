@@ -1,8 +1,25 @@
 # E&M2009 aquaplanet case.  Geography file built by
 #   python scripts/data/make_geography.py aquaplanet -o <path>
 include: em2009_base.yaml
-# NOT RUNNABLE YET: an all-ocean geography with atm_owns_surface is refused at
-# coupler setup (the coupler's ice/lake handback rides the atmosphere land
-# model's flux channel, which builds no columns here). Open design question.
 geography: /burg/glab/users/pg2328/esoteric_logs/geography/aquaplanet.nc
 zm_land_fraction: none             # ZM refuses 'required' on an all-ocean mask and 'none' with land
+# All ocean: no land model (the coupler's ice/lake handback enters the
+# atmosphere's flux kernel directly), so the land-model rows of the base deck
+# go with it (each requires use_multilayer_land).
+use_multilayer_land: false
+mpas_land_beta_soil: false
+mpas_land_stress_from_land: false  # needs a land model (VOTED V3 a/b/b)
+ocean_flux_on_ocean_surface: false # needs a land model; the handback anchors the sea itself (VOTED V3 a/b/b)
+# Land-model-only production rows, back to their no-land defaults (the
+# validator or the column loop refuses each as inert without land):
+mpas_land_beta: 1.0
+mpas_land_lapse_K_per_km: 0.0
+land_soil_freeze_thaw: false
+land_update_seconds: 0.0
+land_calibrated_physics: false
+land_canopy_rh_cap_smoothing_width: null
+land_canopy_zeta_cap_smoothing_width: null
+land_canopy_most_n_iters: null
+land_canopy_solve_group: null
+land_canopy_implicit_ground_flux: null
+land_canopy_fallback_from_last_iterate: null
