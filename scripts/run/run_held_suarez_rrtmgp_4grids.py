@@ -333,11 +333,11 @@ def run_spectral(days, nlev, vertical_coord):
     sigma = _create_vertical(nlev, vertical_coord)
     dt = 600.0
 
-    pe_config = SpectralPEConfig(
-        hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
-        spectral_filter_order=8,
-        spectral_filter_strength=0.01,
-    )
+    # CAM-EUL reference (user decision 2026-11-27): DCMIP 2008 Table 4 del4
+    # K4, no exp spectral filter, full band n <= N.
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        cam_eul_dcmip2008_dissipation)
+    pe_config = SpectralPEConfig(**cam_eul_dcmip2008_dissipation(n_max))
     model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
     state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
 

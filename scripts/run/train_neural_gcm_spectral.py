@@ -118,6 +118,10 @@ def main():
         sigma_top=args.sigma_top,
         dt=args.dt,
         pe_config=SpectralPEConfig(
+            # Trained-model dynamics: the Orszag 2/3 cut these checkpoints were
+            # trained with, pinned (vote 2026-11-27) so the library default flip to
+            # 1.0 (CAM-EUL full band) does not silently change them.
+            dealiasing_fraction=0.667,
             hyperdiff_coeff=args.hyperdiff,
             hyperdiff_order=2,
             time_integrator="ssp_rk3",

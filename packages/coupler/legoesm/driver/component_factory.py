@@ -979,7 +979,11 @@ def create_atmosphere_dycore(
             # euler/leapfrog SI steps consume); ssp_rk54 stays explicit.
             semi_implicit=_spectral_leapfrog,
             p_floor=200.0,
-            dealiasing_fraction=0.667,
+            # Full band n <= N, as CAM-EUL (user decision 2026-11-27; vote
+            # 2026-11-27 Q4: the truncation axis follows the decision, the
+            # del4 stays the deck's explicit hyperdiff_scale -- T31 has no
+            # DCMIP 2008 Table 4 row).  Was the Orszag 2/3 cut (0.667).
+            dealiasing_fraction=1.0,
             # Forward the driver-level mass fixer (mirrors the plane / NH
             # branches).  Previously dropped: DycoreConfig.fix_mass=True was
             # silently ignored on the spectral hydrostatic path.

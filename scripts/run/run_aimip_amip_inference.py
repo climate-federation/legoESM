@@ -102,6 +102,10 @@ def _build_spec_cfg(cfg: dict):
     return NeuralGCMSpectralConfig(
         n_max=int(cfg["n_max"]), n_levels=int(cfg["nlev"]), dt=float(cfg["dt"]),
         pe_config=SpectralPEConfig(
+            # Trained-model dynamics: the Orszag 2/3 cut these checkpoints were
+            # trained with, pinned (vote 2026-11-27) so the library default flip to
+            # 1.0 (CAM-EUL full band) does not silently change them.
+            dealiasing_fraction=0.667,
             hyperdiff_coeff=2.5e15, hyperdiff_order=2,
             time_integrator="ssp_rk3",
             spectral_filter_strength=0.01, spectral_filter_order=8,

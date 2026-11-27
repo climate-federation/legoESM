@@ -28,7 +28,8 @@ from legoesm.grids.gaussian import create_gaussian_grid
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPrimitiveEquationModel, SpectralPEConfig,
-    isothermal_rest_state_spectral, spectral_pe_to_grid)
+    cam_eul_dcmip2008_dissipation, isothermal_rest_state_spectral,
+    spectral_pe_to_grid)
 from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_spectral
 
 
@@ -39,16 +40,40 @@ def main():
     ap.add_argument("--days", type=int, default=200)
     ap.add_argument("--dt", type=float, default=600.0)
     ap.add_argument("--out", type=str, required=True)
+    ap.add_argument("--hyperdiff", type=float, default=None,
+                    help="del4 K4 [m^4/s]; default = DCMIP 2008 Table 4 "
+                         "CAM-EUL value for --nmax (refused if not listed)")
     args = ap.parse_args()
 
     print(f"Dry Held-Suarez SPECTRAL T{args.nmax} / L{args.nlev}, {args.days} d, dt={args.dt}s")
     print(f"  JAX devices: {jax.devices()}")
 
+    # Refuse (never silently shorten) a step the shared CFL estimate rejects
+    # -- the same check and wind / gravity-wave speeds as the JW benchmark
+    # driver.  With the full band, 600 s passes at T21/T42 and fails at T85.
+    from legoesm.core.cfl import cfl_check_and_adjust
+    _dt_ok = cfl_check_and_adjust(args.dt, args.nmax, model_type="primitive_eq",
+                                  max_wind=60.0, gravity_wave_speed=300.0,
+                                  grid_type="gaussian", verbose=False)
+    if _dt_ok < args.dt:
+        raise ValueError(f"--dt {args.dt:g} s exceeds the CFL estimate at "
+                         f"T{args.nmax} (<= {_dt_ok:g} s); pass a smaller --dt")
+    # CAM-EUL reference (user decision 2026-11-27): DCMIP 2008 Table 4 del4
+    # K4, no exp spectral filter, full band n <= N.  A truncation the table
+    # does not list needs an explicit --hyperdiff (vote 2026-11-27).
+    if args.hyperdiff is None:
+        try:
+            diss = cam_eul_dcmip2008_dissipation(args.nmax)
+        except ValueError as e:
+            raise ValueError(f"{e}; pass --hyperdiff explicitly") from e
+    else:
+        diss = dict(hyperdiff_coeff=args.hyperdiff, hyperdiff_order=2,
+                    spectral_filter_strength=0.0, dealiasing_fraction=1.0)
+    print(f"  del4 K4={diss['hyperdiff_coeff']:.3e} m^4/s, no exp filter, "
+          f"full band n<=N")
+    cfg = SpectralPEConfig(**diss)
     grid = create_gaussian_grid(args.nmax)
     sigma = create_sigma_coordinate(args.nlev)
-    cfg = SpectralPEConfig(
-        hyperdiff_coeff=2.338e15 * (21.0 / args.nmax) ** 4,
-        spectral_filter_order=8, spectral_filter_strength=0.01)
     model = SpectralPrimitiveEquationModel(grid, sigma, cfg)
     state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
 

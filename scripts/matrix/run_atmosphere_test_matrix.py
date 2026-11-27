@@ -884,90 +884,70 @@ def _fv3_native_flag_error(fv3_native_grid, fv3_native_angles, sw_core):
 
 # DCMIP 2008 test-case document (Jablonowski et al., 29 May 2008), Sect. 2.1,
 # Table 4: del4 coefficient K4 [m^4/s] of the reference spectral-transform
-# Eulerian core (CAM3.5 EUL) per triangular truncation.  The document's EUL
-# reference carries NO exponential spectral filter.
-DCMIP2008_EUL_K4: dict[int, float] = {
-    21: 2.0e16, 42: 1.0e16, 85: 1.0e15, 106: 0.5e15, 170: 1.5e14, 340: 1.5e13,
-}
+# Eulerian core (CAM3.5 EUL) per triangular truncation; no exponential
+# spectral filter, every n <= N kept.  Canonical copy in spectral_pe.py.
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (  # noqa: E402
+    CAM_EUL_DCMIP2008_K4 as DCMIP2008_EUL_K4,
+    cam_eul_dcmip2008_dissipation as _cam_eul_dcmip2008_dissipation)
 DCMIP2008_DRY_CASES = frozenset(
     {"inertio_gravity_3_2", "mountain_rossby_5_0", "rossby_haurwitz_6_0"})
 # Baroclinic-wave family rows (DCMIP-2016 / Ullrich et al. 2014 state; the
-# rotated pair uses the DCMIP 2008 rotation recipe).  They run the SAME
-# DCMIP 2008 Table 4 CAM-EUL K4 as the dry rows, BORROWED: the DCMIP 2008
-# steady-state / baroclinic-wave tests (Sects. 1.1-1.2.1: 1-0-0 / 2-0-0,
-# rotated 1-3-0 / 2-3-0) use the closely related Jablonowski & Williamson
-# (2006) state, and that document is the one listing a spectral-EUL
-# dissipation for this flow.
-# This is NOT a DCMIP-2016 prescription.
+# rotated pair uses the DCMIP 2008 rotation recipe): Table 4 BORROWED -- the
+# DCMIP 2008 steady-state / baroclinic-wave tests (Sects. 1.1-1.2.1: 1-0-0 /
+# 2-0-0, rotated 1-3-0 / 2-3-0) use the closely related Jablonowski &
+# Williamson (2006) state.  This is NOT a DCMIP-2016 prescription.
 SPECTRAL_BAROCLINIC_TABLE4_CASES = frozenset(
     {"baroclinic", "baroclinic_steady", "rotated_baroclinic",
      "rotated_steady"})
 SPECTRAL_TABLE4_CASES = DCMIP2008_DRY_CASES | SPECTRAL_BAROCLINIC_TABLE4_CASES
-# Matrix spectral-PE lane default (every other spectral row): del4 at
-# 2.338e15 (21/n)^4 plus the order-8, 0.01-retention exp filter per step.
-_SPECTRAL_PE_LANE_HD_T21 = 2.338e15
-_SPECTRAL_PE_LANE_FILTER = 0.01
+_SPECTRAL_PE_MATRIX_NMAX = 42   # vote 2026-11-27 (see _spectral_pe_dissipation)
 
 
 def _spectral_pe_dissipation(case: str, n_max: int) -> tuple[float, float, str]:
-    """(del4 coeff [m^4/s], exp-filter strength, note) of the run_baroclinic
-    spectral lane for ``case`` at truncation ``T<n_max>``.
+    """(del4 coeff [m^4/s], exp-filter strength, note) of EVERY spectral-PE
+    matrix row (run_baroclinic, run_held_suarez, run_amip) at ``T<n_max>``.
 
-    ``SPECTRAL_TABLE4_CASES`` run DCMIP 2008 Sect. 2.1 Table 4 CAM-EUL
-    dissipation: del4 K4 for the truncation, no exponential filter.
+    User decision 2026-11-27 ("option 1", what CAM-EUL does): DCMIP 2008
+    Sect. 2.1 Table 4 CAM-EUL del4 K4 for the truncation, NO exponential
+    spectral filter, and the full band n <= N (SpectralPEConfig default
+    dealiasing_fraction=1.0; the quadratic 34x68 transform grid at T21 is
+    alias-free for the quadratic products).  Replaces the old lane default
+    (2.338e15 (21/n)^4 + order-8, 0.01-retention filter per 600 s step, 2/3
+    state truncation), which left the T21 JW wave essentially absent (day-9
+    min p_s 999.45 hPa vs 979.96 with option 1; latlon 979.86).
 
-    * DCMIP-2008 dry rows (6-3-0 IG, 5-0-0 mountain, 4-0-0 RH): their own
-      document's reference.  The lane's per-step filter (exp(-ln100
-      (n/N)^8) per 600 s step) e-folds n=14 -- the top of the 2/3 band --
-      in ~55 min at T21; with it off (K4 unchanged) the 5-0-0 day-2 max
-      wind is 50.2 vs 39.1 m/s.  Combined change (filter off AND K4
-      2.338e15 -> 2.0e16) at T21: 5-0-0 day-2 49.9, 6-3-0 0.5-d peak 6.2
-      m/s (cube/ico/latlon 51.2/50.1/54.0 and 6.4/6.5/6.4).
-    * Baroclinic-wave family rows (baroclinic, baroclinic_steady,
-      rotated_baroclinic, rotated_steady; DCMIP-2016 / Ullrich 2014
-      state): the SAME Sect. 2.1 Table 4 K4, borrowed because the DCMIP
-      2008 steady-state / baroclinic-wave tests (Sects. 1.1-1.2.1:
-      1-0-0 / 2-0-0, rotated 1-3-0 / 2-3-0) use the closely related
-      Jablonowski & Williamson (2006) state -- it is NOT a DCMIP-2016
-      prescription.  Paired T21 runs (filter+2.338e15 -> Table 4):
-      baroclinic day-9 min p_s 999.45
-      hPa @(60N,110E) (wave essentially absent) -> 990.6 @(50N,122E)
-      (cube/latlon/ico 974.9/979.9/969.7 @~51-54N,120-124E);
-      baroclinic_steady --quick ps_pert 18.7 -> 1.8 Pa (others 4-8);
-      rotated_steady 23.5 -> 1.2 Pa.
+    * DCMIP-2008 dry rows: their own document's reference.
+    * Baroclinic-wave rows: the same table, borrowed (see
+      SPECTRAL_BAROCLINIC_TABLE4_CASES; not a DCMIP-2016 prescription).
+    * held_suarez*, amip, gravity_wave_3_1, rest_state_topo: the same
+      reference dissipation (their documents prescribe none for a spectral
+      core).  gravity_wave_3_1 divides K4 by X^3 (small planet) at the
+      caller.
 
-    Known gaps (same for both groups): the lane keeps only n <= 14 at
-    "T21" (2/3 state truncation, dealiasing_fraction 0.667) while Table 4
-    K4 is tuned for CAM EUL keeping n <= 21: for the same K4 the del4
-    decay rate at the lane's cutoff mode n=14 is [14*15/(21*22)]^2 ~ 0.21
-    of that at the reference cutoff n=21 (continuous decay rates, not
-    per-step attenuation); and the
-    reference's del2 K2 = 2.5e5 m^2/s on the top three levels is NOT
-    applied (no per-level del2 in SpectralPEConfig) -- disclosed in the
-    note.  Evidence is at T21 (and T42 for the dry rows); the lane's
-    fixed 600 s step is not checked for the higher Table 4 truncations.
-    K4 is taken from the table only; a truncation the table does not
-    list is refused rather than interpolated.
-
-    Every other row (held_suarez*, amip, gravity_wave_3_1,
-    rest_state_topo, transport) keeps the lane default unchanged
-    (bit-identical).
+    Known gap: the reference's del2 K2 = 2.5e5 m^2/s on the top three
+    levels is NOT applied (no per-level del2 in SpectralPEConfig).  A
+    truncation the table does not list is refused (vote 2026-11-27, author
+    + codex: no cited scaling law to interpolate with), and so is n_max > 42
+    (vote 2026-11-27, codex b, author switched a -> b: the lanes' fixed
+    600 s explicit step is unchecked there -- Table 4 itself shortens the
+    step at T106+ -- and with the full band a 300 m/s gravity wave's
+    SSP-RK3 amplification at n=85 is ~1.9 per step, codex linear screen).
     """
-    if case in SPECTRAL_TABLE4_CASES:
-        if n_max not in DCMIP2008_EUL_K4:
-            raise ValueError(
-                f"{case} on spectral T{n_max}: DCMIP 2008 Table 4 lists EUL K4 "
-                f"only for T{sorted(DCMIP2008_EUL_K4)}; refusing to guess one")
-        k4 = DCMIP2008_EUL_K4[n_max]
-        src = ("" if case in DCMIP2008_DRY_CASES else
-               " (borrowed from the DCMIP 2008 Jablonowski & Williamson 2006 wave "
-               "tests; not a DCMIP-2016 prescription)")
-        return (k4, 0.0,
-                f"DCMIP 2008 Table 4 EUL dissipation{src}: del4 K4={k4:.2e} "
-                f"m^4/s, no exp spectral filter; top-3-level del2 K2=2.5e5 NOT "
-                f"applied; state truncated to 2/3 band")
-    return (_SPECTRAL_PE_LANE_HD_T21 * (21.0 / n_max) ** 4,
-            _SPECTRAL_PE_LANE_FILTER, "")
+    k4 = _cam_eul_dcmip2008_dissipation(n_max)["hyperdiff_coeff"]
+    if n_max > _SPECTRAL_PE_MATRIX_NMAX:
+        raise ValueError(
+            f"{case} on spectral T{n_max}: the matrix spectral-PE lanes run a "
+            f"fixed explicit step checked only up to T{_SPECTRAL_PE_MATRIX_NMAX}"
+            f" (DCMIP 2008 Table 4 K4 is listed beyond it, but not this step)")
+    src = ("" if case in DCMIP2008_DRY_CASES else
+           " (borrowed from the DCMIP 2008 Jablonowski & Williamson 2006 wave "
+           "tests; not a DCMIP-2016 prescription)"
+           if case in SPECTRAL_BAROCLINIC_TABLE4_CASES else
+           " (CAM-EUL reference; the case document prescribes none)")
+    return (k4, 0.0,
+            f"DCMIP 2008 Table 4 EUL dissipation{src}: del4 K4={k4:.2e} "
+            f"m^4/s, no exp spectral filter, full band n<=N; top-3-level "
+            f"del2 K2=2.5e5 NOT applied")
 
 
 def _modon_hyperdiff_coeff(n: int) -> float:
@@ -4515,13 +4495,17 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         )
 
         n_max = int(tc.resolution.replace("T", ""))
+        # CAM-EUL reference dissipation (DCMIP 2008 Table 4 K4, no exp
+        # filter, full band n <= N): user decision 2026-11-27.  Resolved
+        # (or refused) before any grid is built.
+        _hd, _spec_filter, _ = _spectral_pe_dissipation("held_suarez", n_max)
         grid = create_gaussian_grid(n_max)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 600.0
         pe_config = SpectralPEConfig(
-            hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+            hyperdiff_coeff=_hd,
             spectral_filter_order=8,
-            spectral_filter_strength=0.01,
+            spectral_filter_strength=_spec_filter,
             fix_mass=True, anchor_mass_to_initial=True,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
@@ -6242,13 +6226,17 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         )
 
         n_max = int(tc.resolution.replace("T", ""))
+        # CAM-EUL reference dissipation (DCMIP 2008 Table 4 K4, no exp
+        # filter, full band n <= N): user decision 2026-11-27.  Resolved
+        # (or refused) before any grid is built.
+        _hd, _spec_filter, _ = _spectral_pe_dissipation("amip", n_max)
         grid = create_gaussian_grid(n_max)
         sigma = _create_vertical(nlev, "hybrid")  # AMIP: hybrid only
         dt = 600.0
         pe_config = SpectralPEConfig(
-            hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+            hyperdiff_coeff=_hd,
             spectral_filter_order=8,
-            spectral_filter_strength=0.01,
+            spectral_filter_strength=_spec_filter,
             fix_mass=True, anchor_mass_to_initial=True,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)

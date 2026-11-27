@@ -429,7 +429,8 @@ def test_train_neural_gcm_spectral_cli(monkeypatch, tmp_path, argv, expect):
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     assert pe._replace(T_damping_pressure_surfaces=False) == SpectralPEConfig(
         hyperdiff_coeff=2.5e15, hyperdiff_order=2, time_integrator="ssp_rk3",
-        spectral_filter_strength=0.01, spectral_filter_order=8)
+        spectral_filter_strength=0.01, spectral_filter_order=8,
+        dealiasing_fraction=0.667)   # trained-model 2/3 pin (2026-11-27)
     # a refused invocation leaves an existing record untouched
     monkeypatch.setattr(sys, "argv", [
         "prog", "--spectral-t-damping-pressure-surfaces", "--hyperdiff", "0",

@@ -108,6 +108,39 @@ _COS_LAT_MIN = 1.0e-6
 # Per-level multipliers of nu_top for levels k = 0 (model top), 1, 2.
 _CAM_SE_NU_SCALE_TOP = (4.0, 2.0, 1.0)
 
+# --- CAM-EUL reference dissipation (DCMIP 2008 test-case document,
+# Jablonowski et al., 29 May 2008, Sect. 2.1, Table 4) ---
+# del4 coefficient K4 [m^4/s] of the spectral-transform Eulerian core
+# (CAM3.5 EUL) per triangular truncation.  That reference keeps every
+# n <= N (no 2/3 state truncation: the quadratic Gaussian grid makes the
+# quadratic transform products alias-free) and carries NO exponential
+# spectral filter.  Single source of the table: the test matrix and the
+# drivers import it; a truncation it does not list is refused, never
+# interpolated (no cited scaling law).
+CAM_EUL_DCMIP2008_K4: dict[int, float] = {
+    21: 2.0e16, 42: 1.0e16, 85: 1.0e15, 106: 0.5e15, 170: 1.5e14, 340: 1.5e13,
+}
+
+
+def cam_eul_dcmip2008_dissipation(n_max: int) -> dict:
+    """SpectralPEConfig dissipation fields of the CAM-EUL reference at
+    ``T<n_max>``: DCMIP 2008 Table 4 del4 K4 (``hyperdiff_order=2``), no
+    exponential spectral filter, full band (``dealiasing_fraction=1.0``).
+
+    Raises ``ValueError`` for a truncation Table 4 does not list.  Usage:
+    ``SpectralPEConfig(**cam_eul_dcmip2008_dissipation(21), ...)``.  The
+    reference's del2 K2 = 2.5e5 m^2/s on the top three levels is NOT part
+    of this (SpectralPEConfig has no per-level del2; the CAM-SE top sponge
+    ``sponge_del2_nu_top_m2s`` is a different scheme).
+    """
+    n_max = int(n_max)
+    if n_max not in CAM_EUL_DCMIP2008_K4:
+        raise ValueError(
+            f"spectral T{n_max}: DCMIP 2008 Table 4 lists CAM-EUL del4 K4 only "
+            f"for T{sorted(CAM_EUL_DCMIP2008_K4)}; refusing to guess one")
+    return dict(hyperdiff_coeff=CAM_EUL_DCMIP2008_K4[n_max], hyperdiff_order=2,
+                spectral_filter_strength=0.0, dealiasing_fraction=1.0)
+
 
 def soft_clip_lnps(lnps_raw: jax.Array) -> jax.Array:
     """Two-sided C∞ clamp of ln(p_s) to [_LNPS_MIN, _LNPS_MAX].
@@ -319,8 +352,15 @@ class SpectralPEConfig(NamedTuple):
     # Post-step spectral filter (damps highest wavenumbers)
     spectral_filter_order: int = 8   # Sharpness of spectral filter
     spectral_filter_strength: float = 0.0  # Retention at n=n_max (0=off, 0.01=aggressive)
-    # Tendency truncation to prevent aliasing from cubic nonlinearities.
-    dealiasing_fraction: float = 0.667  # 2/3 rule for cubic nonlinearities
+    # Tendency + state truncation to n <= floor(fraction * n_max).  DEFAULT
+    # 1.0 = keep every n <= N, as CAM-EUL does (user decision 2026-11-27,
+    # "option 1"): the quadratic Gaussian transform grid
+    # (create_gaussian_grid default, n_lat >= (3N+1)/2, n_lon >= 3N+1) makes
+    # the quadratic transform products alias-free (higher-order products,
+    # e.g. the cubic terms, can still alias); the del4 damps the small
+    # scales (cam_eul_dcmip2008_dissipation).  0.667 = the Orszag 2/3 cut (the
+    # pre-2026-11-27 default; trained AIMIP/NeuralGCM pipelines pin it).
+    dealiasing_fraction: float = 1.0
     # Implicit (multiplicative) hyperdiffusion.  Applied as a post-step
     # filter: coeff_new = coeff_old * exp(-nu * [n(n+1)/a^2]^p * dt).
     # This is UNCONDITIONALLY STABLE, unlike explicit (tendency-based)
@@ -1850,9 +1890,9 @@ class SpectralPrimitiveEquationModel:
         if cfg.dealiasing_fraction == 0.0:
             import warnings
             warnings.warn(
-                "dealiasing_fraction=0.0: spectral aliasing from cubic "
-                "nonlinearities is not suppressed. Set dealiasing_fraction=0.667 "
-                "for production runs.",
+                "dealiasing_fraction=0.0 disables the spectral truncation "
+                "mask entirely; use 1.0 (keep n <= N, the default) or 0.667 "
+                "(Orszag 2/3 cut).",
                 stacklevel=2,
             )
 
@@ -1932,7 +1972,8 @@ class SpectralPrimitiveEquationModel:
         # modes CONSTANT — it cannot remove upper-third power already in
         # the state (mountainous ICs, restarts, user states).  Truncating
         # the state post-step enforces the band-limit the 2/3 rule
-        # assumes; exact no-op for band-limited states.
+        # assumes; exact no-op for band-limited states, and an all-ones
+        # (bitwise identity) mask at the default dealiasing_fraction=1.0.
         if self.config.T_damping_pressure_surfaces and sigma_coord.n_levels < 3:
             raise ValueError(
                 "T_damping_pressure_surfaces needs nlev >= 3 (three-level "
@@ -2066,7 +2107,7 @@ class SpectralPrimitiveEquationModel:
         """Add the pressure-surface correction of a post-step multiplicative
         T damping ``factor(n)`` (``L = factor - 1``, see
         ``SpectralPEConfig.T_damping_pressure_surfaces``), evaluated on the
-        pre-damping state and truncated to the 2/3 band (the implicit
+        pre-damping state and truncated to the kept band (the implicit
         hyperdiffusion runs after the state truncation; the products would
         otherwise repopulate the discarded modes).  Identity when the option
         is off."""
@@ -2338,7 +2379,8 @@ class SpectralPrimitiveEquationModel:
         return result
 
     def _apply_state_truncation(self, state):
-        """Truncate the prognostic state to the de-aliased 2/3 band.
+        """Truncate the prognostic state to the kept band
+        ``n <= floor(dealiasing_fraction * n_max)`` (identity at 1.0).
 
         Multiplies vor/div/T (3D) and lnps (2D) by the 0/1 dealiasing
         mask — the SAME fields whose tendencies are masked in

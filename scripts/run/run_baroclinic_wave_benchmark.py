@@ -384,6 +384,15 @@ def main():
     grid_type = args.grid
     res_str = args.resolution or _default_resolution(grid_type)
     N_GRID = _parse_resolution(res_str, grid_type)
+    if grid_type == "spectral":
+        # refused before any grid / IC is built: the spectral branch runs the
+        # DCMIP 2008 Table 4 CAM-EUL del4 only (no override on this benchmark)
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+            CAM_EUL_DCMIP2008_K4)
+        if N_GRID not in CAM_EUL_DCMIP2008_K4:
+            raise SystemExit(
+                f"spectral T{N_GRID}: this benchmark runs the DCMIP 2008 Table 4 "
+                f"CAM-EUL del4 only, listed for T{sorted(CAM_EUL_DCMIP2008_K4)}")
     N_LEV = args.nlev
     DT = args.dt if args.dt is not None else _default_dt(grid_type)
     N_DAYS = args.days
@@ -468,7 +477,8 @@ def main():
     print(f"  Time step:       {DT:.0f} s")
     print(f"  Duration:        {N_DAYS} days")
     print(f"  dx_min:          {dx_min / 1000:.1f} km")
-    print(f"  Hyperdiffusion:  {nu4:.3e} m^4/s")
+    if not USE_SPECTRAL:
+        print(f"  Hyperdiffusion:  {nu4:.3e} m^4/s")
     print(f"  Output:          {OUTPUT_DIR}/")
     print()
 
@@ -500,13 +510,17 @@ def main():
         print(f"  Initial mean T:  {float(jnp.mean(gp['T'])):.1f} K")
         print(f"  Initial p_s:     {float(jnp.mean(gp['p_s'])) / 100:.1f} hPa")
 
-        config = SpectralPEConfig(
-            hyperdiff_coeff=nu4,
-            hyperdiff_order=4,
-            spectral_filter_strength=0.01,
-            spectral_filter_order=8,
-            time_integrator="ssp_rk3",
-        )
+        # CAM-EUL reference (user decision 2026-11-27): the JW wave is DCMIP
+        # 2008 2-0-0, whose Table 4 gives the EUL del4 K4 -- no exp spectral
+        # filter, full band n <= N; an unlisted truncation is refused (this
+        # benchmark has no override).  The grid-point adaptive nu4 printed
+        # above is NOT used on this branch.
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+            cam_eul_dcmip2008_dissipation)
+        _diss = cam_eul_dcmip2008_dissipation(N_GRID)
+        print(f"  Spectral del4 K4 (DCMIP 2008 Table 4): "
+              f"{_diss['hyperdiff_coeff']:.3e} m^4/s, no exp filter")
+        config = SpectralPEConfig(**_diss, time_integrator="ssp_rk3")
         model = SpectralPrimitiveEquationModel(grid, sigma, config)
 
     elif USE_ICOSAHEDRAL:

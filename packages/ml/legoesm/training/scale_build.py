@@ -734,6 +734,10 @@ def _spectral_pe_config(yml):
     _PE_DEFAULTS = SpectralPEConfig()
     spec = dict(yml.get("spectral", {}))
     return SpectralPEConfig(
+        # Trained-model dynamics: the Orszag 2/3 cut of the existing WB
+        # checkpoints, pinned (vote 2026-11-27) against the library default
+        # flip to 1.0 (CAM-EUL full band).
+        dealiasing_fraction=0.667,
         hyperdiff_coeff=float(spec.get("hyperdiff_coeff", 2.5e15)),
         hyperdiff_order=int(spec.get("hyperdiff_order", 2)),
         time_integrator=str(spec.get("time_integrator", "ssp_rk3")),

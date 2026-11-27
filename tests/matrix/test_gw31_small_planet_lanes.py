@@ -325,8 +325,8 @@ _SPEC = "legoesm.atmosphere.dynamics.gcm.spectral_pe"
 
 def test_spectral_lane_runs_the_small_planet(mm, monkeypatch, tmp_path):
     """T21: radius a_ref/125, Omega = 0, the L10 table, the 2012 IC,
-    dt = 600 s / X = 4.8 s, del-4 hyperdiffusion / X^3, the per-step
-    spectral filter of the ordinary rows."""
+    dt = 600 s / X = 4.8 s, DCMIP 2008 Table 4 CAM-EUL del-4 K4 / X^3, no
+    exp filter, full band (user decision 2026-11-27)."""
     import numpy as np
     from legoesm.grids.gaussian import sh_synthesis_3d
     from tests.test_cases.dcmip2012 import gravity_wave_3_1 as gw
@@ -340,10 +340,10 @@ def test_spectral_lane_runs_the_small_planet(mm, monkeypatch, tmp_path):
     assert np.all(np.asarray(grid.f) == 0.0)
     _assert_gw31_table(sigma)
     assert cfg.hyperdiff_order == 2                     # del-4: k = 2
-    assert cfg.hyperdiff_coeff == pytest.approx(2.338e15 / 125.0 ** 3,
+    assert cfg.hyperdiff_coeff == pytest.approx(2.0e16 / 125.0 ** 3,
                                                 rel=1e-15)
-    assert (cfg.spectral_filter_order, cfg.spectral_filter_strength) == (
-        8, 0.01)
+    assert cfg.spectral_filter_strength == 0.0
+    assert cfg.dealiasing_fraction == 1.0
     # the del-4 operator the step applies, on THIS grid: per degree l the
     # rate is K_4 (l(l+1)/a^2)^2 -- X times the Earth row's rate (so the
     # damping per step, rate * dt with dt / X, is the Earth row's)
@@ -355,11 +355,11 @@ def test_spectral_lane_runs_the_small_planet(mm, monkeypatch, tmp_path):
         grid, ones, cfg.hyperdiff_coeff, cfg.hyperdiff_order)))[:, 0]
     ell = np.asarray(grid.ls, dtype=np.float64)
     a = gw.small_planet_radius()
-    np.testing.assert_allclose(rate, 2.338e15 / 125.0 ** 3
+    np.testing.assert_allclose(rate, 2.0e16 / 125.0 ** 3
                                * (ell * (ell + 1) / a ** 2) ** 2, rtol=1e-12)
     earth = create_gaussian_grid(21, omega=0.0)
     rate_e = -np.real(np.asarray(spectral_hyperdiffusion_3d(
-        earth, ones, 2.338e15, 2)))[:, 0]
+        earth, ones, 2.0e16, 2)))[:, 0]
     m = ell > 0
     np.testing.assert_allclose(rate[m] / rate_e[m], 125.0, rtol=1e-6)
     np.testing.assert_allclose(rate[m] * 4.8, rate_e[m] * 600.0, rtol=1e-6)

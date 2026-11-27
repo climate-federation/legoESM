@@ -181,13 +181,17 @@ def test_implicit_hyperdiffusion_heating_at_rest_over_terrain_is_corrected():
     for on in (False, True):
         grid, coord, cfg, _m, s = _setup(on, filt=0.0, hyperdiff=2.338e17)
         model = SpectralPrimitiveEquationModel(
-            grid, coord, cfg._replace(implicit_hyperdiff=True))
+            # explicit 2/3 cut (the default keeps the full band since
+            # 2026-11-27): this pins that the correction never repopulates a
+            # cut band
+            grid, coord, cfg._replace(implicit_hyperdiff=True,
+                                      dealiasing_fraction=0.667))
         model._ensure_hyperdiff_filter(_DT)
         s = model._apply_state_truncation(s)      # the step's order
         post = model._apply_implicit_hyperdiff(s).T_hat.data
         dT = sh_synthesis_3d(grid, post - s.T_hat.data) / _DT
         out[on] = np.asarray(jnp.abs(dT).max(axis=(0, 1))) * _DAY
-        # runs after the 2/3 truncation: must not repopulate the cut band
+        # runs after the state truncation: must not repopulate the cut band
         cut = ~np.asarray(model._dealias_state, dtype=bool)
         assert cut.any() and np.abs(np.asarray(post)[cut]).max() == 0.0
     assert out[False].max() > 0.1, out[False]

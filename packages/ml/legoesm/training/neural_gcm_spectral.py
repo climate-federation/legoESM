@@ -102,6 +102,10 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # Dynamics
     dt: float = 600.0            # Dycore timestep [s] (CFL-safe for T42 explicit RK3)
     pe_config: SpectralPEConfig = SpectralPEConfig(
+        # Trained-model dynamics: the Orszag 2/3 cut these checkpoints were
+        # trained with, pinned (vote 2026-11-27) so the library default flip to
+        # 1.0 (CAM-EUL full band) does not silently change them.
+        dealiasing_fraction=0.667,
         hyperdiff_coeff=2.5e15,
         hyperdiff_order=2,
         time_integrator="ssp_rk3",
