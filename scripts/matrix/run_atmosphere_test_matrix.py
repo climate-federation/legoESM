@@ -3132,6 +3132,19 @@ def _extract_hydro_cube_latlon(s, cos_angle=None, sin_angle=None):
     }
 
 
+def _ico_max_cell_speed(u_edge, mesh) -> float:
+    """Icosahedral ``max_wind``: max cell-centre |V| from the Perot
+    reconstruction, the same staggering and reduction as the cube (A-grid)
+    and lat-lon (cell-centre) rows.  Vote 2026-11-27 (codex B, author B; GLM
+    unavailable): max|edge-normal u| read 6-10 % above cell-centre |V| on
+    weak-flow rows (held_suarez_topo day 2: 3.34 vs 3.15 m/s); the edge
+    maximum stays as ``max_edge_u``."""
+    from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+
+    u_e, v_n = reconstruct_cell_velocity(u_edge, mesh)
+    return float(jnp.max(jnp.sqrt(u_e ** 2 + v_n ** 2)))
+
+
 def _extract_hydro_mpas(s, mesh, lon_cell, lat_cell):
     """Extract hydrostatic snapshot fields for icosahedral (MPAS).
 
@@ -3415,7 +3428,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             return {
                 "mean_height": _area_weighted_mean(s.h.data, mesh.areaCell),
-                "max_wind": float(jnp.max(jnp.abs(s.u.data))),
+                "max_wind": _ico_max_cell_speed(s.u.data, mesh),
+                "max_edge_u": float(jnp.max(jnp.abs(s.u.data))),
             }
 
         def extract_fn(s):
@@ -4523,7 +4537,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             return {
                 "mass": mass_fn(s),
-                "max_wind": float(jnp.max(jnp.abs(s.u.data))),
+                "max_wind": _ico_max_cell_speed(s.u.data, mesh),
+                "max_edge_u": float(jnp.max(jnp.abs(s.u.data))),
                 "mean_T": _area_weighted_mean(s.T.data, mesh.areaCell),
             }
 
@@ -5046,7 +5061,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             return {
                 "mass": mass_fn(s),
-                "max_wind": float(jnp.max(jnp.abs(s.u.data))),
+                "max_wind": _ico_max_cell_speed(s.u.data, mesh),
+                "max_edge_u": float(jnp.max(jnp.abs(s.u.data))),
                 # Same baroclinic-wave growth diagnostic the cube and lat-lon branches
                 # already emit (#1028/#1081): without it the icosahedral arm
                 # has no NATIVE-grid, regrid-free growth series, and the
@@ -6254,7 +6270,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             return {
                 "mass": mass_fn(s),
-                "max_wind": float(jnp.max(jnp.abs(s.u.data))),
+                "max_wind": _ico_max_cell_speed(s.u.data, mesh),
+                "max_edge_u": float(jnp.max(jnp.abs(s.u.data))),
                 "mean_T":   _area_weighted_mean(s.T.data,   mesh.areaCell),
                 "mean_p_s": _area_weighted_mean(s.p_s.data, mesh.areaCell),
             }
