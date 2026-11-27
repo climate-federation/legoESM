@@ -428,7 +428,8 @@ class TestMPASSurfaceForcingThreading(unittest.TestCase):
                 microphysics=MicrophysicsConfig(scheme="none"),
                 gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
             ),
-            model_type="mpas", dt=300.0))
+            model_type="mpas", dt=300.0,
+            surface_bulk_coeffs=None))  # partial builder: no surface exchange: T_sfc reaches radiation only
 
     def _dT_dt(self, forcing):
         res = self.physics_fn(self.state, self.mesh, self.sigma, forcing=forcing)

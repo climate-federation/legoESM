@@ -83,7 +83,8 @@ class _Mesh:
 
 def _run(cfg, ledger):
     st, sigma, mesh = _state_and_grid()
-    fn = make_physics(cfg, model_type="mpas", dt=75.0, budget_ledger=ledger)
+    fn = make_physics(cfg, model_type="mpas", dt=75.0, budget_ledger=ledger,
+                      surface_bulk_coeffs=None)  # partial builder: no surface exchange
     out = fn(st, mesh, sigma)
     tend = out[0] if isinstance(out, tuple) else out
     return tend, st, sigma
@@ -210,7 +211,8 @@ def test_grads_survive_the_ledger():
     break AD through the physics."""
     cfg = _cfg()
     st, sigma, mesh = _state_and_grid()
-    fn = make_physics(cfg, model_type="mpas", dt=75.0, budget_ledger=True)
+    fn = make_physics(cfg, model_type="mpas", dt=75.0, budget_ledger=True,
+                      surface_bulk_coeffs=None)  # partial builder: no surface exchange
 
     def loss(T):
         s = st._replace(T=st.T.replace(data=T))
