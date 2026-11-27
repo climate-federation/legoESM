@@ -816,3 +816,19 @@ def test_no_defaults_and_refused_arms():
         _stages(dict(entry, sst=None), fluxes, nml)
     with pytest.raises(ValueError):
         bl.si3_ice_thd_temp(h_i=None, e_i=entry["e_i"], sz_i=entry["sz_i"], constants=NEMO_SI3_CONSTANTS_CONFIG)
+
+
+def test_heat_loop_stops_once_every_column_has_converged(monkeypatch):
+    nml = _deck()
+    entry, fluxes = _entry(_categories()[0])
+    calls, solve = [], bl.thomas_solve
+
+    def counted(*args, **kwargs):
+        jax.debug.callback(lambda: calls.append(1))
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(bl, "thomas_solve", counted)
+    passes = int(jnp.max(jax.jit(lambda e: _stages(e, fluxes, nml).zdf.n_picard)(entry)))
+    jax.effects_barrier()
+    assert 1 < passes < bl._MAX_ITERATIONS
+    assert len(calls) == passes

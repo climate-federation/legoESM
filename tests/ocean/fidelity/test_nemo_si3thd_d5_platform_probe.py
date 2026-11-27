@@ -411,7 +411,7 @@ def test_d5_zdf_gradients_are_finite_and_reverse_equals_forward_with_literal_for
             jnp.ones_like(qns0),
         )
         with monkeypatch.context() as mp:
-            mp.setattr(bl_mod, "thomas_solve", _thomas_solve_impl)
+            _forward_mode_patches(mp, bl_mod)
             (loss_jvp_primal, primal_jvp), (dloss_jvp, _) = jax.jvp(
                 loss_with_aux,
                 (e_i0, e_s0, h_i0, h_s0, t_su0, qns0),
@@ -2191,7 +2191,7 @@ def test_r5_all_touched_functions_gradients_and_forward_bits(
         jnp.ones_like(forc.qns_ice),
     )
     with monkeypatch.context() as mp:
-        mp.setattr(bl_mod, "thomas_solve", _thomas_solve_impl)
+        _forward_mode_patches(mp, bl_mod)
         (loss_col_jvp, outs_col_jvp), (dloss_col_jvp, _) = jax.jvp(
             col_loss_with_aux,
             (ent.h_ice, ent.e_ice, ent.S_bulk, forc.qns_ice),
@@ -2640,7 +2640,7 @@ def test_r6_all_touched_functions_gradients_and_forward_bits(
             jnp.ones_like(forc.evaporation) * 1.0e-7,
         )
         with monkeypatch.context() as mp:
-            mp.setattr(bl_mod, "thomas_solve", _thomas_solve_impl)
+            _forward_mode_patches(mp, bl_mod)
             (loss_r6_jvp, outs_r6_jvp), (dloss_r6_jvp, _) = jax.jvp(
                 col_r6_loss, args_r6, tangents_r6
             )
@@ -2849,3 +2849,10 @@ def test_o8_production_c1d_plants_fire(probe_module, monkeypatch, plant):
         hit = {0, 1}
     planted = _o8_production_exit(probe_module)
     assert set(np.nonzero(np.any(planted != base, axis=0))[0]) == hit
+
+
+def _forward_mode_patches(mp, bl_mod):
+    # Forward mode needs the undecorated tridiagonal solve and a fixed-count Picard loop.
+    mp.setattr(bl_mod, "thomas_solve", _thomas_solve_impl)
+    mp.setattr(bl_mod, "_bl99_early_exit_loop",
+               lambda body, init, n: jax.lax.fori_loop(0, n, body, init))
