@@ -141,7 +141,7 @@ def test_zarr_rejects_held_radiation_carry_with_cadence(tmp_path):
             days=1,
         )
 
-    held_carry = {"held_dT_rad": jnp.zeros((6, 4, 4, 3))}
+    held_carry = {"held_dT_rad": jnp.zeros((4, 8, 3))}  # lat-lon res 4, nlev 3
 
     driver = ModelDriver(_cfg(2, "zarr"), output_dir=str(tmp_path / "z2"))
     driver.setup()

@@ -214,8 +214,9 @@ def test_latlon_compiled_bitexact_restart_continuation(tmp_path):
 
     comparisons = [
         ("T", dA.state.T.data, dB2.state.T.data),
-        ("u", dA.state.u.data, dB2.state.u.data),
-        ("v", dA.state.v.data, dB2.state.v.data),
+        # lat-lon lane carries the native C-grid face winds
+        ("u_f", dA.state.u_f.data, dB2.state.u_f.data),
+        ("v_f", dA.state.v_f.data, dB2.state.v_f.data),
         ("p_s", dA.state.p_s.data, dB2.state.p_s.data),
         ("q_v", dA.q_v, dB2.q_v),
         ("tke", dA._carry_aux["tke"], dB2._carry_aux["tke"]),
