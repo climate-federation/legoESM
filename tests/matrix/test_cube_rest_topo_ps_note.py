@@ -1,6 +1,8 @@
 """The cube rest_state_topo row records why its surface-pressure drift is
 larger than the other grids' (FV3-duogrid corner halo imbalance + Lin PGF
-truncation on unfiltered DCMIP 2012 2-0-0 terrain at C36).  Vote 2026-11-27
+truncation on unfiltered DCMIP 2012 2-0-0 terrain at C36).  The cube
+held_suarez_topo row likewise records why its early wind transient is larger
+(Lin 1997 hydrostatic PGF truncation on the isothermal HS IC).  Vote 2026-11-27
 (codex + author): accept and document, keep the terrain unfiltered.  The note
 must reach the cube branch of the runner that the rest_state_topo dispatch
 actually calls."""
@@ -42,10 +44,16 @@ class _Stop(Exception):
 
 
 def _cube_row_notes(mm, monkeypatch, tmp_path, case):
-    """Run the registered cube row up to its results.txt write, with the
-    time loop stubbed, and return the notes string it would record."""
-    (tc,) = [t for t in mm._build_test_matrix()
-             if t.case == case and t.grid_type == "cubed_sphere"]
+    """Run each registered cube row of ``case`` up to its results.txt write,
+    with the time loop stubbed, and return the notes strings joined."""
+    tcs = [t for t in mm._build_test_matrix()
+           if t.case == case and t.grid_type == "cubed_sphere"]
+    assert tcs, case
+    return "\n".join(_one_row_notes(mm, monkeypatch, tmp_path, tc)
+                     for tc in tcs)
+
+
+def _one_row_notes(mm, monkeypatch, tmp_path, tc):
     seen = {}
 
     def fake_loop(step_fn, state, dt, n_steps, *a, **k):
@@ -73,3 +81,24 @@ def test_other_cube_rows_do_not_carry_it(matrix_mod, monkeypatch, tmp_path):
     notes = _cube_row_notes(matrix_mod, monkeypatch, tmp_path,
                             "mountain_rossby_5_0")
     assert matrix_mod.CUBE_REST_TOPO_PS_NOTE not in notes
+
+
+def test_hs_topo_note_names_the_diagnosed_mechanism(matrix_mod):
+    note = matrix_mod.CUBE_HS_TOPO_WIND_NOTE
+    for word in ("Lin 1997 PGF", "p**kappa", "constant theta", "isothermal",
+                 "unfiltered", "h0**2", "use_logp is nonhydrostatic-only"):
+        assert word in note, word
+
+
+def test_cube_hs_topo_row_records_its_note(matrix_mod, monkeypatch,
+                                           tmp_path):
+    notes = _cube_row_notes(matrix_mod, monkeypatch, tmp_path,
+                            "held_suarez_topo")
+    assert matrix_mod.CUBE_HS_TOPO_WIND_NOTE in notes
+    assert matrix_mod.CUBE_REST_TOPO_PS_NOTE not in notes
+
+
+def test_flat_cube_hs_row_does_not_carry_it(matrix_mod, monkeypatch,
+                                            tmp_path):
+    notes = _cube_row_notes(matrix_mod, monkeypatch, tmp_path, "held_suarez")
+    assert matrix_mod.CUBE_HS_TOPO_WIND_NOTE not in notes
