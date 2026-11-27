@@ -1550,6 +1550,22 @@ def _duo_vertical_kw(vertical_coord: str, nlev: int) -> dict:
     return {}
 
 
+# Cube rest_state_topo surface-pressure drift (~145 Pa at day 1, max|ps - ps0|, against
+# 3-29 Pa on the other grids) is FV3-duogrid behaviour, not a port error:
+# the IC is discretely balanced (a thickness-consistent T IC gives the same
+# drift), and with constant theta (where the Lin 1997/2004 PGF is exact) the
+# panel-corner cells still drift because ext_scalar(delp, pt) fills the
+# halo/wedge linearly while geopk rebuilds pe**kappa nonlinearly; the
+# interior part is Lin-PGF truncation on 2-0-0 ridges ~4.5 cells wide at
+# C36.  Both scale roughly as h0**2 (tested h0 = 500-2000 m).  Terrain
+# stays unfiltered for cross-grid parity.  Vote (codex + author, 2026-11-27): accept and document, do not
+# filter phis or raise resolution.
+CUBE_REST_TOPO_PS_NOTE = (
+    "day-1 max|ps-ps0| ~145 Pa is FV3-duogrid corner halo imbalance "
+    "(ext_scalar delp/pt vs geopk pe**kappa) + Lin PGF truncation on unfiltered 2-0-0 "
+    "terrain at C36; scales ~h0**2; IC is discretely balanced")
+
+
 def _duo_vertical_note(vertical_coord: str, duo) -> str:
     """results.txt record of the table a cube duo row ran; a sigma row
     carries the same ``sigma_L<n>`` table ID as the other grids."""
@@ -4780,6 +4796,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         sigma = SimpleNamespace(sigma_full=duo.level_values)
         _ps0 = duo.ps(state)
         _duo_note = _duo_vertical_note(tc.vertical_coord, duo)
+        if _rest:
+            _duo_note = f"{_duo_note}; {CUBE_REST_TOPO_PS_NOTE}"
 
         def step_fn(s, dt_):
             return duo.step(s, dt_)
