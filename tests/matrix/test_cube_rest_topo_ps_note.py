@@ -45,12 +45,11 @@ class _Stop(Exception):
 
 def _cube_row_notes(mm, monkeypatch, tmp_path, case):
     """Run each registered cube row of ``case`` up to its results.txt write,
-    with the time loop stubbed, and return the notes strings joined."""
+    with the time loop stubbed, and return the list of notes strings, one per row."""
     tcs = [t for t in mm._build_test_matrix()
            if t.case == case and t.grid_type == "cubed_sphere"]
     assert tcs, case
-    return "\n".join(_one_row_notes(mm, monkeypatch, tmp_path, tc)
-                     for tc in tcs)
+    return [_one_row_notes(mm, monkeypatch, tmp_path, tc) for tc in tcs]
 
 
 def _one_row_notes(mm, monkeypatch, tmp_path, tc):
@@ -74,19 +73,19 @@ def _one_row_notes(mm, monkeypatch, tmp_path, tc):
 def test_cube_rest_row_records_the_note(matrix_mod, monkeypatch, tmp_path):
     notes = _cube_row_notes(matrix_mod, monkeypatch, tmp_path,
                             "rest_state_topo")
-    assert matrix_mod.CUBE_REST_TOPO_PS_NOTE in notes
+    assert all(matrix_mod.CUBE_REST_TOPO_PS_NOTE in n for n in notes)
 
 
 def test_other_cube_rows_do_not_carry_it(matrix_mod, monkeypatch, tmp_path):
     notes = _cube_row_notes(matrix_mod, monkeypatch, tmp_path,
                             "mountain_rossby_5_0")
-    assert matrix_mod.CUBE_REST_TOPO_PS_NOTE not in notes
+    assert all(matrix_mod.CUBE_REST_TOPO_PS_NOTE not in n for n in notes)
 
 
 def test_hs_topo_note_names_the_diagnosed_mechanism(matrix_mod):
     note = matrix_mod.CUBE_HS_TOPO_WIND_NOTE
     for word in ("Lin 1997 PGF", "p**kappa", "constant theta", "isothermal",
-                 "unfiltered", "h0**2", "use_logp is nonhydrostatic-only"):
+                 "unfiltered", "use_logp is nonhydrostatic-only"):
         assert word in note, word
 
 
@@ -94,11 +93,12 @@ def test_cube_hs_topo_row_records_its_note(matrix_mod, monkeypatch,
                                            tmp_path):
     notes = _cube_row_notes(matrix_mod, monkeypatch, tmp_path,
                             "held_suarez_topo")
-    assert matrix_mod.CUBE_HS_TOPO_WIND_NOTE in notes
-    assert matrix_mod.CUBE_REST_TOPO_PS_NOTE not in notes
+    for n in notes:
+        assert matrix_mod.CUBE_HS_TOPO_WIND_NOTE in n
+        assert matrix_mod.CUBE_REST_TOPO_PS_NOTE not in n
 
 
 def test_flat_cube_hs_row_does_not_carry_it(matrix_mod, monkeypatch,
                                             tmp_path):
     notes = _cube_row_notes(matrix_mod, monkeypatch, tmp_path, "held_suarez")
-    assert matrix_mod.CUBE_HS_TOPO_WIND_NOTE not in notes
+    assert all(matrix_mod.CUBE_HS_TOPO_WIND_NOTE not in n for n in notes)

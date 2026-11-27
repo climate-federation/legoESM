@@ -1546,33 +1546,37 @@ CUBE_REST_TOPO_PS_NOTE = (
     "terrain at C36; scales ~h0**2; IC is discretely balanced")
 
 # Cube held_suarez_topo early wind transient (C36 --quick: max|V| ~5.0 m/s at
-# 6 h vs 2.7 latlon / 3.8 ico) is the hydrostatic Lin (1997) PGF acting on
-# the HS ISOTHERMAL 300 K rest IC, not the forcing, the IC or the terrain.
-# Diagnosed 2026-11-27 with 6.4 h cube runs, HS forcing OFF, no 1 K
-# perturbation, same unfiltered 2-0-0 terrain (h0 = 2000 m) and CAM6 L32:
-#   isothermal 300 K          4.68 m/s, at the summit, lowest levels
-#   6.5 K/km lapse rate       1.64 m/s
-#   constant theta = 300 K    0.92 m/s, at a PANEL CORNER (summit is quiet)
-#   isothermal, h0 = 1000 m   1.19 m/s (~h0**2)
-# Lin's contour integral is exact where theta is constant (phi linear in
-# p**kappa) and its truncation grows with d(theta)/dz, which an isothermal
-# column maximises (~9.8 K/km vs ~3.3 for 6.5 K/km).  The isothermal IC is
-# exactly hydrostatic on the duo (geopk's cp*theta*d(p**kappa) =
-# R*T*d(ln p) when T is constant), and the HS forcing (FV3 hswf, strat=F)
-# DAMPS the transient (5.02 with vs 5.80 without at 6.4 h); the 1 K IC
-# perturbation adds ~0.8-1.1 (unforced 4.68 -> 5.80, forced 4.24 -> 5.02).  Why the other grids'
-# PGFs suffer less on the isothermal IC is NOT measured here.  FV3's remedy
-# for nearly isothermal
-# columns, use_logp, exists only on the NONHYDROSTATIC path (dyn_core
-# nh_p_grad / riem_solver3; one_grad_p always uses p**kappa), so a
-# hydrostatic-faithful fix does not exist; terrain filtering and the HS94
-# isothermal start are kept for cross-grid parity.  Documented, not fixed.
+# 6 h vs 2.7 latlon / 3.8 ico).  Leading cause (PLAUSIBLE, cube-only arms):
+# the hydrostatic Lin (1997) p**kappa PGF acting on the matrix's shared
+# isothermal 300 K start over the terrain.  Measured 2026-11-27, cube C36,
+# HS forcing OFF, no 1 K perturbation, same unfiltered 2-0-0 terrain
+# (h0 = 2000 m), CAM6 L32, global max|V| at 0.53 h / 6.4 h:
+#   isothermal 300 K          0.70 / 4.68 m/s, summit, lowest levels
+#   6.5 K/km lapse rate       0.29 / 1.64 m/s
+#   constant theta = 300 K    0.19 / 0.92 m/s, argmax at a PANEL CORNER
+#   isothermal, h0 = 1000 m   0.19 / 1.19 m/s (4x smaller at half height)
+# Lin's p**kappa contour cancels when Phi is affine in p**kappa (constant
+# theta); the response grows with the theta stratification of the start,
+# as expected from that truncation.  Not isolated: the arms also change
+# p_s / layer thickness, and each number integrates whole steps (C and D
+# PGF stages, halos, remap).  The isothermal start integrates exactly in
+# the vertical (cp*(T/pkz)*d(p**kappa) = R*T*d(ln p)).  With the 1 K
+# perturbation, HS forcing (FV3 hswf, strat=F) lowers the 6.4 h peak (5.02
+# forced vs 5.80 unforced); the perturbation adds ~0.8-1.1 (unforced 4.68
+# -> 5.80, forced 4.24 -> 5.02).  Why the other grids respond less is NOT
+# measured here.  Stock FV3 offers no hydrostatic switch for this: use_logp
+# (log-p PGF, better for nearly isothermal columns) is read only on the
+# NONHYDROSTATIC path; one_grad_p always uses p**kappa.  Lin (1997) sec. 3
+# gives a hydrostatic log-p contour variant, but adopting it departs from
+# FV3 (a dycore design call, not taken here).  Terrain stays unfiltered and
+# the isothermal start is kept for cross-grid parity.  Documented, not fixed.
 CUBE_HS_TOPO_WIND_NOTE = (
-    "early max|V| transient (~5 m/s at 6 h) is hydrostatic Lin 1997 PGF "
-    "truncation (p**kappa contour, exact only for constant theta) on the "
-    "isothermal HS IC over unfiltered 2-0-0 terrain at C36; 6.4 h unforced: "
-    "isothermal 4.68 / lapse-rate 1.64 / constant-theta 0.92 m/s; scales "
-    "~h0**2; FV3 use_logp is nonhydrostatic-only")
+    "early max|V| transient (~5 m/s at 6 h) attributed (cube-only arms) to "
+    "hydrostatic Lin 1997 PGF truncation (p**kappa contour, exact for "
+    "constant theta) on the isothermal start over unfiltered 2-0-0 terrain "
+    "at C36; 6.4 h unforced: isothermal 4.68 / lapse-rate 1.64 / "
+    "constant-theta 0.92 m/s, 1.19 at half height; FV3 use_logp is "
+    "nonhydrostatic-only")
 
 
 def _duo_vertical_note(vertical_coord: str, duo) -> str:
