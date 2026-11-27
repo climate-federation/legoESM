@@ -43,7 +43,7 @@ LANES = {
              dict(discretization="mpas", dt=300.0)),
     "spectral": (dict(grid_type="gaussian", resolution=8, nlev=8),
                  dict(model_type="hydrostatic", discretization="spectral", dt=600.0)),
-    # no cube lane: the cubed sphere is the dry fv3_duo, which refuses physics
+    # no cube lane: the cubed sphere is the dry fv3_duo, which refuses radiation
     "latlon": (dict(grid_type="latlon", resolution=8, nlev=5),
                dict(model_type="hydrostatic", discretization="latlon_cgrid", dt=300.0)),
 }

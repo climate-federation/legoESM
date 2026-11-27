@@ -16,7 +16,7 @@ Run through the REAL per-step lane (lat-lon, L5, x64), supersaturated start
 
 The default vertical coordinate is HYBRID, so the dry mass is measured on the
 coordinate's true layer masses (codex r1: ``p_s * dsigma`` is not the layer
-mass away from the reference pressure); a pure-sigma run checks the same.
+mass away from the reference pressure).
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def _masses(d):
     return dry, tot
 
 
-# no cubed-sphere case: the cube is the dry fv3_duo, which refuses physics
+# no cubed-sphere case: the cube is the dry fv3_duo, which refuses radiation
 @pytest.mark.parametrize("grid_type,vcoord,fixer", [
     ("latlon", "hybrid", False),
     # the dycore energy fixer + the mass fixer's energy closure (F15 V8) on
