@@ -5,7 +5,7 @@ monkeypatched to a synthetic latitude- and day-dependent set, then stopped at
 its first hand-off to physics: the per-step ``forcing`` dict given to
 ``model.step`` (MPAS; the fv3_duo column lane runs this same ``_run_column``),
 the spectral ``forcing_data`` dict, or the ``pack_forcing`` kwargs that become
-the compiled cube / lat-lon SegmentForcing.  Every lane must hand its
+the compiled lat-lon SegmentForcing.  Every lane must hand its
 radiation the same TSI, spectrum, ozone, aerosol column, CCN AOD, volcanic LW
 aerosol, GHG set (halogens included) and insolation calendar; the radiation
 config each lane builds is spied for the constant-solar TSI and the CMIP
@@ -43,7 +43,7 @@ LANES = {
              dict(discretization="mpas", dt=300.0)),
     "spectral": (dict(grid_type="gaussian", resolution=8, nlev=8),
                  dict(model_type="hydrostatic", discretization="spectral", dt=600.0)),
-    "cube": (dict(grid_type="cubed_sphere", resolution=4, nlev=5), dict(dt=600.0)),
+    # no cube lane: the cubed sphere is the dry fv3_duo, which refuses physics
     "latlon": (dict(grid_type="latlon", resolution=8, nlev=5),
                dict(model_type="hydrostatic", discretization="latlon_cgrid", dt=300.0)),
 }

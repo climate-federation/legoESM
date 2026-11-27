@@ -7,7 +7,7 @@ fixer held the TOTAL ``p_s`` integral, so precipitated water stayed behind as
 dry air.  Now the moisture update carries its mass (the compiled lane's
 shared helpers) and a target-anchored DRY-mass fixer replaces the dycore's.
 
-Run through the REAL per-step lane (cube C4 L5, x64), supersaturated start
+Run through the REAL per-step lane (lat-lon, L5, x64), supersaturated start
 (``rh_init`` 1.5) so the saturation adjustment rains on the first step:
 
 * the global dry mass is unchanged (old code: grows by the rain);
@@ -42,19 +42,16 @@ def _masses(d):
     return dry, tot
 
 
+# no cubed-sphere case: the cube is the dry fv3_duo, which refuses physics
 @pytest.mark.parametrize("grid_type,vcoord,fixer", [
-    ("cubed_sphere", "hybrid", False), ("latlon", "hybrid", False),
-    ("cubed_sphere", "sigma", False),
+    ("latlon", "hybrid", False),
     # the dycore energy fixer + the mass fixer's energy closure (F15 V8) on
     # this lane: it runs, and the heating it adds moves no mass
-    ("cubed_sphere", "hybrid", True), ("latlon", "hybrid", True)])
+    ("latlon", "hybrid", True)])
 def test_per_step_lane_keeps_dry_mass_and_rain_leaves_p_s(tmp_path, grid_type,
                                                           vcoord, fixer):
-    if grid_type == "cubed_sphere":
-        res, dyc = 4, DycoreConfig(energy_fixer=fixer, dt=1800.0, fix_mass=True)
-    else:
-        res, dyc = 8, DycoreConfig(energy_fixer=fixer, dt=600.0, fix_mass=True,
-                                   discretization="latlon_cgrid")
+    res, dyc = 8, DycoreConfig(energy_fixer=fixer, dt=600.0, fix_mass=True,
+                               discretization="latlon_cgrid")
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type=grid_type, resolution=res, nlev=5,
                         vertical_coord=vcoord),
@@ -78,7 +75,7 @@ def test_per_step_lane_keeps_dry_mass_and_rain_leaves_p_s(tmp_path, grid_type,
         float(d._carry_aux["target_dry_mass"]), dry0, rtol=1e-14)
 
 
-@pytest.mark.parametrize("grid_type", ["cubed_sphere", "latlon"])
+@pytest.mark.parametrize("grid_type", ["latlon"])
 def test_per_step_dry_mass_fixer_returns_its_energy_as_heat(tmp_path,
                                                            grid_type):
     """The per-step lane's dry-mass fixer runs after the dycore step, outside
@@ -86,11 +83,10 @@ def test_per_step_dry_mass_fixer_returns_its_energy_as_heat(tmp_path,
     the dry energy of the driver's state is unchanged across the fixer even
     though it moves real air (anchor offset 1e-5)."""
     from legoesm.core.conservation import dycore_column_energy
-    disc = {} if grid_type == "cubed_sphere" else {
-        "discretization": "latlon_cgrid"}
+    disc = {"discretization": "latlon_cgrid"}
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type=grid_type,
-                        resolution=4 if grid_type == "cubed_sphere" else 8,
+                        resolution=8,
                         nlev=5, vertical_coord="hybrid"),
         dycore=DycoreConfig(energy_fixer=True, dt=600.0, fix_mass=True, **disc),
         output=OutputConfig(output_dir="", diag_days=1, checkpoint_days=0),
