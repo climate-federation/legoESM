@@ -1571,12 +1571,13 @@ CUBE_REST_TOPO_PS_NOTE = (
 # FV3 (a dycore design call, not taken here).  Terrain stays unfiltered and
 # the isothermal start is kept for cross-grid parity.  Documented, not fixed.
 CUBE_HS_TOPO_WIND_NOTE = (
-    "early max|V| transient (~5 m/s at 6 h) attributed (cube-only arms) to "
+    "C36 --quick early max|V| transient (~5 m/s at 6 h) is PLAUSIBLY "
     "hydrostatic Lin 1997 PGF truncation (p**kappa contour, exact for "
     "constant theta) on the isothermal start over unfiltered 2-0-0 terrain "
-    "at C36; 6.4 h unforced: isothermal 4.68 / lapse-rate 1.64 / "
-    "constant-theta 0.92 m/s, 1.19 at half height; FV3 use_logp is "
-    "nonhydrostatic-only")
+    "(not isolated: sensitivity arms also change p_s/thickness); 6.4 h "
+    "sensitivity runs, forcing off, unperturbed: isothermal 4.68 / "
+    "lapse-rate 1.64 / constant-theta 0.92 m/s (panel-corner peak), 1.19 "
+    "at half height; FV3 use_logp is nonhydrostatic-only")
 
 
 def _duo_vertical_note(vertical_coord: str, duo) -> str:
