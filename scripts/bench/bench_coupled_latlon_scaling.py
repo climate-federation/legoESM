@@ -81,37 +81,44 @@ def run_coupled_bench(*, n_lat, nlev, n_intervals, n_atm_substeps, dt,
     sst = sst_g[layout.lat_start:layout.lat_end]
     band_area = band_grid.area
 
-    coupled_step = make_coupled_latlon_band_step(
-        band_model, layout, cpl, n_atm_substeps=n_atm_substeps)
+    # make_coupled_latlon_band_step activates the process-global MPI halo
+    # backend with the band layout; reset it so later callers (and tests
+    # sharing the process) do not run cube halos on a lat-lon layout.
+    from legoesm.grids.halo import set_halo_backend
+    try:
+        coupled_step = make_coupled_latlon_band_step(
+            band_model, layout, cpl, n_atm_substeps=n_atm_substeps)
 
-    # One-exchange coupled-surface-energy drift (the conservation diagnostic).
-    from legoesm.parallel.reductions import global_sum_mpi
+        # One-exchange coupled-surface-energy drift (the conservation diagnostic).
+        from legoesm.parallel.reductions import global_sum_mpi
 
-    def _e(_st, _sst):
-        return float(global_sum_mpi(coupling_energy(_st, _sst, cpl, band_area)))
-    e_pre = _e(st, sst)
-    st_c, sst_c, _ = apply_surface_coupling(st, sst, cpl, dt * n_atm_substeps)
-    energy_drift = abs(_e(st_c, sst_c) - e_pre) / abs(e_pre)
+        def _e(_st, _sst):
+            return float(global_sum_mpi(coupling_energy(_st, _sst, cpl, band_area)))
+        e_pre = _e(st, sst)
+        st_c, sst_c, _ = apply_surface_coupling(st, sst, cpl, dt * n_atm_substeps)
+        energy_drift = abs(_e(st_c, sst_c) - e_pre) / abs(e_pre)
 
-    def _block(pair):
-        jax.block_until_ready((pair[0].T, pair[1]))
+        def _block(pair):
+            jax.block_until_ready((pair[0].T, pair[1]))
 
-    for _ in range(n_warmup):
-        st, sst = coupled_step(st, sst, dt)
-    _block((st, sst))
-    t0 = time.perf_counter()
-    for _ in range(n_intervals):
-        st, sst = coupled_step(st, sst, dt)
-    _block((st, sst))
-    elapsed = time.perf_counter() - t0
+        for _ in range(n_warmup):
+            st, sst = coupled_step(st, sst, dt)
+        _block((st, sst))
+        t0 = time.perf_counter()
+        for _ in range(n_intervals):
+            st, sst = coupled_step(st, sst, dt)
+        _block((st, sst))
+        elapsed = time.perf_counter() - t0
 
-    return {
-        "n_lat": n_lat, "n_lon": n_lon, "nlev": nlev, "n_ranks": n_ranks,
-        "n_intervals": n_intervals, "n_atm_substeps": n_atm_substeps,
-        "coupled_steps_per_s": n_intervals / elapsed if elapsed > 0 else 0.0,
-        "energy_drift_one_exchange": energy_drift,
-        "band_rows": int(layout.lat_end - layout.lat_start),
-    }
+        return {
+            "n_lat": n_lat, "n_lon": n_lon, "nlev": nlev, "n_ranks": n_ranks,
+            "n_intervals": n_intervals, "n_atm_substeps": n_atm_substeps,
+            "coupled_steps_per_s": n_intervals / elapsed if elapsed > 0 else 0.0,
+            "energy_drift_one_exchange": energy_drift,
+            "band_rows": int(layout.lat_end - layout.lat_start),
+        }
+    finally:
+        set_halo_backend("local")
 
 
 def _parity_gate():

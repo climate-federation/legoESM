@@ -40,3 +40,7 @@ def test_bench_runs_and_conserves():
     # The explicit sensible exchange conserves the coupled surface energy to
     # float64 round-off (single-process => no allreduce reassociation).
     assert m["energy_drift_one_exchange"] < 1e-13
+    # the band step's process-global MPI halo backend is reset on return
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+    assert get_halo_backend() == "local"
+    assert get_mpi_topology() is None
