@@ -1567,6 +1567,20 @@ CUBE_REST_TOPO_PS_NOTE = (
 # at day 1.96 (both PASS).  The C-grid
 # p_grad_c stays p**kappa.  Terrain stays unfiltered and the isothermal
 # start is kept for cross-grid parity.
+# Day-2 gap (cube 4.67 vs latlon 3.01 / ico 3.15 m/s), diagnosed
+# 2026-11-27: flat held_suarez agrees across grids at day 2 (max|V| cube
+# 1.42 / latlon 1.47 / ico 1.62; RMS 0.468 / 0.486 / 0.487), so it is not
+# HS spin-up, forcing, perturbation or resolution.  With terrain, cube
+# makes wind ADIABATICALLY (HS off, rest IC: 4.88 m/s at day 2, latlon
+# 0.000, ico bounded ~1) on cube PANEL EDGES where they cross the 2-0-0
+# ridges (~4.5 dx at C36), largest near the lid (k=2) and present at
+# every level.  Smooth envelope without ridges 0.01, ridge period doubled
+# 0.34, h0 = 1000 m 1.33 m/s.  PLAUSIBLE mechanism (not isolated): duogrid
+# halo remap of phis (once) and delp (every step) do not stay
+# hydrostatically consistent over near-grid-scale ridges (top-level
+# geopotential mismatch up to 49 m2/s2 in the first halo ring).  USER
+# DECISION 2026-11-27: accept and document (terrain stays the published
+# 2-0-0 shape on every grid; no cube-only filter).
 CUBE_HS_TOPO_WIND_NOTE = (
     "runs the Lin 1997 sec. 3 log-p hydrostatic PGF OPTION (user decision "
     "2026-11-27; departs from FV3, whose hydrostatic one_grad_p uses "
@@ -1576,7 +1590,11 @@ CUBE_HS_TOPO_WIND_NOTE = (
     "over unfiltered 2-0-0 terrain); C36 --quick max|V| at 5.9 h "
     "p**kappa 4.97 -> log-p 2.25 m/s; 6.4 h forcing-off unperturbed arms "
     "p**kappa/log-p: isothermal 4.68/1.42, lapse-rate 1.64/4.06, "
-    "constant-theta 0.92/4.71 m/s; every other cube row keeps p**kappa")
+    "constant-theta 0.92/4.71 m/s; every other cube row keeps p**kappa; "
+    "day-2 excess (4.67 vs 3.0-3.2 m/s) is adiabatic panel-edge wind over "
+    "the near-grid-scale 2-0-0 ridges, peaking near the lid (flat HS "
+    "agrees across grids; PLAUSIBLE duogrid halo phis/delp remap "
+    "inconsistency); accepted, terrain unfiltered (user decision)")
 
 
 def _duo_vertical_note(vertical_coord: str, duo) -> str:

@@ -87,7 +87,9 @@ def test_hs_topo_note_names_the_diagnosed_mechanism(matrix_mod):
     note = matrix_mod.CUBE_HS_TOPO_WIND_NOTE
     for word in ("Lin 1997 sec. 3 log-p", "OPTION", "departs from FV3",
                  "p**kappa", "constant theta", "isothermal", "unfiltered",
-                 "every other cube row keeps p**kappa"):
+                 "every other cube row keeps p**kappa",
+                 "adiabatic panel-edge wind", "flat HS agrees",
+                 "PLAUSIBLE", "accepted"):
         assert word in note, word
 
 
