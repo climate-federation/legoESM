@@ -255,6 +255,17 @@ def _undo_mpas_gc_freeze():
         md._GC_FROZEN[0] = False
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _clear_jax_caches_per_module():
+    """Compiled XLA executables pile up in a long-lived test process until CPU
+    codegen fails with "Failed to materialize symbols" in unrelated later
+    tests (#2055); drop them after each module."""
+    import gc
+    yield
+    jax.clear_caches()
+    gc.collect()
+
+
 @functools.cache
 def _tree_is_dirty() -> bool:
     from legoesm.io.git_provenance import git_provenance
