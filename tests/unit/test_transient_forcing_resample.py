@@ -18,6 +18,7 @@ leaves are traced arrays of fixed shape).
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -44,7 +45,7 @@ def _make_atm_driver(days=2, diag_days=1, resolution=8, nlev=5, dt=600.0):
         radiation="gray",
         days=days,
     )
-    return ModelDriver(cfg)
+    return ModelDriver(cfg, output_dir=tempfile.mkdtemp())
 
 
 class TestTransientForcingResample(unittest.TestCase):

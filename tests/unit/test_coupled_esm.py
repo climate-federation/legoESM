@@ -4,6 +4,7 @@ Tests wiring, SST feedback, energy conservation, and configuration
 across the six coupled ESM presets.
 """
 
+import tempfile
 import unittest
 import sys
 from pathlib import Path
@@ -37,7 +38,10 @@ def _make_driver(preset="aquaplanet", days=1, resolution=8, nlev=5, dt=600.0,
         days=days,
     )
     coupled_cfg = PRESETS[preset]()
-    driver = CoupledESMDriver(atm_config, coupled_cfg, output_dir=output_dir)
+    # own dir: the default results/amip/C{N}_L{L}_{d}d_<second> collides across
+    # xdist workers and the run-manifest guard then refuses the second driver
+    driver = CoupledESMDriver(atm_config, coupled_cfg,
+                              output_dir=output_dir or tempfile.mkdtemp())
     driver.setup()
     return driver
 
@@ -330,7 +334,8 @@ class TestUnfusedRadiation(unittest.TestCase):
             rad_update_steps=rad_update_steps,
             unfused_radiation=unfused,
         )
-        driver = CoupledESMDriver(atm, PRESETS["aquaplanet"]())
+        driver = CoupledESMDriver(atm, PRESETS["aquaplanet"](),
+                                  output_dir=tempfile.mkdtemp())
         driver.setup()
         status = driver.run()
         return driver, status
@@ -738,7 +743,8 @@ class TestLandModeDispatch(unittest.TestCase):
             days=1,
         )
         coupled_cfg = preset_aquaplanet(land_mode="bogus_mode")
-        driver = CoupledESMDriver(atm_config, coupled_cfg)
+        driver = CoupledESMDriver(atm_config, coupled_cfg,
+                                  output_dir=tempfile.mkdtemp())
         with self.assertRaisesRegex(ValueError, "(?i)unknown land_mode"):
             driver.setup()
 
