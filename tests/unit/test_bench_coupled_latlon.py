@@ -30,7 +30,9 @@ def _load():
 
 
 def test_bench_runs_and_conserves():
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
     mod = _load()
+    before = (get_halo_backend(), get_mpi_topology())
     m = mod.run_coupled_bench(
         n_lat=8, nlev=4, n_intervals=3, n_atm_substeps=2, dt=100.0,
         n_warmup=1, rank=0, n_ranks=1)
@@ -40,3 +42,6 @@ def test_bench_runs_and_conserves():
     # The explicit sensible exchange conserves the coupled surface energy to
     # float64 round-off (single-process => no allreduce reassociation).
     assert m["energy_drift_one_exchange"] < 1e-13
+    # the band step's process-global MPI halo backend is restored on return
+    assert get_halo_backend() == before[0]
+    assert get_mpi_topology() is before[1]
