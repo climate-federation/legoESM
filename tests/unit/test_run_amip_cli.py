@@ -5450,6 +5450,20 @@ def test_fv3_duo_div_damp_flags_round_trip_and_validate():
     _fv3_duo_cfg([]).validate_strict()
 
 
+def test_fv3_duo_vtdm4_flag_round_trip_and_validate():
+    """--fv3-duo-vtdm4 (user decision 2026-11-27): default None = the FV3
+    rule d4_bg/3 resolved by the duo deck; an explicit value (the oracle
+    deck's 0.12) reaches DycoreConfig; negative / off-lane is refused."""
+    assert _fv3_duo_cfg([]).dycore.fv3_duo_vtdm4 is None
+    cfg = _fv3_duo_cfg(["--fv3-duo-vtdm4", "0.12"])
+    assert cfg.dycore.fv3_duo_vtdm4 == 0.12
+    cfg.validate_strict()
+    with pytest.raises(ValueError, match="fv3_duo_vtdm4"):
+        cfg._replace(dycore=cfg.dycore._replace(fv3_duo_vtdm4=-0.1)).validate_strict()
+    with pytest.raises(ValueError, match="fv3_duo_vtdm4"):
+        cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid")).validate_strict()
+
+
 def test_fv3_duo_sponge_flags_round_trip_and_validate():
     """--fv3-duo-sponge-{layers,factor,d2-top} reach DycoreConfig (defaults
     = production: 2 layers, factor 8, the measured coefficient; decision

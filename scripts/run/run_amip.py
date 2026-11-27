@@ -1687,13 +1687,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=("fv3_duo: d_sw5 divergence-damping order (1 = del-4, the CAM6 "
               "ldiv4 class and FV3's default; 2 = del-6, the certified "
               "oracle deck). Default 1 = production (decision B2); oracle-"
-              "parity runs pass 2 with --fv3-duo-d4-bg 0.12."))
+              "parity runs pass 2 with --fv3-duo-d4-bg 0.12 "
+              "--fv3-duo-vtdm4 0.12."))
     parser.add_argument(
         "--fv3-duo-d4-bg", type=float, default=0.05,
         help=("fv3_duo: d_sw5 divergence-damping coefficient d4_bg "
               "(sw_core dd8 = (da_min_c*d4_bg)**(nord+1)). Default 0.05 = "
               "MATCHED to MPAS ldiv4 by measurement (decision B2); the "
               "oracle deck is 0.12."))
+    parser.add_argument(
+        "--fv3-duo-vtdm4", type=float, default=None,
+        help=("fv3_duo: vorticity/delp/pt damping coefficient (FV3 vtdm4; "
+              "order nord_v = min(2, nord)). Default None = the FV3 rule "
+              "d4_bg/3 (user decision 2026-11-27); the oracle deck is 0.12."))
     parser.add_argument(
         "--fv3-duo-sponge-layers", type=int, default=2,
         help=("fv3_duo: top-of-model del-2 momentum sponge depth in levels "
@@ -3327,6 +3333,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         fv3_duo_fill=args.fv3_duo_fill,
         fv3_duo_nord=args.fv3_duo_nord,
         fv3_duo_d4_bg=args.fv3_duo_d4_bg,
+        fv3_duo_vtdm4=args.fv3_duo_vtdm4,
         fv3_duo_sponge_layers=args.fv3_duo_sponge_layers,
         fv3_duo_sponge_factor=args.fv3_duo_sponge_factor,
         fv3_duo_sponge_d2_top=args.fv3_duo_sponge_d2_top,

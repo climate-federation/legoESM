@@ -541,7 +541,8 @@ class TestComponentFactoryDispatch:
         from legoesm.grids.vertical import create_sigma_coordinate
         base = _fv3_duo_config()
         oracle = base._replace(dycore=base.dycore._replace(
-            fv3_duo_nord=2, fv3_duo_d4_bg=0.12, fv3_duo_sponge_layers=0))
+            fv3_duo_nord=2, fv3_duo_d4_bg=0.12, fv3_duo_vtdm4=0.12,
+            fv3_duo_sponge_layers=0))
         oracle.validate_strict()
         model = create_atmosphere_dycore(oracle, create_cubed_sphere(N),
                                          create_sigma_coordinate(KM))

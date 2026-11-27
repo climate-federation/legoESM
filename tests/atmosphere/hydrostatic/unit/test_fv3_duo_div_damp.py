@@ -24,7 +24,7 @@ def test_deck_at_oracle_values_is_the_phases_own_deck():
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import duo_sw_deck
     from legoesm.core.fv3_dsw_phase_3d import DSW_DUO_DECK
     from legoesm.core.fv3_dsw_tail_3d import _TAIL_DECK
-    deck = duo_sw_deck(nord=2, d4_bg=0.12)
+    deck = duo_sw_deck(nord=2, d4_bg=0.12, vtdm4=0.12)
 
     def diff(a, b):
         return {f for f in a._fields if getattr(a, f) != getattr(b, f)}
@@ -74,7 +74,8 @@ def test_default_is_the_production_deck_not_the_oracle(grid):
     assert (FV3DuoConfig().sponge_del2_top_layers,
             FV3DuoConfig().sponge_del2_top_factor) == (2, 8.0)
     assert FV3DuoConfig().sponge_d2_top > 0.0
-    assert ORACLE_DAMPING == {"nord": 2, "d4_bg": 0.12, "sponge_del2_top_layers": 0}
+    assert ORACLE_DAMPING == {"nord": 2, "d4_bg": 0.12, "vtdm4": 0.12,
+                              "sponge_del2_top_layers": 0}
     prod = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=KM, n_split=2))
     ic = prod.dcmip16_initial_state(n_tracers=1)
     oracle = FV3DuoDynamicsModel(
@@ -112,6 +113,10 @@ def test_factory_forwards_the_knobs_to_the_duo_config():
     src = inspect.getsource(cf._create_fv3_duo_column_model)
     assert src.count("nord=config.dycore.fv3_duo_nord") == 1
     assert src.count("d4_bg=config.dycore.fv3_duo_d4_bg") == 1
+    assert src.count("vtdm4=config.dycore.fv3_duo_vtdm4") == 1
+    assert DycoreConfig().fv3_duo_vtdm4 is None and FV3DuoConfig().vtdm4 is None
+    assert inspect.getsource(cf.create_atmosphere_dycore).count(
+        "vtdm4=config.dycore.fv3_duo_vtdm4") >= 1
     src_hs = inspect.getsource(cf.create_atmosphere_dycore)
     assert src_hs.count("nord=config.dycore.fv3_duo_nord") >= 1
     for name in ("layers", "factor", "d2_top"):

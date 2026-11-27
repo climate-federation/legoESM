@@ -328,8 +328,11 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # divergence damping and the B1 top del-2 sponge are CONSUMED by this
     # lane (FV3DuoConfig nord/d4_bg/sponge_*), so an oracle-deck
     # Held-Suarez run (--fv3-duo-nord 2 --fv3-duo-d4-bg 0.12
-    # --fv3-duo-sponge-layers 0) stays launchable for parity debugging.
+    # --fv3-duo-vtdm4 0.12 --fv3-duo-sponge-layers 0) stays launchable for parity debugging.
     "dycore.fv3_duo_nord", "dycore.fv3_duo_d4_bg",
+    # vtdm4 (user decision 2026-11-27): None = FV3 rule d4_bg/3; the
+    # oracle deck adds --fv3-duo-vtdm4 0.12.
+    "dycore.fv3_duo_vtdm4",
     "dycore.fv3_duo_sponge_layers", "dycore.fv3_duo_sponge_factor",
     "dycore.fv3_duo_sponge_d2_top",
     # Output cadence + destination -- the OutputConfig fields the lane's
@@ -611,6 +614,7 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
                      fill=config.dycore.fv3_duo_fill,
                      nord=config.dycore.fv3_duo_nord,
                      d4_bg=config.dycore.fv3_duo_d4_bg,
+                     vtdm4=config.dycore.fv3_duo_vtdm4,
                      sponge_del2_top_layers=config.dycore.fv3_duo_sponge_layers,
                      sponge_del2_top_factor=config.dycore.fv3_duo_sponge_factor,
                      sponge_d2_top=config.dycore.fv3_duo_sponge_d2_top))
@@ -1320,6 +1324,7 @@ def create_atmosphere_dycore(
             moist=(config.microphysics == "kessler"),
             nord=config.dycore.fv3_duo_nord,
             d4_bg=config.dycore.fv3_duo_d4_bg,
+            vtdm4=config.dycore.fv3_duo_vtdm4,
             sponge_del2_top_layers=config.dycore.fv3_duo_sponge_layers,
             sponge_del2_top_factor=config.dycore.fv3_duo_sponge_factor,
             sponge_d2_top=config.dycore.fv3_duo_sponge_d2_top,

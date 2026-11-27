@@ -505,6 +505,13 @@ class DycoreConfig(NamedTuple):
     # only.  The as83 forms carry their own centred transport (inert there).
     # Appended at the tuple END (positional ABI).
     latlon_vert_advection_scheme: str = "auto"
+    # fv3_duo vorticity / delp / pt damping coefficient (FV3 namelist
+    # vtdm4).  None = FV3 rule vtdm4 = d4_bg / 3 (user decision
+    # 2026-11-27, see fv3_duo_dynamics.duo_sw_deck); oracle-parity runs
+    # pass the oracle deck's 0.12 explicitly.  Its order is not a knob:
+    # nord_v = min(2, fv3_duo_nord), as in FV3 (dyn_core.F90:757).
+    # Appended at the tuple END (positional ABI).
+    fv3_duo_vtdm4: float | None = None
 
 
 class EvaluationConfig(NamedTuple):
@@ -2858,11 +2865,17 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "dycore.fv3_duo_d4_bg must be a finite number >= 0, got "
                 f"{d.fv3_duo_d4_bg!r}")
-        if ((d.fv3_duo_nord, d.fv3_duo_d4_bg) != (1, 0.05)
+        if d.fv3_duo_vtdm4 is not None and not (
+                isinstance(d.fv3_duo_vtdm4, (int, float))
+                and math.isfinite(d.fv3_duo_vtdm4) and d.fv3_duo_vtdm4 >= 0):
+            errors.append(
+                "dycore.fv3_duo_vtdm4 must be None or a finite number >= 0, "
+                f"got {d.fv3_duo_vtdm4!r}")
+        if ((d.fv3_duo_nord, d.fv3_duo_d4_bg, d.fv3_duo_vtdm4) != (1, 0.05, None)
                 and d.discretization != "fv3_duo"):
             errors.append(
-                "dycore.fv3_duo_nord/fv3_duo_d4_bg are the fv3_duo d_sw5 "
-                f"divergence damping; got dycore.discretization="
+                "dycore.fv3_duo_nord/fv3_duo_d4_bg/fv3_duo_vtdm4 are the "
+                f"fv3_duo d_sw damping; got dycore.discretization="
                 f"{d.discretization!r}")
         if not (isinstance(d.fv3_duo_sponge_layers, int)
                 and d.fv3_duo_sponge_layers >= 0):

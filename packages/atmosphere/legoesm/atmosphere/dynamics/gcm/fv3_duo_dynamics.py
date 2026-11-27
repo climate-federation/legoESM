@@ -69,7 +69,10 @@ FV3_DUO_STATE_KEYS = ("state", "press", "q", "omga", "nh")
 #: The certified oracle deck's damping (DUO_TAIL_CFG: del-6, 0.12; no top
 #: sponge).  Oracle-parity tooling and tests pin it: ``FV3DuoConfig(km=...,
 #: **ORACLE_DAMPING)``.  The config DEFAULTS are the production values.
-ORACLE_DAMPING = {"nord": 2, "d4_bg": 0.12, "sponge_del2_top_layers": 0}
+#: ``vtdm4`` is pinned explicitly: the oracle deck's own 0.12 (input.nml),
+#: NOT the production FV3-rule value ``d4_bg / 3`` (see ``duo_sw_deck``).
+ORACLE_DAMPING = {"nord": 2, "d4_bg": 0.12, "vtdm4": 0.12,
+                  "sponge_del2_top_layers": 0}
 
 
 class FV3DuoConfig(NamedTuple):
@@ -140,8 +143,9 @@ class FV3DuoConfig(NamedTuple):
     #: divergent mode; decision B2 2026-10-01, default moved by user
     #: decision 1b 2026-10-02).  The certified oracle deck is
     #: ``ORACLE_DAMPING`` (nord=2, d4_bg=0.12): every oracle-parity
-    #: construction pins it explicitly.  ``nord_v``/``damp_v`` (vorticity
-    #: and delp damping) are NOT exposed: outside B2.
+    #: construction pins it explicitly.  ``nord_v`` (vorticity/delp/pt
+    #: damping order) is NOT a knob: it is derived FV3's way,
+    #: ``min(2, nord)``, in :func:`duo_sw_deck`.
     nord: int = 1
     d4_bg: float = 0.05
     #: Decision B1 (user 2026-10-02, 2a): the MPAS/CAM top-of-model
@@ -158,9 +162,17 @@ class FV3DuoConfig(NamedTuple):
     sponge_del2_top_layers: int = 2
     sponge_del2_top_factor: float = 8.0
     sponge_d2_top: float = 0.0016
+    #: (Last field: appended so positional construction is unchanged.)
+    #: FV3 namelist ``vtdm4`` (``damp_v``: d_sw6 vorticity damping AND the
+    #: d_sw1 ``fv_tp_2d`` damping of delp / mass-weighted pt).  ``None``
+    #: (DEFAULT) = the FV3 rule ``d4_bg / 3`` resolved in
+    #: :func:`duo_sw_deck` (user decision 2026-11-27, see the comment
+    #: there); an explicit float overrides it (``ORACLE_DAMPING`` pins 0.12).
+    vtdm4: float | None = None
 
 
-def duo_sw_deck(*, nord: int, d4_bg: float, sponge_del2_top_layers: int = 0,
+def duo_sw_deck(*, nord: int, d4_bg: float, vtdm4: float | None = None,
+                sponge_del2_top_layers: int = 0,
                 sponge_del2_top_factor: float = 8.0, sponge_d2_top: float = 0.0):
     """The duo's ``SWConfig`` deck with the B2 knobs applied: the union of
     the transport deck (``DUO_DECK_CFG``) and the tail deck
@@ -168,7 +180,12 @@ def duo_sw_deck(*, nord: int, d4_bg: float, sponge_del2_top_layers: int = 0,
     at equal values -- so ONE static config reaches every phase (the
     transport phase gates the divgd exchange on ``nord``, dyn_core.F90:652,
     the tail reads ``d4_bg``).  At the deck values this is the config the
-    phases build for ``cfg=None``, so the step is unchanged there."""
+    phases build for ``cfg=None``, so the step is unchanged there
+    (``vtdm4=0.12`` must then be passed explicitly: ``ORACLE_DAMPING``).
+
+    ``nord_v`` and ``damp_v`` follow FV3's rules (user decision
+    2026-11-27): ``nord_v = min(2, nord)``; ``damp_v = vtdm4``, with
+    ``vtdm4=None`` resolved to ``d4_bg / 3``."""
     from legoesm.core.fv3_duo_stepper import SWConfig
     from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
     from legoesm.core.fv3_native_dsw_tail_3d import DUO_TAIL_CFG
@@ -180,8 +197,33 @@ def duo_sw_deck(*, nord: int, d4_bg: float, sponge_del2_top_layers: int = 0,
         raise ValueError(f"nord must be in 0..3 (sw_core del-nord), got {nord}")
     if not (np.isfinite(d4_bg) and d4_bg >= 0.0):
         raise ValueError(f"d4_bg must be finite and >= 0, got {d4_bg}")
+    # "FV3 rules" for the vorticity / delp / pt damping (USER DECISION
+    # 2026-11-27, option A of the rest_state_topo diagnosis):
+    #   (1) nord_v = min(2, nord)         -- dyn_core.F90:757
+    #       ``nord_v(k) = min(2, flagstruct%nord)``; production nord=1
+    #       -> nord_v=1 (del-4), oracle nord=2 -> nord_v=2 (del-6).
+    #   (2) vtdm4 = d4_bg / 3 when not given -- FV3 namelist doc for vtdm4
+    #       (GFDL fv_arrays.F90): it "should be less than that of d4_bg",
+    #       first guess ~1/3 of d4_bg; production d4_bg=0.05 -> 0.0167.
+    #       dyn_core.F90:762 ``damp_vt(k) = flagstruct%vtdm4  ! for delp,
+    #       delz, and vorticity``.
+    # The previous deck carried the reference deck's values verbatim
+    # (C96.nh.case-13.alpha0.duo.hord6 input.nml: vtdm4=0.12, nord=2,
+    # d4_bg=0.12, with ``!vtdm4=0.03`` commented out) into the production
+    # nord=1 / d4_bg=0.05 deck, i.e. del-6 at 0.12 = 2.4x d4_bg.  Because
+    # damp_v also diffuses delp and MASS-WEIGHTED pt along the
+    # terrain-following levels (d_sw1 ``fv_tp_2d(..., damp_c=damp_v)`` ->
+    # deln_flux), that gave 6.8 m/s spurious wind after 1 d on the DCMIP
+    # 2012 rest-state-over-mountain case (C36 L32, h0=2 km); option A
+    # gives ~2.1 m/s (scratch attribution: pt-damping off alone -> 2.1).
+    nord_v = min(2, int(nord))
+    if vtdm4 is None:
+        vtdm4 = float(d4_bg) / 3.0
+    if not (np.isfinite(vtdm4) and vtdm4 >= 0.0):
+        raise ValueError(f"vtdm4 must be finite and >= 0, got {vtdm4}")
     deck = SWConfig.from_mapping({
         **DUO_DECK_CFG, **DUO_TAIL_CFG, "nord": int(nord), "d4_bg": float(d4_bg),
+        "nord_v": nord_v, "damp_v": float(vtdm4),
         "sponge_del2_top_layers": int(sponge_del2_top_layers),
         "sponge_del2_top_factor": float(sponge_del2_top_factor),
         "sponge_d2_top": float(sponge_d2_top)})
@@ -483,7 +525,7 @@ class FV3DuoDynamicsModel:
             self._ctx_jax, config.km,
             k_split=config.k_split, n_split=config.n_split,
             cfg=duo_sw_deck(
-                nord=config.nord, d4_bg=config.d4_bg,
+                nord=config.nord, d4_bg=config.d4_bg, vtdm4=config.vtdm4,
                 sponge_del2_top_layers=config.sponge_del2_top_layers,
                 sponge_del2_top_factor=config.sponge_del2_top_factor,
                 sponge_d2_top=config.sponge_d2_top),

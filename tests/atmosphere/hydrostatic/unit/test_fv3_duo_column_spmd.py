@@ -386,7 +386,10 @@ def test_driver_column_lane_on_windows_is_the_single_device_run(tmp_path, phys):
     # the gate is the CLOSED lane's own windows-vs-one-device difference on
     # this deck (MEASURED 7.5e-11 of peak after a day at C24: the sharded
     # dynamics' class, not the column seam's), x10 -- the column seam must
-    # add nothing to it
+    # add nothing to it.  The FV3-rules damping deck (user decision
+    # 2026-11-27: nord_v=min(2,nord)=1, vtdm4=d4_bg/3 instead of del-6 at
+    # 0.12) damps the layout round-off less, so the Kessler closed-lane
+    # reference grew to 1.66e-9 (measured); its sanity bound is 1e-8.
     c_win = _driver(tmp_path / "c_win", windows=True,
                     column_lane=False, **phys)
     c_one = _driver(tmp_path / "c_one", windows=False,
@@ -397,7 +400,7 @@ def test_driver_column_lane_on_windows_is_the_single_device_run(tmp_path, phys):
         x = np.asarray(c_win.model.to_flat(c_win.state)["state"][k])[:, ci, ci]
         y = np.asarray(c_one.state["state"][k])[:, ci, ci]
         worst = max(worst, float(np.abs(x - y).max() / np.abs(y).max()))
-    assert 0.0 < worst < 1e-9, worst       # the reference itself is bounded
+    assert 0.0 < worst < 1e-8, worst       # the reference itself is bounded
     _assert_driver_faces_close(_driver_faces(win), _driver_faces(one),
                                f"driver windows vs one device ({phys}; "
                                f"closed lane's own {worst:.2e})",

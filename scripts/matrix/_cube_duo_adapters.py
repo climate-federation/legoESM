@@ -314,11 +314,13 @@ DUO_HYDRO_ETA = "cam6_l32"
 #: The duo deck's outer step: dt_atmos = 1920 s with its n_split = 8
 #: acoustic sub-steps (~240 s each).  NOT clamped by the driver's generic
 #: advective+acoustic CFL heuristic: FV3's dimensionless per-substep
-#: damping (vtdm4 del-6 on delp/pt/vorticity, divergence damping) is tuned
+#: damping (vtdm4 del-4 on delp/pt/vorticity, divergence damping) is tuned
 #: per acoustic substep, so the clamp (C36: 1920 -> 200 s at fixed n_split)
 #: applied it ~9.6x more often per day and drove the rest_state_topo
 #: spurious wind (C36 --quick matrix row, 1 d: 13.47 m/s clamped vs 7.25
-#: at the deck step).
+#: at the deck step -- both measured on the PRE-2026-11-27 deck, vtdm4=0.12
+#: del-6; the FV3-rules deck, vtdm4=d4_bg/3 del-4, gives ~2.1 at the deck
+#: step).
 DUO_HYDRO_DT_ATMOS = 1920.0
 #: DCMIP 2012 test 3-1 (X = 125 small planet): the deck step divided by X
 #: (1920/125 = 15.36 s, the document's "divide the dynamics time step by
@@ -835,7 +837,9 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
         return geo(u, v)
 
     note = (f"fv3_duo FV3DuoDynamicsModel km={km} eta={eta} hydrostatic, "
-            f"nord={cfg.nord} d4_bg={cfg.d4_bg} sponge={cfg.sponge_del2_top_layers}"
+            f"nord={cfg.nord} d4_bg={cfg.d4_bg} vtdm4="
+            f"{'d4_bg/3' if cfg.vtdm4 is None else cfg.vtdm4} (FV3 rules) "
+            f"sponge={cfg.sponge_del2_top_layers}"
             f"L, n_split={cfg.n_split}, dt={dt:g}s ("
             + ("small-planet step: deck dt_atmos 1920 s / X = 125 rounded "
                "down to divide 3600 s" if gw31 else "deck dt_atmos")
@@ -1085,7 +1089,7 @@ def build_duo_dcmip_transport(n: int, *, wind_geo, init_latlon, sigma_coord,
         # be the model's ak / bk
         raise ValueError("duo DCMIP transport: the row's hybrid A p_ref / B are "
                          "not the model's ak / bk")
-    deck = duo_sw_deck(nord=cfg.nord, d4_bg=cfg.d4_bg,
+    deck = duo_sw_deck(nord=cfg.nord, d4_bg=cfg.d4_bg, vtdm4=cfg.vtdm4,
                        sponge_del2_top_layers=cfg.sponge_del2_top_layers,
                        sponge_del2_top_factor=cfg.sponge_del2_top_factor,
                        sponge_d2_top=cfg.sponge_d2_top)
