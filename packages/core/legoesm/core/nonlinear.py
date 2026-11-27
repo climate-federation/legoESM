@@ -83,9 +83,30 @@ def make_implicit_newton_solver(
     last iterate) gets the implicit-function adjoint at that iterate,
     ``-(df/dx)^-1 df/dp``, which approaches the root's as the residual left
     there shrinks.
+
+    The working dtype is ``jnp.result_type(x0.dtype, residual.dtype)``:
+    ``x_scale``, ``f_scale``, and the ``while_loop`` carry are aligned to that
+    working dtype so import-time ``float64`` scale constants never trigger a
+    carry mismatch or silent promotion on ``float32`` solves under
+    ``JAX_ENABLE_X64=1``.  When ``work_dtype != x0.dtype`` (mixed-precision
+    solve), floating outputs are cast back to ``x0.dtype`` (matching
+    :func:`attach_implicit_gradient` and the ``custom_vjp`` cotangent dtype)
+    and ``converged``, ``n_sq``, ``n_sq_rel``, and ``admissible`` are certified
+    on the returned ``x0.dtype`` state so callers never receive a ``True``
+    certificate invalidated by downcast rounding.
     """
-    x_scale = jnp.asarray(x_scale)
-    f_scale = jnp.asarray(f_scale)
+
+    def _freeze_scale(scale):
+        if isinstance(scale, jax.Array):
+            return scale
+        if hasattr(scale, "tolist"):
+            scale = scale.tolist()
+        if isinstance(scale, list):
+            return tuple(scale)
+        return scale
+
+    x_scale_ref = _freeze_scale(x_scale)
+    f_scale_ref = _freeze_scale(f_scale)
 
     def accepted(x, n_sq):
         ok = jnp.asarray(True)
@@ -95,12 +116,19 @@ def make_implicit_newton_solver(
             ok = ok & admissible(x)
         return ok
 
-    def scaled_residual(x, parameters):
-        return residual_fn(x, parameters) / f_scale
+    def _forward_with_work(x0, parameters):
+        x0 = jnp.asarray(x0)
+        x_dtype = x0.dtype
+        res_dtype = jax.eval_shape(residual_fn, x0, parameters).dtype
+        work_dtype = jnp.result_type(x_dtype, res_dtype)
+        x_scale_w = jnp.asarray(x_scale_ref, dtype=work_dtype)
+        f_scale_w = jnp.asarray(f_scale_ref, dtype=work_dtype)
+        x_init = x0.astype(work_dtype)
+        lam_zero = jnp.asarray(0.0, dtype=work_dtype)
+        lam_max = jnp.asarray(lambda_max, dtype=work_dtype)
 
-    def forward(x0, parameters):
         def fun(x):
-            return scaled_residual(x, parameters)
+            return residual_fn(x, parameters) / f_scale_w
 
         def fun_twice(x):
             f = fun(x)
@@ -111,7 +139,7 @@ def make_implicit_newton_solver(
 
         def residual_jacobian(x):
             jacobian, residual = jac_and_fun(x)
-            return residual, jacobian * x_scale
+            return residual, jacobian * x_scale_w
 
         def step(jacobian_z, residual, damping):
             n = residual.shape[0]
@@ -135,7 +163,7 @@ def make_implicit_newton_solver(
             predicted = residual + jacobian_z @ delta_z
             return delta_z, jnp.sum(predicted * predicted)
 
-        residual_0, jacobian_z_0 = residual_jacobian(x0)
+        residual_0, jacobian_z_0 = residual_jacobian(x_init)
         n_sq_0 = jnp.sum(residual_0 * residual_0)
 
         def cond(state):
@@ -144,7 +172,7 @@ def make_implicit_newton_solver(
         def body(state):
             x, residual, jacobian_z, n_sq, damping, iteration, _ = state
             delta_z, n_sq_predicted = step(jacobian_z, residual, damping)
-            x_trial = x + x_scale * delta_z
+            x_trial = x + x_scale_w * delta_z
             residual_trial, jacobian_trial = residual_jacobian(x_trial)
             n_sq_trial = jnp.sum(residual_trial * residual_trial)
             denominator = jnp.maximum(
@@ -169,14 +197,14 @@ def make_implicit_newton_solver(
                     damping * 4.0,
                     jnp.where(good, damping / 3.0, damping),
                 ),
-                0.0,
-                lambda_max,
+                lam_zero,
+                lam_max,
             )
             iteration_new = iteration + 1
             converged = (n_sq_new <= atol + rtol * n_sq_0) & accepted(x_new, n_sq_new)
             done = (
                 converged
-                | (damping_new >= lambda_max)
+                | (damping_new >= lam_max)
                 | (iteration_new >= max_iters)
             )
             return (
@@ -189,62 +217,77 @@ def make_implicit_newton_solver(
                 done,
             )
 
-        initial_converged = (n_sq_0 <= atol) & accepted(x0, n_sq_0)
+        initial_converged = (n_sq_0 <= atol) & accepted(x_init, n_sq_0)
         x_final, _, _, n_sq_final, damping, n_iters, _ = jax.lax.while_loop(
             cond,
             body,
             (
-                x0,
+                x_init,
                 residual_0,
                 jacobian_z_0,
                 n_sq_0,
-                jnp.asarray(lambda_initial, dtype=x0.dtype),
+                jnp.asarray(lambda_initial, dtype=work_dtype),
                 jnp.array(0),
                 initial_converged,
             ),
         )
-        # The verdict reuses the loop's own residual.  Re-evaluating it here
-        # compiles differently from the residual inside the Jacobian sweep, and
-        # at the tolerance edge that rounding flipped a column the loop had
-        # accepted onto its fallback.
-        converged = ((n_sq_final <= atol + rtol * n_sq_0)
-                     & accepted(x_final, n_sq_final))
-        tiny = jnp.finfo(n_sq_final.dtype).tiny
-        return (
-            x_final,
+        # The verdict reuses the loop's own residual when no downcast occurs.
+        # Re-evaluating it on a same-dtype solve compiles differently from the
+        # residual inside the Jacobian sweep, and at the tolerance edge that
+        # rounding flipped a column the loop had accepted onto its fallback.
+        # When work_dtype != x_dtype, casting x_final down to x_dtype moves the
+        # returned state, so re-evaluate the residual and admissibility on the
+        # actual returned state so the convergence certificate matches it.
+        x_out = x_final.astype(x_dtype)
+        if work_dtype != x_dtype:
+            x_cert = x_out.astype(work_dtype)
+            r_out = fun(x_cert)
+            n_sq_cert = jnp.sum(r_out * r_out)
+            admissible_ok = accepted(x_cert, n_sq_cert)
+        else:
+            x_cert = x_final
+            n_sq_cert = n_sq_final
+            admissible_ok = accepted(x_final, n_sq_final)
+        converged = (n_sq_cert <= atol + rtol * n_sq_0) & admissible_ok
+        tiny = jnp.finfo(n_sq_cert.dtype).tiny
+        result = (
+            x_out,
             n_iters,
             converged,
-            n_sq_final,
-            n_sq_final / jnp.maximum(n_sq_0, tiny),
-            damping,
-            (n_iters >= max_iters).astype(x_final.dtype),
+            n_sq_cert.astype(x_dtype),
+            (n_sq_cert / jnp.maximum(n_sq_0, tiny)).astype(x_dtype),
+            damping.astype(x_dtype),
+            (n_iters >= max_iters).astype(x_dtype),
         )
+        return result, x_cert
 
     @jax.custom_vjp
     def solve(x0, parameters):
-        return forward(x0, parameters)
+        return _forward_with_work(x0, parameters)[0]
 
     def solve_fwd(x0, parameters):
-        result = forward(x0, parameters)
-        return result, (result[0], parameters, result[2])
+        result, x_final_work = _forward_with_work(x0, parameters)
+        return result, (x_final_work, parameters, result[2])
 
     def solve_bwd(saved, cotangents):
         x_star, parameters, converged = saved
         g_x = cotangents[0]
+        work_dtype = x_star.dtype
+        f_scale_w = jnp.asarray(f_scale_ref, dtype=work_dtype)
         x_safe = jnp.where(jnp.isfinite(x_star), x_star, jnp.zeros_like(x_star))
         input_invalid = jnp.any(~jnp.isfinite(x_star)) | jnp.any(~jnp.isfinite(g_x))
 
         jacobian = jax.jacfwd(
-            lambda x: scaled_residual(x, parameters)
+            lambda x: residual_fn(x, parameters) / f_scale_w
         )(x_safe)
         transpose = jacobian.T
         column_norm = jnp.linalg.norm(transpose, axis=0)
         column_scale = jnp.where(column_norm > 0.0, 1.0 / column_norm, 1.0)
         equilibrated = transpose * column_scale
-        adjoint_scaled = jnp.linalg.solve(equilibrated, g_x)
+        adjoint_scaled = jnp.linalg.solve(equilibrated, g_x.astype(work_dtype))
         adjoint = column_scale * adjoint_scaled
 
-        _, vjp = jax.vjp(lambda p: scaled_residual(x_safe, p), parameters)
+        _, vjp = jax.vjp(lambda p: residual_fn(x_safe, p) / f_scale_w, parameters)
         grad_parameters = vjp(-adjoint)[0]
         solve_failed = input_invalid | jnp.any(~jnp.isfinite(adjoint))
         if not adjoint_unconverged:
@@ -255,7 +298,7 @@ def make_implicit_newton_solver(
                 solve_failed | ~jnp.isfinite(value), jnp.zeros_like(value), value
             )
 
-        return jnp.zeros_like(x_star), jax.tree.map(mask, grad_parameters)
+        return jnp.zeros_like(g_x), jax.tree.map(mask, grad_parameters)
 
     solve.defvjp(solve_fwd, solve_bwd)
     return solve
