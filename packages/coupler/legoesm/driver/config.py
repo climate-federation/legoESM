@@ -343,7 +343,7 @@ class DycoreConfig(NamedTuple):
     # guard, same pattern as hard_sat_ice_curve).  Appended at the tuple END
     # to preserve the positional ABI (codex review).
     k_h_scale: float | None = None
-    # Vertical advection scheme on the MPAS SIGMA lane ("upwind" | "van_leer").
+    # Thermal/wind vertical advection on MPAS SIGMA (tracers select separately).
     # First-order upwind's implicit diffusion K_σ = |σ̇|·Δσ/2 is +0.822 K/day at
     # the tropical UTLS maximum (15S-15N, 91.4 hPa, cldF_fsd, N=37) — larger
     # than the whole production temperature tendency there and 2.1x the
@@ -456,9 +456,9 @@ class DycoreConfig(NamedTuple):
     # viscosity [m2/s] x (4, 2, 1) on vor, div and T of the top three levels.
     # 0.0 = off (bit-identical).  (appended after vertical_form: positional ABI)
     spectral_sponge_nu_top_m2s: float = 0.0
-    # ASKED(user), 2026-11-15: lat-lon HYBRID selector; MPAS always van Leer.
-    # None resolves per lane: hybrid lat-lon SB, hybrid MPAS van Leer;
-    # sigma retains its existing operator and refuses explicit selections.
+    # Pressure-coordinate tracer selector (sigma and hybrid). None resolves
+    # per lane: lat-lon/spectral SB, MPAS van Leer. Explicit selections on
+    # height, FV3 and other unsupported lanes remain refused (F2).
     tracer_vertical_scheme: Literal["sb", "van_leer"] | None = None
     tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
     tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
@@ -744,22 +744,27 @@ CLUBB_PROGNOSTIC_ONLY = frozenset({
     "clubb_c_k10", "clubb_c6rtb"})
 
 
-def resolve_tracer_vertical_scheme(value, solver_name, *, hybrid: bool) -> str | None:
-    """Resolve the hybrid tracer operator; None on lanes retaining their operator.
+def resolve_tracer_vertical_scheme(value, solver_name, *, mpas_vert_advection_scheme) -> str | None:
+    """Resolve the pressure-coordinate tracer operator; None on lanes retaining their operator.
 
     An explicit selection must be honored by the lane, including direct factory
     callers. Widths only affect van Leer; each can independently be zero.
+    MPAS under ``vert_advection_scheme='ppm'`` transports tracers with PPM, so
+    an explicit selection there would be inert and is refused.
     """
     if value not in (None, "sb", "van_leer"):
         raise ValueError("dycore.tracer_vertical_scheme must be None, 'sb' or 'van_leer'")
+    if (value is not None and solver_name == "mpas_primitive_equations"
+            and mpas_vert_advection_scheme == "ppm"):
+        raise ValueError("dycore.tracer_vertical_scheme is inert under "
+                         "mpas_vert_advection_scheme='ppm' (tracers take PPM); use None")
     defaults = {"latlon_cgrid_primitive_equations": "sb",
-                "mpas_primitive_equations": "van_leer"}
-    if not hybrid or solver_name not in defaults:
+                "mpas_primitive_equations": "van_leer",
+                "spectral_primitive_equations": "sb"}
+    if solver_name not in defaults:
         if value is not None:
             raise ValueError("dycore.tracer_vertical_scheme would be silently inert on this lane; use None")
         return None
-    if solver_name == "mpas_primitive_equations" and value == "sb":
-        raise ValueError("dycore.tracer_vertical_scheme on MPAS hybrid must be None or 'van_leer'")
     return defaults[solver_name] if value is None else value
 
 
@@ -4787,7 +4792,7 @@ class ExperimentConfig(NamedTuple):
             try:
                 resolve_tracer_vertical_scheme(
                     d.tracer_vertical_scheme, driver_solver_name(self),
-                    hybrid=g.vertical_coord in ("hybrid", "cam_l32"))
+                    mpas_vert_advection_scheme=d.mpas_vert_advection_scheme)
             except ValueError as exc:
                 errors.append(str(exc))
         for name in ("tracer_van_leer_width", "tracer_van_leer_flux_width"):

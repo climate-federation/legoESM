@@ -10,8 +10,8 @@ Horizontal advection uses the C-grid PPM operator
 advective form is correct for prescribed-wind transport because there
 is no companion continuity equation to be mass-consistent with, and
 it preserves uniform tracers exactly regardless of wind divergence.
-Vertical advection uses the shared upwind operator from
-grids.vertical.
+Vertical advection selects the shared continuity-paired SB or van Leer
+operator from grids.vertical.
 
 Prescribed winds are evaluated directly at C-grid face coordinates
 (u at longitude interfaces, v at latitude interfaces) to avoid
@@ -26,7 +26,7 @@ each Runge-Kutta stage.
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable, NamedTuple
+from typing import Literal, Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -34,7 +34,7 @@ import jax.numpy as jnp
 from legoesm.core.state import TracerState
 from legoesm.core.operators_fv_latlon_3d import cgrid_fv_scalar_advection_latlon_3d
 from legoesm.grids.latlon import LatLonGrid
-from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
+from legoesm.grids.vertical import SigmaCoordinate, vertical_advection_tracer
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 
@@ -53,6 +53,9 @@ WindFnLatLon = Callable[
 class TracerTransportLatLonConfig(NamedTuple):
     """Configuration for lat-lon C-grid tracer transport model."""
     time_integrator: str = "ssp_rk3"
+    tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
 
 
 def _uface_coords(grid: LatLonGrid):
@@ -127,6 +130,8 @@ def tracer_tendencies_latlon(
     -------
     TracerState  — tendency pytree (dtracers_dt, dtime_dt=1).
     """
+    if config.tracer_vertical_scheme not in ("sb", "van_leer"):
+        raise ValueError(f"unknown tracer vertical scheme {config.tracer_vertical_scheme!r}")
     t = state.time.data
     q = state.tracers.data  # (n_lat, n_lon, nlev, n_tracers)
     n_lat, n_lon, nlev, n_tracers = q.shape
@@ -168,11 +173,14 @@ def tracer_tendencies_latlon(
     horiz_adv = horiz_adv_flat.reshape(n_lat, n_lon, nlev, n_tracers)
 
     # Vertical advection — local stencil along axis -1, no halo cost.
-    # ``vertical_advection`` hard-codes axis -1 as nlev, so vmap over
+    # ``vertical_advection_tracer`` uses axis -1 as nlev, so vmap over
     # the trailing tracer axis (with sigma_dot/sigma_coord captured in
     # the closure) so JAX produces one batched kernel.
     def _vert_one(q_one):
-        return vertical_advection(q_one, sigma_dot, sigma_coord)
+        return vertical_advection_tracer(
+            q_one, sigma_dot, sigma_coord, scheme=config.tracer_vertical_scheme,
+            smoothing_width=config.tracer_van_leer_width,
+            flux_smoothing_width=config.tracer_van_leer_flux_width)
 
     vert_adv = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(q)
 

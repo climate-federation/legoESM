@@ -28,11 +28,10 @@ from legoesm import constants
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPEConfig,
     _compute_sigma_dot_gaussian,
-    _vertical_advection_sigma_sb,
     isothermal_rest_state_spectral,
     spectral_pe_tendencies,
 )
-from legoesm.grids.vertical import vertical_advection
+from legoesm.grids.vertical import vertical_advection, vertical_advection_sigma_sb
 from legoesm.grids.gaussian import (
     create_gaussian_grid,
     sh_analysis,
@@ -116,7 +115,7 @@ def test_sb_form_equals_flux_form_minus_field_times_sigmadot_divergence(
                                    dtype=jnp.float64)
     sigma_dot, _ = _compute_sigma_dot_gaussian(div, sigma)
 
-    adv = _vertical_advection_sigma_sb(f, sigma_dot, sigma)
+    adv = vertical_advection_sigma_sb(f, sigma_dot, sigma)
 
     # Flux form: F_j = sigma_dot_j * (f_k + f_{k+1})/2 at interior
     # interfaces, zero at top/bottom (sigma_dot BCs).
@@ -147,7 +146,7 @@ def test_sb_mass_weighted_T_sink_far_below_upwind(grid, sigma):
     sigma_dot, _ = _compute_sigma_dot_gaussian(div, sigma)
 
     up = vertical_advection(T, sigma_dot, sigma)
-    sb = _vertical_advection_sigma_sb(T, sigma_dot, sigma)
+    sb = vertical_advection_sigma_sb(T, sigma_dot, sigma)
 
     m_up = abs(_mass_weighted_mean(grid, sigma, ps, up))
     m_sb = abs(_mass_weighted_mean(grid, sigma, ps, sb))
@@ -177,7 +176,7 @@ def test_sb_column_telescoping_identity_upwind_violates_it(grid, sigma):
     sigma_dot, _ = _compute_sigma_dot_gaussian(div, sigma)
     dsdot = jnp.diff(sigma_dot, axis=-1) / sigma.dsigma
 
-    sb = _vertical_advection_sigma_sb(f, sigma_dot, sigma)
+    sb = vertical_advection_sigma_sb(f, sigma_dot, sigma)
     # adv - f*dsdot = -(flux divergence), whose dsigma-weighted column sum
     # telescopes to the (zero) boundary fluxes.
     resid_sb = ((sb - f * dsdot) * sigma.dsigma).sum(axis=-1)

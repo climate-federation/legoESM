@@ -25,8 +25,8 @@ preserves a uniform tracer exactly even for divergent winds (the
 sibling makes the same choice).  For a NON-divergent wind the two forms
 coincide and the global mean (the ``(n=0, m=0)`` coefficient) is invariant.
 
-Vertical advection (optional): the shared upwind advective-form operator
-``grids.vertical.vertical_advection`` (``-sigma_dot dq/dsigma``), evaluated
+Vertical advection (optional): shared continuity-paired SB or van Leer
+``grids.vertical.vertical_advection_tracer``, evaluated
 in grid space and transformed back — identical operator to the lat-lon
 sibling.  Pass ``sigma_dot=None`` from the wind function for pure
 horizontal transport (the classic solid-body / Williamson-1 protocols).
@@ -51,7 +51,7 @@ spectral-requires-x64 policy.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -66,7 +66,7 @@ from legoesm.grids.gaussian import (
     sh_synthesis_3d,
     spectral_hyperdiffusion_3d,
 )
-from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
+from legoesm.grids.vertical import SigmaCoordinate, vertical_advection_tracer
 from legoesm.parallel.metal import place_spectral_grid
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
@@ -106,6 +106,9 @@ class TracerTransportSpectralConfig(NamedTuple):
     hyperdiff_coeff: float = 0.0
     hyperdiff_order: int = 2
     dealiasing_fraction: float = 0.667
+    tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
 
 
 def spectral_tracer_state(
@@ -157,6 +160,8 @@ def tracer_tendencies_spectral(
 
     Returns a ``TracerState`` tendency pytree (``dq_hat_dt``, ``dtime_dt=1``).
     """
+    if config.tracer_vertical_scheme not in ("sb", "van_leer"):
+        raise ValueError(f"unknown tracer vertical scheme {config.tracer_vertical_scheme!r}")
     t = state.time.data
     q_hat = state.tracers.data                     # (n_sh, nlev, n_tracers)
     n_sh, nlev, n_tracers = q_hat.shape
@@ -207,7 +212,10 @@ def tracer_tendencies_spectral(
         q4 = q                                      # (n_lat, n_lon, nlev, ntr)
 
         def _vert_one(q_one):
-            return vertical_advection(q_one, sigma_dot, sigma_coord)
+            return vertical_advection_tracer(
+                q_one, sigma_dot, sigma_coord, scheme=config.tracer_vertical_scheme,
+                smoothing_width=config.tracer_van_leer_width,
+                flux_smoothing_width=config.tracer_van_leer_flux_width)
 
         vert = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(q4)
         corr_grid = corr_grid + vert.reshape(

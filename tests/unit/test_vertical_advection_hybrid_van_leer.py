@@ -103,13 +103,14 @@ def test_mpas_hybrid_tracer_path_runs_the_conservative_operator(monkeypatch):
     state = state._replace(tracers={"q_v": Field(
         data=qv, name="q_v", dims=("nCells", "nlev"), units="kg/kg")})
     calls = []
-    real = pe.vertical_advection_hybrid_van_leer
+    from legoesm.grids import vertical as v
+    real = v.vertical_advection_hybrid_van_leer
 
     def spy(*a, **k):
         calls.append((a, k))
         return real(*a, **k)
 
-    monkeypatch.setattr(pe, "vertical_advection_hybrid_van_leer", spy)
+    monkeypatch.setattr(v, "vertical_advection_hybrid_van_leer", spy)
     out = pe.mpas_model_tendencies(
         state, mesh, coord, pe.MPASPrimitiveEquationConfig(nu_del2=1.0e5))
     assert calls, "the MPAS hybrid tracer path no longer calls the conservative operator"

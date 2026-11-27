@@ -207,36 +207,12 @@ class TestSpectralPEHybridTracerVerticalAdvection:
     returned horizontal-only when the coord is
     ``HybridSigmaPressureCoordinate`` and the caller never added the
     vertical contribution back.  T, u, v had vertical advection; only
-    tracers were broken.  Source-level verification: grep for
-    ``vertical_advection_hybrid`` calls inside the tracer loop in
-    ``spectral_pe_tendencies`` — the prior bug had none.
+    tracers were broken. Native caller budgets now verify the conservative
+    selected operator, alongside the end-to-end regression below.
     """
 
-    def test_hybrid_tracer_path_calls_vertical_advection(self):
-        """Source-level check: the hybrid tracer code path must call
-        ``vertical_advection_hybrid`` (the same helper used for T, u, v).
-
-        Why non-vacuous: under the prior bug, the tracer loop in
-        ``spectral_pe_tendencies`` had no vertical-advection call.  This
-        test reads the source and asserts the call exists in the tracer
-        loop — falsifies the missing-call version by construction.
-        """
-        from pathlib import Path
-        # namespace-safe: resolve via the atmosphere package (a real package with
-        # __file__); legoesm itself is a PEP-420 namespace pkg with no __file__
-        import legoesm.atmosphere
-        spectral_pe_src = (
-            Path(legoesm.atmosphere.__file__).parent
-            / "dynamics" / "spectral_pe.py"
-        )
-        text = spectral_pe_src.read_text()
-        # Look for the hybrid branch tracer call inside spectral_pe_tendencies
-        assert "vert_adv_q = vertical_advection_hybrid(" in text, (
-            "spectral_pe_tendencies tracer loop must call "
-            "vertical_advection_hybrid for hybrid coords (iter-51 fix). "
-            "The previously-buggy code returned horizontal-only "
-            "tendencies for tracers on the hybrid path."
-        )
+    # The source-string call check was superseded by live paired budgets in
+    # tests/unit/test_pressure_tracer_conservation.py (both selectors/coords).
 
     def test_hybrid_tracer_tendency_includes_vertical_advection(self):
         """Directly call ``spectral_pe_tendencies`` on a hybrid-coord

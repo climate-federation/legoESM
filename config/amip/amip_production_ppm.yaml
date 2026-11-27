@@ -12,4 +12,5 @@
 include: amip_production.yaml
 vertical_form: legacy
 mpas_vert_advection_scheme: ppm
+tracer_vertical_scheme: null   # PPM transports tracers; the parent's van_leer would be inert (refused)
 mpas_vert_ppm_limiter_sharpness: 10000.0   # = DycoreConfig default; written so the arm records it
