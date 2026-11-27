@@ -175,6 +175,18 @@ def test_production_fixture_step_bitwise(lane):
 @pytest.mark.parametrize("scheme", ["sb", "van_leer"])
 def test_unsupported_lane_refuses_explicit_selection(solver, scheme):
     from legoesm.driver.config import resolve_tracer_vertical_scheme
-    assert resolve_tracer_vertical_scheme(None, solver) is None
+    assert resolve_tracer_vertical_scheme(None, solver, mpas_vert_advection_scheme="upwind") is None
     with pytest.raises(ValueError, match="silently inert"):
-        resolve_tracer_vertical_scheme(scheme, solver)
+        resolve_tracer_vertical_scheme(scheme, solver, mpas_vert_advection_scheme="upwind")
+
+
+@pytest.mark.parametrize("scheme", ["sb", "van_leer"])
+def test_mpas_ppm_refuses_inert_tracer_selection(scheme):
+    from legoesm.driver.config import resolve_tracer_vertical_scheme
+    solver = "mpas_primitive_equations"
+    assert resolve_tracer_vertical_scheme(
+        None, solver, mpas_vert_advection_scheme="ppm") == "van_leer"
+    assert resolve_tracer_vertical_scheme(
+        scheme, solver, mpas_vert_advection_scheme="upwind") == scheme
+    with pytest.raises(ValueError, match="inert under mpas_vert_advection_scheme='ppm'"):
+        resolve_tracer_vertical_scheme(scheme, solver, mpas_vert_advection_scheme="ppm")

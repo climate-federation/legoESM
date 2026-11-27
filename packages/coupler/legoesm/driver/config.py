@@ -744,14 +744,20 @@ CLUBB_PROGNOSTIC_ONLY = frozenset({
     "clubb_c_k10", "clubb_c6rtb"})
 
 
-def resolve_tracer_vertical_scheme(value, solver_name) -> str | None:
+def resolve_tracer_vertical_scheme(value, solver_name, *, mpas_vert_advection_scheme) -> str | None:
     """Resolve the pressure-coordinate tracer operator; None on lanes retaining their operator.
 
     An explicit selection must be honored by the lane, including direct factory
     callers. Widths only affect van Leer; each can independently be zero.
+    MPAS under ``vert_advection_scheme='ppm'`` transports tracers with PPM, so
+    an explicit selection there would be inert and is refused.
     """
     if value not in (None, "sb", "van_leer"):
         raise ValueError("dycore.tracer_vertical_scheme must be None, 'sb' or 'van_leer'")
+    if (value is not None and solver_name == "mpas_primitive_equations"
+            and mpas_vert_advection_scheme == "ppm"):
+        raise ValueError("dycore.tracer_vertical_scheme is inert under "
+                         "mpas_vert_advection_scheme='ppm' (tracers take PPM); use None")
     defaults = {"latlon_cgrid_primitive_equations": "sb",
                 "mpas_primitive_equations": "van_leer",
                 "spectral_primitive_equations": "sb"}
@@ -4785,14 +4791,10 @@ class ExperimentConfig(NamedTuple):
         else:
             try:
                 resolve_tracer_vertical_scheme(
-                    d.tracer_vertical_scheme, driver_solver_name(self))
+                    d.tracer_vertical_scheme, driver_solver_name(self),
+                    mpas_vert_advection_scheme=d.mpas_vert_advection_scheme)
             except ValueError as exc:
                 errors.append(str(exc))
-            if (d.tracer_vertical_scheme is not None
-                    and driver_solver_name(self) == "mpas_primitive_equations"
-                    and d.mpas_vert_advection_scheme == "ppm"):
-                errors.append("dycore.tracer_vertical_scheme is inert under "
-                              "mpas_vert_advection_scheme='ppm' (tracers take PPM); use None")
         for name in ("tracer_van_leer_width", "tracer_van_leer_flux_width"):
             width = getattr(d, name)
             if not math.isfinite(width) or width < 0.0:

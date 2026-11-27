@@ -68,7 +68,10 @@ def main():
         tracers={"q_v": Field(data=qv, name="q_v", dims=("nCells", "nlev"), units="kg/kg")},
     )
     calls = []
-    real = pe.vertical_advection_hybrid_van_leer
+    # MPAS reaches the hybrid van Leer operator through grids.vertical's
+    # vertical_advection_tracer dispatcher, so the spy sits on that module.
+    from legoesm.grids import vertical as gv
+    real = gv.vertical_advection_hybrid_van_leer
 
 
     def spy(*a, **kw):
@@ -76,9 +79,9 @@ def main():
         return real(*a, **kw)
 
 
-    pe.vertical_advection_hybrid_van_leer = spy
+    gv.vertical_advection_hybrid_van_leer = spy
     smooth = pe.mpas_model_tendencies(state, mesh, coord, pe.MPASPrimitiveEquationConfig(nu_del2=1e5))
-    pe.vertical_advection_hybrid_van_leer = real
+    gv.vertical_advection_hybrid_van_leer = real
     hard = pe.mpas_model_tendencies(
         state,
         mesh,

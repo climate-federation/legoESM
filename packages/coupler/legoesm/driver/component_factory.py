@@ -875,7 +875,8 @@ def create_atmosphere_dycore(
         _fail_unsupported(model_type, discretization, grid_type)
     from legoesm.driver.config import resolve_tracer_vertical_scheme
     tracer_scheme = resolve_tracer_vertical_scheme(
-        dc.tracer_vertical_scheme, solver_name)
+        dc.tracer_vertical_scheme, solver_name,
+        mpas_vert_advection_scheme=dc.mpas_vert_advection_scheme)
     logger.info("Tracer vertical scheme: %s", tracer_scheme or "lane existing operator")
     refuse_unwired_energy_fixer(config, solver_name)
     warn_if_vapour_floor_creates_water(config, solver_name)

@@ -14,7 +14,8 @@ _PROD = _AMIP / "amip_production.yaml"
 _DECKS = {
     "amip_production_ppm.yaml": {"vertical_form": "legacy",
                                  "mpas_vert_advection_scheme": "ppm",
-                                 "mpas_vert_ppm_limiter_sharpness": 1.0e4},
+                                 "mpas_vert_ppm_limiter_sharpness": 1.0e4,
+                                 "tracer_vertical_scheme": None},
     "amip_production_vert4_tracer.yaml": {"mpas_nu_vert4_tracer": 0.0},
 }
 

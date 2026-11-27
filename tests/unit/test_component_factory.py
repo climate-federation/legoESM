@@ -995,7 +995,9 @@ def test_tracer_vertical_lane_default_and_refusal(grid_type, discretization, ver
                        dycore=cfg.dycore._replace(tracer_vertical_scheme=scheme))
     cfg.validate_strict()
     expected = scheme or ("van_leer" if discretization == "mpas" else "sb")
-    assert resolve_tracer_vertical_scheme(scheme, driver_solver_name(cfg)) == expected
+    assert resolve_tracer_vertical_scheme(
+        scheme, driver_solver_name(cfg),
+        mpas_vert_advection_scheme=cfg.dycore.mpas_vert_advection_scheme) == expected
 
 
 
