@@ -171,13 +171,14 @@ def test_mpas_negative_epoch_chain_crossing_day_zero(tmp_path):
 
 
 # ======================================================================
-# Cube compiled loop: 1+1-day chain == 2-day straight run, bitwise
+# Lat-lon compiled loop (the cube lane is the dry fv3_duo): 1+1-day chain == 2-day straight run, bitwise
 # ======================================================================
 
-def _build_cube_driver(tmpdir: str, days: float) -> ModelDriver:
+def _build_latlon_driver(tmpdir: str, days: float) -> ModelDriver:
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=10),
-        dycore=DycoreConfig(energy_fixer=False, dt=300.0),
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=10),
+        dycore=DycoreConfig(energy_fixer=False, dt=300.0,
+                            discretization="finite_volume"),
         # Uniform cadence on every run (see the scheduler pins): 1-day
         # checkpoints ⇒ 288-step segments; the restart lands exactly on
         # the segment boundary so per-segment forcing aligns.
@@ -192,29 +193,30 @@ def _build_cube_driver(tmpdir: str, days: float) -> ModelDriver:
 
 
 @pytest.mark.slow
-def test_cube_compiled_bitexact_restart_continuation(tmp_path):
-    """Compiled cube chain (1+1 day) == straight 2-day run, BITWISE.
+def test_latlon_compiled_bitexact_restart_continuation(tmp_path):
+    """Compiled lat-lon chain (1+1 day) == straight 2-day run, BITWISE.
 
     Fails pre-port with ~4e-3 K divergence: the restarted run's
     segment forcing ran a full day ahead (START_DAY double-count) while
     the tke carry itself round-tripped 0.0.
     """
-    dA = _build_cube_driver(str(tmp_path / "straight"), days=2.0)
+    dA = _build_latlon_driver(str(tmp_path / "straight"), days=2.0)
     assert dA.run() == "COMPLETED"
 
     outB = str(tmp_path / "chain1")
-    dB = _build_cube_driver(outB, days=1.0)
+    dB = _build_latlon_driver(outB, days=1.0)
     assert dB.run() == "COMPLETED"
     ckpt = sorted(glob.glob(os.path.join(outB, "checkpoint_day_*.npz")))[-1]
-    dB2 = _build_cube_driver(str(tmp_path / "chain2"), days=2.0)
+    dB2 = _build_latlon_driver(str(tmp_path / "chain2"), days=2.0)
     step, day = dB2.load_checkpoint(ckpt)
     assert step == 288, f"checkpoint not on the segment boundary: {step}"
     assert dB2.run(start_step=step, start_day=day) == "COMPLETED"
 
     comparisons = [
         ("T", dA.state.T.data, dB2.state.T.data),
-        ("u", dA.state.u.data, dB2.state.u.data),
-        ("v", dA.state.v.data, dB2.state.v.data),
+        # lat-lon lane carries the native C-grid face winds
+        ("u_f", dA.state.u_f.data, dB2.state.u_f.data),
+        ("v_f", dA.state.v_f.data, dB2.state.v_f.data),
         ("p_s", dA.state.p_s.data, dB2.state.p_s.data),
         ("q_v", dA.q_v, dB2.q_v),
         ("tke", dA._carry_aux["tke"], dB2._carry_aux["tke"]),
@@ -248,10 +250,11 @@ def _spy_forcing_days(driver: ModelDriver) -> list:
     return days
 
 
-def _build_small_cube_driver(tmpdir: str, days: float) -> ModelDriver:
+def _build_small_latlon_driver(tmpdir: str, days: float) -> ModelDriver:
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
-        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+        grid=GridConfig(grid_type="latlon", resolution=4, nlev=5),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0,
+                            discretization="finite_volume"),
         output=OutputConfig(output_dir="", diag_days=1, checkpoint_days=1),
         days=days, dataset="analytical", radiation="gray",
         rad_update_steps=2,
@@ -270,15 +273,15 @@ def test_resumed_segment_zero_refreshes_external_forcing(tmp_path):
     and no CMIP datasets the stale epoch values are numerically identical
     to the refreshed ones.  This spy pins the sampling DAYS themselves.
     """
-    dA = _build_small_cube_driver(str(tmp_path / "straight"), days=2.0)
+    dA = _build_small_latlon_driver(str(tmp_path / "straight"), days=2.0)
     days_straight = _spy_forcing_days(dA)
     assert dA.run() == "COMPLETED"
 
     outB = str(tmp_path / "chain1")
-    dB = _build_small_cube_driver(outB, days=1.0)
+    dB = _build_small_latlon_driver(outB, days=1.0)
     assert dB.run() == "COMPLETED"
     ckpt = sorted(glob.glob(os.path.join(outB, "checkpoint_day_*.npz")))[-1]
-    dB2 = _build_small_cube_driver(str(tmp_path / "chain2"), days=2.0)
+    dB2 = _build_small_latlon_driver(str(tmp_path / "chain2"), days=2.0)
     days_resumed = _spy_forcing_days(dB2)
     step, day = dB2.load_checkpoint(ckpt)
     assert dB2.run(start_step=step, start_day=day) == "COMPLETED"
@@ -374,8 +377,9 @@ def test_per_step_bitexact_restart_off_radiation_boundary(tmp_path):
 
     def build(tmpdir: str, days: float) -> ModelDriver:
         cfg = ExperimentConfig(
-            grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
-            dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+            grid=GridConfig(grid_type="latlon", resolution=4, nlev=5),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0,
+                                discretization="finite_volume"),
             output=OutputConfig(output_dir="", diag_days=1,
                                 checkpoint_days=1),
             days=days, dataset="analytical", radiation="gray",
@@ -403,7 +407,8 @@ def test_per_step_bitexact_restart_off_radiation_boundary(tmp_path):
 
     comparisons = [
         ("T", dA.state.T.data, dB2.state.T.data),
-        ("u", dA.state.u.data, dB2.state.u.data),
+        # per-step lat-lon lane carries the native C-grid face winds
+        ("u_f", dA.state.u_f.data, dB2.state.u_f.data),
         ("p_s", dA.state.p_s.data, dB2.state.p_s.data),
         ("q_v", dA.q_v, dB2.q_v),
         ("held_dT_rad", dA._carry_aux["held_dT_rad"],
@@ -431,7 +436,7 @@ def test_start_day_convention_disambiguation(tmp_path):
     epoch-passing callers (codex finding from the original review on
     fix/persist-physics).
     """
-    d = _build_cube_driver(str(tmp_path / "conv"), days=2.0)
+    d = _build_latlon_driver(str(tmp_path / "conv"), days=2.0)
     # No checkpoint loaded: epoch semantics preserved verbatim.
     ctx = d._prepare_run_context(288, 0.0, restore_carry=False)
     assert ctx["START_DAY"] == 0.0

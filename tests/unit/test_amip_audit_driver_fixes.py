@@ -131,8 +131,9 @@ def test_zarr_rejects_held_radiation_carry_with_cadence(tmp_path):
 
     def _cfg(rad_steps, fmt):
         return ExperimentConfig(
-            grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=3),
-            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
+            grid=GridConfig(grid_type="latlon", resolution=4, nlev=3),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
+                                discretization="finite_volume"),
             topography="flat",           # -> physics.f_land None (isolate held guard)
             radiation="gray",
             rad_update_steps=rad_steps,
@@ -140,7 +141,7 @@ def test_zarr_rejects_held_radiation_carry_with_cadence(tmp_path):
             days=1,
         )
 
-    held_carry = {"held_dT_rad": jnp.zeros((6, 4, 4, 3))}
+    held_carry = {"held_dT_rad": jnp.zeros((4, 8, 3))}  # lat-lon res 4, nlev 3
 
     driver = ModelDriver(_cfg(2, "zarr"), output_dir=str(tmp_path / "z2"))
     driver.setup()

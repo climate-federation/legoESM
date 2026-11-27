@@ -1023,3 +1023,18 @@ def test_factory_resolves_default_from_actual_coordinate(grid_type, discretizati
     with pytest.raises(ValueError, match="tracer_vertical_scheme"):
         create_atmosphere_dycore(cfg._replace(dycore=cfg.dycore._replace(
             tracer_vertical_scheme="van_leer")), grid, _make_sigma(32))
+
+
+@pytest.mark.parametrize("schemes", [
+    dict(radiation="gray"),
+    dict(microphysics="kessler", turbulence="louis"),
+])
+def test_fv3_duo_refuses_active_physics_it_cannot_route(schemes):
+    """The dry fv3_duo lane routes no scheme tendencies but Kessler ALONE, so
+    any other active scheme would be silently inert and must raise."""
+    off = dict(radiation="none", convection="none", microphysics="none",
+               turbulence="none", gravity_wave_drag="none")
+    cfg = _make_config(discretization="fv3_duo")._replace(
+        precision="fp64", **{**off, **schemes})
+    with pytest.raises(ValueError, match="runs DRY dynamics"):
+        create_atmosphere_dycore(cfg, _make_cubed_sphere_grid(), _make_sigma())

@@ -18,6 +18,7 @@ leaves are traced arrays of fixed shape).
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -37,13 +38,14 @@ def _make_atm_driver(days=2, diag_days=1, resolution=8, nlev=5, dt=600.0):
     from legoesm.driver.model_driver import ModelDriver
 
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=resolution, nlev=nlev),
-        dycore=DycoreConfig(energy_fixer=False, dt=dt, model_type="hydrostatic"),
+        grid=GridConfig(grid_type="latlon", resolution=resolution, nlev=nlev),
+        dycore=DycoreConfig(energy_fixer=False, dt=dt, model_type="hydrostatic",
+                            discretization="finite_volume"),
         output=OutputConfig(diag_days=diag_days),
         radiation="gray",
         days=days,
     )
-    return ModelDriver(cfg)
+    return ModelDriver(cfg, output_dir=tempfile.mkdtemp())
 
 
 class TestTransientForcingResample(unittest.TestCase):

@@ -112,19 +112,23 @@ def test_init_ocean_rejects_unknown_mode():
         drv._init_ocean()
 
 
-def test_dynamic_ocean_requires_latlon_grid():
+def test_dynamic_ocean_requires_latlon_grid(tmp_path):
     """ocean_mode='dynamic' on a non-lat-lon ocean grid raises (same-grid Phase
     1 only; cube-atm + tripole-ocean needs the deferred cross-grid remap)."""
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
     from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
     atm = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=4),
+        grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),  # fv3_duo km in {5,10}
         dycore=DycoreConfig(energy_fixer=False, dt=60.0, model_type="hydrostatic"),
-        radiation="gray", convection="none", days=1,
+        # fv3_duo cube is dry: every scheme off; only the ocean-grid guard is tested.
+        radiation="none", convection="none", microphysics="none",
+        turbulence="none", gravity_wave_drag="none", days=1,
+        precision="fp64",  # fv3_duo runs fp64 only
     )
     drv = CoupledESMDriver(
         atm, CoupledConfig(ocean_mode="dynamic",
                            ocean_config=LatLonCGridOceanConfig.from_flat(), ocean_nlev=4),
+        output_dir=tmp_path,
     )
     drv._atm.setup()
     with pytest.raises(ValueError, match="requires a regular lat-lon ocean grid"):

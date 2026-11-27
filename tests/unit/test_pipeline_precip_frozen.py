@@ -33,8 +33,9 @@ FRAC = 0.25
 
 def _driver(tmp_path):
     cfg = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
-        dycore=DycoreConfig(energy_fixer=False, dt=1800.0),
+        grid=GridConfig(grid_type="latlon", resolution=4, nlev=5),
+        dycore=DycoreConfig(energy_fixer=False, dt=1800.0,
+                            discretization="finite_volume"),
         output=OutputConfig(output_dir="", diag_days=1, checkpoint_days=0),
         days=1, dataset="analytical", radiation="gray", rh_init=1.3,
         microphysics="kessler", convection="none", turbulence="none",
