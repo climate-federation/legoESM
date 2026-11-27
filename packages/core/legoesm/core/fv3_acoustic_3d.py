@@ -83,6 +83,7 @@ from legoesm.core.fv3_native_state_3d import (
 )
 from legoesm.core.fv3_phase3d_common import (
     batch_size,
+    require_bool,
     require_f64_jax,  # dtype-uniformity entry gate, reads only static dtypes
     require_km,
     validate_stacked,
@@ -290,6 +291,7 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
                         p_fac: float = 0.05, a_imp: float = 1.0,
                         dp0=None,
                         use_logp: bool = False,
+                        hydrostatic_logp: bool = False,
                         flux_cap: dict | None = None,
                         check_state: bool = False,
                         substep: int | None = None,
@@ -364,6 +366,12 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
             "nh carry (build_nh_carry) and dp0 (dp_ref)")
     if not hydrostatic:
         require_f64_jax("acoustic_substep_3d[nh]", nh)
+    require_bool("acoustic_substep_3d", "hydrostatic_logp", hydrostatic_logp)
+    if hydrostatic_logp and not hydrostatic:
+        # the Lin (1997) log-p option is a HYDROSTATIC one_grad_p switch;
+        # the NH path has FV3's own `use_logp` (nh_p_grad) for that.
+        raise ValueError("acoustic_substep_3d: hydrostatic_logp=True needs "
+                         "hydrostatic=True (NH path: use_logp)")
 
     tab = _duo_tables(ctx)
     # Sub-face WINDOW lane (fv3_duo_windows): every horizontal array's seam
@@ -555,7 +563,8 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
                                         ptop=ptop, akap=akap,
                                         cp_air=cp_air, a2b_ord=a2b_ord,
                                         remap_step=remap_step,
-                                        remap_follows=remap_follows)
+                                        remap_follows=remap_follows,
+                                        hydrostatic_logp=hydrostatic_logp)
         # u/v are one_grad_p's updated winds (the S17 payload); the
         # press dict also carries pk_remap IFF remap_step (the spec's
         # press contract: "plus pk_remap on a remap step").
@@ -708,7 +717,8 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
                      cp_air, cfg=None, check_state=False,
                      remap_follows=False, hydrostatic=True, nh=None,
                      p_fac=0.05, a_imp=1.0, dp0=None, use_logp=False,
-                     flux_cap=None, batched: bool = False):
+                     flux_cap=None, batched: bool = False,
+                     hydrostatic_logp: bool = False):
     """``do it = 1, n_split`` -- one outer dynamics step, JAX lane.
 
     ``dt = bdt/n_split`` (dyn_core.F90:249); the shipped duo decks run
@@ -797,6 +807,7 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
             akap=akap, cp_air=cp_air, cfg=cfg, remap_step=remap,
             remap_follows=remap_follows, hydrostatic=hydrostatic, nh=nh_,
             p_fac=p_fac, a_imp=a_imp, dp0=dp0, use_logp=use_logp,
+            hydrostatic_logp=hydrostatic_logp,
             flux_cap=flux_cap_, batched=batched)
         # Part A returns a DICT, not the 5-tuple this part was authored
         # against: the two halves were written in separate calls and the

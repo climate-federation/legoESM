@@ -437,7 +437,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                      nord_tr: int = 0, trdm2=0.0, lim_fac=1.0,
                      z_tracer: bool = True, inline_q: bool = False,
                      fill: bool = False,
-                     dp2_seam_blend: bool = True) -> dict:
+                     dp2_seam_blend: bool = True,
+                     hydrostatic_logp: bool = False) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (:451-674), functional.
 
     C4/D4 returns ``{"state", "press", "q", "omga", "nh", "stages",
@@ -753,7 +754,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                               remap_follows=remapped,
                               hydrostatic=hydrostatic, nh=nhc,
                               p_fac=p_fac, a_imp=a_imp, dp0=dp0,
-                              use_logp=use_logp, flux_cap=fc)
+                              use_logp=use_logp, flux_cap=fc,
+                              hydrostatic_logp=hydrostatic_logp)
         st = ac["state"]
         nhc = ac["nh"]
         g = ac["press"]
@@ -1064,7 +1066,8 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
                               inline_q: bool = False, zvir: float = 0.0,
                               consv_te: float = 0.0, out_shardings=None,
                               batched: bool = False,
-                              dp2_seam_blend: bool = True):
+                              dp2_seam_blend: bool = True,
+                              hydrostatic_logp: bool = False):
     """Static (C3/D5): ctx, km and every DECK constant.  Dynamic: only
     state, press, q, bdt, omga and nh.
 
@@ -1088,7 +1091,8 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
             nord_tr=nord_tr, trdm2=trdm2, lim_fac=lim_fac,
             fill=fill,
             z_tracer=z_tracer, inline_q=inline_q, batched=batched,
-            dp2_seam_blend=dp2_seam_blend)
+            dp2_seam_blend=dp2_seam_blend,
+            hydrostatic_logp=hydrostatic_logp)
 
     # THE RETURN CARRIES TWO NON-ARRAY LEAVES -- `pt_units` (a str) and
     # `omga_is_meaningless` (a bool) -- and jit refuses to return either

@@ -3,10 +3,10 @@ larger than the other grids' (FV3-duogrid corner halo imbalance + Lin PGF
 truncation on unfiltered DCMIP 2012 2-0-0 terrain at C36).  Vote 2026-11-27
 (codex + author): accept and document, keep the terrain unfiltered.  The note
 must reach the cube branch of the runner that the rest_state_topo dispatch
-actually calls.  The cube held_suarez_topo row records a PLAUSIBLE
-contributor to its early wind transient (Lin 1997 hydrostatic PGF truncation
-on the isothermal start); the cube-only sensitivity runs behind it did not
-isolate the PGF effect or explain the cross-grid gap."""
+actually calls.  The cube held_suarez_topo row, and ONLY that row, runs the
+Lin (1997) sec. 3 log-p hydrostatic PGF option (user decision 2026-11-27)
+against the p**kappa truncation on its isothermal start, and says so in its
+notes."""
 from __future__ import annotations
 
 import importlib.util
@@ -85,8 +85,9 @@ def test_other_cube_rows_do_not_carry_it(matrix_mod, monkeypatch, tmp_path):
 
 def test_hs_topo_note_names_the_diagnosed_mechanism(matrix_mod):
     note = matrix_mod.CUBE_HS_TOPO_WIND_NOTE
-    for word in ("Lin 1997 PGF", "p**kappa", "constant theta", "isothermal",
-                 "unfiltered", "use_logp is nonhydrostatic-only"):
+    for word in ("Lin 1997 sec. 3 log-p", "OPTION", "departs from FV3",
+                 "p**kappa", "constant theta", "isothermal", "unfiltered",
+                 "every other cube row keeps p**kappa"):
         assert word in note, word
 
 
@@ -103,3 +104,29 @@ def test_flat_cube_hs_row_does_not_carry_it(matrix_mod, monkeypatch,
                                             tmp_path):
     notes = _cube_row_notes(matrix_mod, monkeypatch, tmp_path, "held_suarez")
     assert all(matrix_mod.CUBE_HS_TOPO_WIND_NOTE not in n for n in notes)
+
+
+# The adapter's own record of the flag (written iff hydrostatic_logp=True).
+_LOGP_MARK = "hydrostatic PGF: Lin 1997 sec. 3 log-p contour OPTION"
+
+
+def test_only_the_hs_topo_cube_row_runs_logp(matrix_mod, monkeypatch,
+                                             tmp_path):
+    """held_suarez_topo builds its duo with hydrostatic_logp=True; the other
+    cube duo hydrostatic rows keep FV3's p**kappa default."""
+    import scripts.matrix._cube_duo_adapters as A
+    seen = []
+    real = A.build_duo_hydro
+
+    def spy(*a, **k):
+        duo = real(*a, **k)
+        seen.append(bool(duo.model.config.hydrostatic_logp))
+        return duo
+
+    monkeypatch.setattr(A, "build_duo_hydro", spy)
+    for case, want in (("held_suarez_topo", True), ("rest_state_topo", False),
+                       ("held_suarez", False)):
+        seen.clear()
+        notes = _cube_row_notes(matrix_mod, monkeypatch, tmp_path, case)
+        assert seen and all(f is want for f in seen), (case, seen)
+        assert all((_LOGP_MARK in n) is want for n in notes), case

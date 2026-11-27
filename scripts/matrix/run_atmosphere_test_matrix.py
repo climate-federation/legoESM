@@ -1545,39 +1545,38 @@ CUBE_REST_TOPO_PS_NOTE = (
     "(ext_scalar delp/pt vs geopk pe**kappa) + Lin PGF truncation on unfiltered 2-0-0 "
     "terrain at C36; scales ~h0**2; IC is discretely balanced")
 
-# Cube held_suarez_topo early wind transient (C36 --quick: max|V| ~5.0 m/s at
-# 6 h vs 2.7 latlon / 3.8 ico).  Leading cause (PLAUSIBLE, cube-only arms):
-# the hydrostatic Lin (1997) p**kappa PGF acting on the matrix's shared
-# isothermal 300 K start over the terrain.  Measured 2026-11-27, cube C36,
-# HS forcing OFF, no 1 K perturbation, same unfiltered 2-0-0 terrain
-# (h0 = 2000 m), CAM6 L32, global max|V| at 0.53 h / 6.4 h:
-#   isothermal 300 K          0.70 / 4.68 m/s, summit, lowest levels
-#   6.5 K/km lapse rate       0.29 / 1.64 m/s
-#   constant theta = 300 K    0.19 / 0.92 m/s, argmax at a PANEL CORNER
-#   isothermal, h0 = 1000 m   0.19 / 1.19 m/s (4x smaller at half height)
-# Lin's p**kappa contour cancels when Phi is affine in p**kappa (constant
-# theta); the response grows with the theta stratification of the start,
-# as expected from that truncation.  Not isolated: the arms also change
-# p_s / layer thickness, and each number integrates whole steps (C and D
-# PGF stages, halos, remap).  The isothermal start integrates exactly in
-# the vertical (cp*(T/pkz)*d(p**kappa) = R*T*d(ln p)).  With the 1 K
-# perturbation, HS forcing (FV3 hswf, strat=F) lowers the 6.4 h peak (5.02
-# forced vs 5.80 unforced); the perturbation adds ~0.8-1.1 (unforced 4.68
-# -> 5.80, forced 4.24 -> 5.02).  Why the other grids respond less is NOT
-# measured here.  Stock FV3 offers no hydrostatic switch for this: use_logp
-# (log-p PGF, better for nearly isothermal columns) is read only on the
-# NONHYDROSTATIC path; one_grad_p always uses p**kappa.  Lin (1997) sec. 3
-# gives a hydrostatic log-p contour variant, but adopting it departs from
-# FV3 (a dycore design call, not taken here).  Terrain stays unfiltered and
-# the isothermal start is kept for cross-grid parity.  Documented, not fixed.
+# Cube held_suarez_topo early wind transient.  Leading contributor: the
+# D-grid truncation of FV3's hydrostatic Lin (1997) p**kappa PGF on the
+# matrix's shared isothermal 300 K start over unfiltered 2-0-0 terrain
+# (h0 = 2000 m).  The p**kappa contour integrates exactly when Phi is
+# affine in p**kappa around the cell (constant theta); the ln p contour
+# (Lin 1997 sec. 3) when Phi is affine in ln p (isothermal).
+# Measured 2026-11-27, cube C36 CAM6 L32, HS forcing OFF, no 1 K
+# perturbation, global max|V| at 6.4 h, p**kappa -> log-p:
+#   isothermal 300 K     4.68 -> 1.42 m/s
+#   6.5 K/km lapse rate  1.64 -> 4.06 m/s
+#   constant theta 300 K 0.92 -> 4.71 m/s
+# i.e. each form is best on the column it integrates exactly.  FV3 reads
+# use_logp only on the NONHYDROSTATIC path; its hydrostatic one_grad_p is
+# always p**kappa.  USER DECISION 2026-11-27: this row (and ONLY this row)
+# runs the Lin 1997 sec. 3 log-p hydrostatic PGF as an OPTION
+# (FV3DuoConfig.hydrostatic_logp; a deliberate departure from FV3); every
+# other cube row, production and the oracle keep p**kappa.  Matrix row,
+# --quick, 1 K perturbation + HS forcing, max|V| p**kappa -> log-p:
+# 4.97 -> 2.25 m/s at 5.9 h (latlon 2.7 / ico 3.8 at 6 h), 4.86 -> 4.67
+# at day 1.96 (both PASS).  The C-grid
+# p_grad_c stays p**kappa.  Terrain stays unfiltered and the isothermal
+# start is kept for cross-grid parity.
 CUBE_HS_TOPO_WIND_NOTE = (
-    "C36 --quick early max|V| transient (~5 m/s at 6 h) is PLAUSIBLY "
-    "hydrostatic Lin 1997 PGF truncation (p**kappa contour, exact for "
-    "constant theta) on the isothermal start over unfiltered 2-0-0 terrain "
-    "(not isolated: sensitivity arms also change p_s/thickness); 6.4 h "
-    "sensitivity runs, forcing off, unperturbed: isothermal 4.68 / "
-    "lapse-rate 1.64 / constant-theta 0.92 m/s (panel-corner peak), 1.19 "
-    "at half height; FV3 use_logp is nonhydrostatic-only")
+    "runs the Lin 1997 sec. 3 log-p hydrostatic PGF OPTION (user decision "
+    "2026-11-27; departs from FV3, whose hydrostatic one_grad_p uses "
+    "p**kappa, exact when the cell-corner geopotential is affine in "
+    "p**kappa, i.e. constant theta; log-p is exact when it is affine in ln "
+    "p, as for an isothermal hydrostatic column such as this row's start "
+    "over unfiltered 2-0-0 terrain); C36 --quick max|V| at 5.9 h "
+    "p**kappa 4.97 -> log-p 2.25 m/s; 6.4 h forcing-off unperturbed arms "
+    "p**kappa/log-p: isothermal 4.68/1.42, lapse-rate 1.64/4.06, "
+    "constant-theta 0.92/4.71 m/s; every other cube row keeps p**kappa")
 
 
 def _duo_vertical_note(vertical_coord: str, duo) -> str:
@@ -4218,9 +4217,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         from scripts.matrix._cube_duo_adapters import build_duo_hydro
         n = int(tc.resolution[1:])
         # a sigma label on a CAM6-only builder (topo) is refused there
+        # held_suarez_topo ONLY: Lin 1997 log-p hydrostatic PGF option
+        # (user decision 2026-11-27; see CUBE_HS_TOPO_WIND_NOTE).  Every
+        # other cube row keeps FV3's p**kappa default.
         duo = (build_duo_hydro(n, held_suarez=True,
                                shared_case="held_suarez_topo",
                                ic_kwargs=_topo_init_kwargs(),
+                               hydrostatic_logp=True,
                                **_duo_vertical_kw(tc.vertical_coord, nlev))
                if _topo
                else build_duo_hydro(n, perturbed=True, held_suarez=True,

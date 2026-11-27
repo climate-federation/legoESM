@@ -686,7 +686,8 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
                     eta: str = DUO_HYDRO_ETA,
                     rotated_alpha: float | None = None,
                     shared_case: str | None = None,
-                    ic_kwargs: dict | None = None):
+                    ic_kwargs: dict | None = None,
+                    hydrostatic_logp: bool = False):
     """FV3DuoDynamicsModel (production deck defaults) on C``n``.
 
     ``dt`` is the deck's ``DUO_HYDRO_DT_ATMOS`` (1920 s, n_split 8), not the
@@ -702,6 +703,10 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     (:func:`duo_shared_ic_spec`, ``ic_kwargs`` passed through), with the
     recipe's terrain (``phis_fn``, unfiltered like every other grid's) and
     rotation rate on the grid; combines with ``held_suarez`` for HS-topo.
+    ``hydrostatic_logp``: ``FV3DuoConfig.hydrostatic_logp`` (Lin 1997
+    sec. 3 log-p hydrostatic PGF OPTION; default False = FV3 p**kappa).
+    Only the held_suarez_topo matrix row passes True (user decision
+    2026-11-27); the row note records it.
     """
     if n != 36:
         # The deck step (1920 s, n_split 8) is validated on the full cube
@@ -751,7 +756,10 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     grid = create_fv3_duo_grid(
         n, rotation_alpha=0.0 if rotated_alpha is None else rotated_alpha,
         **grid_kw)
-    cfg = FV3DuoConfig(km=km, eta=eta, hydrostatic=True)
+    if not isinstance(hydrostatic_logp, bool):
+        raise TypeError("hydrostatic_logp must be a bool")
+    cfg = FV3DuoConfig(km=km, eta=eta, hydrostatic=True,
+                       hydrostatic_logp=hydrostatic_logp)
     model = FV3DuoDynamicsModel(grid, cfg)
     if spec is not None:
         bundle = shared_ic_bundle(model, spec)
@@ -865,6 +873,9 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
                 f"rotated-planet Coriolis"))
     if held_suarez:
         note += " + Held-Suarez 1994 forcing (FV3 hswf, strat=F) after each step"
+    if hydrostatic_logp:
+        note += ("; hydrostatic PGF: Lin 1997 sec. 3 log-p contour OPTION "
+                 "(departs from FV3 p**kappa one_grad_p)")
     return SimpleNamespace(
         model=model, grid=grid, state=bundle, dt=dt, step=step, ps=ps,
         temperature=temperature, winds=winds, lon_deg=lon_deg,

@@ -2055,3 +2055,204 @@ def test_geopk_scans_take_the_unroll_setting(monkeypatch):
     text = str(jax.make_jaxpr(lambda d, t, h: geopk(d, t, h, BD, **kw))(
         st["delp"], st["pt"], st["hs"]))
     assert text.count("unroll=7") == 2
+
+
+# =====================================================================
+# Lin (1997) sec. 3 log-p hydrostatic PGF OPTION (user decision
+# 2026-11-27): geopk(return_lnp=True) + one_grad_p(logp=True).  A
+# deliberate departure from FV3's hydrostatic p**kappa one_grad_p; the
+# default (False) path is the certified one above, unchanged.
+# =====================================================================
+
+def _isothermal_rest_over_terrain(km=4, t_iso=300.0, h_phi=2.0e4):
+    """Isothermal (T = t_iso) resting column over a smooth terrain bump on
+    the C12 tile, on a hybrid ak/bk deck with lid PTOP.
+
+    ``ps = p_ref * exp(-hs / (R T))`` puts the column in exact
+    hydrostatic balance, and ``pt = R T dlnp / (cp dpk)`` makes geopk's
+    ``gz(k) = gz(k+1) + cp pt dpk`` integrate ``R T dlnp`` exactly, so
+    ``gz = C - R T ln p`` with ONE horizontally constant ``C``: phi is
+    affine in ln p, the case the ln p contour integrates exactly and the
+    p**kappa contour does not (Lin 1997 sec. 3)."""
+    r_gas = CP_AIR * AKAP                     # geopk's own R = cp * kappa
+    p_ref = 1.0e5
+    ii, jj = np.meshgrid(np.arange(M_A), np.arange(M_A), indexing="ij")
+    c = 0.5 * (M_A - 1)
+    hs = h_phi * np.exp(-((ii - c) ** 2 + (jj - c) ** 2) / (0.3 * M_A) ** 2)
+    ps = p_ref * np.exp(-hs / (r_gas * t_iso))
+    eta = np.linspace(0.0, 1.0, km + 1)
+    bk = eta ** 2
+    ak = PTOP + (1.0 - bk) * eta * 3.0e4
+    ak[0], bk[0] = PTOP, 0.0
+    ak[-1], bk[-1] = 0.0, 1.0
+    pe = ak[None, None, :] + bk[None, None, :] * ps[:, :, None]
+    delp = np.diff(pe, axis=-1)
+    dlnp = np.diff(np.log(pe), axis=-1)
+    dpk = np.diff(pe ** AKAP, axis=-1)
+    pt = r_gas * t_iso * dlnp / (CP_AIR * dpk)
+    return delp, pt, hs
+
+
+def _ogp_isothermal(km, logp):
+    delp, pt, hs = _isothermal_rest_over_terrain(km)
+    got = geopk(delp, pt, hs, BD, return_lnp=True,
+                **_geopk_kw(km, cg=False, computehalo=False))
+    gs = _gs_cached()
+    zu = np.zeros((M_A, M_B, km))
+    zv = np.zeros((M_B, M_A, km))
+    u, v, _, _ = one_grad_p(
+        zu, zv, got["lnp"] if logp else got["pk"], got["gz"],
+        np.zeros((N + 1, N + 1)), delp, gs, BD, logp=logp,
+        **_ogp_kw(km), **_ogp_flags())
+    return np.asarray(u)[NG:NG + N, NG:NG + N + 1], \
+        np.asarray(v)[NG:NG + N + 1, NG:NG + N]
+
+
+def test_one_grad_p_logp_is_exact_for_isothermal_rest_over_terrain():
+    """The ln p contour leaves a resting isothermal column over terrain at
+    rest (round-off); the FV3 p**kappa contour does not.  Fails if the
+    option is reverted to p**kappa (pk plane or ptop**akap seed)."""
+    km = 4
+    u_l, v_l = _ogp_isothermal(km, logp=True)
+    u_k, v_k = _ogp_isothermal(km, logp=False)
+    err_logp = max(np.abs(u_l).max(), np.abs(v_l).max())
+    err_pk = max(np.abs(u_k).max(), np.abs(v_k).max())
+    assert np.isfinite(err_logp) and np.isfinite(err_pk)
+    # p**kappa truncation is real on this column (non-vacuity) ...
+    assert err_pk > 1.0e-6, err_pk
+    # ... and ln p removes it to round-off: >= 1e6 smaller.
+    assert err_logp < 1.0e-6 * err_pk, (err_logp, err_pk)
+
+
+def test_geopk_return_lnp_is_additive_and_matches_peln():
+    """return_lnp adds ONE key and leaves the Fortran five bit-identical;
+    its compute window equals peln (same logp scan) and k=1 is log(ptop)."""
+    km = 3
+    st = _synthetic(km)
+    kw = _geopk_kw(km, cg=False, computehalo=False)
+    base = geopk(st["delp"], st["pt"], st["hs"], BD, **kw)
+    plus = geopk(st["delp"], st["pt"], st["hs"], BD, return_lnp=True, **kw)
+    assert set(base) == {"pk", "gz", "pe", "peln", "pkz"}
+    assert set(plus) == set(base) | {"lnp"}
+    for k in base:
+        assert np.array_equal(np.asarray(base[k]), np.asarray(plus[k])), k
+    lnp = np.asarray(plus["lnp"])
+    win = lnp[NG:NG + N, NG:NG + N, :]
+    peln = np.transpose(np.asarray(plus["peln"]), (0, 2, 1))
+    assert np.array_equal(win, peln)
+    box = slice(NG - 2, NG + N + 2)
+    assert np.all(lnp[box, box, 0] == float(np.log(PTOP)))
+
+
+def test_one_grad_p_logp_false_routes_to_the_default():
+    """logp=False routes to the default (FV3 p**kappa) path, bit for bit.
+    (Legacy identity vs the pre-option code is evidenced separately: the
+    cube rest_state_topo matrix row's snapshot arrays are bit-identical
+    between this branch and its base.)"""
+    km = 2
+    delp, pk, gz, u, v, divg2 = _ogp_fixture(km)
+    gs = _gs_cached()
+    a = one_grad_p(u, v, pk, gz, divg2, delp, gs, BD, **_ogp_kw(km),
+                   **_ogp_flags())
+    b = one_grad_p(u, v, pk, gz, divg2, delp, gs, BD, logp=False,
+                   **_ogp_kw(km), **_ogp_flags())
+    for x, y in zip(a, b):
+        assert np.array_equal(np.asarray(x), np.asarray(y), equal_nan=True)
+
+
+def test_one_grad_p_logp_matches_the_analytic_contour_with_flat_lnp():
+    """Nonzero-force check of the ln p stencil INCLUDING its normaliser.
+
+    With ln p horizontally uniform on every interface (k-varying only) the
+    contour reduces to ``-(d_x gz_k + d_x gz_{k+1}) * dlnp`` and the
+    normaliser to ``2 * dlnp``, so ``u = rdx * dt * (-(d_x gz_k +
+    d_x gz_{k+1}) / 2)`` on the B-corner gz one_grad_p returns.  A
+    normaliser that is not d(ln p) (e.g. d(p**kappa)) fails this."""
+    km = 3
+    p_if = np.array([PTOP, 2.0e4, 5.0e4, 9.0e4])
+    lnp = np.broadcast_to(np.log(p_if), (M_A, M_A, km + 1)).copy()
+    gz = _wellcond_fields(km)["gz"]
+    gs = _gs_cached()
+    kw = dict(_ogp_kw(km), **_ogp_flags())
+    zu = np.zeros((M_A, M_B, km))
+    zv = np.zeros((M_B, M_A, km))
+    u, v, _, gzb = one_grad_p(zu, zv, lnp, gz, np.zeros((N + 1, N + 1)),
+                              None, gs, BD, logp=True, **kw)
+    u, v, gzb = np.asarray(u), np.asarray(v), np.asarray(gzb)
+    dt = kw["dt"]
+    i, ip, j = slice(NG, NG + N), slice(NG + 1, NG + N + 1), \
+        slice(NG, NG + N + 1)
+    dgx = gzb[ip, j, :] - gzb[i, j, :]
+    want_u = gs["rdx"][i, j][:, :, None] * dt * (
+        -0.5 * (dgx[:, :, 0:km] + dgx[:, :, 1:km + 1]))
+    iv, jv, jp = slice(NG, NG + N + 1), slice(NG, NG + N), \
+        slice(NG + 1, NG + N + 1)
+    dgy = gzb[iv, jp, :] - gzb[iv, jv, :]
+    want_v = gs["rdy"][iv, jv][:, :, None] * dt * (
+        -0.5 * (dgy[:, :, 0:km] + dgy[:, :, 1:km + 1]))
+    got_u, got_v = u[i, j, :], v[iv, jv, :]
+    assert np.abs(want_u).max() > 1e-3          # non-vacuous force
+    np.testing.assert_allclose(got_u, want_u, rtol=1e-11,
+                               atol=1e-12 * np.abs(want_u).max())
+    np.testing.assert_allclose(got_v, want_v, rtol=1e-11,
+                               atol=1e-12 * np.abs(want_v).max())
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+def test_logp_paths_refuse_a_bad_lid(bad):
+    km = 2
+    st = _synthetic(km)
+    kw = dict(_geopk_kw(km, cg=False, computehalo=False), ptop=bad)
+    with pytest.raises(ValueError, match="ptop"):
+        geopk(st["delp"], st["pt"], st["hs"], BD, return_lnp=True, **kw)
+    delp, pk, gz, u, v, divg2 = _ogp_fixture(km)
+    okw = dict(_ogp_kw(km), ptop=bad)
+    with pytest.raises(ValueError, match="ptop"):
+        one_grad_p(u, v, pk, gz, divg2, delp, _gs_cached(), BD, logp=True,
+                   **okw, **_ogp_flags())
+
+
+def test_one_grad_p_logp_matches_the_contour_reference_general():
+    """Horizontally VARYING ln p and gz (unequal corner d ln p, nonzero
+    force): u/v equal the four-edge Lin (1997) contour written out in
+    NumPy on the B-corner ln p / gz one_grad_p returns, normalised by the
+    SUM of the two corner d ln p (dyn_core.F90:2464-2477 with pk -> ln p).
+    A one-corner normaliser (2 * wk_left) or a non-ln p normaliser fails."""
+    km = 3
+    f = _wellcond_fields(km)
+    sa = _smooth2d((M_A, M_A), 0.05, phase=0.3)
+    p_if = np.array([PTOP, 2.0e4, 5.0e4, 9.0e4])
+    lnp = np.log(p_if)[None, None, :] + np.zeros((M_A, M_A, km + 1))
+    lnp[:, :, 1:] += np.log(sa)[:, :, None] * np.array([0.2, 0.5, 1.0])
+    gs = _gs_cached()
+    kw = dict(_ogp_kw(km), **_ogp_flags())
+    u, v, P, G = (np.asarray(x) for x in one_grad_p(
+        f["u"], f["v"], lnp, f["gz"], np.zeros((N + 1, N + 1)), None, gs,
+        BD, logp=True, **kw))
+    dt = kw["dt"]
+    k0, k1 = slice(0, km), slice(1, km + 1)
+
+    def contour(a, b, u_in, r):
+        # a = the corner (i,j), b = its neighbour along the edge
+        wk = (P[a][..., k1] - P[a][..., k0]) + (P[b][..., k1] - P[b][..., k0])
+        num = ((G[a][..., k1] - G[b][..., k0]) * (P[b][..., k1] - P[a][..., k0])
+               + (G[a][..., k0] - G[b][..., k1])
+               * (P[a][..., k1] - P[b][..., k0]))
+        return r[..., None] * (u_in + dt / wk * num)
+
+    i, ip, j = slice(NG, NG + N), slice(NG + 1, NG + N + 1), \
+        slice(NG, NG + N + 1)
+    want_u = contour((i, j), (ip, j), f["u"][i, j, :], gs["rdx"][i, j])
+    iv, jv, jp = slice(NG, NG + N + 1), slice(NG, NG + N), \
+        slice(NG + 1, NG + N + 1)
+    want_v = contour((iv, jv), (iv, jp), f["v"][iv, jv, :], gs["rdy"][iv, jv])
+    # non-vacuity: the PGF increment itself is resolved, not just u_in
+    inc = want_u - gs["rdx"][i, j][..., None] * f["u"][i, j, :]
+    assert np.abs(inc).max() > 1e-3 * np.abs(want_u).max()
+    np.testing.assert_allclose(u[i, j, :], want_u, rtol=1e-12,
+                               atol=1e-13 * np.abs(want_u).max())
+    np.testing.assert_allclose(v[iv, jv, :], want_v, rtol=1e-12,
+                               atol=1e-13 * np.abs(want_v).max())
+    # the corners really differ in d ln p (else 2*wk_left == the sum)
+    dl = P[..., 1:] - P[..., :-1]
+    assert np.abs(dl[ip, j] - dl[i, j]).max() > 1e-3

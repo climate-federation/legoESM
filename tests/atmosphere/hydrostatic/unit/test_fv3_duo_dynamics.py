@@ -1539,3 +1539,38 @@ class TestTerminatorTracers:
         for iq in range(2):
             np.testing.assert_array_equal(np.asarray(ic["q"][iq]),
                                           np.asarray(plain["q"][iq]))
+
+
+def test_hydrostatic_logp_option_reaches_the_step(bundle):
+    """FV3DuoConfig.hydrostatic_logp (Lin 1997 sec. 3 log-p hydrostatic PGF
+    OPTION, user decision 2026-11-27): default False; explicit False routes
+    to the default step bit for bit (legacy identity vs the pre-option code:
+    the cube rest_state_topo matrix row is bit-identical branch vs base);
+    True changes the winds (the flag reaches one_grad_p,
+    not merely stored); NH + the option is refused."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig,
+        FV3DuoDynamicsModel,
+    )
+    assert FV3DuoConfig._field_defaults["hydrostatic_logp"] is False
+    m_def = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2))
+    m_off = FV3DuoDynamicsModel(bundle, FV3DuoConfig(
+        km=KM, n_split=2, hydrostatic_logp=False))
+    m_on = FV3DuoDynamicsModel(bundle, FV3DuoConfig(
+        km=KM, n_split=2, hydrostatic_logp=True))
+    ic = m_def.dcmip16_initial_state()
+    a, b, c = (m.step(ic, BDT) for m in (m_def, m_off, m_on))
+    for k in ("u", "v", "delp", "pt"):
+        assert np.array_equal(np.asarray(a["state"][k]),
+                              np.asarray(b["state"][k]), equal_nan=True), k
+    for k in ("u", "v"):
+        fa, fc = np.asarray(a["state"][k]), np.asarray(c["state"][k])
+        assert np.array_equal(np.isfinite(fa), np.isfinite(fc)), k
+        assert np.isfinite(fc).sum() > 0.5 * fc.size, k
+    du = np.nanmax(np.abs(np.asarray(c["state"]["u"])
+                          - np.asarray(a["state"]["u"])))
+    assert du > 1e-9, du
+    m_nh = FV3DuoDynamicsModel(bundle, FV3DuoConfig(
+        km=KM, n_split=2, hydrostatic=False, hydrostatic_logp=True))
+    with pytest.raises(ValueError, match="hydrostatic_logp"):
+        m_nh.step(m_nh.dcmip16_initial_state(), BDT)

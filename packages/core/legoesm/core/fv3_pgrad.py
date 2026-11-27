@@ -879,7 +879,8 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
           cp_air: float, cg: bool, duogrid: bool, computehalo: bool,
           npx: int, npy: int, a2b_ord: int, bounded_domain: bool = False,
           sw_dynamics: bool = False, q_con=None, use_cond: bool = False,
-          unwritten_fill: float = BIG_NUMBER) -> dict:
+          unwritten_fill: float = BIG_NUMBER,
+          return_lnp: bool = False) -> dict:
     """JAX twin of ``fv3_native_pgrad.geopk`` (dyn_core.F90:2660-2790).
 
     Functional by construction: the Fortran declares ``pk``/``gz``/``pe``/
@@ -901,7 +902,21 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
 
     Every keyword is STATIC (deck constant or ``#ifdef``/branch
     selector); ``delp``, ``pt``, ``hs`` are the traced operands.
+
+    ``return_lnp`` (default False: the dict is exactly the Fortran's
+    five outputs) adds ``"lnp"``: the SAME ``logp`` the top-down scan
+    already computes (:2746), stored on the full ``pk`` box with ``pk``'s
+    shape/origin and ``log(ptop)`` (:246 ``peln1``) at k=1, unwritten
+    slots at ``unwritten_fill``.  ``peln`` cannot serve here: Fortran
+    writes it on the compute window only, while ``one_grad_p``'s a2b
+    interpolation reads the 2-halo box.  Consumed only by the
+    ``one_grad_p(..., logp=True)`` option (Lin 1997 sec. 3 log-p PGF; a
+    deliberate departure from FV3's hydrostatic path, see there).
     """
+    _require_bool("geopk", "return_lnp", return_lnp)
+    if return_lnp and not (np.isfinite(ptop) and ptop > 0.0):
+        raise ValueError(f"geopk: return_lnp needs a finite ptop > 0 "
+                         f"(log(ptop) seeds the plane), got {ptop!r}")
     if use_cond:
         raise ValueError(
             "geopk: use_cond=True selects the -DUSE_COND peg/pkg branch "
@@ -1054,7 +1069,13 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
             / (akap * jnp.transpose(peln[:, 1:km + 1, :] - peln[:, 0:km, :],
                                     (0, 2, 1))))
 
-    return {"pk": pk, "gz": gz, "pe": pe, "peln": peln, "pkz": pkz}
+    out = {"pk": pk, "gz": gz, "pe": pe, "peln": peln, "pkz": pkz}
+    if return_lnp:
+        lnp = jnp.full((m_i, m_j, km + 1), unwritten_fill, dtype=delp.dtype)
+        lnp = lnp.at[box_i, box_j, 0].set(float(np.log(ptop)))
+        lnp = lnp.at[box_i, box_j, 1:km + 1].set(jnp.moveaxis(logp_k, 0, 2))
+        out["lnp"] = lnp
+    return out
 
 
 def p_grad_c(dt2: float, delpc, pkc, gz, uc, vc, gs: dict, bd, *,
@@ -1181,7 +1202,7 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
                duogrid: bool = True, bounded_domain: bool = False,
                grid_type: int = 0, sw_corner: bool = True,
                se_corner: bool = True, nw_corner: bool = True,
-               ne_corner: bool = True):
+               ne_corner: bool = True, logp: bool = False):
     """JAX twin of ``fv3_native_pgrad.one_grad_p`` (dyn_core.F90:2347-2480).
 
     Functional: the NumPy twin mutates ``u``, ``v``, AND ``pk``, ``gz``
@@ -1209,8 +1230,30 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
     while upstream reads ``gridstruct%dg%is_initialized`` inside a2b.
     The NumPy twin's non-faithful ``bvertex_mean2`` screen is NOT ported
     (module docstring, deviation 3).
+
+    ``logp`` (OPTION, default False = FV3): the Lin (1997, QJRMS 123,
+    sec. 3) log-p contour form of the hydrostatic PGF.  ``pk`` must then
+    hold ln p on interfaces (``geopk(..., return_lnp=True)["lnp"]``),
+    the B-box top seed is ``log(ptop)`` instead of ``ptop**akap``, and
+    the stencil is otherwise UNCHANGED -- both the contour numerator
+    (sum of phi * d(ln p) around the cell's x-ln p quadrilateral) and the
+    ``wk`` normaliser (d ln p) take ln p in place of p**kappa.  A
+    DELIBERATE DEPARTURE FROM FV3 (user decision 2026-11-27): FV3's
+    hydrostatic one_grad_p always uses pkc = pe**kappa and its
+    ``use_logp`` is read only on the nonhydrostatic nh_p_grad path.
+    Why: the p**kappa contour is exact when phi is affine in p**kappa
+    (constant theta); the ln p contour is exact when phi is affine in
+    ln p (isothermal).  The matrix's held_suarez_topo start is
+    isothermal over unfiltered terrain, where the p**kappa form leaves a
+    truncation PGF (~4.7 m/s after 6.4 h at C36, forcing off).  Enabled
+    only where a caller asks for it (that matrix row); every default and
+    every oracle path stays p**kappa.
     """
     _require_bool("one_grad_p", "hydrostatic", hydrostatic)
+    _require_bool("one_grad_p", "logp", logp)
+    if logp and not (np.isfinite(ptop) and ptop > 0.0):
+        raise ValueError(f"one_grad_p: logp=True needs a finite ptop > 0 "
+                         f"(top seed log(ptop)), got {ptop!r}")
     # Checked HERE, not only inside a2b_ord4: a raise from inside the
     # vmap trace is harder to attribute, and these two select the
     # interior-everywhere arm vs the corner/edge arm -- a different set
@@ -1247,7 +1290,9 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
     del delp  # hydrostatic branch never reads it (see docstring)
 
     # :2380-2386 — `ptk` (the `**` operator, :248/:2382), NOT exp(akap*log)
-    top_value = ptop ** akap
+    # logp option: geopk's own `peln1 = log(ptop)` constant (:246), so the
+    # seed is bit-identical to the lnp plane's k=1 (Lin 1997 sec. 3).
+    top_value = float(np.log(ptop)) if logp else ptop ** akap
 
     b_i = _w(isd, is_, ie + 1)
     b_j = _w(jsd, js, je + 1)
@@ -1647,7 +1692,7 @@ def make_geopk_jit(fn=geopk):
         static_argnames=("km", "ptop", "akap", "cp_air", "cg", "duogrid",
                          "computehalo", "npx", "npy", "a2b_ord",
                          "bounded_domain", "sw_dynamics", "use_cond",
-                         "unwritten_fill"))
+                         "unwritten_fill", "return_lnp"))
 
 
 geopk_jit = make_geopk_jit()
@@ -1674,7 +1719,7 @@ def make_one_grad_p_jit(fn=one_grad_p):
                          "hydrostatic", "a2b_ord", "d_ext", "ng",
                          "duogrid", "bounded_domain", "grid_type",
                          "sw_corner", "se_corner", "nw_corner",
-                         "ne_corner"))
+                         "ne_corner", "logp"))
 
 
 one_grad_p_jit = make_one_grad_p_jit()

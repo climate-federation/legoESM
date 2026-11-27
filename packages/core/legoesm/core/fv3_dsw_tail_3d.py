@@ -554,7 +554,8 @@ def make_dsw_tail_phase_3d_jit(ctx, km, *, cfg: SWConfig | None = None,
 
 def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
                             cp_air, a2b_ord=4, d_ext=0.0, remap_step=False,
-                            remap_follows=False, batched=False):
+                            remap_follows=False, batched=False,
+                            hydrostatic_logp=False):
     """D-grid ``geopk`` (dyn_core.F90:1401) then ``one_grad_p`` (:1531).
 
     JAX twin of the spec routine of the same name.  No numerics live
@@ -575,6 +576,19 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
     arithmetically only, so a new time step must not recompile this
     phase.  The spec's ``stage_hook`` is NOT ported (C6); the S16
     payload is RETURNED instead.
+
+    ``hydrostatic_logp`` (STATIC OPTION, default False = FV3 p**kappa):
+    one_grad_p runs the Lin (1997) sec. 3 log-p contour PGF on geopk's
+    ``lnp`` plane -- a deliberate departure from FV3's hydrostatic path
+    (user decision 2026-11-27; rationale at ``fv3_pgrad.one_grad_p``).
+    On that option one_grad_p scratches the ln p plane, not ``pk``; the
+    returned ``pk`` keeps its contract (B-grid corners, A-grid
+    elsewhere) by running the option-off one_grad_p on geopk's ``pk``
+    and keeping only its scratched ``pk`` -- the same a2b_ord4 replace,
+    bit-identical to the option-off ``pk``.  Cost: one extra one_grad_p
+    per face per sub-step on the OPTION path only (XLA can drop it where
+    the returned ``pk`` is dead; no hydrostatic consumer reads it -- the
+    remap takes ``pk_remap``).  ``pk_remap``/S16 are unchanged.
 
     Returns ONE face-stacked dict (C1; the spec returns a list of six
     per-face dicts), level axis at position 2:
@@ -610,6 +624,7 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
     require_bool(fname, "remap_step", remap_step)
     require_bool(fname, "remap_follows", remap_follows)
     require_bool(fname, "batched", batched)
+    require_bool(fname, "hydrostatic_logp", hydrostatic_logp)
     # Rule 5: a2b_ord is a static scheme selector; one_grad_p's arms
     # are a2b_ord2 (the d_ext branch) and _a2b_ord4_k -- any other
     # value selects no arm.
@@ -644,7 +659,7 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
         return _dgrid_pressure_phase_3d_batched(
             ctx, dsw_outs, tail_outs, km, dt=dt, ptop=ptop, akap=akap,
             cp_air=cp_air, a2b_ord=a2b_ord, d_ext=d_ext,
-            remap_step=remap_step)
+            remap_step=remap_step, hydrostatic_logp=hydrostatic_logp)
 
     per_face = []
     for t in range(batch_size(ctx)):
@@ -664,7 +679,8 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
                     km=km, ptop=ptop, akap=akap, cp_air=cp_air,
                     cg=False, duogrid=True, computehalo=False,
                     npx=bd.ie + 1, npy=bd.je + 1, a2b_ord=a2b_ord,
-                    bounded_domain=False, sw_dynamics=False)
+                    bounded_domain=False, sw_dynamics=False,
+                    return_lnp=hydrostatic_logp)
         # S16 snapshot.  The spec's np.array(..., copy=True) exists only
         # because one_grad_p scratches pk/gz in place; on this lane pk/gz
         # are immutable values and one_grad_p RETURNS fresh ones, so
@@ -677,11 +693,21 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
         # dtype follows storage (fp32/fp64), from dsw_outs["delp"]
         divg2 = jnp.zeros((m + 1, m + 1), dtype=dsw_outs["delp"].dtype)
         u_t, v_t, pk_t, gz_t = one_grad_p(
-            tail_outs["u"][t], tail_outs["v"][t], got["pk"], got["gz"],
+            tail_outs["u"][t], tail_outs["v"][t],
+            got["lnp"] if hydrostatic_logp else got["pk"], got["gz"],
             divg2, dsw_outs["delp"][t], ctx.gs6[t], bd,
             npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
             akap=akap, hydrostatic=True, a2b_ord=a2b_ord, d_ext=d_ext,
-            ng=ng, duogrid=True)
+            ng=ng, duogrid=True, logp=hydrostatic_logp)
+        if hydrostatic_logp:
+            # the scratched plane was ln p: rebuild the contract's B-corner
+            # pk with the option-off call (winds discarded; docstring)
+            _, _, pk_t, _ = one_grad_p(
+                tail_outs["u"][t], tail_outs["v"][t], got["pk"], got["gz"],
+                divg2, dsw_outs["delp"][t], ctx.gs6[t], bd,
+                npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
+                akap=akap, hydrostatic=True, a2b_ord=a2b_ord, d_ext=d_ext,
+                ng=ng, duogrid=True)
         face = {"pk": pk_t, "gz": gz_t,           # post-one_grad_p (scratched)
                 "pe": got["pe"], "peln": got["peln"], "pkz": got["pkz"],
                 "u": u_t, "v": v_t,               # C4: S17, caller threads
@@ -695,7 +721,8 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
 
 def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
                                      dt, ptop, akap, cp_air, a2b_ord,
-                                     d_ext, remap_step) -> dict:
+                                     d_ext, remap_step,
+                                     hydrostatic_logp=False) -> dict:
     """The vmap-over-faces arm of :func:`dgrid_pressure_phase_3d` (C2a).
 
     Entry gates already ran in the caller.  One ``jax.vmap`` replaces
@@ -725,15 +752,23 @@ def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
                     akap=akap, cp_air=cp_air, cg=False, duogrid=True,
                     computehalo=False, npx=bd.ie + 1, npy=bd.je + 1,
                     a2b_ord=a2b_ord, bounded_domain=False,
-                    sw_dynamics=False)
+                    sw_dynamics=False, return_lnp=hydrostatic_logp)
         pk_pre, gz_pre = got["pk"], got["gz"]
         # dtype follows storage (fp32/fp64), from delp_t
         divg2 = jnp.zeros((m + 1, m + 1), dtype=delp_t.dtype)
         u_o, v_o, pk_t, gz_t = one_grad_p(
-            u_t, v_t, got["pk"], got["gz"], divg2, delp_t, gs_t, bd,
+            u_t, v_t, got["lnp"] if hydrostatic_logp else got["pk"],
+            got["gz"], divg2, delp_t, gs_t, bd,
             npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
             akap=akap, hydrostatic=True, a2b_ord=a2b_ord, d_ext=d_ext,
-            ng=ng, duogrid=True)
+            ng=ng, duogrid=True, logp=hydrostatic_logp)
+        if hydrostatic_logp:
+            # B-corner pk for the contract (see the loop path)
+            _, _, pk_t, _ = one_grad_p(
+                u_t, v_t, got["pk"], got["gz"], divg2, delp_t, gs_t, bd,
+                npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
+                akap=akap, hydrostatic=True, a2b_ord=a2b_ord, d_ext=d_ext,
+                ng=ng, duogrid=True)
         face = {"pk": pk_t, "gz": gz_t,
                 "pe": got["pe"], "peln": got["peln"], "pkz": got["pkz"],
                 "u": u_o, "v": v_o,

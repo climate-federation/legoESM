@@ -169,6 +169,19 @@ class FV3DuoConfig(NamedTuple):
     #: :func:`duo_sw_deck` (user decision 2026-11-27, see the comment
     #: there); an explicit float overrides it (``ORACLE_DAMPING`` pins 0.12).
     vtdm4: float | None = None
+    #: OPTION (user decision 2026-11-27), appended last so positional
+    #: construction is unchanged.  ``True`` switches the HYDROSTATIC D-grid
+    #: PGF (one_grad_p) from FV3's p**kappa contour to the Lin (1997,
+    #: QJRMS 123, sec. 3) log-p contour -- a deliberate departure from
+    #: FV3, whose hydrostatic path always uses p**kappa (``use_logp`` is
+    #: nonhydrostatic-only).  The D-grid contour cancels when the four
+    #: corner geopotentials share one affine relation in the vertical
+    #: variable: p**kappa for constant theta, ln p for an isothermal
+    #: hydrostatic column, so the option removes the truncation PGF of an
+    #: isothermal start over terrain.  DEFAULT False everywhere
+    #: (production, AMIP, oracle); only the matrix's cube held_suarez_topo
+    #: row turns it on.  The C-grid p_grad_c stays p**kappa either way.
+    hydrostatic_logp: bool = False
 
 
 def duo_sw_deck(*, nord: int, d4_bg: float, vtdm4: float | None = None,
@@ -539,6 +552,7 @@ class FV3DuoDynamicsModel:
             batched=step_face_batched,
             zvir=self.zvir, sphum_index=(0 if config.moist else None),
             fill=config.fill,
+            hydrostatic_logp=config.hydrostatic_logp,
         )
         self.step_face_batched = bool(step_face_batched)
 

@@ -565,6 +565,62 @@ def test_dgrid_pressure_parity(ctx, jctx, state_np, csw_np, dsw_np,
         cmp_fields(got[nm], want, f"press {nm}", 1.7e-14)
 
 
+def test_dgrid_pressure_hydrostatic_logp_option(jctx, jstate, jcsw, jdsw):
+    """Lin (1997) sec. 3 log-p OPTION (user decision 2026-11-27).
+
+    (a) ``hydrostatic_logp=False`` is the default path bit for bit, on
+    the loop AND the batched arm; (b) ``True`` drives one_grad_p with
+    geopk's ln p plane: per face it equals ``geopk(return_lnp=True)`` +
+    ``one_grad_p(logp=True)``, and it MOVES the winds (non-vacuity: a
+    phase that ignored the flag fails here); (c) ``pk`` is the
+    B-grid-corner pk of the contract, bit-identical to the option-off
+    pk; (d) batched == loop."""
+    from legoesm.core.fv3_pgrad import geopk, one_grad_p
+    tail = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, jdsw, DT, KM)
+    kw = dict(dt=DT, ptop=PTOP, akap=AKAP, cp_air=CP_AIR, remap_step=True)
+    for batched in (False, True):
+        base = jtail.dgrid_pressure_phase_3d(jctx, jdsw, tail, KM,
+                                             batched=batched, **kw)
+        off = jtail.dgrid_pressure_phase_3d(jctx, jdsw, tail, KM,
+                                            batched=batched,
+                                            hydrostatic_logp=False, **kw)
+        assert set(base) == set(off)
+        for nm in base:
+            assert np.array_equal(np.asarray(base[nm]), np.asarray(off[nm]),
+                                  equal_nan=True), (batched, nm)
+    on = jtail.dgrid_pressure_phase_3d(jctx, jdsw, tail, KM,
+                                       hydrostatic_logp=True, **kw)
+    on_b = jtail.dgrid_pressure_phase_3d(jctx, jdsw, tail, KM, batched=True,
+                                         hydrostatic_logp=True, **kw)
+    assert set(on) == set(base)
+    for nm in ("u", "v", "pk", "gz", "pk_remap"):
+        cmp_fields(on_b[nm], np.asarray(on[nm]), f"logp batched {nm}", 1e-14)
+    for nm in ("pk", "gz", "pk_pre_onegradp", "gz_pre_onegradp"):
+        assert np.array_equal(np.asarray(on[nm]), np.asarray(base[nm]),
+                              equal_nan=True), nm
+    assert np.array_equal(np.asarray(on["pk_remap"]),
+                          np.asarray(base["pk_remap"]), equal_nan=True)
+    bd, ng, m = jctx.bd, jctx.ng, jctx.n + 2 * jctx.ng
+    for t in range(6):
+        hs = (jnp.asarray(jctx.hs6[t]) if getattr(jctx, "hs6", None)
+              is not None else jnp.zeros((m, m)))
+        g = geopk(jdsw["delp"][t], jdsw["pt"][t], hs, bd, km=KM, ptop=PTOP,
+                  akap=AKAP, cp_air=CP_AIR, cg=False, duogrid=True,
+                  computehalo=False, npx=bd.ie + 1, npy=bd.je + 1,
+                  a2b_ord=4, return_lnp=True)
+        u, v, _, _ = one_grad_p(
+            tail["u"][t], tail["v"][t], g["lnp"], g["gz"],
+            jnp.zeros((m + 1, m + 1)), jdsw["delp"][t], jctx.gs6[t], bd,
+            npx=bd.ie + 1, npy=bd.je + 1, npz=KM, dt=DT, ptop=PTOP,
+            akap=AKAP, ng=ng, duogrid=True, logp=True)
+        assert np.array_equal(np.asarray(on["u"][t]), np.asarray(u),
+                              equal_nan=True), t
+        assert np.array_equal(np.asarray(on["v"][t]), np.asarray(v),
+                              equal_nan=True), t
+    du = float(np.nanmax(np.abs(_win(on["u"]) - _win(base["u"]))))
+    assert du > 1e-6, du
+
+
 def test_pk_remap_is_the_pre_one_grad_p_snapshot(jctx, jstate, jcsw,
                                                  jdsw):
     """``pk_remap`` exists only on a remap step, and it is the geopk
