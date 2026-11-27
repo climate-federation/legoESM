@@ -48,6 +48,19 @@ All notable changes to legoESM. Format roughly follows
 
 ### Fixed
 
+- **`make_implicit_newton_solver` aligns working dtype to the problem and returns `x0.dtype`.**
+  The shared implicit Levenberg–Marquardt solver in `legoesm.core.nonlinear`
+  previously froze `x_scale`/`f_scale` in the active import/factory dtype and
+  entered `jax.lax.while_loop` with raw `x0`, raising a `float32` vs `float64`
+  carry `TypeError` under `JAX_ENABLE_X64=1` whenever a `float32` seed met
+  `float64` scale constants or a `float64` residual (such as the two-leaf
+  canopy closure in `test_two_leaf_land_stress_reaches_clubb_winds`). The
+  forward loop and IFT adjoint now align `x_scale`, `f_scale`, and the
+  `while_loop` carry to `jnp.result_type(x0.dtype, residual.dtype)`, cast
+  floating outputs back to `x0.dtype`, and certify convergence on the returned
+  state whenever a downcast occurs — keeping pure `float32` solves in `float32`
+  even with `x64` enabled while leaving same-dtype solves unchanged.
+
 - **Ice-shelf prescribed melt is off in empty bands, as in NEMO.** Where the
   melt band's bottom (`sodepmax_isf`, clipped to the sea floor) is not below
   its snapped top, NEMO applies no melt; legoESM used to widen such bands to
