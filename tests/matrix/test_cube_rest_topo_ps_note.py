@@ -3,9 +3,10 @@ larger than the other grids' (FV3-duogrid corner halo imbalance + Lin PGF
 truncation on unfiltered DCMIP 2012 2-0-0 terrain at C36).  Vote 2026-11-27
 (codex + author): accept and document, keep the terrain unfiltered.  The note
 must reach the cube branch of the runner that the rest_state_topo dispatch
-actually calls.  The cube held_suarez_topo row records the PLAUSIBLE cause
-of its larger early wind transient (Lin 1997 hydrostatic PGF truncation on
-the isothermal start)."""
+actually calls.  The cube held_suarez_topo row records a PLAUSIBLE
+contributor to its early wind transient (Lin 1997 hydrostatic PGF truncation
+on the isothermal start); the cube-only sensitivity runs behind it did not
+isolate the PGF effect or explain the cross-grid gap."""
 from __future__ import annotations
 
 import importlib.util
