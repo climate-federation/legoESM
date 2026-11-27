@@ -87,7 +87,8 @@ def test_tendency_additivity():
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
-    rad_fn = make_physics(cfg_rad, model_type="hydrostatic", dt=dt)
+    rad_fn = make_physics(cfg_rad, model_type="hydrostatic", dt=dt,
+                          surface_bulk_coeffs=None)  # partial builder: no surface exchange
     rad_fn.set_time(80.0, 43200.0)
     tend_rad, _ = rad_fn(state, grid, sigma)
 
@@ -108,7 +109,8 @@ def test_tendency_additivity():
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="rayleigh"),
     )
-    gwd_fn = make_physics(cfg_gwd, model_type="hydrostatic", dt=dt)
+    gwd_fn = make_physics(cfg_gwd, model_type="hydrostatic", dt=dt,
+                          surface_bulk_coeffs=None)  # partial builder: no surface exchange
     tend_gwd, _ = gwd_fn(state, grid, sigma)
 
     # Combined
@@ -149,7 +151,8 @@ def test_convection_radiation_combination(conv):
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)  # partial builder: no surface exchange
     physics_fn.set_time(80.0, 43200.0)
     tend, _ = physics_fn(state, grid, sigma)
     assert jnp.all(jnp.isfinite(tend.dT_dt.data)), f"NaN with gray+{conv}"

@@ -15,7 +15,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
+
+from legoesm.driver.run_config_yaml import read_yaml_with_includes
 
 REPO = Path(__file__).resolve().parents[2]
 LAUNCHERS = ("config/amip/amip_production.sh",
@@ -179,7 +180,8 @@ def test_coupled_forcing_products_cover_the_decks_run_years(flag):
             pytest.skip(f"{path} is not staged here and its name carries no years")
         lo, hi = int(span[1]), int(span[2])
     for deck in ("cmip_ocean_slab.yaml", "cmip_ocean_3D.yaml"):
-        cfg = yaml.safe_load((REPO / "config" / "cmip" / deck).read_text())
+        # the 3-D deck INCLUDES the slab deck, which carries start_year/days
+        cfg = read_yaml_with_includes(REPO / "config" / "cmip" / deck)
         first, last = cfg["start_year"], cfg["start_year"] + (cfg["days"] - 1) // 365
         assert lo <= first and last <= hi, (flag, path, (lo, hi), deck, (first, last))
 
