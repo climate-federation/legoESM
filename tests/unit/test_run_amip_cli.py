@@ -6787,6 +6787,17 @@ def test_two_leaf_implicit_ground_flux_with_snow_node_is_refused_strict():
         assert "implicit_ground_flux (on by default)" not in str(err)
 
 
+def test_spectral_production_selects_continuity_paired_sb():
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    rows = load_yaml_config(str(_repo_root() / "config/amip/amip_production_spectral_t31.yaml"), parser)
+    assert rows["tracer_vertical_scheme"] == "sb"
+    parser.set_defaults(**rows)
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    cfg.validate_strict()
+    assert cfg.dycore.tracer_vertical_scheme == "sb"
+
+
 def test_positivity_condensate_from_vapour_flag_flows_to_config():
     """--positivity-condensate-from-vapour round-trips to DycoreConfig
     (default ON, owner decision 2026-11-20; --no- restores the legacy borrow)."""

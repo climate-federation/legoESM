@@ -874,10 +874,8 @@ def create_atmosphere_dycore(
     if solver_name is None:
         _fail_unsupported(model_type, discretization, grid_type)
     from legoesm.driver.config import resolve_tracer_vertical_scheme
-    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     tracer_scheme = resolve_tracer_vertical_scheme(
-        dc.tracer_vertical_scheme, solver_name,
-        hybrid=isinstance(sigma, HybridSigmaPressureCoordinate))
+        dc.tracer_vertical_scheme, solver_name)
     logger.info("Tracer vertical scheme: %s", tracer_scheme or "lane existing operator")
     refuse_unwired_energy_fixer(config, solver_name)
     warn_if_vapour_floor_creates_water(config, solver_name)
@@ -958,6 +956,9 @@ def create_atmosphere_dycore(
                 f"is not implemented for the spectral path."
             )
         pe_config = SpectralPEConfig(
+            tracer_vertical_scheme=tracer_scheme,
+            tracer_van_leer_width=dc.tracer_van_leer_width,
+            tracer_van_leer_flux_width=dc.tracer_van_leer_flux_width,
             hyperdiff_coeff=hyperdiff,
             hyperdiff_order=2,
             time_integrator="leapfrog_si" if _spectral_leapfrog else "ssp_rk54",
@@ -1043,6 +1044,7 @@ def create_atmosphere_dycore(
         if _ti == "auto":
             _ti = MPASPrimitiveEquationConfig().time_integrator
         cfg = MPASPrimitiveEquationConfig(
+            tracer_vertical_scheme=tracer_scheme,
             nu_del2=diff.A_h,
             nu_del4=diff.hyperdiff,
             nu_del4_ps=diff.hyperdiff,

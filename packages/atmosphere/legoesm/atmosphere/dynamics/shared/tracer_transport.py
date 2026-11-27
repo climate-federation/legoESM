@@ -18,7 +18,7 @@ each Runge-Kutta stage.
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable, NamedTuple
+from typing import Literal, Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -31,7 +31,7 @@ from legoesm.core.operators_3d import (
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo_4d
-from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
+from legoesm.grids.vertical import SigmaCoordinate, vertical_advection_tracer
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 
@@ -50,18 +50,19 @@ class TracerTransportConfig(NamedTuple):
     """Configuration for tracer transport model."""
     hyperdiff_coeff: float = 0.0
     time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
+    tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
 
 
 def advective_tracer_tendency(q, u, v, grid, vertical_fn, *, hyperdiff_coeff=0.0,
                               horizontal=True):
     """Advective-form tracer tendency on the cubed sphere, batched over tracers.
 
-    The SHARED cubed-sphere tracer-advection core: the moisture/tracer transport
-    numerics live in ONE place, reused by the prescribed-wind
-    :class:`TracerTransportModel` (:func:`tracer_tendencies`) AND the FV3
-    hydrostatic dycore's moist tracer transport (``fv3_hydrostatic_tendencies``).
-    Advective (not flux) form, consistent with how the FV3 hydrostatic core
-    transports temperature.
+    Batched horizontal advection for the prescribed-wind
+    :class:`TracerTransportModel` (:func:`tracer_tendencies`), with a supplied
+    per-tracer vertical operator. The production FV3-duo dycore uses its own
+    Lagrangian/remap transport and does not call this module.
 
     Parameters
     ----------
@@ -73,8 +74,8 @@ def advective_tracer_tendency(q, u, v, grid, vertical_fn, *, hyperdiff_coeff=0.0
     vertical_fn : callable
         Per-tracer vertical advection of a single ``(6, n, n, nlev)`` field with
         the caller's vertical velocity bound, e.g.
-        ``lambda q1: vertical_advection(q1, sigma_dot, sigma_coord)`` (sigma) or
-        ``lambda q1: vertical_advection_hybrid(q1, mass_flux, p_s, sigma_coord)``
+        ``lambda q1: vertical_advection_tracer(q1, sigma_dot, sigma_coord)`` or
+        ``lambda q1: vertical_advection_tracer(q1, mass_flux, coord, p_s)``
         (hybrid).  ``vmap``-ped over the trailing tracer axis here.
     hyperdiff_coeff : float, optional
         Biharmonic hyperdiffusion coefficient (>0 enables it); shares the single
@@ -157,6 +158,8 @@ def tracer_tendencies(
     TracerState
         Tendency pytree: dtracers_dt and dtime_dt = 1.0.
     """
+    if config.tracer_vertical_scheme not in ("sb", "van_leer"):
+        raise ValueError(f"unknown tracer vertical scheme {config.tracer_vertical_scheme!r}")
     t = state.time.data  # scalar time
     q = state.tracers.data  # (6, n, n, nlev, n_tracers)
 
@@ -165,10 +168,12 @@ def tracer_tendencies(
 
     # Delegate to the SHARED cubed-sphere advective-tracer core (one batched
     # halo pad for the horizontal stencils; per-tracer vertical advection with
-    # the prescribed sigma_dot bound).  Same numerics now used by the FV3
-    # hydrostatic dycore's moist tracer transport.
+    # the prescribed sigma_dot bound).
     def _vert_adv_one(q_one):
-        return vertical_advection(q_one, sigma_dot, sigma_coord)
+        return vertical_advection_tracer(
+            q_one, sigma_dot, sigma_coord, scheme=config.tracer_vertical_scheme,
+            smoothing_width=config.tracer_van_leer_width,
+            flux_smoothing_width=config.tracer_van_leer_flux_width)
 
     dq_dt = advective_tracer_tendency(
         q, u, v, grid, _vert_adv_one,

@@ -579,14 +579,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "legacy clamp for bit-comparison runs.")
     parser.add_argument("--tracer-vertical-scheme", choices=("sb", "van_leer"),
                         default=_DYCORE_DEFAULTS.tracer_vertical_scheme,
-                        help="Hybrid tracer scheme; omitted = lane default (lat-lon SB, MPAS van Leer). "
-                             "Sigma lanes require omission; MPAS hybrid refuses SB.")
+                        help="Pressure-coordinate tracer scheme; omitted = lane default (lat-lon/spectral SB, MPAS van Leer). "
+                             "Height and FV3 lanes require omission.")
     parser.add_argument("--tracer-van-leer-width", type=float,
                         default=_DYCORE_DEFAULTS.tracer_van_leer_width,
-                        help="Hybrid van Leer mixing-ratio increment width [kg/kg]; zero = hard faces.")
+                        help="Tracer van Leer mixing-ratio increment width [kg/kg]; zero = hard faces.")
     parser.add_argument("--tracer-van-leer-flux-width", type=float,
                         default=_DYCORE_DEFAULTS.tracer_van_leer_flux_width,
-                        help="Hybrid van Leer mass-flux width [Pa/s]; zero = hard flux split. "
+                        help="Tracer van Leer mass-flux width [Pa/s]; zero = hard flux split. "
                              "Both widths zero recover the old hard operator.")
     parser.add_argument("--positivity-condensate-from-vapour",
                         action=argparse.BooleanOptionalAction,
@@ -645,7 +645,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=("upwind", "van_leer", "sb", "ppm"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
                         help="Vertical advection scheme on the MPAS sigma lane "
-                             "(theta, tracers, edge winds).  'upwind' (default) "
+                             "(theta and edge winds; tracers have their own selector).  'upwind' (default) "
                              "is first-order donor cell, whose implicit "
                              "diffusion K_sigma=|sigma_dot|*dsigma/2 warms the "
                              "tropical UTLS by +0.822 K/day (measured, 91.4 hPa). "

@@ -2591,6 +2591,40 @@ def vertical_advection_hybrid(
     return -F_full * grad
 
 
+def vertical_advection_sigma_sb(field, sigma_dot, sigma_coord):
+    """Simmons-Burridge (1981) centered vertical advection (energy-conserving).
+
+        -sigma_dot * df/dsigma |_k
+            = -(1/(2*dsigma_k)) * [ sigma_dot_{k+1/2} * (f_{k+1} - f_k)
+                                  + sigma_dot_{k-1/2} * (f_k   - f_{k-1}) ]
+
+    with sigma_dot = 0 at the top and bottom interfaces (the BCs
+    ``_compute_sigma_dot_gaussian`` already builds in). This is the standard
+    ECMWF/SB81 form: it is algebraically identical to a flux-form divergence
+    of the interface flux ``sigma_dot_{j} * (f_k + f_{k+1})/2`` minus
+    ``f_k * (d sigma_dot/d sigma)_k``, so the mass-weighted column integral
+    telescopes against the continuity equation and the discretization
+    supports a conserved ``sum(ps * dsigma * T)`` under adiabatic flow.
+
+    Measured motivation: the legacy first-order UPWIND advective form
+    (:func:`legoesm.grids.vertical.vertical_advection`) carries a systematic
+    -36 W/m^2 (-0.32 K/day at t=0, -0.47 K/day after adjustment) mass-
+    weighted temperature sink at T63L8 — the dominant term of the dycore's
+    measured -0.48 K/day zero-physics global cooling (2026-08-10 budget
+    probe, scripts/validate/aimip_t_budget.py; closure FD vs budget 2%).
+
+    ``sigma_dot`` is on interfaces, shape (..., nlev+1); ``field`` is on
+    full levels (..., nlev).
+    """
+    df = jnp.diff(field, axis=-1)                 # (..., nlev-1) interior interfaces
+    sd_int = sigma_dot[..., 1:-1]                 # (..., nlev-1)
+    contrib = sd_int * df
+    pad_axes = ((0, 0),) * (contrib.ndim - 1)
+    upper = jnp.pad(contrib, (*pad_axes, (1, 0)))  # sigma_dot_{k-1/2}(f_k - f_{k-1})
+    lower = jnp.pad(contrib, (*pad_axes, (0, 1)))  # sigma_dot_{k+1/2}(f_{k+1} - f_k)
+    return -(upper + lower) / (2.0 * sigma_coord.dsigma)
+
+
 def vertical_advection_hybrid_sb(
     field: jax.Array,
     mass_flux: jax.Array,
@@ -2606,7 +2640,7 @@ def vertical_advection_hybrid_sb(
     with ``mdot`` the interface mass flux from
     :func:`compute_mass_flux_hybrid` (zero at top and surface) and ``dp_k``
     the LAYER thickness (half-level differences) — the conservation weight.
-    Identical structure to the pure-sigma ``_vertical_advection_sigma_sb``:
+    Identical structure to the pure-sigma ``vertical_advection_sigma_sb``:
     ``adv_k - f_k * (mdot_{k+1/2} - mdot_{k-1/2})/dp_k`` is a flux-form
     divergence whose dp-weighted column sum telescopes to the (zero)
     boundary fluxes, so ``sum(dp * f)`` is conserved in pairing with
@@ -2687,6 +2721,16 @@ def vertical_advection_hybrid_van_leer(
     1.8808e-4, 1.2091e-3, 7.6004e-3. Full per-column gaps are stored in
     ``tests/unit/test_vertical_advection_hybrid_van_leer.py``.
     """
+    dp = dp_from_hybrid(coord, p_s)
+    dc = jnp.diff(pressure_from_hybrid(coord, p_s, full=True), axis=-1)
+    return _vertical_advection_van_leer_flux(
+        field, mass_flux, dp, dc, smoothing_width, flux_smoothing_width)
+
+
+def _vertical_advection_van_leer_flux(
+    field, mass_flux, dp, dc, smoothing_width, flux_smoothing_width,
+):
+    """Shared pressure-metric face reconstruction and paired flux divergence."""
     # Each static regularizer is checked in the dtype of the quantity it smooths.
     # Either width may independently recover its hard branch.
     for name, width, dtype in (
@@ -2700,8 +2744,6 @@ def vertical_advection_hybrid_van_leer(
             if not (float(limits.tiny) <= width * width <= float(limits.max)
                     and 1.0 / width <= float(limits.max)):
                 raise ValueError(f"{name} square and reciprocal must be representable")
-    dp = dp_from_hybrid(coord, p_s)                                  # (..., nlev)
-    dc = jnp.diff(pressure_from_hybrid(coord, p_s, full=True), axis=-1)
     q_pos, q_neg = _van_leer_face_values(field, dc, dp, smoothing_width)
     donor_pos = jnp.concatenate([field[..., :1], field], axis=-1)    # cell above
     donor_neg = jnp.concatenate([field, field[..., -1:]], axis=-1)   # cell below
@@ -3200,6 +3242,42 @@ def vertical_advection_tv_hybrid_ppm(T, q_v, dq_v, mass_flux, p_s, coord, dt, *,
     return ppm_tv_lnp_tendency(T, q_v, dq_v, mass_flux, p_half, dt, sharpness=sharpness)
 
 
+
+
+def vertical_advection_tracer(
+    field, flux, coord, p_s=None, *, scheme="sb", smoothing_width=1e-10,
+    flux_smoothing_width=1e-6,
+):
+    """Continuity-paired tracer tendency with one shared value per face.
+
+    ``flux`` is pressure mass flux [Pa/s] for hybrid coordinates, sigma_dot
+    [1/s] for sigma coordinates. With closed lids, sum(dp*dq - q*diff(F))
+    vanishes per column. This is an instantaneous vertical subsystem budget,
+    not a claim about horizontal transport or the time integrator.
+
+    Sigma is exactly A=0 hybrid: dp=ps*dsigma, dc=ps*dsigma_full and
+    F=ps*sigma_dot. Prescribed-wind callers without ps use constants.p_ref;
+    the van Leer flux smoothing width therefore retains its Pa/s units.
+    Smooth defaults and hard-width behavior reuse the hybrid operator's
+    documented KNOWN DIFFERENCE without changing its reconstruction.
+    """
+    if scheme not in ("sb", "van_leer"):
+        raise ValueError(f"unknown tracer vertical scheme {scheme!r}")
+    if isinstance(coord, HybridSigmaPressureCoordinate):
+        if p_s is None:
+            raise ValueError("hybrid tracer vertical advection requires p_s")
+        if scheme == "sb":
+            return vertical_advection_hybrid_sb(field, flux, p_s, coord)
+        return vertical_advection_hybrid_van_leer(
+            field, flux, p_s, coord, smoothing_width=smoothing_width,
+            flux_smoothing_width=flux_smoothing_width)
+    if scheme == "sb":
+        return vertical_advection_sigma_sb(field, flux, coord)
+    ps = jnp.asarray(constants.p_ref if p_s is None else p_s, dtype=flux.dtype)
+    return _vertical_advection_van_leer_flux(
+        field, flux * ps[..., None], coord.dsigma * ps[..., None],
+        coord.dsigma_full * ps[..., None], smoothing_width,
+        flux_smoothing_width)
 
 
 def vertical_advection_theta_hybrid(

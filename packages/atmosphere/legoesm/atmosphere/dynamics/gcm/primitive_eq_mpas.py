@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 from functools import partial
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -75,9 +75,9 @@ from legoesm.grids.vertical import (
     compute_mass_flux_from_cumsum,
     VERTICAL_ADVECTION_SCHEMES,
     vertical_advection,
+    vertical_advection_tracer,
     vertical_advection_hybrid,
     vertical_advection_hybrid_ppm,
-    vertical_advection_hybrid_van_leer,
     vertical_advection_theta,
     vertical_advection_theta_hybrid,
     vertical_advection_tv_hybrid_ppm,
@@ -202,8 +202,8 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # the uniform-grid bound.  Requires nlev >= 4.  Default keeps every
     # existing MPAS result bit-identical.  NOT wired to the hybrid lane's temperature
     # (theta form, upwind or 'sb') — selecting it there RAISES rather than
-    # running silently inert.  Hybrid-lane TRACERS always take the conservative
-    # limited ``vertical_advection_hybrid_van_leer``, independent of this field.
+    # running silently inert. Tracers select their conservative reconstruction
+    # independently via tracer_vertical_scheme on both pressure coordinates.
     # Appended at the tuple END: this preserves POSITIONAL CONSTRUCTION by
     # existing callers, not full tuple ABI (exact unpacking / len() / _make
     # with a short tuple still break; no such caller exists in-repo).
@@ -284,6 +284,8 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     damping_exp_del2: float = 2.0
     damping_exp_del4: float = 4.0
     damping_ref_stiffness: float = 0.0
+    # Appended after existing fields to preserve positional construction.
+    tracer_vertical_scheme: Literal["sb", "van_leer"] = "van_leer"
 
 
 # ============================================================================
@@ -644,6 +646,8 @@ def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
     the continuity's layer thicknesses, read by ``tracer_horizontal_scheme
     = "flux_fct"``."""
     _vert_scheme = config.vert_advection_scheme
+    if config.tracer_vertical_scheme not in ("sb", "van_leer"):
+        raise ValueError(f"unknown tracer vertical scheme {config.tracer_vertical_scheme!r}")
     # --- 7. Tracer transport (moisture etc.) ---
     # Advect prognostic tracers with the dycore's OWN edge wind (u_3d) and
     # vertical mass flux (mass_flux for hybrid / sigma_dot for σ), so moisture
@@ -677,17 +681,13 @@ def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
                     qk, mass_flux, p_s, sigma_coord, dt, kord=7, iv=0,
                     sharpness=config.vert_ppm_limiter_sharpness),
                 in_axes=-1, out_axes=-1)(q)
-        elif _hybrid:
-            dq = dq + jax.vmap(
-                lambda qk: vertical_advection_hybrid_van_leer(
-                    qk, mass_flux, p_s, sigma_coord,
-                    flux_smoothing_width=config.tracer_van_leer_flux_width,
-                    smoothing_width=config.tracer_van_leer_width),
-                in_axes=-1, out_axes=-1)(q)
         else:
             dq = dq + jax.vmap(
-                lambda qk: vertical_advection(
-                    qk, sigma_dot, sigma_coord, scheme=_vert_scheme),
+                lambda qk: vertical_advection_tracer(
+                    qk, mass_flux if _hybrid else sigma_dot, sigma_coord, p_s,
+                    scheme=config.tracer_vertical_scheme,
+                    smoothing_width=config.tracer_van_leer_width,
+                    flux_smoothing_width=config.tracer_van_leer_flux_width),
                 in_axes=-1, out_axes=-1)(q)
         if _dps_del4 is not None:
             # The p_s hyperdiffusion moves layer mass dB_k * _dps_del4 that no

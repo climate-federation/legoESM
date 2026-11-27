@@ -186,13 +186,13 @@ def test_new_fields_are_appended_last():
     rate and the PPM limiter sharpness."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
     from legoesm.driver.config import DycoreConfig
-    assert MPASPrimitiveEquationConfig._fields[-15:] == (
+    assert MPASPrimitiveEquationConfig._fields[-16:] == (
         "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form",
         "tracer_van_leer_width", "tracer_van_leer_flux_width",
         "nu_vert4_tracer", "vert_ppm_limiter_sharpness",
         "tracer_horizontal_scheme", "fct_smoothing_width", "fct_upwind_width_ms",
         "K_h_pressure_surfaces", "edge_scaled_damping", "damping_exp_del2",
-        "damping_exp_del4", "damping_ref_stiffness")
+        "damping_exp_del4", "damping_ref_stiffness", "tracer_vertical_scheme")
     assert DycoreConfig._fields[-16:] == (
         "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers", "vertical_form",
         "spectral_sponge_nu_top_m2s",

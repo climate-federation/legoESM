@@ -80,6 +80,7 @@ from legoesm.grids.vertical import (
     compute_geopotential,
     compute_geopotential_hybrid,
     vertical_advection,
+    vertical_advection_tracer,
     vertical_advection_hybrid,
     vertical_advection_hybrid_sb,
     vertical_advection_hybrid_van_leer,
@@ -546,8 +547,11 @@ def latlon_tracer_tendencies(tracers, u, v, u_c, v_c, dp_u, dp_v, div_dp, dp,
                     smoothing_width=config.tracer_van_leer_width,
                 )
         else:
-            vert_q_lead = vertical_advection(
-                tracers_lead, vert_vel, sigma_coord,
+            vert_q_lead = vertical_advection_tracer(
+                tracers_lead, vert_vel, sigma_coord, p_s,
+                scheme=config.tracer_vertical_scheme,
+                smoothing_width=config.tracer_van_leer_width,
+                flux_smoothing_width=config.tracer_van_leer_flux_width,
             )
         for i, name in enumerate(tracer_names):
             tracer_tends[name] = horiz_q_stack[..., i] + vert_q_lead[i]

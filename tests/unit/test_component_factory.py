@@ -964,21 +964,23 @@ def test_spectral_pe_hyperdiff_is_half_hour_efold():
     assert hyperdiff_coeff_for_efold(g, 0.5 * 3600.0) == pytest.approx(expected, rel=1e-14)
 
 
-@pytest.mark.parametrize("grid_type,discretization", [("mpas", "mpas"), ("latlon", "latlon_cgrid")])
-def test_hybrid_tracer_smoothing_config_reaches_dycore(grid_type, discretization):
+@pytest.mark.parametrize("grid_type,discretization", [("mpas", "mpas"), ("latlon", "latlon_cgrid"), ("gaussian", "spectral")])
+@pytest.mark.parametrize("scheme", ["sb", "van_leer"])
+@pytest.mark.parametrize("coordinate", ["sigma", "hybrid"])
+def test_hybrid_tracer_smoothing_config_reaches_dycore(grid_type, discretization, scheme, coordinate):
     from legoesm.grids.factory import create_grid
     from legoesm.grids.vertical import make_cam6_l32_levels
     grid = create_grid(grid_type, 1 if grid_type == "mpas" else 4,
                        **({"lloyd_iterations": 2} if grid_type == "mpas" else {}))
     cfg = _make_config(grid_type=grid_type, discretization=discretization, nlev=32)
     cfg = cfg._replace(dycore=cfg.dycore._replace(
-        tracer_vertical_scheme="van_leer", tracer_van_leer_width=2e-10,
+        tracer_vertical_scheme=scheme, tracer_van_leer_width=2e-10,
         tracer_van_leer_flux_width=3e-6))
-    model = create_atmosphere_dycore(cfg, grid, make_cam6_l32_levels())
+    coord = make_cam6_l32_levels() if coordinate == "hybrid" else _make_sigma(32)
+    model = create_atmosphere_dycore(cfg, grid, coord)
     assert model.config.tracer_van_leer_width == 2e-10
     assert model.config.tracer_van_leer_flux_width == 3e-6
-    if grid_type == "latlon":
-        assert model.config.tracer_vertical_scheme == "van_leer"
+    assert model.config.tracer_vertical_scheme == scheme
 
 
 @pytest.mark.parametrize("grid_type,discretization", [("mpas", "mpas"), ("latlon", "latlon_cgrid"), ("gaussian", "spectral")])
@@ -991,18 +993,10 @@ def test_tracer_vertical_lane_default_and_refusal(grid_type, discretization, ver
     cfg = _make_config(grid_type=grid_type, discretization=discretization, nlev=32)
     cfg = cfg._replace(grid=cfg.grid._replace(vertical_coord=vertical_coord),
                        dycore=cfg.dycore._replace(tracer_vertical_scheme=scheme))
-    hybrid = vertical_coord != "sigma"
-    allowed = scheme is None or (hybrid and (
-        discretization == "latlon_cgrid" or (discretization == "mpas" and scheme == "van_leer")))
-    if not allowed:
-        with pytest.raises(ValueError, match="tracer_vertical_scheme"):
-            cfg.validate_strict()
-        with pytest.raises(ValueError, match="tracer_vertical_scheme"):
-            resolve_tracer_vertical_scheme(scheme, driver_solver_name(cfg), hybrid=hybrid)
-    else:
-        cfg.validate_strict()
-        expected = (scheme or ("sb" if discretization == "latlon_cgrid" else "van_leer")) if hybrid and discretization != "spectral" else None
-        assert resolve_tracer_vertical_scheme(scheme, driver_solver_name(cfg), hybrid=hybrid) == expected
+    cfg.validate_strict()
+    expected = scheme or ("van_leer" if discretization == "mpas" else "sb")
+    assert resolve_tracer_vertical_scheme(scheme, driver_solver_name(cfg)) == expected
+
 
 
 @pytest.mark.parametrize("grid_type,discretization", [("mpas", "mpas"), ("latlon", "latlon_cgrid")])
@@ -1018,8 +1012,6 @@ def test_factory_resolves_default_from_actual_coordinate(grid_type, discretizati
     assert model.config.tracer_van_leer_flux_width == 1e-6
     if grid_type == "latlon":
         assert model.config.tracer_vertical_scheme == "sb"
-    # Refuse an explicit HYBRID selection even when config metadata claims
-    # hybrid but the actual factory argument is sigma.
-    with pytest.raises(ValueError, match="tracer_vertical_scheme"):
-        create_atmosphere_dycore(cfg._replace(dycore=cfg.dycore._replace(
-            tracer_vertical_scheme="van_leer")), grid, _make_sigma(32))
+    model = create_atmosphere_dycore(cfg._replace(dycore=cfg.dycore._replace(
+        tracer_vertical_scheme="van_leer")), grid, _make_sigma(32))
+    assert model.config.tracer_vertical_scheme == "van_leer"

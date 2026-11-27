@@ -173,3 +173,37 @@ def test_full_step_inventory_acceptance_is_nonvacuous(inventory_probe, violation
     else:
         with pytest.raises(AssertionError):
             inventory_probe.assert_height_inventory_conserves(rows, paths)
+
+
+def test_paired_column_budget_detects_planted_leak_and_nonfinite():
+    """Conservation gate has both a passing and a nonzero failing column."""
+    spec = importlib.util.spec_from_file_location("_hybrid_budget_probe", _SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mass = np.array([[2.0, 3.0]])
+    q = np.array([[1.0, 2.0]])
+    dm = np.array([[0.5, -0.5]])
+    dq = np.array([[-0.25, 1.0 / 3.0]])
+    assert mod.paired_column_budget(mass, q, dq, dm)["verdict"] == "CONSERVES"
+    dq[0, 0] += 0.01
+    assert mod.paired_column_budget(mass, q, dq, dm)["verdict"] == "LEAKS"
+    assert mod.paired_column_budget(mass, q, dq * 0, dm * 0)["max_relative"] == 0
+    dq[0, 0] = np.nan
+    with pytest.raises(ValueError, match="nonfinite"):
+        mod.paired_column_budget(mass, q, dq, dm)
+
+
+def test_live_ordered_callback_under_jitted_vmap():
+    """Exercise the census spy mechanism; ordered callbacks must execute live."""
+    import jax
+    import jax.numpy as jnp
+    received = []
+
+    def observed(x):
+        jax.debug.callback(lambda value: received.append(float(value)), x, ordered=True)
+        return x * x
+
+    actual = jax.jit(jax.vmap(observed))(jnp.array([1.0, 2.0]))
+    jax.effects_barrier()
+    np.testing.assert_array_equal(actual, [1.0, 4.0])
+    assert received == [1.0, 2.0]

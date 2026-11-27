@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import math
 from functools import partial
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -70,6 +70,8 @@ from legoesm.grids.vertical import (
     sb81_full_level_ln_p,
     compute_mass_flux_from_cumsum,
     vertical_advection,
+    vertical_advection_sigma_sb,
+    vertical_advection_tracer,
     vertical_advection_hybrid,
     compute_omega_hybrid,
 )
@@ -354,14 +356,12 @@ class SpectralPEConfig(NamedTuple):
     energy_fixer: bool = False
     # Vertical advection for u, v, T on BOTH vertical coordinates (sigma and
     # hybrid): "sb_centered" (DEFAULT — Simmons-Burridge energy-conserving
-    # pairing; sigma via _vertical_advection_sigma_sb, hybrid via
+    # pairing; sigma via vertical_advection_sigma_sb, hybrid via
     # vertical_advection_hybrid_sb) or "upwind" (legacy, NOT recommended:
     # measured -0.48 K/day mass-weighted global-mean T leak at T63L8 and it
     # destroys 62% of the atmosphere's vertical T structure in 5 days).
     # Selecting "upwind" emits a RuntimeWarning at tendency-build time.
-    # TRACERS keep upwind regardless: centered vertical advection overshoots
-    # and would drive moisture negative — upwind's diffusivity is the
-    # positivity choice there, not an accident.
+    # Tracers select their continuity-paired reconstruction independently.
     vertical_advection_scheme: str = "sb_centered"
     # Return the KE removed by explicit vor/div hyperdiffusion as local
     # frictional heating (standard GCM practice, ~0.5-2 W/m^2 at T63; the
@@ -375,6 +375,10 @@ class SpectralPEConfig(NamedTuple):
     # so rigid rotation, n=1, is not damped).  0 = off (bitwise the old step).
     # (appended last: positional ABI)
     sponge_del2_nu_top_m2s: float = 0.0
+    # Appended after existing fields to preserve positional construction.
+    tracer_vertical_scheme: Literal["sb", "van_leer"] = "sb"
+    tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
+    tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
 
 
 # =============================================================================
@@ -460,40 +464,6 @@ def _warn_non_conserving_numerics(scheme: str, frictional_heating: bool):
         RuntimeWarning, stacklevel=3)
 
 
-def _vertical_advection_sigma_sb(field, sigma_dot, sigma_coord):
-    """Simmons-Burridge (1981) centered vertical advection (energy-conserving).
-
-        -sigma_dot * df/dsigma |_k
-            = -(1/(2*dsigma_k)) * [ sigma_dot_{k+1/2} * (f_{k+1} - f_k)
-                                  + sigma_dot_{k-1/2} * (f_k   - f_{k-1}) ]
-
-    with sigma_dot = 0 at the top and bottom interfaces (the BCs
-    ``_compute_sigma_dot_gaussian`` already builds in). This is the standard
-    ECMWF/SB81 form: it is algebraically identical to a flux-form divergence
-    of the interface flux ``sigma_dot_{j} * (f_k + f_{k+1})/2`` minus
-    ``f_k * (d sigma_dot/d sigma)_k``, so the mass-weighted column integral
-    telescopes against the continuity equation and the discretization
-    supports a conserved ``sum(ps * dsigma * T)`` under adiabatic flow.
-
-    Measured motivation: the legacy first-order UPWIND advective form
-    (:func:`legoesm.grids.vertical.vertical_advection`) carries a systematic
-    -36 W/m^2 (-0.32 K/day at t=0, -0.47 K/day after adjustment) mass-
-    weighted temperature sink at T63L8 — the dominant term of the dycore's
-    measured -0.48 K/day zero-physics global cooling (2026-08-10 budget
-    probe, scripts/validate/aimip_t_budget.py; closure FD vs budget 2%).
-
-    ``sigma_dot`` is on interfaces, shape (..., nlev+1); ``field`` is on
-    full levels (..., nlev).
-    """
-    df = jnp.diff(field, axis=-1)                 # (..., nlev-1) interior interfaces
-    sd_int = sigma_dot[..., 1:-1]                 # (..., nlev-1)
-    contrib = sd_int * df
-    pad_axes = ((0, 0),) * (contrib.ndim - 1)
-    upper = jnp.pad(contrib, (*pad_axes, (1, 0)))  # sigma_dot_{k-1/2}(f_k - f_{k-1})
-    lower = jnp.pad(contrib, (*pad_axes, (0, 1)))  # sigma_dot_{k+1/2}(f_{k+1} - f_k)
-    return -(upper + lower) / (2.0 * sigma_coord.dsigma)
-
-
 def _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt, sigma_coord):
     """Pressure velocity omega = sigma * dp_s/dt + p_s * sigma_dot_full."""
     sigma_full = sigma_coord.sigma_full
@@ -517,6 +487,8 @@ def _tracer_advection_gaussian(
     sigma_dot: jnp.ndarray,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     grid: GaussianGrid,
+    *, tracer_vertical_scheme="sb", tracer_van_leer_width=1e-10,
+    tracer_van_leer_flux_width=1e-6, p_s=None,
 ) -> jnp.ndarray:
     """Compute advective tendency ``∂q/∂t = -v · ∇q - σ̇ · ∂q/∂σ`` on grid.
 
@@ -526,7 +498,7 @@ def _tracer_advection_gaussian(
         ∂q/∂t = -∇·(q v_h) + q · D - σ̇ · ∂q/∂σ
 
     Spectral horizontal divergence via the pole-safe ``oc2`` / ``dmu``
-    operators; vertical advection via the existing upwind helper.
+    operators; vertical advection via the selected continuity-paired helper.
 
     Parameters
     ----------
@@ -579,7 +551,7 @@ def _tracer_advection_gaussian(
     horiz_adv = -flux_q_div_grid + q_grid * div
 
     # Vertical advection.  Hybrid coords use the mass-flux helper from
-    # the dycore; sigma coords use the existing upwind-stable helper.
+    # the dycore; sigma coordinates use the selected paired helper.
     if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
         # ``sigma_dot`` is ignored in this branch; the hybrid path is
         # handled by the caller post-return (it has access to mass_flux
@@ -587,7 +559,10 @@ def _tracer_advection_gaussian(
         # non-conditional on ``sigma_dot``.
         return horiz_adv
 
-    vert_adv = vertical_advection(q_grid, sigma_dot, sigma_coord)
+    vert_adv = vertical_advection_tracer(
+        q_grid, sigma_dot, sigma_coord, p_s, scheme=tracer_vertical_scheme,
+        smoothing_width=tracer_van_leer_width,
+        flux_smoothing_width=tracer_van_leer_flux_width)
     return horiz_adv + vert_adv
 
 
@@ -618,6 +593,8 @@ def spectral_pe_tendencies(
     # raise, not silently run different numerics (a typo here would change
     # the model's conservation properties without an error). Both vertical
     # coordinates carry both schemes.
+    if config.tracer_vertical_scheme not in ("sb", "van_leer"):
+        raise ValueError(f"unknown tracer vertical scheme {config.tracer_vertical_scheme!r}")
     _vadv_scheme = config.vertical_advection_scheme
     if _vadv_scheme == "upwind":
         _warn_non_conserving_numerics(_vadv_scheme, config.frictional_heating)
@@ -627,7 +604,7 @@ def spectral_pe_tendencies(
         if not config.frictional_heating:
             _warn_non_conserving_numerics(
                 _vadv_scheme, config.frictional_heating)
-        _vadv_sigma = _vertical_advection_sigma_sb
+        _vadv_sigma = vertical_advection_sigma_sb
         from legoesm.grids.vertical import vertical_advection_hybrid_sb
         _vadv_hybrid = vertical_advection_hybrid_sb
     else:
@@ -1206,20 +1183,22 @@ def spectral_pe_tendencies(
         tracers_tend = {}
         for name, value in state.tracers.items():
             q_grid = value.data if hasattr(value, "data") else value
-            # Compute advective tendency.  Sigma-coord branch handles
-            # vertical advection internally; hybrid path returns
-            # horizontal-only and we add vertical advection here using
-            # the same ``vertical_advection_hybrid`` helper used for
-            # T, u, v above (lines 604, 656-657).  Without this addition
-            # tracers had NO vertical transport on the hybrid path —
-            # iter-51 audit caught this CRITICAL bug.
+            # Sigma transport is paired inside the horizontal helper; hybrid
+            # transport is added here with the native continuity mass flux.
             dq_dt_grid = _tracer_advection_gaussian(
                 q_grid, u_cos, v_cos, div, sigma_dot,
                 sigma_coord, grid,
+                tracer_vertical_scheme=config.tracer_vertical_scheme,
+                tracer_van_leer_width=config.tracer_van_leer_width,
+                tracer_van_leer_flux_width=config.tracer_van_leer_flux_width,
+                p_s=p_s,
             )
             if is_hybrid:
-                vert_adv_q = vertical_advection_hybrid(
-                    q_grid, mass_flux, p_s, sigma_coord
+                vert_adv_q = vertical_advection_tracer(
+                    q_grid, mass_flux, sigma_coord, p_s,
+                    scheme=config.tracer_vertical_scheme,
+                    smoothing_width=config.tracer_van_leer_width,
+                    flux_smoothing_width=config.tracer_van_leer_flux_width,
                 )
                 dq_dt_grid = dq_dt_grid + vert_adv_q
             # F21 transport mass fixer (see above).
