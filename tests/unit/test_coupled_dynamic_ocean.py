@@ -118,9 +118,12 @@ def test_dynamic_ocean_requires_latlon_grid():
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
     from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
     atm = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=4),
+        grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),  # fv3_duo km in {5,10}
         dycore=DycoreConfig(energy_fixer=False, dt=60.0, model_type="hydrostatic"),
-        radiation="gray", convection="none", days=1,
+        # fv3_duo cube is dry: every scheme off; only the ocean-grid guard is tested.
+        radiation="none", convection="none", microphysics="none",
+        turbulence="none", gravity_wave_drag="none", days=1,
+        precision="fp64",  # fv3_duo runs fp64 only
     )
     drv = CoupledESMDriver(
         atm, CoupledConfig(ocean_mode="dynamic",

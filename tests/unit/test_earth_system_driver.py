@@ -20,8 +20,9 @@ class TestEarthSystemDriver:
 
     def _make_config(self):
         return ExperimentConfig(
-            grid=GridConfig(resolution=8, nlev=5),
-            dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+            grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0,
+                                discretization="finite_volume"),
             output=OutputConfig(diag_days=1),
             days=1,
             dataset="analytical",

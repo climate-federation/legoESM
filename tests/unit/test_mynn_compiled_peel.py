@@ -14,8 +14,9 @@ from legoesm.driver.model_driver import ModelDriver
 def _cfg():
     return ExperimentConfig(
         # pure sigma: the lane diagnoses w by sigma continuity (votes M1/R1)
-        grid=GridConfig(resolution=8, nlev=8, vertical_coord="sigma"),
-        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=8, vertical_coord="sigma"),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0,
+                            discretization="finite_volume"),
         output=OutputConfig(diag_days=1),
         days=3 * 600.0 / 86400.0, dataset="analytical",
         radiation="gray", turbulence="mynn25")

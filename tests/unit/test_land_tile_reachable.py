@@ -67,7 +67,7 @@ class TestDriverActuallyExecutesTheInvariant:
     ``TileConfig`` -- so neither dead-coding the call nor passing an unrelated
     array would pass."""
 
-    def _minimal_slab_land_driver(self):
+    def _minimal_slab_land_driver(self, output_dir):
         from legoesm.driver.config import (
             DycoreConfig,
             ExperimentConfig,
@@ -78,8 +78,9 @@ class TestDriverActuallyExecutesTheInvariant:
         from legoesm.driver.coupled_esm_driver import CoupledESMDriver
 
         atm_config = ExperimentConfig(
-            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
+            grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
+                                discretization="finite_volume"),
             output=OutputConfig(diag_days=1),
             radiation="gray",
             days=1,
@@ -87,13 +88,13 @@ class TestDriverActuallyExecutesTheInvariant:
         # slab_simple: land_mode='slab' + f_land_mode='analytical' -- the NON-
         # exempt branch the invariant actually guards (unlike aquaplanet's
         # f_land_mode='zero', which early-returns, codex round 3). On this
-        # cubed-sphere grid the analytical mask generates real land (|lat|>25),
+        # lat-lon grid the analytical mask generates real land (|lat|>25),
         # so max(f_land) > 0 and setup() completes while the guard runs live.
         coupled_cfg = preset_slab_simple()
-        return CoupledESMDriver(atm_config, coupled_cfg)
+        return CoupledESMDriver(atm_config, coupled_cfg, output_dir=output_dir)
 
     def test_setup_runs_the_invariant_on_the_stored_tile_fraction(
-        self, monkeypatch
+        self, monkeypatch, tmp_path
     ):
         from legoesm.driver import coupled_esm_driver as mod
 
@@ -106,7 +107,7 @@ class TestDriverActuallyExecutesTheInvariant:
 
         monkeypatch.setattr(mod, "assert_land_tile_reachable", recorder)
 
-        driver = self._minimal_slab_land_driver()
+        driver = self._minimal_slab_land_driver(tmp_path)
         driver.setup()
 
         assert calls, (
@@ -128,7 +129,7 @@ class TestDriverActuallyExecutesTheInvariant:
             "fraction")
 
 
-def test_coupled_multilayer_clm_lane_solves_on_its_configured_air_entry_head(monkeypatch):
+def test_coupled_multilayer_clm_lane_solves_on_its_configured_air_entry_head(monkeypatch, tmp_path):
     """The coupled driver's CLM multilayer lane rebuilds the soil hydraulics from
     the CLM map; the configured air-entry head must survive that rebuild, and the
     map's wilting point / field capacity must be built on the same head."""
@@ -156,13 +157,14 @@ def test_coupled_multilayer_clm_lane_solves_on_its_configured_air_entry_head(mon
 
     monkeypatch.setattr(clm, "load_clm_surface", fake_map)
     monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: "unused")
-    atm = ExperimentConfig(grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-                           dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+    atm = ExperimentConfig(grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
+                           dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                                               discretization="finite_volume"),
                            output=OutputConfig(diag_days=1), radiation="gray", days=1)
     coupled = preset_slab_simple()._replace(
         land_mode="multilayer", land_param_source="clm",
         land_config=MultiLayerLandConfig(hydraulics=SoilHydraulicsConfig(vg_air_entry_m=-0.05)))
-    drv = CoupledESMDriver(atm, coupled)
+    drv = CoupledESMDriver(atm, coupled, output_dir=tmp_path)
     drv.setup()
     assert heads == [-0.05]
     h = drv._land_cfg.hydraulics
