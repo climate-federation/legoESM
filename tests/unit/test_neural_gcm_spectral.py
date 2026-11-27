@@ -1172,8 +1172,10 @@ class TestMidEpochResume:
         class _Kill(Exception):
             pass
 
-        def _save_then_kill(ckpt_dir, model, opt_state, epoch, next_chunk):
-            real_save(ckpt_dir, model, opt_state, epoch, next_chunk)
+        def _save_then_kill(ckpt_dir, model, opt_state, epoch, next_chunk,
+                            ema_model=None):
+            real_save(ckpt_dir, model, opt_state, epoch, next_chunk,
+                      ema_model=ema_model)
             counter["n"] += 1
             if counter["n"] == 2:   # after chunk idx 1 -> saved (epoch0, chunk2)
                 raise _Kill()
@@ -1227,8 +1229,10 @@ class TestMidEpochResume:
         class _Kill(Exception):
             pass
 
-        def _save_then_kill(ckpt_dir, model, opt_state, epoch, next_chunk):
-            real_save(ckpt_dir, model, opt_state, epoch, next_chunk)
+        def _save_then_kill(ckpt_dir, model, opt_state, epoch, next_chunk,
+                            ema_model=None):
+            real_save(ckpt_dir, model, opt_state, epoch, next_chunk,
+                      ema_model=ema_model)
             counter["n"] += 1
             if counter["n"] == 2:
                 raise _Kill()
@@ -1243,12 +1247,14 @@ class TestMidEpochResume:
         # optimizer state (simulate the old model-only checkpoint).
         real_load = mod._load_midepoch_checkpoint
 
-        def _load_drop_optstate(ckpt_dir, model_template, opt_state_template):
-            res = real_load(ckpt_dir, model_template, opt_state_template)
+        def _load_drop_optstate(ckpt_dir, model_template, opt_state_template,
+                                ema_template=None):
+            res = real_load(ckpt_dir, model_template, opt_state_template,
+                            ema_template=ema_template)
             if res is None:
                 return None
-            m, _o, ep, nc = res
-            return m, opt_state_template, ep, nc   # fresh opt_state
+            # fresh opt_state; the rest (EMA if present, epoch, chunk) as loaded
+            return (res[0], opt_state_template, *res[2:])
 
         monkeypatch.setattr(mod, "_load_midepoch_checkpoint", _load_drop_optstate)
         model_c, _ = self._run(
