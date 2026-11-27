@@ -2353,8 +2353,8 @@ def _si3_zdf_bl99_core(
     """`ice_thd_zdf_BL99(np_cnd_OFF)` iteration, ``icethd_zdf_bl99.f90:170-603``.
 
     Layer counts are the trailing extents of ``t_i_old`` (nlay_i) and ``t_s_old``
-    (nlay_s).  The static 200-iterate ``fori_loop`` freezes each column after
-    NEMO's ``1e-4 K`` test, which keeps reverse-mode AD available.
+    (nlay_s).  Each column freezes after NEMO's ``1e-4 K`` test and the loop stops once all
+    have (checkpointed early exit: reverse-mode AD only, no JVP, no second derivatives).
     """
 
     sr = nemo_source_round if _nemo_source_round else (lambda x: x)
@@ -2570,7 +2570,7 @@ def _si3_zdf_bl99_core(
         jnp.full_like(h_i, _maximum_iterations, dtype=jnp.int32),
     )
     (Tsu, _, Ti, Ts, qns, k_i_frozen, k_s_frozen, comb_frozen, tcond_frozen,
-     _, iterations) = jax.lax.fori_loop(0, _maximum_iterations, body, init)
+     _, iterations) = _bl99_early_exit_loop(body, init, _maximum_iterations)
     return _SI3ZDFCore(Tsu, Ti, Ts, qns, qtr_bottom, k_i_frozen, k_s_frozen,
                        comb_frozen, tcond_frozen, isnow, iterations)
 
@@ -4301,3 +4301,16 @@ __all__ = tuple(dict.fromkeys(__all__ + (
     "si3_ice_thd_frazil", "si3_ice_thd_do", "si3_ice_thd_sal",
     "si3_ice_thd_o10_category_stages", "ieee_lt_zero",
 )))
+
+
+def _bl99_early_exit_loop(body, init, max_passes):
+    # ponytail: at file end so receipt line pins hold; post-convergence passes are no-ops.
+    import equinox.internal as eqxi
+
+    return eqxi.while_loop(
+        lambda s: (s[0] < max_passes) & ~jnp.all(s[1][9]),
+        lambda s: (s[0] + 1, body(s[0], s[1])),
+        (jnp.int32(0), init),
+        kind="checkpointed",
+        max_steps=max_passes,
+    )[1]
