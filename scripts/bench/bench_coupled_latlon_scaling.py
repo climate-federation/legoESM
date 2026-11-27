@@ -82,10 +82,11 @@ def run_coupled_bench(*, n_lat, nlev, n_intervals, n_atm_substeps, dt,
     band_area = band_grid.area
 
     # make_coupled_latlon_band_step activates the process-global MPI halo
-    # backend with the band layout; reset it so later callers (and tests
-    # sharing the process) do not run cube halos on a lat-lon layout.
-    from legoesm.grids.halo import set_halo_backend
-    try:
+    # backend with the band layout; scope it so the caller's halo state comes
+    # back on exit (tests sharing the process otherwise run cube halos on a
+    # lat-lon layout).
+    from legoesm.grids.halo import local_halo_pads
+    with local_halo_pads():
         coupled_step = make_coupled_latlon_band_step(
             band_model, layout, cpl, n_atm_substeps=n_atm_substeps)
 
@@ -117,8 +118,6 @@ def run_coupled_bench(*, n_lat, nlev, n_intervals, n_atm_substeps, dt,
             "energy_drift_one_exchange": energy_drift,
             "band_rows": int(layout.lat_end - layout.lat_start),
         }
-    finally:
-        set_halo_backend("local")
 
 
 def _parity_gate():
