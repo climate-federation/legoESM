@@ -32,11 +32,12 @@ def check_supported(ocean_ic, H_wet, H_max):
                          "(partial-cell geometry is not rebuilt here)")
 
 
-def check_same_instant(atm_ck, ocean_ck, day):
-    """The ocean checkpoint must be stamped with the atmosphere step of the same day."""
-    if float(atm_ck["day"]) != day or int(ocean_ck["_atm_step"]) != int(atm_ck["step"]):
-        raise ValueError(f"checkpoints disagree: atm day {float(atm_ck['day'])} step {int(atm_ck['step'])}, "
-                         f"ocean _atm_step {int(ocean_ck['_atm_step'])}, requested day {day}")
+def check_ocean_day(ocean_ck, day, dt_atm_s):
+    """The ocean checkpoint's own atmosphere-step stamp must land exactly on the requested day."""
+    t = int(ocean_ck["_atm_step"]) * float(dt_atm_s)
+    if t != day * 86400.0:
+        raise ValueError(f"ocean checkpoint stamped at step {int(ocean_ck['_atm_step'])} "
+                         f"(t = {t / 86400.0:g} d at dt {dt_atm_s:g} s), not day {day}")
 
 
 def _ckpt_field(ck, name):
@@ -60,7 +61,7 @@ def main(argv):
     s0 = rest_state_mpas_ocean(mesh, z, T_water_init_C=Ts, T_deep=np.minimum(REST_T_DEEP_C, Ts),
                                H_max=Hmax, land_lat_threshold=90.0)
     ck = np.load(f"{out}/coupled_day_{day:04d}.npz", allow_pickle=True)
-    check_same_instant(np.load(f"{out}/checkpoint_day_{day:04d}.npz", allow_pickle=True), ck, day)
+    check_ocean_day(ck, day, man["config"]["resolved_config"]["cli_args"]["dt"])
     T1, S1, eta1 = _ckpt_field(ck, "T"), _ckpt_field(ck, "S"), _ckpt_field(ck, "eta")
     wet, H = _ckpt_field(ck, "land_mask") > 0.5, _ckpt_field(ck, "H_bathy")
     check_supported(find_key(man, "ocean_ic"), H[wet], Hmax)
@@ -75,8 +76,8 @@ def main(argv):
     print(f"eta day0 mean {np.sum(eta0 * aw) / aw.sum():+.3f} m, day{day} mean {np.sum(eta1 * aw) / aw.sum():+.3f} m")
     print(f"SST area mean day0 {np.sum(T0[:, 0] * aw) / aw.sum():.3f} C, day{day} {np.sum(T1[:, 0] * aw) / aw.sum():.3f} C")
     g = (T0[wet], h0[wet], T1[wet]); w = area[wet]
-    print(f"global ocean heat-storage rate W/m2: fixed thickness {storage_rate(*g, h0[wet], w, day):+.2f}, "
-          f"live thickness {storage_rate(*g, h1[wet], w, day):+.2f}")
+    print(f"global ocean heat-storage rate W/m2: fixed thickness {storage_rate(*g, h0[wet], w, day):+.2f} (compare with net surface heat flux), "
+          f"live thickness {storage_rate(*g, h1[wet], w, day):+.2f} (heat content; adds SSH-T covariance, not heating)")
     print("band | dSST K | storage rate W/m2 fixed / live (incl. lateral transport) | dT by level k="
           + ",".join(map(str, levels)))
     for a, b in BANDS:

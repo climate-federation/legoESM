@@ -89,8 +89,9 @@ def test_storage_rate_counts_ssh_volume_change():
 
 
 def test_ocean_heat_cli_counts_ssh(tmp_path):
-    """End to end on a level-2 mesh: day-N = rebuilt IC with SSH +2 m everywhere,
-    same T. Fixed-thickness rate ~0; live minus fixed = rho*c*sum(T*dh)/t."""
+    """End to end on a level-2 mesh: day-N = rebuilt IC warmed 1 K everywhere with
+    SSH +2 m. Fixed rate = rho*c*sum(h0)*1/t; live minus fixed = rho*c*sum(T1*dh)/t,
+    globally and on a band row."""
     import json
     from legoesm import constants
     from legoesm.forcing.analytical import qobs_sst_C
@@ -101,7 +102,8 @@ def test_ocean_heat_cli_counts_ssh(tmp_path):
     nlev, Hmax, day, step = 4, 4000.0, 2, 768
     out = tmp_path / "out"; (out / "coupled").mkdir(parents=True)
     (out / "coupled" / "run_manifest.json").write_text(json.dumps(
-        {"config": {"precision": "fp64", "coupled": {"ocean_nlev": nlev, "ocean_H_max_m": Hmax, "ocean_ic": "qobs"}}}))
+        {"config": {"precision": "fp64", "resolved_config": {"cli_args": {"dt": 225.0}},
+                    "coupled": {"ocean_nlev": nlev, "ocean_H_max_m": Hmax, "ocean_ic": "qobs"}}}))
     mesh = create_voronoi_mesh(2); z = create_ocean_z_star(nlev, H_max=Hmax)
     Ts = qobs_sst_C(np.degrees(np.asarray(mesh.latCell)))
     s0 = rest_state_mpas_ocean(mesh, z, T_water_init_C=Ts, T_deep=np.minimum(REST_T_DEEP_C, Ts),
@@ -109,20 +111,30 @@ def test_ocean_heat_cli_counts_ssh(tmp_path):
     T0, S0, H, wet = (np.asarray(f.data) for f in (s0.T, s0.S, s0.H_bathy, s0.land_mask))
     eta1 = np.full(T0.shape[0], 2.0)
     k = lambda n: f"ocean3d_.{n}.[<flat index 0>]"
-    np.savez(out / f"coupled_day_{day:04d}.npz", **{k("T"): T0, k("S"): S0, k("eta"): eta1, k("H_bathy"): H,
+    T1 = T0 + 1.0
+    np.savez(out / f"coupled_day_{day:04d}.npz", **{k("T"): T1, k("S"): S0, k("eta"): eta1, k("H_bathy"): H,
              k("land_mask"): wet, "_atm_step": np.array(step)})
-    np.savez(out / f"checkpoint_day_{day:04d}.npz", day=np.array(float(day)), step=np.array(step))
     r = subprocess.run([sys.executable, str(_DIR / "ocean_heat.py"), str(out), "2", str(day)],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-2000:]
     line = next(l for l in r.stdout.splitlines() if l.startswith("global ocean heat-storage"))
-    fixed, live = (float(x.split()[0].rstrip(",")) for x in line.split("thickness ")[1:])
-    dh = np.asarray(compute_layer_thickness(eta1, H, z)) - np.asarray(compute_layer_thickness(0 * eta1, H, z))
-    area = np.asarray(mesh.areaCell) * (wet > 0.5)
-    want = constants.rho_ocean * constants.c_sw * np.sum((T0 * dh).sum(1) * area) / area.sum() / (day * 86400.0)
-    # fixed ~0 (only the fp32-saved vs fp64-rebuilt T residual); live - fixed = sum(dh*T1) exactly
-    assert abs(fixed) < 0.1 and abs(want) > 10.0
-    assert live - fixed == pytest.approx(want, abs=0.011)
+    fixed, live = (float(x.split()[0]) for x in line.split("thickness ")[1:])
+    h0 = np.asarray(compute_layer_thickness(0 * eta1, H, z))
+    dh = np.asarray(compute_layer_thickness(eta1, H, z)) - h0
+    lat = np.degrees(np.asarray(mesh.latCell)); area = np.asarray(mesh.areaCell) * (wet > 0.5)
+    rc = constants.rho_ocean * constants.c_sw / (day * 86400.0)
+    want_fixed = rc * np.sum(h0.sum(1) * area) / area.sum()
+    want_vol = rc * np.sum((T1 * dh).sum(1) * area) / area.sum()
+    assert abs(want_fixed) > 10.0 and abs(want_vol) > 10.0
+    # T1 is saved from a float32 rebuild, the script rebuilds T0 in float64: the
+    # ~1e-6 K residual on a 4 km column gives ~3e-7 relative on the fixed rate
+    assert fixed == pytest.approx(want_fixed, rel=2e-6)
+    assert live - fixed == pytest.approx(want_vol, abs=0.02)
+    row = next(l for l in r.stdout.splitlines() if l.startswith(" -30..-10"))
+    rf, rl = (float(x) for x in row.split("|")[2].split("/"))
+    m = (lat >= -30) & (lat < -10) & (wet > 0.5); am = area[m]
+    assert rf == pytest.approx(rc * np.sum(h0[m].sum(1) * am) / am.sum(), rel=2e-6, abs=0.06)
+    assert rl - rf == pytest.approx(rc * np.sum((T1[m] * dh[m]).sum(1) * am) / am.sum(), rel=2e-6, abs=0.11)
 
 
 def test_find_key_nested():
@@ -140,26 +152,25 @@ def test_ocean_heat_refuses_unrebuildable_runs():
         oh.check_supported("qobs", np.array([5200.0, 3000.0]), 5200.0)
 
 
-def test_ocean_heat_refuses_mismatched_checkpoints():
+def test_ocean_heat_refuses_checkpoint_of_another_day():
     oh = _load("ocean_heat")
-    atm = {"day": np.array(30.0), "step": np.array(11520)}
-    oh.check_same_instant(atm, {"_atm_step": np.array(11520)}, 30)
-    with pytest.raises(ValueError, match="disagree"):
-        oh.check_same_instant(atm, {"_atm_step": np.array(11000)}, 30)
-    with pytest.raises(ValueError, match="disagree"):
-        oh.check_same_instant(atm, {"_atm_step": np.array(11520)}, 60)
+    oh.check_ocean_day({"_atm_step": np.array(11520)}, 30, 225.0)
+    with pytest.raises(ValueError, match="not day 30"):
+        oh.check_ocean_day({"_atm_step": np.array(11000)}, 30, 225.0)
+    with pytest.raises(ValueError, match="not day 60"):
+        oh.check_ocean_day({"_atm_step": np.array(11520)}, 60, 225.0)
 
 
-# ------------------------------------------------------------- eddy_variance
+# ------------------------------------------------------- snapshot_zonal_rms
 def test_far_from_ridge_wraps_longitude():
-    ev = _load("eddy_variance")
+    ev = _load("snapshot_zonal_rms")
     got = ev.far_from_ridge(np.array([0.0, 29.0, 31.0, 331.0, 329.0, 180.0]), 0.0)
     np.testing.assert_array_equal(got, [False, False, True, False, True, True])
     np.testing.assert_array_equal(ev.far_from_ridge(np.array([350.0, 10.0, 60.0]), 20.0), [False, False, True])
 
 
 def test_snapshot_rms_wave_one_and_zonally_uniform(mesh):
-    ev = _load("eddy_variance")
+    ev = _load("snapshot_zonal_rms")
     lat = np.degrees(np.asarray(mesh.latCell)); lon = np.asarray(mesh.lonCell)
     area = np.asarray(mesh.areaCell); sel = np.ones(lat.size, bool)
     assert np.all(ev.snapshot_spatial_rms(np.full(lat.size, 7.0), lat, area, sel) < 1e-9)
@@ -169,7 +180,7 @@ def test_snapshot_rms_wave_one_and_zonally_uniform(mesh):
 
 
 def test_snapshot_rms_refuses_empty_band(mesh):
-    ev = _load("eddy_variance")
+    ev = _load("snapshot_zonal_rms")
     lat = np.degrees(np.asarray(mesh.latCell)); area = np.asarray(mesh.areaCell)
     with pytest.raises(ValueError, match="empty band"):
         ev.snapshot_spatial_rms(np.ones(lat.size), lat, area, lat < 0)
@@ -206,7 +217,7 @@ def test_report_sbatch_maps_only_numbered_days_up_to_n(tmp_path):
     subprocess.run(git + ["-C", str(wt), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
     sha = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     py = tmp_path / "py"   # stub interpreter: answers the manifest read, echoes every other call
-    py.write_text('#!/bin/bash\nif [ "$1" = -c ]; then echo %s %s; else echo "CALL $*"; fi\n' % (wt, sha))
+    py.write_text('#!/bin/bash\nif [ "$1" = -c ]; then echo %s %s False; else echo "CALL $*"; fi\n' % (wt, sha))
     py.chmod(0o755)
     r = subprocess.run(["bash", str(_SBATCH), str(out), "60", "5", "0.0", str(py)], capture_output=True,
                        text=True, env={"PATH": "/usr/bin:/bin", "DIAG_DIR": str(diag)})
@@ -214,6 +225,12 @@ def test_report_sbatch_maps_only_numbered_days_up_to_n(tmp_path):
     maps = [l for l in r.stdout.splitlines() if "snap_maps.py" in l]
     assert len(maps) == 1 and "day_0030" in maps[0] and "day_0060" in maps[0]
     assert "day_0090" not in maps[0] and "final" not in maps[0] and "backup" not in maps[0]
+    # a run the manifest records as launched from a dirty tree is refused
+    py.write_text(py.read_text().replace(" False;", " True;"))
+    r = subprocess.run(["bash", str(_SBATCH), str(out), "60", "5", "0.0", str(py)], capture_output=True,
+                       text=True, env={"PATH": "/usr/bin:/bin", "DIAG_DIR": str(diag)})
+    assert r.returncode != 0 and "dirty tree" in r.stderr
+    py.write_text(py.read_text().replace(" True;", " False;"))
     # a run worktree that moved off the run's commit is refused
     subprocess.run(git + ["-C", str(wt), "commit", "-q", "--allow-empty", "-m", "y"], check=True)
     r = subprocess.run(["bash", str(_SBATCH), str(out), "60", "5", "0.0", str(py)], capture_output=True,

@@ -3,7 +3,7 @@
 ONE checkpoint, so this is the spatial RMS of the deviation from each 5-degree
 bin's area mean -- not transient eddy variance: it includes stationary waves
 outside the ridge exclusion and the meridional gradient inside each bin.
-Usage: eddy_variance.py checkpoint_day_NNNN.npz mesh_level ridge_lon_deg
+Usage: snapshot_zonal_rms.py checkpoint_day_NNNN.npz mesh_level ridge_lon_deg
 """
 import sys
 

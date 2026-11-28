@@ -13,15 +13,17 @@ OUT=$1; DAY=$2; LEV=${3:-5}; RLON=${4:-0.0}
 PY=${5:-/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python}
 D=$(printf %04d "$DAY")
 HERE=${DIAG_DIR:?set DIAG_DIR to the checkout holding scripts/validate/esoteric (sbatch runs a spooled copy of this file)}
-read -r RUN_WT RUN_SHA < <($PY -c "import json,sys; m=json.load(open(sys.argv[1])); print(m['run']['cwd'], m['legoESM']['commit'])" "$OUT/coupled/run_manifest.json")
+read -r RUN_WT RUN_SHA RUN_DIRTY < <($PY -c "import json,sys; m=json.load(open(sys.argv[1])); print(m['run']['cwd'], m['legoESM']['commit'], m['reproducibility']['git_dirty'])" "$OUT/coupled/run_manifest.json")
+[ "$RUN_DIRTY" = False ] || { echo "run was launched from a dirty tree (git_dirty=$RUN_DIRTY): its code cannot be rebuilt" >&2; exit 1; }
 [ "$(git -C "$RUN_WT" rev-parse HEAD)" = "$RUN_SHA" ] || { echo "run worktree $RUN_WT is not at the run's commit $RUN_SHA" >&2; exit 1; }
-[ -z "$(git -C "$RUN_WT" status --porcelain)" ] || { echo "run worktree $RUN_WT has uncommitted changes" >&2; exit 1; }
+ST=$(git -C "$RUN_WT" status --porcelain)
+[ -z "$ST" ] || { echo "run worktree $RUN_WT has uncommitted changes" >&2; exit 1; }
 export PYTHONPATH="$RUN_WT/src:$(ls -d "$RUN_WT"/packages/*/ | sed 's:/$::' | tr '\n' ':')$RUN_WT"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 echo "model code $RUN_WT @ $(git -C "$RUN_WT" rev-parse HEAD); diagnostics $HERE @ $(git -C "$HERE" rev-parse HEAD)"
 CK=$OUT/checkpoint_day_$D.npz
 echo "=== OCEAN day $DAY"; $PY "$HERE/ocean_heat.py" "$OUT" "$LEV" "$DAY"
 echo "=== ATM day $DAY"; $PY "$HERE/zonal_state.py" "$CK" "$LEV"
-$PY "$HERE/eddy_variance.py" "$CK" "$LEV" "$RLON"
+$PY "$HERE/snapshot_zonal_rms.py" "$CK" "$LEV" "$RLON"
 CKS=$(ls "$OUT"/checkpoint_day_[0-9][0-9][0-9][0-9].npz | awk -v n="$DAY" '{d=$0; sub(/.*checkpoint_day_/,"",d); sub(/\.npz$/,"",d); if (d+0 <= n) print}' | tail -4)
 $PY "$HERE/snap_maps.py" "$(dirname "$OUT")/maps_day$D.png" "$LEV" "$RLON" $CKS
