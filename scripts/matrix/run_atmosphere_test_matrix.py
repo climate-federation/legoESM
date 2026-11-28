@@ -3216,6 +3216,22 @@ def _extract_hydro_mpas(s, mesh, lon_cell, lat_cell):
 #: (codex 1200 s, author 1200 s; GLM unavailable -> single review).
 _MODON_DIAG_CADENCE_S = 1200.0
 
+#: Mountain Rossby 5-0 (all four grids): common cadence of the lee-box wind
+#: series, the LCM of the row steps (cube duo 1920 s, lat-lon / ico 200 s,
+#: spectral 600 s) so every grid samples EXACTLY the same model times (the
+#: 6-hourly default lands the cube on 11 x 1920 s = 5.87 h).
+_MR50_DIAG_CADENCE_S = 9600.0
+
+#: Lee region of the DCMIP 2008 5-0 mountain (centre 90E, 30N), and the box
+#: size of the cross-grid lee-wind score.  Only whole 10-degree boxes inside
+#: the region are scored (lat 0-40N x lon 90-150E: 4 x 6 boxes).  Vote
+#: 2026-11-28 (codex + author; GLM unavailable -> single review): whole
+#: boxes, area-mean of |V| (not |mean V|), 9600 s matched cadence.
+_MR50_LEE_LAT = (0.0, 45.0)
+_MR50_LEE_LON = (90.0, 150.0)
+_MR50_LEE_BOX_DEG = 10.0
+
+
 def _matched_diag_steps(dt: float, n_steps: int, cadence_s: float,
                         t_end_s: float | None = None
                         ) -> tuple[frozenset, float]:
@@ -3237,6 +3253,103 @@ def _matched_diag_steps(dt: float, n_steps: int, cadence_s: float,
     off = (float(np.max(np.abs(steps * dt - ks * cadence_s)))
            if steps.size else 0.0)
     return frozenset(int(x) for x in steps), off
+
+
+#: Sub-sampling lattice of the lee-box score [deg]: each lattice point takes
+#: the value of the native cell CONTAINING it (a piecewise-constant
+#: reconstruction, no smoothing), so a cell straddling a box edge contributes
+#: to each box in proportion to its overlap (to ~1/8 deg) instead of
+#: all-or-nothing by its centre.  Containment is the nearest cell centre on
+#: the Voronoi mesh (exact) and on the lat-lon / Gaussian rows (matched
+#: native-edge containment to <= 7e-4 m/s on every saved day-0..2 quick
+#: state); the cube passes its FV3 cell corners, because there 6.2 % of the
+#: lattice points lie outside the nearest-centre cell (0.05 m/s at day 2;
+#: measured 2026-11-28).
+_MR50_LEE_SAMPLE_DEG = 0.125
+_LEE_WEIGHT_CACHE: dict = {}
+
+
+def _sphere_xyz(lat_deg, lon_deg):
+    la, lo = np.radians(lat_deg), np.radians(lon_deg)
+    return np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo),
+                     np.sin(la)], axis=-1)
+
+
+def _duo_cell_corners_xyz(ctx_np) -> np.ndarray:
+    """Unit-sphere corners of the six-face duo compute cells, (6*n*n, 4, 3),
+    in the order of ``duo_cell_geometry`` (corner i,j / i+1,j / i+1,j+1 /
+    i,j+1 of ``grid_lon``/``grid_lat``)."""
+    ng, n = ctx_np["ng"], ctx_np["n"]
+    out = []
+    for g in ctx_np["gs6"]:
+        x = _sphere_xyz(np.degrees(np.asarray(g["grid_lat"])),
+                        np.degrees(np.asarray(g["grid_lon"])))
+        x = x[ng:ng + n + 1, ng:ng + n + 1]
+        out.append(np.stack([x[:-1, :-1], x[1:, :-1], x[1:, 1:],
+                             x[:-1, 1:]], axis=-2))
+    return np.stack(out).reshape(-1, 4, 3)
+
+
+def _lee_box_weights(lat_deg, lon_deg, corners_xyz=None):
+    """``(cell_index, box_index, weight, n_box)`` of the cos(lat)-weighted
+    sample lattice over the whole 10-degree lee boxes, each point mapped to
+    its native cell (cached per native grid).  ``corners_xyz`` (n_cell, 4, 3)
+    selects convex-quadrilateral containment among the 8 nearest centres;
+    ``None`` = the nearest centre."""
+    import hashlib
+    lat = np.asarray(lat_deg, dtype=np.float64).ravel()
+    lon = np.asarray(lon_deg, dtype=np.float64).ravel()
+    h = hashlib.sha1(lat.tobytes() + lon.tobytes())
+    if corners_xyz is not None:
+        corners_xyz = np.asarray(corners_xyz, dtype=np.float64)
+        h.update(corners_xyz.tobytes())
+    key = h.hexdigest()
+    if key in _LEE_WEIGHT_CACHE:
+        return _LEE_WEIGHT_CACHE[key]
+    b, r = _MR50_LEE_BOX_DEG, _MR50_LEE_SAMPLE_DEG
+    n_la = int(np.floor((_MR50_LEE_LAT[1] - _MR50_LEE_LAT[0]) / b + 1e-9))
+    n_lo = int(np.floor((_MR50_LEE_LON[1] - _MR50_LEE_LON[0]) / b + 1e-9))
+    s_lat = _MR50_LEE_LAT[0] + r * (np.arange(int(round(n_la * b / r))) + 0.5)
+    s_lon = _MR50_LEE_LON[0] + r * (np.arange(int(round(n_lo * b / r))) + 0.5)
+    SLA, SLO = np.meshgrid(s_lat, s_lon, indexing="ij")
+    SLA, SLO = SLA.ravel(), SLO.ravel()
+    pts = _sphere_xyz(SLA, SLO)
+    tree = cKDTree(_sphere_xyz(lat, lon))
+    if corners_xyz is None:
+        _, idx = tree.query(pts)
+    else:
+        _, cand = tree.query(pts, k=8)
+        idx = np.full(pts.shape[0], -1, dtype=np.int64)
+        for kk in range(cand.shape[1]):
+            c = cand[:, kk]
+            q = corners_xyz[c]
+            sgn = np.stack([np.einsum("ij,ij->i", np.cross(
+                q[:, e], q[:, (e + 1) % 4]), pts) for e in range(4)], 1)
+            inside = ((np.all(sgn >= 0, 1) | np.all(sgn <= 0, 1))
+                      & (idx < 0))
+            idx[inside] = c[inside]
+        if np.any(idx < 0):
+            raise ValueError(f"lee-box weights: {int((idx < 0).sum())} "
+                             "lattice points in no native cell")
+    box = (np.floor((SLA - _MR50_LEE_LAT[0]) / b).astype(np.int64) * n_lo
+           + np.floor((SLO - _MR50_LEE_LON[0]) / b).astype(np.int64))
+    out = (np.asarray(idx, dtype=np.int64), box, np.cos(np.radians(SLA)),
+           n_la * n_lo)
+    _LEE_WEIGHT_CACHE[key] = out
+    return out
+
+
+def _lee_box_wind(speed, lat_deg, lon_deg, corners_xyz=None) -> float:
+    """Max over the whole 10-degree boxes of the mountain Rossby lee region
+    (lat 0-40N x lon 90-150E; the 40-45N sliver is not a whole box) of the
+    area-weighted mean lowest-level wind speed [m/s] of the native cells,
+    each weighted by its overlap with the box (``_lee_box_weights``).
+    ``speed``, ``lat_deg``, ``lon_deg``: same-size arrays on native cells."""
+    idx, box, w, n_box = _lee_box_weights(lat_deg, lon_deg, corners_xyz)
+    spd = np.asarray(speed, dtype=np.float64).ravel()[idx]
+    num = np.bincount(box, w * spd, minlength=n_box)
+    den = np.bincount(box, w, minlength=n_box)
+    return float(np.max(num / den))
 
 
 def _sw_energy_enstrophy(e_density, area, zeta_abs, h_at_zeta,
@@ -5005,6 +5118,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     _dcmip2008_dry = tc.case in (
         "inertio_gravity_3_2", "mountain_rossby_5_0", "rossby_haurwitz_6_0",
     )
+    _mr50 = tc.case == "mountain_rossby_5_0"
     # Non-rotating cases override the planetary rotation rate at
     # grid-construction time (the four grid factories all accept
     # ``omega``); ``None`` leaves the factory's default (Earth) Omega.
@@ -5061,13 +5175,18 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                          and np.all(np.isfinite(duo.temperature(s)))),
                     float(np.max(np.hypot(u, v))))
 
-        def scalar_fn(s):
+        def scalar_fn(s, _matched=False):
             u, v = duo.winds(s)
-            return {
+            out = {
                 "mass": _area_weighted_sum(duo.ps(s), duo.area),
                 "max_wind": float(np.max(np.hypot(u, v))),
                 "ps_perturbation": float(np.max(np.abs(duo.ps(s) - _ps0))),
             }
+            if _matched:
+                out["lee_box_wind"] = _lee_box_wind(
+                    np.hypot(u[..., -1], v[..., -1]), duo.lat_deg,
+                    duo.lon_deg, _duo_cell_corners_xyz(duo.grid.ctx_np))
+            return out
 
         def extract_fn(s):
             u, v = duo.winds(s, level=-1)
@@ -5168,14 +5287,21 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 
         ps_init = np.array(state.p_s)
 
-        def scalar_fn(s):
+        def scalar_fn(s, _matched=False):
             u_c = 0.5 * (s.u[:, :-1, :] + s.u[:, 1:, :])
             v_c = 0.5 * (s.v[:-1, :, :] + s.v[1:, :, :])
-            return {
+            out = {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
                 "ps_perturbation": float(jnp.max(jnp.abs(s.p_s - ps_init))),
             }
+            if _matched:
+                out["lee_box_wind"] = _lee_box_wind(
+                    np.hypot(np.asarray(u_c[..., -1]),
+                             np.asarray(v_c[..., -1])),
+                    np.degrees(np.asarray(grid.lat2d)),
+                    np.degrees(np.asarray(grid.lon2d)))
+            return out
 
         def extract_fn(s):
             u_sfc = np.asarray(0.5 * (s.u[:, :-1, -1] + s.u[:, 1:, -1]), dtype=np.float64)
@@ -5255,8 +5381,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 
         ps_init_ico = np.array(state.p_s.data)
 
-        def scalar_fn(s):
-            return {
+        def scalar_fn(s, _matched=False):
+            out = {
                 "mass": mass_fn(s),
                 "max_wind": _ico_max_cell_speed(s.u.data, mesh),
                 "max_edge_u": float(jnp.max(jnp.abs(s.u.data))),
@@ -5268,6 +5394,13 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 "ps_perturbation": float(jnp.max(
                     jnp.abs(s.p_s.data - ps_init_ico))),
             }
+            if _matched:
+                from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+                _ue, _vn = reconstruct_cell_velocity(s.u.data[:, -1], mesh)
+                out["lee_box_wind"] = _lee_box_wind(
+                    np.hypot(np.asarray(_ue), np.asarray(_vn)), lat_cell,
+                    lon_cell)
+            return out
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
         lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
@@ -5371,9 +5504,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             dtype=np.float64,
         )
 
-        def scalar_fn(s):
+        def scalar_fn(s, _matched=False):
             fields = spectral_pe_to_grid(s, grid, sigma)
-            return {
+            out = {
                 # See iter-5 H1: ``mass`` is the integral, not the mean.
                 "mass": _area_weighted_sum(fields['p_s'], grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
@@ -5381,6 +5514,13 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 "ps_perturbation": float(jnp.max(
                     jnp.abs(fields['p_s'] - ps_init_spec))),
             }
+            if _matched:
+                _la, _lo = np.meshgrid(lat_deg, lon_deg, indexing="ij")
+                out["lee_box_wind"] = _lee_box_wind(
+                    np.hypot(np.asarray(fields['u'][..., -1]),
+                             np.asarray(fields['v'][..., -1])),
+                    _la, _lo)
+            return out
 
         def extract_fn(s):
             fields = spectral_pe_to_grid(s, grid, sigma)
@@ -5411,11 +5551,19 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     # (_gw31_diag_every); 6-hourly would leave the 3600 s run one sample.
     diag_every = (_gw31_diag_every(dt) if tc.case == "gravity_wave_3_1"
                   else max(1, int(6 * 3600 / dt)))
+    # Mountain Rossby 5-0: the lee-box wind is a CROSS-GRID score, so it is
+    # a SEPARATE series on one common cadence that every grid's step
+    # divides; the gated diag series keeps its 6-hourly cadence.
+    _m_steps, _m_off = (_matched_diag_steps(
+        dt, n_steps, _MR50_DIAG_CADENCE_S, days * 86400.0)
+        if _mr50 else (None, 0.0))
 
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, key_array_fn,
-        label=f"Baroclinic ({tc.grid_type})", total_days=days)
+        label=f"Baroclinic ({tc.grid_type})", total_days=days,
+        matched_steps=_m_steps,
+        matched_fn=lambda s: scalar_fn(s, _matched=True))
 
     mass_drift = _compute_drift(diag.get("mass", []))
     notes = f"mass drift={mass_drift:.2e}"
@@ -5432,6 +5580,29 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     ok, notes = _apply_mass_drift_tolerance(
         ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
+    _mt = diag.get("_matched", {})
+    if _mr50 and _mt.get("lee_box_wind"):
+        # Info only (no gate): cross-grid lee-wind score, peak over the
+        # matched samples of the 10-degree-box mean lowest-level |V|.
+        _lw = np.asarray(_mt["lee_box_wind"], dtype=np.float64)
+        _fin = np.isfinite(_lw)
+        if _fin.any():
+            _ik = int(np.argmax(np.where(_fin, _lw, -np.inf)))
+            notes += (f", lee-box |V|_1 peak={_lw[_ik]:.2f} m/s at "
+                      f"t={_mt['times'][_ik]:.3f} d")
+        else:
+            notes += ", lee-box |V|_1 peak unavailable"
+        notes += (f" (matched cadence {_MR50_DIAG_CADENCE_S:g} s, max "
+                  f"sample offset {_m_off:.1f} s)")
+        if not _fin.all():
+            # a matched sample taken between blow-up checks went
+            # non-finite: the peak covers the finite samples only
+            notes += (f" [INCOMPLETE: {int((~_fin).sum())} of {_lw.size} "
+                      f"lee samples non-finite]")
+        if _lw.size < len(_m_steps) + 1:
+            # the run stopped (blow-up) before the last scheduled sample
+            notes += (f" [INCOMPLETE: {_lw.size} of {len(_m_steps) + 1} "
+                      f"scheduled lee samples recorded]")
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
@@ -5470,6 +5641,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         scalar_units={
             "mass": "Pa*m^2", "max_wind": "m/s",
             "ps_perturbation": "Pa"})
+    if _mt:
+        _save_timeseries_csv(output_dir, _mt, dt,
+                             filename="matched_timeseries.csv")
 
     return "PASS" if ok else "FAIL", wall, notes
 
