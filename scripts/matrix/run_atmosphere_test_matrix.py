@@ -1931,8 +1931,16 @@ def _run_timeloop(
     blowup_threshold: float = 1000.0,
     n_snaps: int = 10,
     blowup_check_interval: int = 100,
+    matched_steps: frozenset | None = None,
+    matched_fn: Callable | None = None,
 ) -> tuple[Any, dict, dict, float, bool]:
     """Run time loop with diagnostics.
+
+    ``matched_steps`` / ``matched_fn`` (optional): ALSO record
+    ``matched_fn(state)`` at step 0 and at exactly these steps (a cross-grid
+    matched cadence, see ``_matched_diag_steps``) into the private
+    ``diag["_matched"]`` series ({"steps", "times", key: [...]}).  The
+    ``diag_every`` series (the one the gates read) is unchanged.
 
     Returns (final_state, snapshots, diag, wall_time, ok).
     """
@@ -1964,6 +1972,16 @@ def _run_timeloop(
     diag: dict[str, list] = {"times": [0.0], "steps": [0]}
     for k, v in scalars_0.items():
         diag.setdefault(k, []).append(v)
+
+    def _record(series, step, values):
+        series["times"].append(step * dt / 86400.0)
+        series["steps"].append(step)
+        for k, v in values.items():
+            series.setdefault(k, []).append(v)
+
+    if matched_steps is not None:
+        diag["_matched"] = {"times": [], "steps": []}
+        _record(diag["_matched"], 0, matched_fn(state))
 
     t0 = time.time()
     last_print = t0
@@ -2019,6 +2037,9 @@ def _run_timeloop(
                     diag["_blowup_info"]["scalars_at_blowup_error"] = repr(_exc)
                 blown_up = True
                 break
+
+        if matched_steps is not None and step in matched_steps:
+            _record(diag["_matched"], step, matched_fn(state))
 
         if step % diag_every == 0:
             day = step * dt / 86400.0
@@ -2429,7 +2450,8 @@ def _write_results_txt(output_dir: Path, rows: dict[str, Any],
             f.write(f"{k}: {v}\n")
 
 
-def _save_timeseries_csv(output_dir: Path, diag: dict, dt: float):
+def _save_timeseries_csv(output_dir: Path, diag: dict, dt: float, *,
+                         filename: str = "mean_timeseries.csv"):
     # new_test_dycores iter-118: exclude private-prefix keys (``_*``)
     # from the csv columns.  Pre-iter-118 ``_blowup_info`` (a dict,
     # added by ``_run_timeloop`` on FAIL) was included in ``keys``,
@@ -2447,7 +2469,7 @@ def _save_timeseries_csv(output_dir: Path, diag: dict, dt: float):
     if not keys or not diag["steps"]:
         return
     output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "mean_timeseries.csv", "w") as f:
+    with open(output_dir / filename, "w") as f:
         f.write("step,time_days," + ",".join(keys) + "\n")
         for i in range(len(diag["steps"])):
             vals = ",".join(f"{diag[k][i]:.12e}" for k in keys)
@@ -3180,6 +3202,142 @@ def _extract_hydro_mpas(s, mesh, lon_cell, lat_cell):
 
 
 # ===========================================================================
+# Matched-cadence diagnostics (colliding modons energy / mountain Rossby lee)
+# ===========================================================================
+
+#: Colliding modons: common scalar-output cadence on ALL four grids [s].  The
+#: antipodal gravity-wave refocus spike sits at pi*R/c ~ 0.74 d and is ~1 h
+#: wide, so the n_steps // 20 default (~1.2 h on the 1-day quick run, 5 d
+#: on the 100-day run) cannot resolve it.  1200 s is the cube duo's outer
+#: step (dt_atmos, the coarsest grid step), i.e. the finest cadence every grid
+#: can hit; 15 min is not reachable on the cube without changing its deck dt.
+#: The lat-lon (pole-CFL dt) and spectral (CFL dt ~ R/n_max) rows take the
+#: nearest step (offset <= dt/2, recorded in the notes).  Vote 2026-11-28
+#: (codex 1200 s, author 1200 s; GLM unavailable -> single review).
+_MODON_DIAG_CADENCE_S = 1200.0
+
+def _matched_diag_steps(dt: float, n_steps: int, cadence_s: float,
+                        t_end_s: float | None = None
+                        ) -> tuple[frozenset, float]:
+    """Steps nearest to the common output times ``k * cadence_s`` (k >= 1,
+    ``k * cadence_s <= t_end_s``, default ``n_steps * dt``), and the largest
+    |step*dt - k*cadence_s| [s].
+
+    Interior offsets are <= dt/2 (0 when ``cadence_s`` is a multiple of
+    ``dt``).  The one exception is a final target past the last step (the
+    run length ``n_steps = int(t_end / dt)`` truncates, e.g. lat-lon 1 d =
+    8922 x 9.68 s): it is sampled at the last step, offset < dt."""
+    t_end = n_steps * dt if t_end_s is None else float(t_end_s)
+    k_max = int(np.floor(t_end / cadence_s + 1e-9))
+    ks = np.arange(1, k_max + 1, dtype=np.float64)
+    steps = np.minimum(np.rint(ks * cadence_s / dt).astype(np.int64),
+                       n_steps)
+    keep = steps >= 1
+    steps, ks = steps[keep], ks[keep]
+    off = (float(np.max(np.abs(steps * dt - ks * cadence_s)))
+           if steps.size else 0.0)
+    return frozenset(int(x) for x in steps), off
+
+
+def _sw_energy_enstrophy(e_density, area, zeta_abs, h_at_zeta,
+                         area_at_zeta) -> dict:
+    """Total energy E = sum area * e_density and potential enstrophy
+    Z = sum area * (zeta + f)^2 / (2 h), each on its native points."""
+    e = jnp.sum(jnp.asarray(area, jnp.float64)
+                * jnp.asarray(e_density, jnp.float64))
+    z = jnp.sum(jnp.asarray(area_at_zeta, jnp.float64)
+                * jnp.asarray(zeta_abs, jnp.float64) ** 2
+                / (2.0 * jnp.asarray(h_at_zeta, jnp.float64)))
+    return {"total_energy": float(e), "potential_enstrophy": float(z)}
+
+
+def _modon_energy_enstrophy_latlon(s, grid) -> dict:
+    """Lat-lon C-grid: the SW core's cell KE (``latlon_cell_ke``) times the
+    cell depth plus g h^2 / 2 over ``grid.area``; potential enstrophy on the
+    VERTICES, where the core holds its vorticity (``vorticity`` + polar-cap
+    Stokes rows + ``latlon_vertex_coriolis``, as in
+    ``absolute_vorticity_coriolis``), over the vertex dual cells (cell-centre
+    latitude to cell-centre latitude; pole rows the polar caps; together
+    exactly 4 pi R^2) with h_v the mean of the adjacent cells.  A
+    4-point average of zeta to cell centres would smooth away ~30 % of the
+    modon IC enstrophy at 72x144."""
+    from legoesm import constants as _c
+    from legoesm.grids.operator_adapters import latlon_cgrid_operators
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
+        _pole_cap_vorticity, latlon_cell_ke, latlon_vertex_coriolis)
+    u_c = 0.5 * (s.u[:, :-1] + s.u[:, 1:])
+    v_c = 0.5 * (s.v[:-1] + s.v[1:])
+    ke = latlon_cell_ke(u_c, v_c, s.v, grid)
+    eta_v = (_pole_cap_vorticity(
+        latlon_cgrid_operators(grid).vorticity(s.u, s.v), s.u, grid)
+        + latlon_vertex_coriolis(grid))[:, :-1]     # drop the wrap column
+    h = s.h
+    h_w = jnp.roll(h, 1, axis=1)                    # cell west of the vertex
+    h_row = 0.5 * (h + h_w)                         # (n_lat, n_lon)
+    h_v = jnp.concatenate(
+        [h_row[:1], 0.5 * (h_row[:-1] + h_row[1:]), h_row[-1:]], axis=0)
+    sin_c = jnp.sin(jnp.asarray(grid.lat, jnp.float64))
+    sin_edges = jnp.concatenate(
+        [jnp.array([-1.0]), sin_c, jnp.array([1.0])])
+    a_row = (float(grid.radius) ** 2 * float(grid.dlon)
+             * (sin_edges[1:] - sin_edges[:-1]))   # (n_lat+1,)
+    a_v = jnp.broadcast_to(a_row[:, None], eta_v.shape)
+    return _sw_energy_enstrophy(
+        h * ke + 0.5 * _c.g * h ** 2, grid.area, eta_v, h_v, a_v)
+
+
+def _modon_energy_enstrophy_mpas(s, mesh) -> dict:
+    """MPAS (Ringler et al. 2010) native forms: cell KE
+    (``kinetic_energy_cell``) times h plus g h^2 / 2 over ``areaCell``;
+    potential enstrophy sum areaTriangle * h_v * q_v^2 / 2 with the core's
+    vertex PV and kite-weighted vertex thickness."""
+    from legoesm import constants as _c
+    from legoesm.core.operators_voronoi import (
+        kinetic_energy_cell, potential_vorticity_vertex, vertex_thickness)
+    h, u = s.h.data, s.u.data
+    ke = kinetic_energy_cell(u, mesh)
+    q = potential_vorticity_vertex(u, h, mesh.fVertex, mesh)
+    h_v = vertex_thickness(h, mesh)
+    return _sw_energy_enstrophy(
+        h * ke + 0.5 * _c.g * h ** 2, mesh.areaCell,
+        q * h_v, h_v, mesh.areaTriangle)
+
+
+def _modon_energy_enstrophy_spectral(s, grid) -> dict:
+    """Gaussian spectral: the model's own ``compute_spectral_diagnostics``
+    (Gaussian-quadrature E with the 0.5 g h^2 + g h h_s PE and potential
+    enstrophy (zeta + f)^2 / (2 h))."""
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
+        compute_spectral_diagnostics)
+    d = compute_spectral_diagnostics(s, grid)
+    return {"total_energy": d["energy"], "potential_enstrophy": d["enstrophy"]}
+
+
+def _modon_energy_enstrophy_cube(s, duo) -> dict:
+    """FV3 duo (non-rotating case 8, f = 0): KE 0.5 h |V_A|^2 from the A-grid
+    ``c2l_ord2`` winds (the matrix's cube wind lens) plus 0.5 g h^2 with the
+    FV3 g; relative vorticity at cell centres from the D-grid edge
+    circulation, rarea * (u dx_j - u dx_j+1 - v dy_i + v dy_i+1) -- the
+    ``wk`` of sw_core.F90:1582-1598 (``d_sw5_duo``)."""
+    ctx = duo.ctx
+    n, ng = ctx["n"], ctx["ng"]
+    sl, sp = slice(ng, ng + n), slice(ng + 1, ng + n + 1)
+    u6 = np.asarray(s["u"], dtype=np.float64)
+    v6 = np.asarray(s["v"], dtype=np.float64)
+    zeta = np.empty((6, n, n))
+    for t, g in enumerate(ctx["gs6"]):
+        dx, dy = np.asarray(g["dx"]), np.asarray(g["dy"])
+        ut, vt = u6[t] * dx, v6[t] * dy
+        zeta[t] = (np.asarray(g["rarea"])[sl, sl]
+                   * (ut[sl, sl] - ut[sl, sp] - vt[sl, sl] + vt[sp, sl]))
+    h = duo.h(s)
+    ue, vn = duo.winds(s)
+    return _sw_energy_enstrophy(
+        0.5 * h * (ue ** 2 + vn ** 2) + 0.5 * duo.grav * h ** 2, duo.area,
+        zeta, h, duo.area)
+
+
+# ===========================================================================
 # Runner: Shallow Water
 # ===========================================================================
 
@@ -3209,10 +3367,13 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                          and np.all(np.isfinite(v))),
                     float(np.max(np.hypot(u, v))))
 
-        def scalar_fn(s):
+        def scalar_fn(s, _matched=False):
             u, v = duo.winds(s)
-            return {"mean_height": _area_weighted_mean(duo.h(s), duo.area),
-                    "max_wind": float(np.max(np.hypot(u, v)))}
+            out = {"mean_height": _area_weighted_mean(duo.h(s), duo.area),
+                   "max_wind": float(np.max(np.hypot(u, v)))}
+            if _matched:
+                out.update(_modon_energy_enstrophy_cube(s, duo))
+            return out
 
         def extract_fn(s):
             u_e, v_n = duo.winds(s)
@@ -3353,13 +3514,16 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             return (check_finite({"h": s.h, "u": s.u}),
                     float(jnp.max(jnp.abs(s.u))))
 
-        def scalar_fn(s):
+        def scalar_fn(s, _matched=False):
             u_c = 0.5 * (s.u[:, :-1] + s.u[:, 1:])
             v_c = 0.5 * (s.v[:-1] + s.v[1:])
-            return {
+            out = {
                 "mean_height": _area_weighted_mean(s.h, grid.area),
                 "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
             }
+            if _matched:
+                out.update(_modon_energy_enstrophy_latlon(s, grid))
+            return out
 
         def extract_fn(s):
             u = np.asarray(0.5 * (s.u[:, :-1] + s.u[:, 1:]), dtype=np.float64)
@@ -3430,12 +3594,15 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             return (check_finite({"h": s.h.data, "u": s.u.data}),
                     float(jnp.max(jnp.abs(s.u.data))))
 
-        def scalar_fn(s):
-            return {
+        def scalar_fn(s, _matched=False):
+            out = {
                 "mean_height": _area_weighted_mean(s.h.data, mesh.areaCell),
                 "max_wind": _ico_max_cell_speed(s.u.data, mesh),
                 "max_edge_u": float(jnp.max(jnp.abs(s.u.data))),
             }
+            if _matched:
+                out.update(_modon_energy_enstrophy_mpas(s, mesh))
+            return out
 
         def extract_fn(s):
             u_e, v_n = reconstruct_cell_velocity(s.u.data, mesh)
@@ -3556,17 +3723,20 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             return (check_finite({"phi": phi}),
                     float(jnp.max(jnp.abs(vor))))
 
-        def scalar_fn(s):
+        def scalar_fn(s, _matched=False):
             phi = sh_synthesis(grid, s.phi_hat.data)
             u_cos, v_cos = uv_from_vordiv(
                 grid, s.vor_hat.data, s.div_hat.data)
             cos2d = grid.cos_lat[:, None]
             ws = jnp.sqrt((u_cos / cos2d) ** 2 + (v_cos / cos2d) ** 2)
-            return {
+            out = {
                 "mean_height": _area_weighted_mean(
                     phi / constants.g, grid.grid_area),
                 "max_wind": float(jnp.max(ws)),
             }
+            if _matched:
+                out.update(_modon_energy_enstrophy_spectral(s, grid))
+            return out
 
         def extract_fn(s):
             phi = np.asarray(sh_synthesis(grid, s.phi_hat.data),
@@ -3616,11 +3786,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             mass_init = _area_weighted_mean(h_data, grid.area)
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 20)
+    # Colliding modons: a SEPARATE matched-cadence series (scalars + native
+    # E / potential enstrophy) on the common cross-grid cadence, fine enough
+    # for the ~0.74 d refocus spike; the gated diag series is untouched.
+    _m_steps, _m_off = (_matched_diag_steps(
+        dt, n_steps, _MODON_DIAG_CADENCE_S, days * 86400.0)
+        if test_num == 8 else (None, 0.0))
 
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, key_array_fn,
-        label=f"SW W{test_num} ({tc.grid_type})", total_days=days)
+        label=f"SW W{test_num} ({tc.grid_type})", total_days=days,
+        matched_steps=_m_steps,
+        matched_fn=lambda s: scalar_fn(s, _matched=True))
 
     # --- Error norms for TC2 ---
     notes = ""
@@ -3688,6 +3866,15 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             n_samples=len(diag['mean_height']),
         )
 
+    _mt = diag.get("_matched", {})
+    if test_num == 8 and len(_mt.get("total_energy", [])) >= 2:
+        # Info only (no gate): native E and potential enstrophy at the last
+        # matched sample relative to t = 0; series in matched_timeseries.csv.
+        _e, _z = _mt["total_energy"], _mt["potential_enstrophy"]
+        notes = (f"{notes}; E/E0-1={_e[-1] / _e[0] - 1.0:.3e}, "
+                 f"Z/Z0={_z[-1] / _z[0]:.6f} at t={_mt['times'][-1]:.4f} d "
+                 f"(matched cadence {_MODON_DIAG_CADENCE_S:g} s, max sample "
+                 f"offset {_m_off:.1f} s)")
     if tc.grid_type == "cubed_sphere":
         notes = f"{notes}; {_duo_note}"
     _write_results_txt(output_dir, {
@@ -3726,6 +3913,9 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         ],
         mass_key="mean_height", energy_key="max_wind",
         scalar_units={"mean_height": "m", "max_wind": "m/s"})
+    if _mt:
+        _save_timeseries_csv(output_dir, _mt, dt,
+                             filename="matched_timeseries.csv")
 
     return "PASS" if ok else "FAIL", wall, notes
 
