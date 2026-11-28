@@ -3501,8 +3501,19 @@ def _modon_energy_enstrophy_cube(s, duo) -> dict:
 # Runner: Shallow Water
 # ===========================================================================
 
-def _sw_state_run_precision(state):
-    """Promote a SW initial state's float leaves to float64 when x64 is on.
+def _state_run_precision(state):
+    """Promote an initial state's float leaves to float64 when x64 is on.
+
+    Shared by the SW lanes (below) and the hydrostatic 3-D lat-lon / ico
+    lanes (``run_baroclinic`` / ``run_held_suarez``): the same fp32-storage
+    inheritance hits several 3-D analytic ICs (DCMIP 2012 2-0-0 rest-state
+    ``T``/``p_s``/``phis``, DCMIP 2008 3-2/5-0/6-0 ``u``/``p_s``/``T``,
+    measured 2026-11-28).  An fp32 ``p_s`` stays fp32 through the ico step,
+    so rest_state_topo (ico5 L40, fixer off) GAINED +9.8e-6 of the air mass
+    per day (+2e-8/step rounding drift) with a matching +0.54 W/m^2 energy
+    gain; lat-lon took a one-off +1.3e-8 jump on step 1.  With fp64 ICs both
+    are -1.9e-14/day (roundoff) and the ico energy change is ~0.  The SW
+    measurements follow.
 
     The grids/meshes are built at the fp32 storage policy, so the analytic
     ICs inherit fp32 (lat-lon ``h``/``u``; every ico leaf) while the
@@ -3525,9 +3536,13 @@ def _sw_state_run_precision(state):
     return jax.tree.map(_up, state)
 
 
+#: The SW lanes' name for :func:`_state_run_precision` (same function).
+_sw_state_run_precision = _state_run_precision
+
+
 def _latlon_sw_initial_state(grid, test_num: int):
     """Lat-lon C-grid SW initial state for the matrix lanes, at run precision
-    (see :func:`_sw_state_run_precision`)."""
+    (see :func:`_state_run_precision`)."""
     from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         CGridLatLonShallowWaterState, williamson_test2_cgrid,
         williamson_test5_cgrid)
@@ -3604,7 +3619,7 @@ def _latlon_sw_initial_state(grid, test_num: int):
 
 def _ico_sw_initial_state(mesh, test_num: int):
     """MPAS (ico) SW initial state for the matrix lanes, at run precision
-    (see :func:`_sw_state_run_precision`)."""
+    (see :func:`_state_run_precision`)."""
     if test_num == 6:
         from tests.test_cases.williamson_extended import (
             williamson_test6_mpas)
@@ -4830,7 +4845,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                 grid, sigma, **_topo_init_kwargs())
         else:
             state_cc = held_suarez_init_latlon(grid, sigma)
-        state = hydrostatic_to_cgrid(state_cc, grid)
+        state = _state_run_precision(hydrostatic_to_cgrid(state_cc, grid))
 
         physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing_latlon)
                       if radiation == "rrtmgp" else held_suarez_forcing_latlon)
@@ -4924,6 +4939,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             state = held_suarez_topo_init_mpas(mesh, sigma, **_topo_init_kwargs())
         else:
             state = held_suarez_init_mpas(mesh, sigma)
+        state = _state_run_precision(state)
         grid = mesh
 
         physics_fn_mpas = (_make_rrtmgp_physics("mpas", dt, hs_fn=held_suarez_forcing_mpas)
@@ -5180,6 +5196,153 @@ def dcmip_omega_override(case: str) -> float | None:
     return 0.0 if case in ("gravity_wave_3_1", "rest_state_topo") else None
 
 
+# ---------------------------------------------------------------------------
+# 3-D hydrostatic dycore rows: intrinsic mass conservation + total energy
+# ---------------------------------------------------------------------------
+
+#: The lat-lon / ico ``run_baroclinic`` rows run WITHOUT a mass fixer under
+#: the x64 matrix (user directive 2026-11-28: fixers only as a last resort).
+#: Measured 2026-11-28, fp64, fixers off, flux-form continuity alone:
+#: DCMIP16 JW wave 2 d and DCMIP 2012 2-0-0 rest-over-terrain 1 d, -1.8e-14
+#: .. -2.1e-14 of the air mass per day on 72x144 and ico5 (stage-combination
+#: roundoff, < 1e-16 per step) once the ICs are fp64
+#: (``_state_run_precision``); every other hydro-family row of the two lanes
+#: is in the commit record.  The lat-lon ``zero_mean_ps_tendency`` is the
+#: same kind of global projection (it activates exactly when ``fix_mass`` is
+#: off) and goes with it.  With x64 OFF (fp32 matrix) the ICs stay fp32 and
+#: an fp32 ``p_s`` does not conserve mass (ico +9.8e-6/day on 2-0-0), so the
+#: rows keep their fixers there.  The spectral lane KEEPS its fixer: its
+#: ln p_s core does not conserve the p_s integral (-8e-11/day on JW T21
+#: without the fixer, unchanged with hyperdiffusion and filter off; CAM-EUL
+#: has the same fixer).
+def _pe_mass_fixer_kw(lane: str) -> dict:
+    """Mass-fixer fields of a ``run_baroclinic`` lat-lon (``lane="latlon"``)
+    or ico (``"mpas"``) config: none under x64, the previous anchored fixer
+    otherwise (see the comment above)."""
+    if lane not in ("latlon", "mpas"):
+        raise ValueError(f"_pe_mass_fixer_kw: unknown lane {lane!r}")
+    on = not jax.config.jax_enable_x64
+    kw = dict(fix_mass=on, anchor_mass_to_initial=on)
+    if lane == "latlon" and not on:
+        kw["zero_mean_ps_tendency"] = False
+    return kw
+
+
+def _pe_total_energy(T, ke, p_s, phis, sigma, area) -> float:
+    """Global hydrostatic total energy [J], the dycore energy fixers' form
+    (``core.conservation.dycore_column_energy``: sum_k (c_pd T + K) dp/g +
+    phis p_s / g, layer masses from the lane's own ``pressure_at_half``),
+    fp64.  ``ke`` is the lane's per-level kinetic energy [J/kg]."""
+    from legoesm.core.conservation import dycore_column_energy
+    p_s = jnp.asarray(p_s, jnp.float64)
+    ph = sigma.pressure_at_half(p_s)
+    e = dycore_column_energy(jnp.asarray(T, jnp.float64),
+                             jnp.asarray(ke, jnp.float64),
+                             ph[..., 1:] - ph[..., :-1],
+                             jnp.asarray(phis, jnp.float64), p_s)
+    return float(jnp.sum(e * jnp.asarray(area, jnp.float64)))
+
+
+def _latlon_pe_energy_fn(grid, sigma):
+    """Lat-lon C-grid total energy with the face-weighted (TRiSK /
+    Arakawa-Lamb) kinetic energy ``sum_f A_f u_f^2 / (4 A_c)`` on the
+    operators' summation-by-parts face weights -- a norm of the C-grid state
+    (the SW lanes' choice, commit 0ef1718df7), not the core's Bernoulli
+    |face-mean wind|^2 / 2."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import (
+        latlon_face_metrics, latlon_trisk_kinetic_energy)
+    from legoesm.grids.operator_adapters import latlon_sw_grid_operators
+    l_u, d_u, l_v, d_v = latlon_face_metrics(
+        grid, latlon_sw_grid_operators(grid))
+    A_u = jnp.asarray(l_u * d_u, jnp.float64)
+    A_v = jnp.asarray(l_v * d_v, jnp.float64)
+    area = jnp.asarray(grid.area, jnp.float64)
+
+    def energy(s):
+        ke = latlon_trisk_kinetic_energy(jnp.asarray(s.u, jnp.float64),
+                                         jnp.asarray(s.v, jnp.float64),
+                                         A_u, A_v, area)
+        return _pe_total_energy(s.T, ke, s.p_s, s.phis, sigma, area)
+    return energy
+
+
+def _mpas_pe_energy_fn(mesh, sigma):
+    """Voronoi total energy with the TRiSK cell kinetic energy the core
+    conserves (``kinetic_energy_cell_3d``, as ``voronoi_energy_fixer_dT``)."""
+    from legoesm.core.operators_voronoi import kinetic_energy_cell_3d
+
+    def energy(s):
+        ke = kinetic_energy_cell_3d(jnp.asarray(s.u.data, jnp.float64), mesh)
+        return _pe_total_energy(s.T.data, ke, s.p_s.data, s.phis.data, sigma,
+                                mesh.areaCell)
+    return energy
+
+
+def _duo_pe_energy_fn(duo):
+    """FV3 duo total energy [J]: FV3's own hydrostatic ``te0_2d``
+    (``compute_total_energy``, fv_mapz.F90:1128-1151, D-grid KE with the
+    rsin2 / cosa corner factors; ``fv3_dynamics.
+    total_energy_2d_hydrostatic_jax``) over the compute-window cell areas,
+    divided by FV3's g.  FV3's form carries the lid term -p_top Phi_top / g
+    the other lanes' enthalpy form (``_pe_total_energy``) leaves out: 0.36 %
+    of E on the DCMIP16 wave (CAM6 L32), so compare cube energy CHANGES, not
+    levels, across grids."""
+    from legoesm.core.fv3_dynamics import total_energy_2d_hydrostatic_jax
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_CP_AIR, FV3_GRAV, FV3_RDGAS)
+    ctx = duo.grid.ctx_np
+    n, ng, km = int(ctx["n"]), int(ctx["ng"]), int(duo.km)
+    gs = ctx["gs6"]
+
+    def _stack(key):
+        return jnp.asarray(np.stack([np.asarray(gs[t][key], np.float64)
+                                     for t in range(6)]))
+    rsin2, cosa_s = _stack("rsin2"), _stack("cosa_s")
+    area = _stack("area")[:, ng:ng + n, ng:ng + n]
+    hs6 = ctx.get("hs6")
+    hs = (jnp.zeros((6, n + 2 * ng, n + 2 * ng), jnp.float64) if hs6 is None
+          else jnp.asarray(np.stack([np.asarray(hs6[t], np.float64)
+                                     for t in range(6)])))
+
+    def energy(b):
+        st, pr = b["state"], b["press"]
+        te = total_energy_2d_hydrostatic_jax(
+            st["pt"], st["delp"], st["u"], st["v"], pr["pe"], pr["peln"],
+            hs, rsin2, cosa_s, cp=FV3_CP_AIR, rg=FV3_RDGAS, n=n, ng=ng, km=km)
+        return float(jnp.sum(te * area) / FV3_GRAV)
+    return energy
+
+
+def _pe_conservation_note(diag: dict, total_area: float) -> str:
+    """Signed per-day rates of the ``mass`` and ``total_energy`` series,
+    (X_end - X_first) / X_first over the sampled interval [days], the largest
+    sampled |X - X_first| / X_first of the mass, and the energy change as a
+    mean flux [W/m^2] over ``total_area`` (the lane's own summed cell areas,
+    so a small-planet row reads per its own planet).  Empty when a series is
+    missing or the samples span no time.  ``mass`` is the lanes' p_s area
+    integral: with a constant lid the numerator is the air-mass change
+    exactly, the denominator overstates the air mass by p_top/p_s (<= ~0.2 %
+    on the matrix tables).  The energy rate is reported only under x64: the
+    fp32 matrix's energy totals cannot resolve it."""
+    t = diag.get("times", [])
+    if len(t) < 2 or not float(t[-1]) > float(t[0]):
+        return ""
+    days = float(t[-1]) - float(t[0])
+    out = []
+    m = np.asarray(diag.get("mass", []), dtype=np.float64)
+    if m.size >= 2 and m[0]:
+        out.append(f"mass dM/M/day={(m[-1] - m[0]) / m[0] / days:+.2e} "
+                   f"(max |dM/M| {np.max(np.abs(m - m[0])) / abs(m[0]):.1e})")
+    e = np.asarray(diag.get("total_energy", []), dtype=np.float64)
+    if e.size >= 2 and e[0] and not jax.config.jax_enable_x64:
+        out.append("energy rate not resolved (fp32 matrix)")
+    elif e.size >= 2 and e[0]:
+        flux = (e[-1] - e[0]) / (days * 86400.0) / float(total_area)
+        out.append(f"energy dE/E/day={(e[-1] - e[0]) / e[0] / days:+.2e} "
+                   f"({flux:+.3g} W/m^2)")
+    return ", ".join(out)
+
+
 def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                    radiation: str = "gray") -> tuple[str, float, str]:
     nlev = DEFAULT_NLEV
@@ -5256,6 +5419,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         nlev = duo.km
         sigma = SimpleNamespace(sigma_full=duo.level_values)
         _ps0 = duo.ps(state)
+        _duo_energy = _duo_pe_energy_fn(duo)
+        _total_area = float(np.sum(np.asarray(duo.area, np.float64)))
         _duo_note = _duo_vertical_note(tc.vertical_coord, duo)
         if _rest:
             _duo_note = f"{_duo_note}; {CUBE_REST_TOPO_PS_NOTE}"
@@ -5273,6 +5438,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             u, v = duo.winds(s)
             out = {
                 "mass": _area_weighted_sum(duo.ps(s), duo.area),
+                "total_energy": _duo_energy(s),
                 "max_wind": float(np.max(np.hypot(u, v))),
                 "ps_perturbation": float(np.max(np.abs(duo.ps(s) - _ps0))),
             }
@@ -5342,11 +5508,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                           vert_advection_scheme="sb")
                      if _gw31 is not None else {})
         config = CGridLatLonPrimitiveEquationConfig(
-            A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
-            A_h_pressure_surfaces=_LATLON_A_H_PRESSURE_SURFACES,
+            A_h=ah, A_h_pressure_surfaces=_LATLON_A_H_PRESSURE_SURFACES,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
             sb81_omega_conversion=True,
             **_ll_vform,
+            **_pe_mass_fixer_kw("latlon"),
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _rotated:
@@ -5368,12 +5534,14 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         else:
             state_cc = baroclinic_wave_init_latlon(
                 grid, sigma, perturbed=_perturbed)
-        state = hydrostatic_to_cgrid(state_cc, grid)
+        state = _state_run_precision(hydrostatic_to_cgrid(state_cc, grid))
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
 
         mass_fn = lambda s: _area_weighted_sum(s.p_s, grid.area)
+        energy_fn = _latlon_pe_energy_fn(grid, sigma)
+        _total_area = float(jnp.sum(jnp.asarray(grid.area, jnp.float64)))
 
         def check_fn(s):
             return (check_finite({"T": s.T, "u": s.u}),
@@ -5386,6 +5554,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             v_c = 0.5 * (s.v[:-1, :, :] + s.v[1:, :, :])
             out = {
                 "mass": mass_fn(s),
+                "total_energy": energy_fn(s),
                 "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
                 "ps_perturbation": float(jnp.max(jnp.abs(s.p_s - ps_init))),
             }
@@ -5443,6 +5612,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             # dx_min^4 / (48 h) on the small mesh is already the Earth
             # value over X^4 (its fixed 48 h e-folding), so times X.
             config = config._replace(nu_del4=config.nu_del4 * _gw31.X_SCALE)
+        config = config._replace(**_pe_mass_fixer_kw("mpas"))
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -5462,12 +5632,15 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         else:
             state = baroclinic_wave_init_mpas(
                 mesh, sigma, perturbed=_perturbed)
+        state = _state_run_precision(state)
         grid = mesh
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
 
         mass_fn = lambda s: _area_weighted_sum(s.p_s.data, mesh.areaCell)
+        energy_fn = _mpas_pe_energy_fn(mesh, sigma)
+        _total_area = float(jnp.sum(jnp.asarray(mesh.areaCell, jnp.float64)))
 
         def check_fn(s):
             return (check_finite({"T": s.T.data, "u": s.u.data}),
@@ -5478,6 +5651,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s, _matched=False):
             out = {
                 "mass": mass_fn(s),
+                "total_energy": energy_fn(s),
                 "max_wind": _ico_max_cell_speed(s.u.data, mesh),
                 "max_edge_u": float(jnp.max(jnp.abs(s.u.data))),
                 # Same baroclinic-wave growth diagnostic the cube and lat-lon branches
@@ -5597,12 +5771,16 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             jnp.exp(sh_synthesis(grid, state.lnps_hat.data)),
             dtype=np.float64,
         )
+        _total_area = float(jnp.sum(jnp.asarray(grid.grid_area, jnp.float64)))
 
         def scalar_fn(s, _matched=False):
             fields = spectral_pe_to_grid(s, grid, sigma)
             out = {
                 # See iter-5 H1: ``mass`` is the integral, not the mean.
                 "mass": _area_weighted_sum(fields['p_s'], grid.grid_area),
+                "total_energy": _pe_total_energy(
+                    fields['T'], 0.5 * (fields['u'] ** 2 + fields['v'] ** 2),
+                    fields['p_s'], fields['phis'], sigma, grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "ps_perturbation": float(jnp.max(
@@ -5661,6 +5839,13 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 
     mass_drift = _compute_drift(diag.get("mass", []))
     notes = f"mass drift={mass_drift:.2e}"
+    _cons_note = _pe_conservation_note(diag, _total_area)
+    if _cons_note:
+        notes += f", {_cons_note}"
+    notes += ", mass fixer " + (
+        "on (ln p_s core)" if tc.grid_type == "spectral"
+        else "none (FV3 flux-form)" if tc.grid_type == "cubed_sphere"
+        else "on" if config.fix_mass else "off")
     if diag.get("max_wind"):
         notes += f", max|v|={diag['max_wind'][-1]:.1f}"
     # iter-118 (codex iter-117 followup MEDIUM-3): apply
@@ -5731,9 +5916,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         ],
         field_3d_key="T_3d", level_values=level_values,
         level_label="Sigma level",
-        mass_key="mass", energy_key="max_wind",
+        mass_key="mass", energy_key="total_energy",
         scalar_units={
-            "mass": "Pa*m^2", "max_wind": "m/s",
+            "mass": "Pa*m^2", "total_energy": "J", "max_wind": "m/s",
             "ps_perturbation": "Pa"})
     if _mt:
         _save_timeseries_csv(output_dir, _mt, dt,
