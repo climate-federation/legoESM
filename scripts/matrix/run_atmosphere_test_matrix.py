@@ -3352,16 +3352,38 @@ def _lee_box_wind(speed, lat_deg, lon_deg, corners_xyz=None) -> float:
     return float(np.max(num / den))
 
 
-def _sw_energy_enstrophy(e_density, area, zeta_abs, h_at_zeta,
+def _sw_energy_enstrophy(h_ke, h, g, area, zeta_abs, h_at_zeta,
                          area_at_zeta) -> dict:
-    """Total energy E = sum area * e_density and potential enstrophy
-    Z = sum area * (zeta + f)^2 / (2 h), each on its native points."""
-    e = jnp.sum(jnp.asarray(area, jnp.float64)
-                * jnp.asarray(e_density, jnp.float64))
+    """Native SW energy split and potential enstrophy.
+
+    ``h_ke`` is h * (kinetic energy per unit mass) on the mass points.
+    KE = sum area h_ke; APE = sum area g (h - hbar)^2 / 2 with hbar the
+    area-weighted global-mean depth (mass-conserved); total
+    E = KE + sum area g h^2 / 2 = KE + APE + g hbar^2 A / 2.  The last term
+    is a constant ~2e4 x KE for the 10 km modon layer, so changes are
+    reported against the DYNAMICALLY ACTIVE energy KE + APE.  Potential
+    enstrophy Z = sum area (zeta + f)^2 / (2 h) on the vorticity points."""
+    a = jnp.asarray(area, jnp.float64)
+    h = jnp.asarray(h, jnp.float64)
+    ke = jnp.sum(a * jnp.asarray(h_ke, jnp.float64))
+    hbar = jnp.sum(a * h) / jnp.sum(a)
+    ape = jnp.sum(a * 0.5 * g * (h - hbar) ** 2)
+    e = ke + jnp.sum(a * 0.5 * g * h ** 2)
     z = jnp.sum(jnp.asarray(area_at_zeta, jnp.float64)
                 * jnp.asarray(zeta_abs, jnp.float64) ** 2
                 / (2.0 * jnp.asarray(h_at_zeta, jnp.float64)))
-    return {"total_energy": float(e), "potential_enstrophy": float(z)}
+    return {"energy_kinetic_KE": float(ke),
+            "energy_available_potential_APE": float(ape),
+            "energy_KE_plus_APE": float(ke + ape),
+            "energy_total_E": float(e),
+            "potential_enstrophy": float(z)}
+
+
+def _energy_change_vs_active(e, ke, ape) -> float:
+    """(E(t_last) - E(0)) / (KE(0) + APE(0)): total-energy change normalised
+    by the dynamically active energy, not by E(0) (dominated by the
+    constant g hbar^2 A / 2)."""
+    return (e[-1] - e[0]) / (ke[0] + ape[0])
 
 
 def _modon_energy_enstrophy_latlon(s, grid) -> dict:
@@ -3396,7 +3418,7 @@ def _modon_energy_enstrophy_latlon(s, grid) -> dict:
              * (sin_edges[1:] - sin_edges[:-1]))   # (n_lat+1,)
     a_v = jnp.broadcast_to(a_row[:, None], eta_v.shape)
     return _sw_energy_enstrophy(
-        h * ke + 0.5 * _c.g * h ** 2, grid.area, eta_v, h_v, a_v)
+        h * ke, h, _c.g, grid.area, eta_v, h_v, a_v)
 
 
 def _modon_energy_enstrophy_mpas(s, mesh) -> dict:
@@ -3412,18 +3434,21 @@ def _modon_energy_enstrophy_mpas(s, mesh) -> dict:
     q = potential_vorticity_vertex(u, h, mesh.fVertex, mesh)
     h_v = vertex_thickness(h, mesh)
     return _sw_energy_enstrophy(
-        h * ke + 0.5 * _c.g * h ** 2, mesh.areaCell,
-        q * h_v, h_v, mesh.areaTriangle)
+        h * ke, h, _c.g, mesh.areaCell, q * h_v, h_v, mesh.areaTriangle)
 
 
 def _modon_energy_enstrophy_spectral(s, grid) -> dict:
-    """Gaussian spectral: the model's own ``compute_spectral_diagnostics``
-    (Gaussian-quadrature E with the 0.5 g h^2 + g h h_s PE and potential
-    enstrophy (zeta + f)^2 / (2 h))."""
-    from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
-        compute_spectral_diagnostics)
-    d = compute_spectral_diagnostics(s, grid)
-    return {"total_energy": d["energy"], "potential_enstrophy": d["enstrophy"]}
+    """Gaussian spectral: the model's own grid fields (``spectral_to_grid``,
+    as ``compute_spectral_diagnostics`` uses) on its Gaussian-quadrature
+    areas; flat bottom (h_s = 0) for the modons, so its g h h_s term is 0."""
+    from legoesm import constants as _c
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import spectral_to_grid
+    f = spectral_to_grid(s, grid)
+    h = f["h"]
+    area = jnp.broadcast_to(jnp.asarray(grid.grid_area), h.shape)
+    return _sw_energy_enstrophy(
+        0.5 * h * (f["u"] ** 2 + f["v"] ** 2), h, _c.g, area,
+        f["vor"] + grid.f, h, area)
 
 
 def _modon_energy_enstrophy_cube(s, duo) -> dict:
@@ -3446,7 +3471,7 @@ def _modon_energy_enstrophy_cube(s, duo) -> dict:
     h = duo.h(s)
     ue, vn = duo.winds(s)
     return _sw_energy_enstrophy(
-        0.5 * h * (ue ** 2 + vn ** 2) + 0.5 * duo.grav * h ** 2, duo.area,
+        0.5 * h * (ue ** 2 + vn ** 2), h, duo.grav, duo.area,
         zeta, h, duo.area)
 
 
@@ -3980,11 +4005,15 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         )
 
     _mt = diag.get("_matched", {})
-    if test_num == 8 and len(_mt.get("total_energy", [])) >= 2:
-        # Info only (no gate): native E and potential enstrophy at the last
-        # matched sample relative to t = 0; series in matched_timeseries.csv.
-        _e, _z = _mt["total_energy"], _mt["potential_enstrophy"]
-        notes = (f"{notes}; E/E0-1={_e[-1] / _e[0] - 1.0:.3e}, "
+    if test_num == 8 and len(_mt.get("energy_total_E", [])) >= 2:
+        # Info only (no gate): native energy change normalised by the
+        # dynamically active KE0 + APE0, and potential enstrophy, at the
+        # last matched sample; series in matched_timeseries.csv.
+        _z = _mt["potential_enstrophy"]
+        _de = _energy_change_vs_active(
+            _mt["energy_total_E"], _mt["energy_kinetic_KE"],
+            _mt["energy_available_potential_APE"])
+        notes = (f"{notes}; (E-E0)/(KE0+APE0)={_de:.4e}, "
                  f"Z/Z0={_z[-1] / _z[0]:.6f} at t={_mt['times'][-1]:.4f} d "
                  f"(matched cadence {_MODON_DIAG_CADENCE_S:g} s, max sample "
                  f"offset {_m_off:.1f} s)")

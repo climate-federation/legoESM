@@ -1,5 +1,6 @@
-"""Colliding-modons matrix rows: native total energy
-E = sum area * (h |V|^2 / 2 + g h^2 / 2) and potential enstrophy
+"""Colliding-modons matrix rows: native KE, APE = g (h - hbar)^2 / 2 and total
+energy E = sum area * (h |V|^2 / 2 + g h^2 / 2) (change reported against
+KE0 + APE0), and potential enstrophy
 Z = sum area * (zeta + f)^2 / (2 h) on every grid, sampled at one common
 cadence (1200 s) fine enough for the ~0.74 d antipodal refocus spike."""
 from __future__ import annotations
@@ -78,8 +79,12 @@ def test_matched_series_is_separate_and_gate_series_unchanged(M):
 def _check(d, z_tol=0.12):
     """IC enstrophy vs the analytic integral (the ~250-280 km grids resolve
     r0 = 500 km cores to within ~10 %)."""
-    assert np.isfinite(d["total_energy"]) and d["total_energy"] > 0
+    assert np.isfinite(d["energy_total_E"]) and d["energy_total_E"] > 0
     assert abs(d["potential_enstrophy"] / _Z0_ANALYTIC - 1.0) < z_tol, d
+    # uniform-depth IC: no available potential energy, KE carries it all
+    assert d["energy_available_potential_APE"] < 1e-9 * d["energy_kinetic_KE"]
+    assert d["energy_KE_plus_APE"] == pytest.approx(
+        d["energy_kinetic_KE"] + d["energy_available_potential_APE"])
 
 
 def test_latlon_ic(M):
@@ -102,7 +107,7 @@ def test_latlon_ic(M):
     d = M._modon_energy_enstrophy_latlon(st, grid)
     _check(d)
     pe = 0.5 * constants.g * 1e4 ** 2 * 4 * np.pi * float(grid.radius) ** 2
-    assert abs((d["total_energy"] - pe) / _KE0_ANALYTIC - 1.0) < 0.12
+    assert abs((d["energy_total_E"] - pe) / _KE0_ANALYTIC - 1.0) < 0.12
 
 
 def test_mpas_ic(M):
@@ -113,7 +118,7 @@ def test_mpas_ic(M):
     d = M._modon_energy_enstrophy_mpas(colliding_modons_mpas(mesh), mesh)
     _check(d)
     pe = 0.5 * constants.g * 1e4 ** 2 * float(np.sum(mesh.areaCell))
-    assert abs((d["total_energy"] - pe) / _KE0_ANALYTIC - 1.0) < 0.12
+    assert abs((d["energy_total_E"] - pe) / _KE0_ANALYTIC - 1.0) < 0.12
 
 
 def test_spectral_ic(M):
@@ -123,6 +128,7 @@ def test_spectral_ic(M):
     d = M._modon_energy_enstrophy_spectral(colliding_modons_spectral(grid),
                                            grid)
     _check(d, z_tol=0.05)
+    assert abs(d["energy_kinetic_KE"] / _KE0_ANALYTIC - 1.0) < 0.05
 
 
 def test_cube_ic(M):
@@ -134,7 +140,28 @@ def test_cube_ic(M):
     _check(d)
     pe = 0.5 * duo.grav * 1e4 ** 2 * float(np.sum(duo.area))
     ke_ref = _KE0_ANALYTIC * (duo.radius / 6.371e6) ** 2
-    assert abs((d["total_energy"] - pe) / ke_ref - 1.0) < 0.12
+    assert abs((d["energy_total_E"] - pe) / ke_ref - 1.0) < 0.12
+
+
+def test_energy_split_and_active_normalisation(M):
+    """E = KE + APE + g hbar^2 A / 2 for a perturbed depth, and the reported
+    change is normalised by KE0 + APE0, NOT by E0."""
+    import jax.numpy as jnp
+    rng = np.random.default_rng(1)
+    area = rng.uniform(1.0, 2.0, 50)
+    h = 1e4 + rng.normal(0.0, 5.0, 50)
+    hke = rng.uniform(0.0, 1e3, 50)
+    g = 9.8
+    d = M._sw_energy_enstrophy(hke, h, g, area, jnp.zeros(3), jnp.ones(3),
+                               jnp.ones(3))
+    hbar = np.sum(area * h) / np.sum(area)
+    assert d["energy_available_potential_APE"] == pytest.approx(
+        np.sum(area * 0.5 * g * (h - hbar) ** 2), rel=1e-10)
+    assert d["energy_total_E"] == pytest.approx(
+        d["energy_KE_plus_APE"] + 0.5 * g * hbar ** 2 * np.sum(area),
+        rel=1e-12)
+    e, ke, ape = [100.0, 97.0], [2.0, 1.0], [1.0, 0.5]
+    assert M._energy_change_vs_active(e, ke, ape) == pytest.approx(-1.0)
 
 
 def test_every_modon_lane_reports_energy_enstrophy():
@@ -145,3 +172,5 @@ def test_every_modon_lane_reports_energy_enstrophy():
     assert ("_matched_diag_steps(\n        dt, n_steps, _MODON_DIAG_CADENCE_S, "
             "days * 86400.0)" in src)
     assert "matched_fn=lambda s: scalar_fn(s, _matched=True))" in src
+    assert 'notes = (f"{notes}; (E-E0)/(KE0+APE0)={_de:.4e}, "' in src
+    assert "_de = _energy_change_vs_active(" in src
