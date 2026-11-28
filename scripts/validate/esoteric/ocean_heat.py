@@ -1,8 +1,10 @@
 """Ocean heat-storage change: day-0 (rebuilt Qobs IC) vs day-N MPAS ocean checkpoint.
 
-Heat per column uses live layer thickness (z-star with SSH), so volume change is
-counted. A band's rate is STORAGE change: it includes lateral ocean transport,
-not only the surface flux. Usage: ocean_heat.py run_out_dir mesh_level day
+Two storage rates: FIXED day-0 thickness (sum h0*dT, the comparator for net
+surface heat flux) and LIVE z-star thickness with SSH (sum h1*T1 - h0*T0, the
+model's heat content; its extra term is the SSH-temperature covariance and
+depends on the 0 degC reference wherever mean SSH changes). A band's rate is
+STORAGE change: it includes lateral ocean transport, not only the surface flux. Usage: ocean_heat.py run_out_dir mesh_level day
 """
 import sys
 
@@ -68,16 +70,20 @@ def main(argv):
     h0 = np.asarray(compute_layer_thickness(eta0, H, z))
     h1 = np.asarray(compute_layer_thickness(eta1, H, z))
     aw = area * wet
+    levels = [k for k in LEVELS_SHOWN if k < nlev]
     print(f"precision {prec}; nlev {nlev} H_max {Hmax}; wet cells {wet.sum()} of {wet.size}")
     print(f"eta day0 mean {np.sum(eta0 * aw) / aw.sum():+.3f} m, day{day} mean {np.sum(eta1 * aw) / aw.sum():+.3f} m")
     print(f"SST area mean day0 {np.sum(T0[:, 0] * aw) / aw.sum():.3f} C, day{day} {np.sum(T1[:, 0] * aw) / aw.sum():.3f} C")
-    print(f"global ocean heat-storage rate (live thickness): {storage_rate(T0[wet], h0[wet], T1[wet], h1[wet], area[wet], day):+.1f} W/m2")
-    print("band | dSST K | storage rate W/m2 (incl. lateral transport) | dT by level k=" + ",".join(map(str, LEVELS_SHOWN)))
+    g = (T0[wet], h0[wet], T1[wet]); w = area[wet]
+    print(f"global ocean heat-storage rate W/m2: fixed thickness {storage_rate(*g, h0[wet], w, day):+.2f}, "
+          f"live thickness {storage_rate(*g, h1[wet], w, day):+.2f}")
+    print("band | dSST K | storage rate W/m2 fixed / live (incl. lateral transport) | dT by level k="
+          + ",".join(map(str, levels)))
     for a, b in BANDS:
         m = wet & (lat >= a) & (lat < b); w = area[m]
-        lv = [np.sum((T1[m, k] - T0[m, k]) * w) / w.sum() for k in LEVELS_SHOWN]
-        r = storage_rate(T0[m], h0[m], T1[m], h1[m], w, day)
-        print(f"{a:4d}..{b:3d} | {lv[0]:+6.2f} | {r:+8.1f} | " + " ".join(f"{v:+6.2f}" for v in lv))
+        lv = [np.sum((T1[m, k] - T0[m, k]) * w) / w.sum() for k in levels]
+        rf, rl = (storage_rate(T0[m], h0[m], T1[m], hh[m], w, day) for hh in (h0, h1))
+        print(f"{a:4d}..{b:3d} | {lv[0]:+6.2f} | {rf:+8.1f} / {rl:+8.1f} | " + " ".join(f"{v:+6.2f}" for v in lv))
     vol0, vol1 = np.sum(h0 * aw[:, None]), np.sum(h1 * aw[:, None])
     print(f"SSS area mean day{day} {np.sum(S1[:, 0] * aw) / aw.sum():.4f}; volume-mean S day0 "
           f"{np.sum(S0 * h0 * aw[:, None]) / vol0:.5f} day{day} {np.sum(S1 * h1 * aw[:, None]) / vol1:.5f}")

@@ -88,6 +88,43 @@ def test_storage_rate_counts_ssh_volume_change():
     assert oh.storage_rate(T, h0, T, h1, area, 1) == pytest.approx(want, rel=1e-12)
 
 
+def test_ocean_heat_cli_counts_ssh(tmp_path):
+    """End to end on a level-2 mesh: day-N = rebuilt IC with SSH +2 m everywhere,
+    same T. Fixed-thickness rate ~0; live minus fixed = rho*c*sum(T*dh)/t."""
+    import json
+    from legoesm import constants
+    from legoesm.forcing.analytical import qobs_sst_C
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.ocean.init_mpas import REST_T_DEEP_C, rest_state_mpas_ocean
+    from legoesm.ocean.vertical import compute_layer_thickness, create_ocean_z_star
+
+    nlev, Hmax, day, step = 4, 4000.0, 2, 768
+    out = tmp_path / "out"; (out / "coupled").mkdir(parents=True)
+    (out / "coupled" / "run_manifest.json").write_text(json.dumps(
+        {"config": {"precision": "fp64", "coupled": {"ocean_nlev": nlev, "ocean_H_max_m": Hmax, "ocean_ic": "qobs"}}}))
+    mesh = create_voronoi_mesh(2); z = create_ocean_z_star(nlev, H_max=Hmax)
+    Ts = qobs_sst_C(np.degrees(np.asarray(mesh.latCell)))
+    s0 = rest_state_mpas_ocean(mesh, z, T_water_init_C=Ts, T_deep=np.minimum(REST_T_DEEP_C, Ts),
+                               H_max=Hmax, land_lat_threshold=90.0)
+    T0, S0, H, wet = (np.asarray(f.data) for f in (s0.T, s0.S, s0.H_bathy, s0.land_mask))
+    eta1 = np.full(T0.shape[0], 2.0)
+    k = lambda n: f"ocean3d_.{n}.[<flat index 0>]"
+    np.savez(out / f"coupled_day_{day:04d}.npz", **{k("T"): T0, k("S"): S0, k("eta"): eta1, k("H_bathy"): H,
+             k("land_mask"): wet, "_atm_step": np.array(step)})
+    np.savez(out / f"checkpoint_day_{day:04d}.npz", day=np.array(float(day)), step=np.array(step))
+    r = subprocess.run([sys.executable, str(_DIR / "ocean_heat.py"), str(out), "2", str(day)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-2000:]
+    line = next(l for l in r.stdout.splitlines() if l.startswith("global ocean heat-storage"))
+    fixed, live = (float(x.split()[0].rstrip(",")) for x in line.split("thickness ")[1:])
+    dh = np.asarray(compute_layer_thickness(eta1, H, z)) - np.asarray(compute_layer_thickness(0 * eta1, H, z))
+    area = np.asarray(mesh.areaCell) * (wet > 0.5)
+    want = constants.rho_ocean * constants.c_sw * np.sum((T0 * dh).sum(1) * area) / area.sum() / (day * 86400.0)
+    # fixed ~0 (only the fp32-saved vs fp64-rebuilt T residual); live - fixed = sum(dh*T1) exactly
+    assert abs(fixed) < 0.1 and abs(want) > 10.0
+    assert live - fixed == pytest.approx(want, abs=0.011)
+
+
 def test_find_key_nested():
     com = _load("_common")
     assert com.find_key({"a": {"b": {"ocean_nlev": 20}}}, "ocean_nlev") == 20
@@ -159,22 +196,29 @@ def test_panel_wind_is_snapshot_reconstruction(mesh):
 # ------------------------------------------------------------- report sbatch
 def test_report_sbatch_maps_only_numbered_days_up_to_n(tmp_path):
     out = tmp_path / "run" / "out"; (out / "coupled").mkdir(parents=True)
-    for d in ("0030", "0060", "0090", "final"):
+    for d in ("0030", "0060", "0090", "final", "0030_backup"):
         (out / f"checkpoint_day_{d}.npz").write_text("")
     wt = tmp_path / "wt"; (wt / "packages" / "core").mkdir(parents=True)
     diag = tmp_path / "diag"; diag.mkdir()
     for g in (wt, diag):
         subprocess.run(["git", "init", "-q", str(g)], check=True)
-    (out / "coupled" / "run_manifest.json").write_text('{"run": {"cwd": "%s"}}' % wt)
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(git + ["-C", str(wt), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    sha = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     py = tmp_path / "py"   # stub interpreter: answers the manifest read, echoes every other call
-    py.write_text('#!/bin/bash\nif [ "$1" = -c ]; then echo %s; else echo "CALL $*"; fi\n' % wt)
+    py.write_text('#!/bin/bash\nif [ "$1" = -c ]; then echo %s %s; else echo "CALL $*"; fi\n' % (wt, sha))
     py.chmod(0o755)
     r = subprocess.run(["bash", str(_SBATCH), str(out), "60", "5", "0.0", str(py)], capture_output=True,
                        text=True, env={"PATH": "/usr/bin:/bin", "DIAG_DIR": str(diag)})
     assert r.returncode == 0, r.stderr
     maps = [l for l in r.stdout.splitlines() if "snap_maps.py" in l]
     assert len(maps) == 1 and "day_0030" in maps[0] and "day_0060" in maps[0]
-    assert "day_0090" not in maps[0] and "final" not in maps[0]
+    assert "day_0090" not in maps[0] and "final" not in maps[0] and "backup" not in maps[0]
+    # a run worktree that moved off the run's commit is refused
+    subprocess.run(git + ["-C", str(wt), "commit", "-q", "--allow-empty", "-m", "y"], check=True)
+    r = subprocess.run(["bash", str(_SBATCH), str(out), "60", "5", "0.0", str(py)], capture_output=True,
+                       text=True, env={"PATH": "/usr/bin:/bin", "DIAG_DIR": str(diag)})
+    assert r.returncode != 0 and "not at the run's commit" in r.stderr
 
 
 def test_report_sbatch_parses_and_requires_diag_dir():
