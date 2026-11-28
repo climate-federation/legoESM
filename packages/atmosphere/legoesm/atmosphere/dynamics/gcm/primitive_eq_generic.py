@@ -289,6 +289,26 @@ def latlon_face_metrics(grid: Any, gops: Any) -> tuple[jax.Array, ...]:
     return l_u, d_u, l_v, d_v
 
 
+def latlon_trisk_kinetic_energy(u, v, A_u, A_v, area):
+    """Cell kinetic energy ``K_c = sum_f A_f u_f^2 / (4 A_c)`` (the TRiSK /
+    Arakawa-Lamb form) from C-grid face winds ``u (n_lat, n_lon+1[, nlev])``,
+    ``v (n_lat+1, n_lon[, nlev])``; ``A_u (n_lat,)``, ``A_v (n_lat+1,)`` the
+    face summation-by-parts weights (``latlon_face_metrics``, pole v faces
+    0) and ``area (n_lat, n_lon)`` the cell areas.  ``sum_c A_c h_c K_c`` is
+    ``sum_f A_f hbar_f u_f^2 / 2`` with ``hbar_f`` the mean of the two cells
+    sharing the face (the Arakawa-Lamb face-weighted energy; conserved only
+    when the momentum and mass discretizations are compatible with it)."""
+    # Metrics are built in the default float (fp64 under x64): cast to the
+    # wind dtype so an fp32 state stays fp32 (no-op for fp64 states).
+    ex = (None,) * (u.ndim - 1)
+    A_u_, A_v_ = A_u.astype(u.dtype), A_v.astype(u.dtype)
+    ku = A_u_[(slice(None),) + ex] * (u[:, :-1] ** 2 + u[:, 1:] ** 2)
+    kv = (A_v_[(slice(-1),) + ex] * v[:-1] ** 2
+          + A_v_[(slice(1, None),) + ex] * v[1:] ** 2)
+    a = area.astype(u.dtype)[(Ellipsis,) + (None,) * (u.ndim - 2)]
+    return (ku + kv) / (4.0 * a)
+
+
 def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = None, *,
                         vertical_form: str | None = None) -> PEOperators:
     """Lat-lon C-grid plug-ins (fields ``(n_lat, n_lon(+1), nlev)``).  The
@@ -347,13 +367,7 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
 
     def kinetic_energy_dual(vel):
         """K_c = sum_f A_f u_f^2 / (4 A_c) (the TRiSK form)."""
-        u, v = vel
-        # Metrics are built in the default float (fp64 under x64): cast to the
-        # wind dtype so an fp32 state stays fp32 (no-op for fp64 states).
-        A_u_, A_v_ = A_u.astype(u.dtype), A_v.astype(u.dtype)
-        ku = A_u_[:, None, None] * (u[:, :-1] ** 2 + u[:, 1:] ** 2)
-        kv = A_v_[:-1, None, None] * v[:-1] ** 2 + A_v_[1:, None, None] * v[1:] ** 2
-        return (ku + kv) / (4.0 * area.astype(u.dtype)[..., None])
+        return latlon_trisk_kinetic_energy(vel[0], vel[1], A_u, A_v, area)
 
     def vorticity_term_energy(ctx, dvel):
         """Vertex-PV Coriolis on mass transports U = l dp u, V = l dp v:

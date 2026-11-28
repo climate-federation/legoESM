@@ -3387,8 +3387,22 @@ def _energy_change_vs_active(e, ke, ape) -> float:
 
 
 def _modon_energy_enstrophy_latlon(s, grid) -> dict:
-    """Lat-lon C-grid: the SW core's cell KE (``latlon_cell_ke``) times the
-    cell depth plus g h^2 / 2 over ``grid.area``; potential enstrophy on the
+    """Lat-lon C-grid: the TRiSK / Arakawa-Lamb cell KE
+    ``sum_f A_f u_f^2 / (4 A_c)`` (``latlon_trisk_kinetic_energy`` on the
+    operators' own summation-by-parts face weights) times the cell depth plus
+    g h^2 / 2 over ``grid.area`` -- i.e. the face-weighted energy
+    sum_f A_f hbar_f u_f^2 / 2 + sum_c A_c g h^2 / 2 of a C-grid flux-form
+    scheme (Arakawa-Lamb / TRiSK).  Measured, 72x144 modons, fp64: an
+    experimental core with THIS KE in its Bernoulli term, centred mass flux,
+    no del-4 and the vorticity term removed holds it to <1e-4 of KE0+APE0
+    over a day (the production core does not have that form; see below).
+    NOT the core's Bernoulli ``latlon_cell_ke`` = |face-mean wind|^2 / 2:
+    that is not a norm of the C-grid state (a 2-dx face checkerboard has zero
+    KE), and on the modons it misses 7 % of the analytic IC KE (sub-cell
+    variance of the r0 = 500 km jets), so its recovery as the jets spread
+    read as a +1.0 % energy GAIN at day 1 ((E1-E0)/(KE0+APE0), each with its
+    own KE form) while the face-weighted energy falls 2.1 %.  Potential
+    enstrophy on the
     VERTICES, where the core holds its vorticity (``vorticity`` + polar-cap
     Stokes rows + ``latlon_vertex_coriolis``, as in
     ``absolute_vorticity_coriolis``), over the vertex dual cells (cell-centre
@@ -3398,11 +3412,19 @@ def _modon_energy_enstrophy_latlon(s, grid) -> dict:
     modon IC enstrophy at 72x144."""
     from legoesm import constants as _c
     from legoesm.grids.operator_adapters import latlon_cgrid_operators
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import (
+        latlon_face_metrics, latlon_trisk_kinetic_energy)
     from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
-        _pole_cap_vorticity, latlon_cell_ke, latlon_vertex_coriolis)
-    u_c = 0.5 * (s.u[:, :-1] + s.u[:, 1:])
-    v_c = 0.5 * (s.v[:-1] + s.v[1:])
-    ke = latlon_cell_ke(u_c, v_c, s.v, grid)
+        _pole_cap_vorticity, latlon_vertex_coriolis)
+    from legoesm.grids.operator_adapters import latlon_sw_grid_operators
+    l_u, d_u, l_v, d_v = latlon_face_metrics(
+        grid, latlon_sw_grid_operators(grid))
+    u64 = jnp.asarray(s.u, jnp.float64)
+    v64 = jnp.asarray(s.v, jnp.float64)
+    ke = latlon_trisk_kinetic_energy(
+        u64, v64, jnp.asarray(l_u * d_u, jnp.float64),
+        jnp.asarray(l_v * d_v, jnp.float64),
+        jnp.asarray(grid.area, jnp.float64))
     eta_v = (_pole_cap_vorticity(
         latlon_cgrid_operators(grid).vorticity(s.u, s.v), s.u, grid)
         + latlon_vertex_coriolis(grid))[:, :-1]     # drop the wrap column
@@ -3478,6 +3500,127 @@ def _modon_energy_enstrophy_cube(s, duo) -> dict:
 # ===========================================================================
 # Runner: Shallow Water
 # ===========================================================================
+
+def _sw_state_run_precision(state):
+    """Promote a SW initial state's float leaves to float64 when x64 is on.
+
+    The grids/meshes are built at the fp32 storage policy, so the analytic
+    ICs inherit fp32 (lat-lon ``h``/``u``; every ico leaf) while the
+    ``linspace`` lat-face ``v`` is fp64.  Under the x64 matrix that made part
+    of the lat-lon core's FIRST step run in fp32 arithmetic (a one-off
+    +1.6e-8 mass jump; afterwards the state is fp64 and steps conserve mass
+    to roundoff) and the ico core run entirely in fp32 (+-1e-10 roundoff
+    random walk per step, ~3e-9/day).  With fp64 ICs, fixer off, 1 day:
+    ico mass change 0 at fp64 resolution; lat-lon -3.3e-13 (SSP-RK3 stage
+    combination roundoff).  The run precision of the state is the matrix's
+    choice (x64 on = fp64 matrix); applies to every SW case (W2/W5/W6/modons)
+    on both grids.  No-op when x64 is off (fp32 matrix)."""
+    if not jax.config.jax_enable_x64:
+        return state
+
+    def _up(x):
+        if isinstance(x, jax.Array) and jnp.issubdtype(x.dtype, jnp.floating):
+            return x.astype(jnp.float64)
+        return x
+    return jax.tree.map(_up, state)
+
+
+def _latlon_sw_initial_state(grid, test_num: int):
+    """Lat-lon C-grid SW initial state for the matrix lanes, at run precision
+    (see :func:`_sw_state_run_precision`)."""
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
+        CGridLatLonShallowWaterState, williamson_test2_cgrid,
+        williamson_test5_cgrid)
+
+    # new_test_dycores iter-25: extend SW latlon to W6
+    # (Rossby-Haurwitz wave-4).  W6 winds depend on both lon and
+    # lat, so the C-grid face-midpoint init evaluates
+    # ``_w6_winds_geo`` directly at the u-face / v-face
+    # coordinates (no rotation needed — latlon faces are aligned
+    # with east/north).  h field from
+    # ``williamson_test6_latlon(grid)``.
+    if test_num == 6:
+        from tests.test_cases.williamson_extended import (
+            williamson_test6_latlon, _w6_winds_geo,
+        )
+        _w6 = williamson_test6_latlon(grid)
+        _R = grid.radius
+        # u at lon-faces (n_lat, n_lon+1): wrap-periodic.
+        _lon_f_1d = grid.lon - 0.5 * grid.dlon
+        _lon_f_full = jnp.concatenate(
+            [_lon_f_1d, _lon_f_1d[0:1] + 2.0 * jnp.pi]
+        )
+        _u_east_uface, _ = _w6_winds_geo(
+            _lon_f_full[None, :], grid.lat[:, None], _R,
+        )
+        # v at lat-faces (n_lat+1, n_lon).  ``_w6_winds_geo``
+        # safely returns 0 at the poles since v_north has a
+        # ``cos(lat)^(R-1)`` factor (R=4 → cos^3=0 at ±π/2).
+        _lat_f_1d = jnp.linspace(
+            -0.5 * jnp.pi, 0.5 * jnp.pi, grid.n_lat + 1
+        )
+        _, _v_north_vface = _w6_winds_geo(
+            grid.lon[None, :], _lat_f_1d[:, None], _R,
+        )
+        state = CGridLatLonShallowWaterState(
+            h=_w6.h.data, u=_u_east_uface, v=_v_north_vface,
+            h_s=jnp.zeros_like(_w6.h.data),
+        )
+    elif test_num == 8:
+        # Colliding modons (#521): two zonal Gaussian bursts, constant
+        # depth, NON-ROTATING (omega=0 grid above).  Same face-midpoint
+        # analytic wind init as W6 (winds depend on lon AND lat), via
+        # _modon_winds_geo; v_north is identically zero (pole-safe).
+        from tests.test_cases.colliding_modons import (
+            colliding_modons_latlon, _modon_winds_geo,
+        )
+        _cm = colliding_modons_latlon(grid)
+        _R = grid.radius
+        # u at lon-faces (n_lat, n_lon+1): wrap-periodic.
+        _lon_f_1d = grid.lon - 0.5 * grid.dlon
+        _lon_f_full = jnp.concatenate(
+            [_lon_f_1d, _lon_f_1d[0:1] + 2.0 * jnp.pi]
+        )
+        _u_east_uface, _ = _modon_winds_geo(
+            _lon_f_full[None, :], grid.lat[:, None], _R,
+        )
+        # v at lat-faces (n_lat+1, n_lon): identically zero for the
+        # purely-zonal modon winds.
+        _lat_f_1d = jnp.linspace(
+            -0.5 * jnp.pi, 0.5 * jnp.pi, grid.n_lat + 1
+        )
+        _, _v_north_vface = _modon_winds_geo(
+            grid.lon[None, :], _lat_f_1d[:, None], _R,
+        )
+        state = CGridLatLonShallowWaterState(
+            h=_cm.h.data, u=_u_east_uface, v=_v_north_vface,
+            h_s=jnp.zeros_like(_cm.h.data),
+        )
+    else:
+        state = (williamson_test2_cgrid(grid) if test_num == 2
+                 else williamson_test5_cgrid(grid))
+    return _sw_state_run_precision(state)
+
+
+def _ico_sw_initial_state(mesh, test_num: int):
+    """MPAS (ico) SW initial state for the matrix lanes, at run precision
+    (see :func:`_sw_state_run_precision`)."""
+    if test_num == 6:
+        from tests.test_cases.williamson_extended import (
+            williamson_test6_mpas)
+        init_fns = {6: williamson_test6_mpas}
+    elif test_num == 8:
+        # Colliding modons: geographic winds projected onto edge
+        # normals (same pattern as the Williamson MPAS ICs).
+        from tests.test_cases.colliding_modons import (
+            colliding_modons_mpas)
+        init_fns = {8: colliding_modons_mpas}
+    else:
+        from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
+            williamson_test2_mpas, williamson_test5_mpas)
+        init_fns = {2: williamson_test2_mpas, 5: williamson_test5_mpas}
+    return _sw_state_run_precision(init_fns[test_num](mesh))
+
 
 def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                       radiation: str = "gray") -> tuple[str, float, str]:
@@ -3577,73 +3720,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             anchor_mass_to_initial=True,
         )
         model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
-        # new_test_dycores iter-25: extend SW latlon to W6
-        # (Rossby-Haurwitz wave-4).  W6 winds depend on both lon and
-        # lat, so the C-grid face-midpoint init evaluates
-        # ``_w6_winds_geo`` directly at the u-face / v-face
-        # coordinates (no rotation needed — latlon faces are aligned
-        # with east/north).  h field from
-        # ``williamson_test6_latlon(grid)``.
-        if test_num == 6:
-            from tests.test_cases.williamson_extended import (
-                williamson_test6_latlon, _w6_winds_geo,
-            )
-            _w6 = williamson_test6_latlon(grid)
-            _R = grid.radius
-            # u at lon-faces (n_lat, n_lon+1): wrap-periodic.
-            _lon_f_1d = grid.lon - 0.5 * grid.dlon
-            _lon_f_full = jnp.concatenate(
-                [_lon_f_1d, _lon_f_1d[0:1] + 2.0 * jnp.pi]
-            )
-            _u_east_uface, _ = _w6_winds_geo(
-                _lon_f_full[None, :], grid.lat[:, None], _R,
-            )
-            # v at lat-faces (n_lat+1, n_lon).  ``_w6_winds_geo``
-            # safely returns 0 at the poles since v_north has a
-            # ``cos(lat)^(R-1)`` factor (R=4 → cos^3=0 at ±π/2).
-            _lat_f_1d = jnp.linspace(
-                -0.5 * jnp.pi, 0.5 * jnp.pi, grid.n_lat + 1
-            )
-            _, _v_north_vface = _w6_winds_geo(
-                grid.lon[None, :], _lat_f_1d[:, None], _R,
-            )
-            state = CGridLatLonShallowWaterState(
-                h=_w6.h.data, u=_u_east_uface, v=_v_north_vface,
-                h_s=jnp.zeros_like(_w6.h.data),
-            )
-        elif test_num == 8:
-            # Colliding modons (#521): two zonal Gaussian bursts, constant
-            # depth, NON-ROTATING (omega=0 grid above).  Same face-midpoint
-            # analytic wind init as W6 (winds depend on lon AND lat), via
-            # _modon_winds_geo; v_north is identically zero (pole-safe).
-            from tests.test_cases.colliding_modons import (
-                colliding_modons_latlon, _modon_winds_geo,
-            )
-            _cm = colliding_modons_latlon(grid)
-            _R = grid.radius
-            # u at lon-faces (n_lat, n_lon+1): wrap-periodic.
-            _lon_f_1d = grid.lon - 0.5 * grid.dlon
-            _lon_f_full = jnp.concatenate(
-                [_lon_f_1d, _lon_f_1d[0:1] + 2.0 * jnp.pi]
-            )
-            _u_east_uface, _ = _modon_winds_geo(
-                _lon_f_full[None, :], grid.lat[:, None], _R,
-            )
-            # v at lat-faces (n_lat+1, n_lon): identically zero for the
-            # purely-zonal modon winds.
-            _lat_f_1d = jnp.linspace(
-                -0.5 * jnp.pi, 0.5 * jnp.pi, grid.n_lat + 1
-            )
-            _, _v_north_vface = _modon_winds_geo(
-                grid.lon[None, :], _lat_f_1d[:, None], _R,
-            )
-            state = CGridLatLonShallowWaterState(
-                h=_cm.h.data, u=_u_east_uface, v=_v_north_vface,
-                h_s=jnp.zeros_like(_cm.h.data),
-            )
-        else:
-            state = (williamson_test2_cgrid(grid) if test_num == 2
-                     else williamson_test5_cgrid(grid))
+        state = _latlon_sw_initial_state(grid, test_num)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
@@ -3707,19 +3784,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             nu_del4=_hyperdiff_ico(mesh), anchor_mass_to_initial=True,
         )
         model = MPASShallowWaterModel(mesh, config)
-        if test_num == 6:
-            from tests.test_cases.williamson_extended import (
-                williamson_test6_mpas)
-            init_fns = {6: williamson_test6_mpas}
-        elif test_num == 8:
-            # Colliding modons: geographic winds projected onto edge
-            # normals (same pattern as the Williamson MPAS ICs).
-            from tests.test_cases.colliding_modons import (
-                colliding_modons_mpas)
-            init_fns = {8: colliding_modons_mpas}
-        else:
-            init_fns = {2: williamson_test2_mpas, 5: williamson_test5_mpas}
-        state = init_fns[test_num](mesh)
+        state = _ico_sw_initial_state(mesh, test_num)
         grid = mesh  # for consistent naming
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
