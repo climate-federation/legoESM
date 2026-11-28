@@ -962,3 +962,21 @@ def test_o10_production_composer_calls_salinity_then_second_temperature(monkeypa
     )
     assert calls == ["sal", "temp2"]
     np.testing.assert_array_equal(result.t_i, sal_token + 1.0)
+
+
+def test_drainage_loop_stops_after_the_last_draining_cell(monkeypatch):
+    kwargs = _model_kwargs()
+    for name in _ARRAY_NAMES:
+        kwargs[name] = kwargs[name][:8]
+    calls, velocity = [], bl._sal4_rjw_velocity
+
+    def counted(*args, **kw):
+        jax.debug.callback(lambda: calls.append(1))
+        return velocity(*args, **kw)
+
+    monkeypatch.setattr(bl, "_sal4_rjw_velocity", counted)
+    passes = int(jnp.max(jax.jit(lambda: bl.si3_ice_thd_sal(**kwargs).ndrainage)()))
+    jax.effects_barrier()
+    assert 1 < passes < NML["nn_drainage"]
+    # One velocity before the loop, then one per pass after the first.
+    assert len(calls) == passes
