@@ -170,7 +170,7 @@ from legoesm.core.fv3_duo_sw_core import (
     d_sw5_duo,
     d_sw6_duo,
 )
-from legoesm.core.fv3_pgrad import geopk, one_grad_p, p_grad_c
+from legoesm.core.fv3_pgrad import geopk, grad1_p_update, one_grad_p, p_grad_c
 from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
 from legoesm.grids.fv3_duo_halos import (
     average_allflux_shared_edges,
@@ -185,6 +185,7 @@ from legoesm.grids.fv3_duo_halos import (
 )
 
 __all__ = [
+    "CUBE_PGRAD_BETA",
     "SWConfig",
     "SW_CFG_DEFAULT",
     "SW_CFG_CASE8",
@@ -196,6 +197,7 @@ __all__ = [
     "geopk_sw_1lev_d",
     "p_grad_c_1lev",
     "one_grad_p_1lev",
+    "grad1_p_update_1lev",
     "exchange_post_pgrad_sixface",
     "exchange_post_pgrad_sixface_allk",
     "csw_step_sixface",
@@ -211,6 +213,18 @@ __all__ = [
     "make_acoustic_step_sixface_jit",
     "make_full_acoustic_step_sixface_jit",
 ]
+
+#: FV3 namelist ``beta`` the CUBE runs with in production (USER APPROVED
+#: 2026-11-28): hydrostatic PG off-centering, dyn_core.F90:1528
+#: ``grad1_p_update``.  FV3's own default (fv_arrays.F90:389) and every
+#: oracle deck is 0 (``one_grad_p``) -- which is why the kernel-level
+#: defaults below stay 0 and only the production surfaces
+#: (``FV3DuoConfig``, the matrix SW adapter) default to this value.  At 0
+#: the C/D acoustic predictor damps gravity waves.  Measured 2026-11-28:
+#: C36 colliding modons (E-E0)/(KE0+APE0) at 1 day -0.477 (beta 0) ->
+#: -0.365 (0.4); C12 standing P6 gravity mode, KE+APE lost in 2 h
+#: 7.96% -> 3.19%.
+CUBE_PGRAD_BETA = 0.4
 
 # The stepper's own state keys, in the order the NumPy twin returns
 # them (fv3_native_duo_stepper.py:1025).
@@ -719,6 +733,24 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
     return u_out[:, :, 0], v_out[:, :, 0]
 
 
+def grad1_p_update_1lev(u, v, pkc, gz, divg2, du, dv, gs: dict, bd,
+                        npx: int, npy: int, *, dt, beta_d: float):
+    """``dyn_core.F90`` grad1_p_update (2483-2574), km=1 hydrostatic SW:
+    the ``beta > 0`` arm of the call at ``:1528-1529``.  Same adapter
+    as :func:`one_grad_p_1lev` (ptop=0, akap=1, the SW pk/gz planes)
+    over ``fv3_pgrad.grad1_p_update``; ``beta_d`` is this sub-step's
+    weight (0 on ``it == 1``) and ``du``/``dv`` the previous sub-step's
+    PG increment; ``divg2`` is applied unconditionally (the caller's
+    ``d_ext``-scaled field, zero at d_ext = 0).  Returns ``(u, v, du,
+    dv)``, all 2-D."""
+    u_out, v_out, _pk, _gz, du_out, dv_out = grad1_p_update(
+        divg2, jnp.asarray(u)[:, :, None], jnp.asarray(v)[:, :, None],
+        pkc, gz, jnp.asarray(du)[:, :, None], jnp.asarray(dv)[:, :, None],
+        gs, bd, npx=npx, npy=npy, npz=1, dt=dt, ptop=0.0, akap=1.0,
+        beta=beta_d, a2b_ord=4, ng=bd.ng, duogrid=True)
+    return u_out[:, :, 0], v_out[:, :, 0], du_out[:, :, 0], dv_out[:, :, 0]
+
+
 # ---------------------------------------------------------------------
 # the post-p_grad_c duo exchanges
 # ---------------------------------------------------------------------
@@ -1018,7 +1050,9 @@ def acoustic_step_sixface(ctx: DuoStepperContext, states: dict, dt,
 
 def full_acoustic_step_sixface(ctx: DuoStepperContext, states: dict, dt,
                                d_ext: float = 0.02, sw_cfg=None,
-                               entry_ascalar: bool = True) -> dict:
+                               entry_ascalar: bool = True, *,
+                               beta: float = 0.0, beta_d: float = 0.0,
+                               pg_prev=None) -> dict:
     """The complete acoustic step INCLUDING the D-grid tail.
 
     ``acoustic_step_sixface`` -> the ``delp``/``pt`` halo refresh
@@ -1042,9 +1076,20 @@ def full_acoustic_step_sixface(ctx: DuoStepperContext, states: dict, dt,
     a nonzero value has already produced one retracted claim in this
     campaign.  ``d_ext`` is jit-STATIC (``one_grad_p`` branches on it in
     Python).
+
+    ``beta`` / ``beta_d`` (jit-STATIC) / ``pg_prev``: FV3's hydrostatic
+    PG off-centering, dyn_core.F90:1528-1531 -- ``beta > 0`` runs
+    ``grad1_p_update`` with this sub-step's weight ``beta_d`` (0 on
+    ``it == 1``, else ``beta``; :440-444) on the previous sub-step's
+    increment ``pg_prev = (du6, dv6)`` (None = the init_step zero,
+    :304-309), and the result then also carries ``"du"``/``"dv"``.
+    ``beta = 0`` (DEFAULT, FV3's and every oracle deck's) is the
+    unchanged one_grad_p step.  The cadence lives in
+    :func:`advance_duo_outer_step`.
     """
     require_uniform_float_jax("full_acoustic_step_sixface",
                      {k: states[k] for k in _STATE_KEYS})
+    beta, beta_d = _check_pgrad_beta(beta, beta_d)
     bd, npx, ng, tab = ctx.bd, ctx.npx, ctx.ng, ctx.tab
 
     stage = acoustic_step_sixface(ctx, states, dt, sw_cfg=sw_cfg,
@@ -1056,7 +1101,22 @@ def full_acoustic_step_sixface(ctx: DuoStepperContext, states: dict, dt,
 
     sl = slice(ng, ng + npx)
     u6, v6 = stage["u"], stage["v"]
-    outs_u, outs_v = [], []
+    if beta > 0.0:
+        if pg_prev is None:
+            # dyn_core.F90:304-309 -- du/dv zeroed at init_step; only a
+            # zero-weight (it == 1) step may start from it
+            if beta_d != 0.0:
+                raise ValueError("full_acoustic_step_sixface: beta_d > 0 "
+                                 "needs pg_prev (previous sub-step du/dv)")
+            pg_prev = (jnp.zeros_like(u6), jnp.zeros_like(v6))
+        du6, dv6 = pg_prev
+        if jnp.shape(du6) != u6.shape or jnp.shape(dv6) != v6.shape:
+            raise ValueError("full_acoustic_step_sixface: pg_prev must be "
+                             f"stacked like the winds {u6.shape}/{v6.shape}")
+    elif pg_prev is not None:
+        raise ValueError("full_acoustic_step_sixface: pg_prev given with "
+                         "beta = 0")
+    outs_u, outs_v, outs_du, outs_dv = [], [], [], []
     for t in range(6):
         pkc, gz = geopk_sw_1lev_d(delp6[t], ctx.hs6[t], bd, pt=pt6[t])
         # divg2 = d_ext * da_min_c * the SAVED divergence, at km=1.
@@ -1068,21 +1128,50 @@ def full_acoustic_step_sixface(ctx: DuoStepperContext, states: dict, dt,
         # (hop A) km=1 form, mirrored here verbatim, not re-derived.
         divg2 = (d_ext * float(ctx.flags6[t].da_min_c)
                  * stage["delpc"][t][sl, sl])
-        uu, vv = one_grad_p_1lev(u6[t], v6[t], pkc, gz, divg2,
-                                 ctx.gs6[t], bd, npx, npx, dt=dt,
-                                 d_ext=d_ext)
+        if beta > 0.0:   # dyn_core.F90:1528-1529
+            # grad1_p_update applies divg2 unconditionally; dyn_core
+            # zeroes it when d_ext <= 0 (:1329), so the same here
+            dg_b = divg2 if d_ext > 0.0 else jnp.zeros_like(divg2)
+            uu, vv, dd_u, dd_v = grad1_p_update_1lev(
+                u6[t], v6[t], pkc, gz, dg_b, du6[t], dv6[t], ctx.gs6[t],
+                bd, npx, npx, dt=dt, beta_d=beta_d)
+            outs_du.append(dd_u)
+            outs_dv.append(dd_v)
+        else:            # :1531
+            uu, vv = one_grad_p_1lev(u6[t], v6[t], pkc, gz, divg2,
+                                     ctx.gs6[t], bd, npx, npx, dt=dt,
+                                     d_ext=d_ext)
         outs_u.append(uu)
         outs_v.append(vv)
     # NO post-step vector refresh -- see the docstring.  Consumers
     # needing fresh D halos re-enter the step (which exchanges at its
     # own entry) or call ext_vector_dgrid_sixface themselves.
-    return {"delp": delp6, "pt": pt6,
-            "u": jnp.stack(outs_u), "v": jnp.stack(outs_v)}
+    out = {"delp": delp6, "pt": pt6,
+           "u": jnp.stack(outs_u), "v": jnp.stack(outs_v)}
+    if beta > 0.0:
+        out["du"] = jnp.stack(outs_du)
+        out["dv"] = jnp.stack(outs_dv)
+    return out
+
+
+def _check_pgrad_beta(beta, beta_d):
+    """beta/beta_d are STATIC floats in [0, 1], beta_d in {0, beta}."""
+    for _nm, _v in (("beta", beta), ("beta_d", beta_d)):
+        if isinstance(_v, (jax.Array, bool)) or not isinstance(
+                _v, (int, float)) or not (0.0 <= float(_v) <= 1.0):
+            raise ValueError(f"{_nm} must be a static float in [0, 1], "
+                             f"got {_v!r}")
+    beta, beta_d = float(beta), float(beta_d)
+    if beta_d not in (0.0, beta):
+        raise ValueError(f"beta_d must be 0 (it == 1) or beta ({beta}), "
+                         f"got {beta_d}")
+    return beta, beta_d
 
 
 def advance_duo_outer_step(ctx: DuoStepperContext, states: dict,
                            dt_atmos, n_split: int, d_ext: float = 0.02,
-                           sw_cfg=None, *, step_fn=None) -> dict:
+                           sw_cfg=None, *, step_fn=None,
+                           beta: float = 0.0) -> dict:
     """One ``dt_atmos`` block = ``n_split`` acoustic steps.
 
     ``dt = dt_atmos / n_split`` with the UPSTREAM exchange schedule: the
@@ -1105,14 +1194,32 @@ def advance_duo_outer_step(ctx: DuoStepperContext, states: dict,
     ``n_split`` is a Python trip count and therefore jit-STATIC when this
     routine itself is jitted; a different ``n_split`` is a different
     unrolled program.
+
+    ``beta`` (keyword-only, default 0 = FV3's): the hydrostatic PG
+    off-centering (dyn_core.F90:1528).  This routine owns its cadence:
+    ``beta_d = 0`` on the first inner step (:440-441, ``it == 1``) and
+    ``beta`` after, the ``du``/``dv`` increment threaded step to step and
+    DROPPED at the block's end -- its next use is an ``it == 1`` step
+    with weight zero, so nothing crosses a ``dt_atmos`` block, exactly
+    the Fortran's lifetime.  The returned state has the usual keys.
     """
     if n_split < 1:
         raise ValueError(f"n_split must be >= 1, got {n_split}")
     step = full_acoustic_step_sixface if step_fn is None else step_fn
     dt = dt_atmos / n_split
+    beta, _ = _check_pgrad_beta(beta, 0.0)
+    if beta == 0.0:
+        for it in range(n_split):
+            states = step(ctx, states, dt, d_ext=d_ext, sw_cfg=sw_cfg,
+                          entry_ascalar=(it == 0))
+        return states
+    pg = None
     for it in range(n_split):
         states = step(ctx, states, dt, d_ext=d_ext, sw_cfg=sw_cfg,
-                      entry_ascalar=(it == 0))
+                      entry_ascalar=(it == 0), beta=beta,
+                      beta_d=(0.0 if it == 0 else beta), pg_prev=pg)
+        states = dict(states)
+        pg = (states.pop("du"), states.pop("dv"))
     return states
 
 
@@ -1191,6 +1298,7 @@ def make_full_acoustic_step_sixface_jit(fn=full_acoustic_step_sixface):
     both are given -- ``jax/_src/api_util.py:420-423``).
     """
     return jax.jit(fn, static_argnums=(0, 3, 4, 5),
-                   static_argnames=("d_ext", "sw_cfg", "entry_ascalar"))
+                   static_argnames=("d_ext", "sw_cfg", "entry_ascalar",
+                                    "beta", "beta_d"))
 
 

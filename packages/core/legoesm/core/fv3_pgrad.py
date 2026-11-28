@@ -255,6 +255,7 @@ __all__ = [
     "a2b_gridstruct_view",
     "geopk",
     "geopk_jit",
+    "grad1_p_update",
     "make_geopk_jit",
     "make_nh_p_grad_jit",
     "make_one_grad_p_jit",
@@ -1195,6 +1196,104 @@ def _check_a2b_origin(fname: str, bd, ng: int) -> None:
             f"SHIFTED data on both lanes")
 
 
+def _grad_p_bgrid(u, v, pk, gz, divg2, gs: dict, bd, *, fname: str,
+                  npx: int, npy: int, npz: int, ptop: float, akap: float,
+                  ng, duogrid: bool, bounded_domain: bool, grid_type: int,
+                  sw_corner: bool, se_corner: bool, nw_corner: bool,
+                  ne_corner: bool, logp: bool):
+    """The B-grid set-up SHARED by ``one_grad_p`` (dyn_core.F90:2380-2455)
+    and ``grad1_p_update`` (:2512-2549): the k=1 ``top_value`` seed, the
+    ``replace=.true.`` a2b_ord4 of ``pk`` (k=2..npz+1) and ``gz``
+    (k=1..npz+1), and the hydrostatic ``wk = pk(k+1) - pk(k)`` weight.
+    The two Fortran routines carry these lines VERBATIM-identical
+    (hydrostatic branch: ``top_value = ptk``), so they live once here;
+    moved out of ``one_grad_p`` unchanged (same ops, same order), not
+    re-derived.  Returns ``(u, v, pk, gz, divg2, wk, rdx, rdy, win)``
+    with ``win`` the dict of the u/v update windows.
+    """
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, jsd, ied, jed = bd.isd, bd.jsd, bd.ied, bd.jed
+    if ng is None:
+        ng = bd.ng
+    _check_a2b_origin(fname, bd, ng)
+
+    require_uniform_float_jax(fname, {
+        "u": u, "v": v, "pk": pk, "gz": gz, "divg2": divg2,
+        "rdx": gs["rdx"], "rdy": gs["rdy"]})
+    u = jnp.asarray(u)
+    v = jnp.asarray(v)
+    pk = jnp.asarray(pk)
+    gz = jnp.asarray(gz)
+    divg2 = jnp.asarray(divg2)
+
+    # :2380-2386 — `ptk` (the `**` operator, :248/:2382), NOT exp(akap*log)
+    # logp option: geopk's own `peln1 = log(ptop)` constant (:246), so the
+    # seed is bit-identical to the lnp plane's k=1 (Lin 1997 sec. 3).
+    top_value = float(np.log(ptop)) if logp else ptop ** akap
+
+    b_i = _w(isd, is_, ie + 1)
+    b_j = _w(jsd, js, je + 1)
+
+    # :2388-2393 — B box seed at k=1 ONLY
+    pk = pk.at[b_i, b_j, 0].set(top_value)
+
+    geom = a2b_gridstruct_view(gs, bd)
+    flags = dict(bounded_domain=bounded_domain, grid_type=grid_type,
+                 sw_corner=sw_corner, se_corner=se_corner,
+                 ne_corner=ne_corner, nw_corner=nw_corner)
+
+    # a2b's `qout` scratch: ONE local reused across every call upstream.
+    # NaN outside the B box so an out-of-window read is LOUD (the duo
+    # branch writes exactly [is,ie+1]x[js,je+1]; the plain branch's
+    # corner/edge writes land inside that same box).
+    def _a2b_replace(planes):
+        # dtype follows storage (fp32/fp64), from pk (delp is del'd in the hydrostatic branch)
+        scratch = jnp.full(
+            (ied - isd + 1, jed - jsd + 1, planes.shape[2]), jnp.nan,
+            dtype=pk.dtype)
+        qin, _ = _a2b_ord4_k(planes, scratch, geom, npx, npy, is_, ie, js,
+                             je, ng, replace=True, duogrid=duogrid,
+                             **flags)
+        return qin
+
+    # READ-AFTER-WRITE ACROSS THE CALL BOUNDARY (docstring proof 3):
+    # replace=.true. overwrites pk/gz on the B box, and every read below
+    # -- the wk weight and the u/v brackets -- must see those OVERWRITTEN
+    # B-grid corner values.  The rebound names carry them; nothing here
+    # recomputes from the A-grid originals.
+    pk = pk.at[:, :, 1:npz + 1].set(_a2b_replace(pk[:, :, 1:npz + 1]))
+    gz = gz.at[:, :, 0:npz + 1].set(_a2b_replace(gz[:, :, 0:npz + 1]))
+
+    rdx = jnp.asarray(gs["rdx"])
+    rdy = jnp.asarray(gs["rdy"])
+
+    # u: i in is..ie, j in js..je+1   (:2464-2470)
+    ui = _w(isd, is_, ie)
+    uip1 = _w(isd, is_ + 1, ie + 1)
+    uj = _w(jsd, js, je + 1)
+    # v: i in is..ie+1, j in js..je   (:2471-2477)
+    vi = _w(isd, is_, ie + 1)
+    vj = _w(jsd, js, je)
+    vjp1 = _w(jsd, js + 1, je + 1)
+
+    # :2450-2455 — wk recomputed on the B box inside the Fortran k loop.
+    # ALIASING (docstring proof 4): upstream and the NumPy twin reuse the
+    # SAME buffer for a2b's qout scratch and for this weight.  The alias
+    # is dead -- the whole B box is rewritten here before any read, and
+    # the four reads below (ui/uip1 x uj, vi x vj/vjp1) all lie inside
+    # it -- so allocating separately is equivalent.  NaN outside the box
+    # keeps a window slip loud.
+    # DEPENDENCE (the k nest): u/v are written at level k from pk/gz/wk
+    # at levels k and k+1 of arrays this nest never writes.
+    wk = jnp.full((ied - isd + 1, jed - jsd + 1, npz), jnp.nan,
+                  dtype=pk.dtype)
+    wk = wk.at[b_i, b_j, :].set(pk[b_i, b_j, 1:npz + 1]
+                                - pk[b_i, b_j, 0:npz])
+    win = dict(ui=ui, uip1=uip1, uj=uj, vi=vi, vj=vj, vjp1=vjp1,
+               is_=is_, ie=ie, js=js, je=je)
+    return u, v, pk, gz, divg2, wk, rdx, rdy, win
+
+
 def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
                npy: int, npz: int, dt: float, ptop: float, akap: float,
                hydrostatic: bool = True, a2b_ord: int = 4,
@@ -1273,59 +1372,16 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
             "(:2385) and an a2b_ord4(delp) wk (:2456-2461, no `replace`); "
             "neither is certified by any fixture")
 
-    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
-    isd, jsd, ied, jed = bd.isd, bd.jsd, bd.ied, bd.jed
-    if ng is None:
-        ng = bd.ng
-    _check_a2b_origin("one_grad_p", bd, ng)
-
-    require_uniform_float_jax("one_grad_p", {
-        "u": u, "v": v, "pk": pk, "gz": gz, "divg2": divg2,
-        "rdx": gs["rdx"], "rdy": gs["rdy"]})
-    u = jnp.asarray(u)
-    v = jnp.asarray(v)
-    pk = jnp.asarray(pk)
-    gz = jnp.asarray(gz)
-    divg2 = jnp.asarray(divg2)
     del delp  # hydrostatic branch never reads it (see docstring)
-
-    # :2380-2386 — `ptk` (the `**` operator, :248/:2382), NOT exp(akap*log)
-    # logp option: geopk's own `peln1 = log(ptop)` constant (:246), so the
-    # seed is bit-identical to the lnp plane's k=1 (Lin 1997 sec. 3).
-    top_value = float(np.log(ptop)) if logp else ptop ** akap
-
-    b_i = _w(isd, is_, ie + 1)
-    b_j = _w(jsd, js, je + 1)
-
-    # :2388-2393 — B box seed at k=1 ONLY
-    pk = pk.at[b_i, b_j, 0].set(top_value)
-
-    geom = a2b_gridstruct_view(gs, bd)
-    flags = dict(bounded_domain=bounded_domain, grid_type=grid_type,
-                 sw_corner=sw_corner, se_corner=se_corner,
-                 ne_corner=ne_corner, nw_corner=nw_corner)
-
-    # a2b's `qout` scratch: ONE local reused across every call upstream.
-    # NaN outside the B box so an out-of-window read is LOUD (the duo
-    # branch writes exactly [is,ie+1]x[js,je+1]; the plain branch's
-    # corner/edge writes land inside that same box).
-    def _a2b_replace(planes):
-        # dtype follows storage (fp32/fp64), from pk (delp is del'd in the hydrostatic branch)
-        scratch = jnp.full(
-            (ied - isd + 1, jed - jsd + 1, planes.shape[2]), jnp.nan,
-            dtype=pk.dtype)
-        qin, _ = _a2b_ord4_k(planes, scratch, geom, npx, npy, is_, ie, js,
-                             je, ng, replace=True, duogrid=duogrid,
-                             **flags)
-        return qin
-
-    # READ-AFTER-WRITE ACROSS THE CALL BOUNDARY (docstring proof 3):
-    # replace=.true. overwrites pk/gz on the B box, and every read below
-    # -- the wk weight and the u/v brackets -- must see those OVERWRITTEN
-    # B-grid corner values.  The rebound names carry them; nothing here
-    # recomputes from the A-grid originals.
-    pk = pk.at[:, :, 1:npz + 1].set(_a2b_replace(pk[:, :, 1:npz + 1]))
-    gz = gz.at[:, :, 0:npz + 1].set(_a2b_replace(gz[:, :, 0:npz + 1]))
+    u, v, pk, gz, divg2, wk, rdx, rdy, win = _grad_p_bgrid(
+        u, v, pk, gz, divg2, gs, bd, fname="one_grad_p", npx=npx, npy=npy,
+        npz=npz, ptop=ptop, akap=akap, ng=ng, duogrid=duogrid,
+        bounded_domain=bounded_domain, grid_type=grid_type,
+        sw_corner=sw_corner, se_corner=se_corner, nw_corner=nw_corner,
+        ne_corner=ne_corner, logp=logp)
+    ui, uip1, uj = win["ui"], win["uip1"], win["uj"]
+    vi, vj, vjp1 = win["vi"], win["vj"], win["vjp1"]
+    is_, ie, js, je = win["is_"], win["ie"], win["js"], win["je"]
 
     # :2415-2443 — external-mode filter increments; both zero at d_ext<=0.
     # The windows are taken off is_/js so any bounds are representable.
@@ -1337,32 +1393,6 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
     else:
         wk2 = jnp.zeros((ie - is_ + 1, je - js + 2), dtype=pk.dtype)
         wk1 = jnp.zeros((ie - is_ + 2, je - js + 1), dtype=pk.dtype)
-
-    rdx = jnp.asarray(gs["rdx"])
-    rdy = jnp.asarray(gs["rdy"])
-
-    # u: i in is..ie, j in js..je+1   (:2464-2470)
-    ui = _w(isd, is_, ie)
-    uip1 = _w(isd, is_ + 1, ie + 1)
-    uj = _w(jsd, js, je + 1)
-    # v: i in is..ie+1, j in js..je   (:2471-2477)
-    vi = _w(isd, is_, ie + 1)
-    vj = _w(jsd, js, je)
-    vjp1 = _w(jsd, js + 1, je + 1)
-
-    # :2450-2455 — wk recomputed on the B box inside the Fortran k loop.
-    # ALIASING (docstring proof 4): upstream and the NumPy twin reuse the
-    # SAME buffer for a2b's qout scratch and for this weight.  The alias
-    # is dead -- the whole B box is rewritten here before any read, and
-    # the four reads below (ui/uip1 x uj, vi x vj/vjp1) all lie inside
-    # it -- so allocating separately is equivalent.  NaN outside the box
-    # keeps a window slip loud.
-    # DEPENDENCE (the k nest): u/v are written at level k from pk/gz/wk
-    # at levels k and k+1 of arrays this nest never writes.
-    wk = jnp.full((ied - isd + 1, jed - jsd + 1, npz), jnp.nan,
-                  dtype=pk.dtype)
-    wk = wk.at[b_i, b_j, :].set(pk[b_i, b_j, 1:npz + 1]
-                                - pk[b_i, b_j, 0:npz])
 
     # ASSIGNMENT (not an increment, unlike p_grad_c): the whole bracket
     # is multiplied by rdx/rdy.
@@ -1384,6 +1414,121 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
                 * (pk[vi, vj, 1:npz + 1] - pk[vi, vjp1, 0:npz]))))
     return u, v, pk, gz
 
+
+
+def grad1_p_update(divg2, u, v, pk, gz, du, dv, gs: dict, bd, *, npx: int,
+                   npy: int, npz: int, dt: float, ptop: float, akap: float,
+                   beta: float, a2b_ord: int = 4, ng: int | None = None,
+                   duogrid: bool = True, bounded_domain: bool = False,
+                   grid_type: int = 0, sw_corner: bool = True,
+                   se_corner: bool = True, nw_corner: bool = True,
+                   ne_corner: bool = True, logp: bool = False):
+    """JAX port of ``grad1_p_update`` (dyn_core.F90:2483-2574), the
+    HYDROSTATIC pressure gradient with FV3's ``beta`` off-centering.
+
+    Call site dyn_core.F90:1528-1529: ``if (beta > 0.) call
+    grad1_p_update(divg2, u, v, pkc, gz, dt, ..., beta_d, a2b_ord)``,
+    else ``one_grad_p``.  ``beta`` HERE is the call's ``beta_d``
+    argument: 0 on the first acoustic sub-step ``it == 1`` and the
+    namelist ``beta`` on every later one (:440-444).  The ``du``/``dv``
+    module arrays (allocated and zeroed at ``init_step``, :304-309;
+    freed at ``end_step``) carry the PREVIOUS sub-step's PG increment;
+    this functional twin takes them in and RETURNS the new ones.
+
+    Per level, verbatim (:2551-2571), ``alpha = 1 - beta`` (:2512)::
+
+        u  = u + beta*du                      ! old PG, weight beta
+        du = dt/(wk(i)+wk(i+1)) * (contour)   ! new PG (one_grad_p's term)
+        u  = (u + divg2(i)-divg2(i+1) + alpha*du) * rdx
+
+    The B-grid set-up (top seed ``ptk``, a2b_ord4 ``replace`` of pk/gz,
+    ``wk``) is :func:`_grad_p_bgrid`, shared with :func:`one_grad_p`.
+    ``divg2`` is added UNCONDITIONALLY, as in the Fortran (there is no
+    ``d_ext`` argument; dyn_core passes a zeroed ``divg2`` when
+    ``d_ext <= 0``, :1329, and so must the caller here).  It must cover
+    ``[is, ie+1] x [js, je+1]`` (origin ``is``/``js``).  ``logp`` is the
+    same documented departure as on :func:`one_grad_p` (seed
+    ``log(ptop)``, ln p plane).
+
+    Returns ``(u, v, pk, gz, du, dv)``; ``du``/``dv`` keep their input
+    values outside the update windows (the Fortran never writes there).
+    At ``beta = 0`` with a ZERO ``divg2`` this is one_grad_p's arithmetic
+    exactly (``u + 0*du`` is ``u`` for finite ``du``, ``alpha*du`` is
+    ``1*du``); with a nonzero ``divg2`` the Fortran grouping
+    ``(u + divg2(i)) - divg2(i+1)`` is kept and can round differently
+    from one_grad_p's ``(divg2(i) - divg2(i+1)) + u``.
+    """
+    fname = "grad1_p_update"
+    _require_bool(fname, "logp", logp)
+    _require_bool(fname, "duogrid", duogrid)
+    _require_bool(fname, "bounded_domain", bounded_domain)
+    if logp and not (np.isfinite(ptop) and ptop > 0.0):
+        raise ValueError(f"{fname}: logp=True needs a finite ptop > 0 "
+                         f"(top seed log(ptop)), got {ptop!r}")
+    if a2b_ord != 4:
+        raise NotImplementedError(
+            f"{fname}: a2b_ord={a2b_ord!r}; only the a2b_ord==4 arm is "
+            "ported (same as one_grad_p)")
+    if isinstance(beta, (jax.Array, bool)) or not isinstance(
+            beta, (int, float)) or not (0.0 <= float(beta) <= 1.0):
+        raise ValueError(f"{fname}: beta must be a static float in [0, 1], "
+                         f"got {beta!r}")
+    beta = float(beta)
+
+    u, v, pk, gz, divg2, wk, rdx, rdy, win = _grad_p_bgrid(
+        u, v, pk, gz, divg2, gs, bd, fname=fname, npx=npx, npy=npy,
+        npz=npz, ptop=ptop, akap=akap, ng=ng, duogrid=duogrid,
+        bounded_domain=bounded_domain, grid_type=grid_type,
+        sw_corner=sw_corner, se_corner=se_corner, nw_corner=nw_corner,
+        ne_corner=ne_corner, logp=logp)
+    require_uniform_float_jax(fname, {"u": u, "du": du, "v": v, "dv": dv})
+    du = jnp.asarray(du)
+    dv = jnp.asarray(dv)
+    if du.shape != u.shape or dv.shape != v.shape:
+        raise ValueError(f"{fname}: du/dv must be shaped like u/v "
+                         f"({u.shape}/{v.shape}), got {du.shape}/{dv.shape}")
+    ui, uip1, uj = win["ui"], win["uip1"], win["uj"]
+    vi, vj, vjp1 = win["vi"], win["vj"], win["vjp1"]
+    is_, ie, js, je = win["is_"], win["ie"], win["js"], win["je"]
+    # :2512 alpha = 1 - beta, in the kernel's working dtype
+    beta = jnp.asarray(beta, dtype=u.dtype)
+    alpha = 1.0 - beta
+
+    # divg2(i,j), divg2(i+1,j) / divg2(i,j+1) kept SEPARATE so the sum
+    # groups as the Fortran's left-to-right ``u + divg2(i) - divg2(i+1)
+    # + alpha*du`` (:2560/:2569), applied unconditionally.
+    if divg2.ndim != 2:
+        raise ValueError(f"{fname}: divg2 must be 2-D, got {divg2.shape}")
+    gx0 = divg2[_w(is_, is_, ie), _w(js, js, je + 1)][:, :, None]
+    gx1 = divg2[_w(is_, is_ + 1, ie + 1), _w(js, js, je + 1)][:, :, None]
+    gy0 = divg2[_w(is_, is_, ie + 1), _w(js, js, je)][:, :, None]
+    gy1 = divg2[_w(is_, is_, ie + 1), _w(js, js + 1, je + 1)][:, :, None]
+    if gx0.shape[:2] != (ie - is_ + 1, je - js + 2) or \
+            gy1.shape[:2] != (ie - is_ + 2, je - js + 1):
+        raise ValueError(f"{fname}: divg2 {divg2.shape} does not cover "
+                         f"[is, ie+1] x [js, je+1]")
+
+    # :2554-2561 -- u, i in is..ie, j in js..je+1
+    u1 = u[ui, uj, 0:npz] + beta * du[ui, uj, 0:npz]
+    du_new = dt / (wk[ui, uj, :] + wk[uip1, uj, :]) * (
+        (gz[ui, uj, 1:npz + 1] - gz[uip1, uj, 0:npz])
+        * (pk[uip1, uj, 1:npz + 1] - pk[ui, uj, 0:npz])
+        + (gz[ui, uj, 0:npz] - gz[uip1, uj, 1:npz + 1])
+        * (pk[ui, uj, 1:npz + 1] - pk[uip1, uj, 0:npz]))
+    u = u.at[ui, uj, 0:npz].set(
+        (u1 + gx0 - gx1 + alpha * du_new) * rdx[ui, uj][:, :, None])
+    du = du.at[ui, uj, 0:npz].set(du_new)
+    # :2563-2570 -- v, i in is..ie+1, j in js..je
+    v1 = v[vi, vj, 0:npz] + beta * dv[vi, vj, 0:npz]
+    dv_new = dt / (wk[vi, vj, :] + wk[vi, vjp1, :]) * (
+        (gz[vi, vj, 1:npz + 1] - gz[vi, vjp1, 0:npz])
+        * (pk[vi, vjp1, 1:npz + 1] - pk[vi, vj, 0:npz])
+        + (gz[vi, vj, 0:npz] - gz[vi, vjp1, 1:npz + 1])
+        * (pk[vi, vj, 1:npz + 1] - pk[vi, vjp1, 0:npz]))
+    v = v.at[vi, vj, 0:npz].set(
+        (v1 + gy0 - gy1 + alpha * dv_new) * rdy[vi, vj][:, :, None])
+    dv = dv.at[vi, vj, 0:npz].set(dv_new)
+    return u, v, pk, gz, du, dv
 
 def nh_p_grad(u, v, pp, gz, delp, pk3, gs: dict, bd, *, npx: int,
               npy: int, npz: int, dt: float, ptop: float, akap: float,
