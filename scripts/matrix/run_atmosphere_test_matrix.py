@@ -449,22 +449,27 @@ def _build_test_matrix() -> list[TestCase]:
         # at 72x144) would make 100 days ~631k host-loop steps (codex
         # round-12 Medium), and the collision/exchange phase this case
         # gates happens well inside 20 days.
-        # Spectral runs the modons at T42, not the T21 canvas default:
-        # T21's 64-point equatorial spacing is ~625 km — 2.3x coarser
-        # than the other three panels (C36 / 72x144 / ico5, all
-        # ~250-280 km) — and the r0=750 km vortex cores disintegrate
-        # into wave debris at the day-~20 collision (the collision
-        # sharpens gradients past the truncation).  T42 (~312 km) is
-        # the resolution-parity choice; the dt law and hyperdiffusion
-        # need no per-resolution retuning here (modon-scale damping
-        # tau ~ 250 d either way).
+        # Spectral runs the modons at T63 (2/3-rule n_cut = 42), not the
+        # T21 canvas default nor T42.  The DEFAULT 2/3 de-aliasing mask
+        # leaves only n <= floor(0.667*n_max) resolved, so T42 resolves
+        # n <= 28 (~715 km half-wavelength) — coarser than the other
+        # three panels (C36 / 72x144 / ico5, ~250-280 km) — and at the
+        # paper's r0 = 500 km the mask cut the filtered IC max |V| from
+        # 34.8 to 27.6 m/s (other grids 34.3-36.1).  T63 + mask resolves
+        # n <= 42 (= the T42 grid's full truncation), restoring the IC
+        # max to the other grids' band.  Vote 2026-11-28 (codex T63+mask,
+        # author T63+mask; GLM unavailable -> single review): keep the
+        # mask (maskless T85 NaN'd at step 100).  dt and hyperdiffusion
+        # follow the existing per-resolution laws in run_shallow_water
+        # (gravity-wave CFL dt ~ R/n_max; del-6 coeff pinned to the
+        # truncation-scale rate), no retuning.
         # All four grids run the full ~100-day return-to-IC so the
         # cross-grid panels compare the SAME time.  The old latlon
         # 20-day cap predated the measured cost: 1.4 ms/host-step at
         # 72x144 -> ~15 min for 100 d (dt ~ 13.7 s pole-CFL).
         matrix.append(TestCase(
             "shallow_water", "colliding_modons", g,
-            "T42" if g == "spectral" else res[g], "none",
+            "T63" if g == "spectral" else res[g], "none",
             100, 1,
             {"test_num": 8}))
 
@@ -3509,15 +3514,17 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # (per-step loss < 0.1% over 14 d, validated visually
             # consistent across all four grids).
             spectral_filter_every_step=test_num == 6,
-            # Modons keep the DEFAULT 2/3-rule mask.  At T42 the cut
-            # (n_cut=28) sits above the r0=750 km core band (n~13-21),
-            # so the mask costs nothing — the over-truncation problem
-            # existed only at T21 (n_cut=14 slicing the cores), which
-            # the T42 resolution-parity choice already solves.  Running
-            # WITHOUT the mask is NOT sound for this formulation: the
-            # cos^-2 factors in the tendencies make the products more
-            # than quadratic, and a maskless T85 probe NaN'd at step
-            # 100 (T42 maskless was only marginally stable).
+            # Modons keep the DEFAULT 2/3-rule mask, at T63 (n_cut=42).
+            # The mask is NOT free at the paper's r0 = 500 km: at T42
+            # (n_cut=28) it sliced the core band and dropped the IC max
+            # |V| 34.8 -> 27.6 m/s (the old "costs nothing" note was
+            # written for r0 = 750 km).  The matrix row therefore runs
+            # T63, whose n_cut = 42 restores the IC max to the other
+            # grids' 34.3-36.1 m/s band.  Running WITHOUT the mask is
+            # NOT sound for this formulation: the cos^-2 factors in the
+            # tendencies make the products more than quadratic, and a
+            # maskless T85 probe NaN'd at step 100 (T42 maskless was
+            # only marginally stable).
         )
         model = SpectralShallowWaterModel(grid, config)
         if test_num == 6:
