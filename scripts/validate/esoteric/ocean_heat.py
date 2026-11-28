@@ -1,10 +1,13 @@
 """Ocean heat-storage change: day-0 (rebuilt Qobs IC) vs day-N MPAS ocean checkpoint.
 
-Two storage rates: FIXED day-0 thickness (sum h0*dT, the comparator for net
-surface heat flux) and LIVE z-star thickness with SSH (sum h1*T1 - h0*T0, the
-model's heat content; its extra term is the SSH-temperature covariance and
-depends on the 0 degC reference wherever mean SSH changes). A band's rate is
-STORAGE change: it includes lateral ocean transport, not only the surface flux. Usage: ocean_heat.py run_out_dir mesh_level day
+Two storage rates. LIVE z-star thickness with SSH (sum h1*T1 - h0*T0) is the
+h*T the model conserves, so globally it is what the net surface heat flux must
+match while ocean volume is unchanged (mean SSH is printed; where volume
+changes the number depends on the 0 degC reference). FIXED day-0 thickness
+(sum h0*dT) is the temperature change alone and omits heat moved with volume.
+MEASURED on the day-30 ridge TKE run: atmosphere net surface flux 30.4 W/m2
+(global, 1 % land), live 31.0, fixed 25.6. A band's rate is STORAGE change: it
+includes lateral ocean transport, not only the surface flux. Usage: ocean_heat.py run_out_dir mesh_level day
 """
 import sys
 
@@ -76,8 +79,8 @@ def main(argv):
     print(f"eta day0 mean {np.sum(eta0 * aw) / aw.sum():+.3f} m, day{day} mean {np.sum(eta1 * aw) / aw.sum():+.3f} m")
     print(f"SST area mean day0 {np.sum(T0[:, 0] * aw) / aw.sum():.3f} C, day{day} {np.sum(T1[:, 0] * aw) / aw.sum():.3f} C")
     g = (T0[wet], h0[wet], T1[wet]); w = area[wet]
-    print(f"global ocean heat-storage rate W/m2: fixed thickness {storage_rate(*g, h0[wet], w, day):+.2f} (compare with net surface heat flux), "
-          f"live thickness {storage_rate(*g, h1[wet], w, day):+.2f} (heat content; adds SSH-T covariance, not heating)")
+    print(f"global ocean heat-storage rate W/m2: fixed thickness {storage_rate(*g, h0[wet], w, day):+.2f} (temperature change only), "
+          f"live thickness {storage_rate(*g, h1[wet], w, day):+.2f} (model-conserved h*T: compare with net surface heat flux)")
     print("band | dSST K | storage rate W/m2 fixed / live (incl. lateral transport) | dT by level k="
           + ",".join(map(str, levels)))
     for a, b in BANDS:

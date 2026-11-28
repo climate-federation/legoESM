@@ -58,6 +58,20 @@ def test_band_eastward_wind_matches_solid_body(mesh):
     np.testing.assert_allclose(got, want, rtol=0, atol=ZONAL_ATOL)
 
 
+def test_zonal_state_cli_prints_band_wind_and_checks_day(tmp_path, mesh, capsys):
+    zs = _load("zonal_state")
+    n = np.asarray(mesh.latCell).size
+    ck = tmp_path / "checkpoint_day_0030.npz"
+    np.savez(ck, T=np.full((n, 2), 250.0), u=_solid_body_edge_u(mesh, 20.0), p_s=np.full(n, 1.0e5),
+             day=np.array(30.0))
+    zs.main([str(ck), "3", "30"])
+    row = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("k= 1"))
+    u_eq = float(row.split("| u")[1].split()[3])   # 10S-10N band
+    assert u_eq == pytest.approx(19.88, abs=0.05)
+    with pytest.raises(ValueError, match="stamped day 30"):
+        zs.main([str(ck), "3", "24"])
+
+
 def test_band_means_area_weighted_and_refuses_empty_band():
     com = _load("_common")
     lat = np.array([-80.0, -80.0, 0.0])
@@ -191,7 +205,7 @@ def test_panel_wind_is_snapshot_reconstruction(mesh):
     sm = _load("snap_maps")
     U, nlev = 15.0, 32
     lat = np.asarray(mesh.latCell)
-    ck = {"T": np.full((lat.size, nlev), 280.0), "p_s": np.full(lat.size, 1.0e5),
+    ck = {"T": np.tile(200.0 + np.arange(nlev), (lat.size, 1)), "p_s": np.full(lat.size, 1.0e5),
           # only the LOWEST level carries the wind: a wrong level index maps zero
           "u": np.where(np.arange(nlev) == nlev - 1, _solid_body_edge_u(mesh, U, nlev), 0.0),
           # a stale accumulator that must NOT be what is mapped
@@ -199,6 +213,9 @@ def test_panel_wind_is_snapshot_reconstruction(mesh):
     f = sm.panel_fields(ck, mesh)
     mid = np.abs(np.degrees(lat)) < 60
     np.testing.assert_allclose(f[2][mid], U * np.cos(lat[mid]), atol=PANEL_ATOL)
+    np.testing.assert_array_equal(f[0], 200.0 + nlev - 1)   # lowest level
+    np.testing.assert_array_equal(f[3], 220.0)              # level 20
+    np.testing.assert_array_equal(f[1], 1000.0)             # Pa -> hPa
     ck["T"] = ck["T"].copy(); ck["T"][0, -1] = np.nan
     with pytest.raises(ValueError, match="non-finite"):
         sm.panel_fields(ck, mesh)
@@ -219,9 +236,11 @@ def test_report_sbatch_maps_only_numbered_days_up_to_n(tmp_path):
     py = tmp_path / "py"   # stub interpreter: answers the manifest read, echoes every other call
     py.write_text('#!/bin/bash\nif [ "$1" = -c ]; then echo %s %s False; else echo "CALL $*"; fi\n' % (wt, sha))
     py.chmod(0o755)
-    r = subprocess.run(["bash", str(_SBATCH), str(out), "60", "5", "0.0", str(py)], capture_output=True,
+    # "0060" must mean day 60 (bash would read a leading-zero number as octal)
+    r = subprocess.run(["bash", str(_SBATCH), str(out), "0060", "5", "0.0", str(py)], capture_output=True,
                        text=True, env={"PATH": "/usr/bin:/bin", "DIAG_DIR": str(diag)})
     assert r.returncode == 0, r.stderr
+    assert any("zonal_state.py" in l and "checkpoint_day_0060.npz 5 60" in l for l in r.stdout.splitlines())
     maps = [l for l in r.stdout.splitlines() if "snap_maps.py" in l]
     assert len(maps) == 1 and "day_0030" in maps[0] and "day_0060" in maps[0]
     assert "day_0090" not in maps[0] and "final" not in maps[0] and "backup" not in maps[0]

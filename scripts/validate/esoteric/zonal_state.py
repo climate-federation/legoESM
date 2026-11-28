@@ -1,7 +1,7 @@
 """Zonal-mean T and eastward wind by latitude band and level from an MPAS atmosphere checkpoint.
 
 Eastward wind is the model's own Perot edge->cell reconstruction, area-weighted on
-the same cells as T. Usage: zonal_state.py checkpoint_day_NNNN.npz mesh_level
+the same cells as T. Usage: zonal_state.py checkpoint_day_NNNN.npz mesh_level [expected_day]
 """
 import sys
 
@@ -24,6 +24,8 @@ def main(argv):
 
     ck = np.load(argv[0], allow_pickle=True)
     mesh = create_voronoi_mesh(int(argv[1]))
+    if len(argv) > 2 and float(ck["day"]) != float(argv[2]):
+        raise ValueError(f"checkpoint is stamped day {float(ck['day']):g}, expected {argv[2]}")
     T, u, ps = np.asarray(ck["T"]), np.asarray(ck["u"]), np.asarray(ck["p_s"])
     if T.shape[0] != mesh.nCells or u.shape[0] != mesh.nEdges:
         raise ValueError(f"layout mismatch: T {T.shape}, u {u.shape}, mesh {mesh.nCells}/{mesh.nEdges}")
