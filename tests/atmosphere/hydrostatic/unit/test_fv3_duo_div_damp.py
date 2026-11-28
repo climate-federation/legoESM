@@ -60,7 +60,10 @@ def test_oracle_pinned_step_is_bitwise_the_cfg_none_step(grid, monkeypatch):
     ic = dyn.dcmip16_initial_state(n_tracers=1)
     out = dyn.step(ic, 120.0)
     monkeypatch.setattr(m, "duo_sw_deck", lambda **kw: None)
-    dyn_none = m.FV3DuoDynamicsModel(grid, m.FV3DuoConfig(km=KM, n_split=2))
+    # beta=0.0 passed explicitly: cfg=None's step is the oracle's one_grad_p
+    # PG, and the default config now runs beta=0.4 (user 2026-11-28)
+    dyn_none = m.FV3DuoDynamicsModel(grid, m.FV3DuoConfig(km=KM, n_split=2,
+                                                          beta=0.0))
     assert _bundles_equal(dyn_none.step(ic, 120.0), out)
 
 
@@ -75,7 +78,7 @@ def test_default_is_the_production_deck_not_the_oracle(grid):
             FV3DuoConfig().sponge_del2_top_factor) == (2, 8.0)
     assert FV3DuoConfig().sponge_d2_top > 0.0
     assert ORACLE_DAMPING == {"nord": 2, "d4_bg": 0.12, "vtdm4": 0.12,
-                              "sponge_del2_top_layers": 0}
+                              "sponge_del2_top_layers": 0, "beta": 0.0}
     prod = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=KM, n_split=2))
     ic = prod.dcmip16_initial_state(n_tracers=1)
     oracle = FV3DuoDynamicsModel(

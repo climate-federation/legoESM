@@ -109,8 +109,9 @@ def build_duo_sw(test_num: int, n: int):
     import jax
     jax.config.update("jax_enable_x64", True)
     from legoesm.core.fv3_duo_stepper import (
-        SWConfig, advance_duo_outer_step, build_jax_duo_stepper_context,
-        make_full_acoustic_step_sixface_jit, states_to_jax)
+        CUBE_PGRAD_BETA, SWConfig, advance_duo_outer_step,
+        build_jax_duo_stepper_context, make_full_acoustic_step_sixface_jit,
+        states_to_jax)
     from legoesm.core.fv3_native_duo_stepper import (
         SW_CFG_CASE8, build_six_face_duo_context, case6_six_face_state,
         w2_six_face_state)
@@ -178,8 +179,11 @@ def build_duo_sw(test_num: int, n: int):
     n_split = deck["n_split"]
 
     def step(state, dt):
+        # production PG off-centering (FV3 beta, dyn_core.F90:1528; USER
+        # APPROVED 2026-11-28) -- the oracle deck itself has beta = 0
         return advance_duo_outer_step(jctx, state, dt, n_split, d_ext=0.0,
-                                      sw_cfg=sw_cfg, step_fn=jstep)
+                                      sw_cfg=sw_cfg, step_fn=jstep,
+                                      beta=CUBE_PGRAD_BETA)
 
     lon_deg, lat_deg, area = duo_cell_geometry(ctx)
     sl = _compute_window(ctx)
@@ -192,7 +196,8 @@ def build_duo_sw(test_num: int, n: int):
         return geo(state["u"], state["v"])
 
     note = (f"fv3_duo JAX km=1 stepper, SW_CFG_CASE8 hord8 nord2 "
-            f"d4_bg={deck['d4_bg']} d_ext=0, dt_atmos={deck['dt_atmos']:g}s "
+            f"d4_bg={deck['d4_bg']} d_ext=0 beta={CUBE_PGRAD_BETA:g} "
+            f"(FV3 grad1_p_update), dt_atmos={deck['dt_atmos']:g}s "
             f"n_split={n_split}; FV3 GFS consts (a={FV3_RADIUS_M:g} m, "
             f"g={FV3_GRAV})")
     if test_num == 5:
@@ -733,7 +738,7 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
     import jax
     jax.config.update("jax_enable_x64", True)
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-        FV3DuoConfig, FV3DuoDynamicsModel)
+        FV3DuoConfig, FV3DuoDynamicsModel, resolve_pgrad_beta)
     from legoesm.grids.factory import create_fv3_duo_grid
 
     spec = None
@@ -848,7 +853,8 @@ def build_duo_hydro(n: int, *, perturbed: bool = True,
             f"nord={cfg.nord} d4_bg={cfg.d4_bg} vtdm4="
             f"{'d4_bg/3' if cfg.vtdm4 is None else cfg.vtdm4} (FV3 rules) "
             f"sponge={cfg.sponge_del2_top_layers}"
-            f"L, n_split={cfg.n_split}, dt={dt:g}s ("
+            f"L, PG beta={resolve_pgrad_beta(cfg):g}, "
+            f"n_split={cfg.n_split}, dt={dt:g}s ("
             + ("small-planet step: deck dt_atmos 1920 s / X = 125 rounded "
                "down to divide 3600 s" if gw31 else "deck dt_atmos")
             + ", no driver CFL clamp); " + (

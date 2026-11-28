@@ -71,8 +71,10 @@ FV3_DUO_STATE_KEYS = ("state", "press", "q", "omga", "nh")
 #: **ORACLE_DAMPING)``.  The config DEFAULTS are the production values.
 #: ``vtdm4`` is pinned explicitly: the oracle deck's own 0.12 (input.nml),
 #: NOT the production FV3-rule value ``d4_bg / 3`` (see ``duo_sw_deck``).
+#: ``beta`` is pinned to 0.0: the oracle decks set no ``beta`` (fv_arrays
+#: default 0, one_grad_p), NOT the production 0.4 (``resolve_pgrad_beta``).
 ORACLE_DAMPING = {"nord": 2, "d4_bg": 0.12, "vtdm4": 0.12,
-                  "sponge_del2_top_layers": 0}
+                  "sponge_del2_top_layers": 0, "beta": 0.0}
 
 
 class FV3DuoConfig(NamedTuple):
@@ -182,6 +184,33 @@ class FV3DuoConfig(NamedTuple):
     #: (production, AMIP, oracle); only the matrix's cube held_suarez_topo
     #: row turns it on.  The C-grid p_grad_c stays p**kappa either way.
     hydrostatic_logp: bool = False
+    #: FV3 namelist ``beta`` (appended last; USER APPROVED 2026-11-28): the
+    #: hydrostatic D-grid PG off-centering, dyn_core.F90:1528
+    #: ``grad1_p_update`` -- each acoustic sub-step's PG is
+    #: ``(1-beta)*new + beta*previous`` (beta_d = 0 on ``it == 1``).
+    #: FV3's own default is 0 (one_grad_p, the oracle decks); at 0 the
+    #: C/D acoustic predictor damps gravity waves.  Measured (SW lane,
+    #: 2026-11-28): C36 colliding modons (E-E0)/(KE0+APE0) at 1 day
+    #: -0.477 -> -0.365; C12 standing P6 gravity mode, KE+APE lost in
+    #: 2 h 7.96% -> 3.19%.
+    #: ``None`` (DEFAULT) resolves in :func:`resolve_pgrad_beta`:
+    #: ``CUBE_PGRAD_BETA`` (0.4) when hydrostatic, 0.0 when not (FV3's
+    #: NH beta > 0 arm is split_p_grad, not ported -- an explicit beta > 0
+    #: with hydrostatic=False raises).  ``ORACLE_DAMPING`` pins 0.0.
+    beta: float | None = None
+
+
+def resolve_pgrad_beta(config: FV3DuoConfig) -> float:
+    """The PG off-centering ``beta`` a config runs with (see the field)."""
+    from legoesm.core.fv3_duo_stepper import CUBE_PGRAD_BETA
+    if config.beta is None:
+        return CUBE_PGRAD_BETA if config.hydrostatic else 0.0
+    b = config.beta
+    if isinstance(b, bool) or not isinstance(b, (int, float)) \
+            or not 0.0 <= float(b) <= 1.0:
+        raise ValueError(f"FV3DuoConfig.beta must be None or a float in "
+                         f"[0, 1], got {b!r}")
+    return float(b)
 
 
 def duo_sw_deck(*, nord: int, d4_bg: float, vtdm4: float | None = None,
@@ -553,6 +582,7 @@ class FV3DuoDynamicsModel:
             zvir=self.zvir, sphum_index=(0 if config.moist else None),
             fill=config.fill,
             hydrostatic_logp=config.hydrostatic_logp,
+            beta=resolve_pgrad_beta(config),
         )
         self.step_face_batched = bool(step_face_batched)
 

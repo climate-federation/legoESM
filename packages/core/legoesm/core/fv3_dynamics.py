@@ -438,7 +438,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                      z_tracer: bool = True, inline_q: bool = False,
                      fill: bool = False,
                      dp2_seam_blend: bool = True,
-                     hydrostatic_logp: bool = False) -> dict:
+                     hydrostatic_logp: bool = False,
+                     beta: float = 0.0) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (:451-674), functional.
 
     C4/D4 returns ``{"state", "press", "q", "omga", "nh", "stages",
@@ -755,7 +756,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                               hydrostatic=hydrostatic, nh=nhc,
                               p_fac=p_fac, a_imp=a_imp, dp0=dp0,
                               use_logp=use_logp, flux_cap=fc,
-                              hydrostatic_logp=hydrostatic_logp)
+                              hydrostatic_logp=hydrostatic_logp,
+                              beta=beta)
         st = ac["state"]
         nhc = ac["nh"]
         g = ac["press"]
@@ -1067,7 +1069,8 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
                               consv_te: float = 0.0, out_shardings=None,
                               batched: bool = False,
                               dp2_seam_blend: bool = True,
-                              hydrostatic_logp: bool = False):
+                              hydrostatic_logp: bool = False,
+                              beta: float = 0.0):
     """Static (C3/D5): ctx, km and every DECK constant.  Dynamic: only
     state, press, q, bdt, omga and nh.
 
@@ -1092,7 +1095,7 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
             fill=fill,
             z_tracer=z_tracer, inline_q=inline_q, batched=batched,
             dp2_seam_blend=dp2_seam_blend,
-            hydrostatic_logp=hydrostatic_logp)
+            hydrostatic_logp=hydrostatic_logp, beta=beta)
 
     # THE RETURN CARRIES TWO NON-ARRAY LEAVES -- `pt_units` (a str) and
     # `omga_is_meaningless` (a bool) -- and jit refuses to return either

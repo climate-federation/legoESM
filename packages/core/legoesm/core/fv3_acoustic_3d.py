@@ -292,6 +292,8 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
                         dp0=None,
                         use_logp: bool = False,
                         hydrostatic_logp: bool = False,
+                        beta: float = 0.0,
+                        pg_prev: dict | None = None,
                         flux_cap: dict | None = None,
                         check_state: bool = False,
                         substep: int | None = None,
@@ -346,6 +348,16 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
     of silently skipping.  The post-d_sw delp/pt exchange runs BEFORE
     the D-grid pressure phase every sub-step: without it the spec
     recorded sub-step 2 producing 278 non-finite delp values.
+
+    ``beta`` (STATIC, default 0 = FV3's namelist default) /
+    ``pg_prev``: FV3's hydrostatic PG off-centering (dyn_core.F90:1528,
+    grad1_p_update).  This sub-step's weight is ``beta_d = 0`` when
+    ``first_substep`` (:440-441, ``it == 1``) else ``beta``.
+    ``pg_prev`` is the previous sub-step's ``{"du", "dv"}``; on the first
+    sub-step it may be None and is the init_step zero (:304-309).  The
+    new increment is returned as ``out["pg"]`` (None at beta = 0).  The
+    nonhydrostatic beta > 0 arm (split_p_grad, :1537-1538) is NOT ported
+    and raises.
     """
     km = require_km("acoustic_substep_3d", km)
     require_no_remap_needed(km, remap_follows=remap_follows)
@@ -372,6 +384,28 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         # the NH path has FV3's own `use_logp` (nh_p_grad) for that.
         raise ValueError("acoustic_substep_3d: hydrostatic_logp=True needs "
                          "hydrostatic=True (NH path: use_logp)")
+    if isinstance(beta, jax.Array) or isinstance(beta, bool) or not (
+            isinstance(beta, (int, float)) and 0.0 <= float(beta) <= 1.0):
+        raise ValueError(f"acoustic_substep_3d: beta must be a static "
+                         f"float in [0, 1], got {beta!r}")
+    beta = float(beta)
+    if beta > 0.0 and not hydrostatic:
+        raise NotImplementedError(
+            "acoustic_substep_3d: beta > 0 on the nonhydrostatic path is "
+            "FV3's split_p_grad (dyn_core.F90:1537-1538), not ported; "
+            "use beta=0 (nh_p_grad) on hydrostatic=False")
+    if beta > 0.0:
+        if pg_prev is None:
+            if not first_substep:
+                raise ValueError(
+                    "acoustic_substep_3d: beta > 0 needs pg_prev (the "
+                    "previous sub-step's du/dv) after the first sub-step")
+            # dyn_core.F90:304-309: du/dv zeroed at init_step
+            pg_prev = {"du": jnp.zeros_like(state["u"]),
+                       "dv": jnp.zeros_like(state["v"])}
+    elif pg_prev is not None:
+        raise ValueError("acoustic_substep_3d: pg_prev given with beta = 0")
+    beta_d = 0.0 if first_substep else beta   # :440-444
 
     tab = _duo_tables(ctx)
     # Sub-face WINDOW lane (fv3_duo_windows): every horizontal array's seam
@@ -564,7 +598,9 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
                                         cp_air=cp_air, a2b_ord=a2b_ord,
                                         remap_step=remap_step,
                                         remap_follows=remap_follows,
-                                        hydrostatic_logp=hydrostatic_logp)
+                                        hydrostatic_logp=hydrostatic_logp,
+                                        beta=beta, beta_d=beta_d,
+                                        pg_prev=pg_prev)
         # u/v are one_grad_p's updated winds (the S17 payload); the
         # press dict also carries pk_remap IFF remap_step (the spec's
         # press contract: "plus pk_remap on a remap step").
@@ -630,8 +666,9 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         stages["S16"] = {"pk": press["pk_pre_onegradp"],
                          "gz": press["gz_pre_onegradp"]}
 
+    pg = ({"du": press["du"], "dv": press["dv"]} if beta > 0.0 else None)
     return {"state": state, "nh": nh, "flux_cap": flux_cap,
-            "press": press, "stages": stages}
+            "press": press, "stages": stages, "pg": pg}
 
 
 # =====================================================================
@@ -641,7 +678,7 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
 # (Part A) and the phase modules it assembles.
 #
 # Part A contract relied on below:
-#   acoustic_substep_3d(...) -> (state, nh, flux_cap, press, stages)
+#   acoustic_substep_3d(...) -> (state, nh, flux_cap, press, stages, pg)
 #     state     face-stacked dict (C1), rebuilt functionally;
 #     nh        the NH carry dict (None when hydrostatic);
 #     flux_cap  the six-face tracer flux capacitor this sub-step
@@ -718,7 +755,7 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
                      remap_follows=False, hydrostatic=True, nh=None,
                      p_fac=0.05, a_imp=1.0, dp0=None, use_logp=False,
                      flux_cap=None, batched: bool = False,
-                     hydrostatic_logp: bool = False):
+                     hydrostatic_logp: bool = False, beta: float = 0.0):
     """``do it = 1, n_split`` -- one outer dynamics step, JAX lane.
 
     ``dt = bdt/n_split`` (dyn_core.F90:249); the shipped duo decks run
@@ -768,6 +805,13 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
 
     ``hydrostatic=False`` with ``nh=None`` builds the carry from
     ``ctx.hs6`` via build_nh_carry (``zs = phis / grav``, D5).
+
+    ``beta`` (STATIC): FV3's hydrostatic PG off-centering
+    (grad1_p_update, dyn_core.F90:1528).  The ``du``/``dv`` PG increment
+    rides the sub-step carry; it starts at zero on ``it == 1`` with
+    ``beta_d = 0`` there (:304-309, :440-444), so nothing crosses a
+    call of this routine (one dyn_core call) -- exactly the Fortran's
+    lifetime, since the ``it == 1`` weight is zero.
     """
     # The f64 gate belongs on the ARRAYS, and it runs inside
     # acoustic_substep_3d on the state and the carry.  The first draft
@@ -798,7 +842,7 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
         nh = build_nh_carry(ctx, km, hs6)
     dt = dt_atmos / float(n_split)
 
-    def _sub(state_, nh_, flux_cap_, first, remap):
+    def _sub(state_, nh_, flux_cap_, pg_, first, remap):
         # Single call site for all three positions.  `first` / `remap`
         # are static Python bools -- a loop-index predicate is a static
         # partition here, never jnp.where (R2).
@@ -807,20 +851,20 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
             akap=akap, cp_air=cp_air, cfg=cfg, remap_step=remap,
             remap_follows=remap_follows, hydrostatic=hydrostatic, nh=nh_,
             p_fac=p_fac, a_imp=a_imp, dp0=dp0, use_logp=use_logp,
-            hydrostatic_logp=hydrostatic_logp,
+            hydrostatic_logp=hydrostatic_logp, beta=beta, pg_prev=pg_,
             flux_cap=flux_cap_, batched=batched)
         # Part A returns a DICT, not the 5-tuple this part was authored
         # against: the two halves were written in separate calls and the
         # seam is exactly where a contract goes missing.  Unpacked ONCE,
         # here, so the three call sites below stay unchanged.
-        return (out["state"], out["nh"], out["flux_cap"],
+        return (out["state"], out["nh"], out["flux_cap"], out["pg"],
                 out["press"], out["stages"])
 
     # --- sub-step 1 (it = 1) is peeled: first_substep=True is a
     # different program from the middle.  When n_split == 1 it is ALSO
     # the remap step, so the flag is this static Python bool.
-    state, nh, flux_cap, press, stages_first = _sub(
-        state, nh, flux_cap, True, n_split == 1)
+    state, nh, flux_cap, pg, press, stages_first = _sub(
+        state, nh, flux_cap, None, True, n_split == 1)
     stages_last = stages_first
     if check_state:
         _check_substep_state(state, ctx, km, 1, n_split, hydrostatic,
@@ -832,8 +876,8 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
             # validate it, so it runs the IDENTICAL middle program in a
             # Python loop instead of a scan.
             for it in range(2, n_split):
-                state, nh, flux_cap, _press, _stages = _sub(
-                    state, nh, flux_cap, False, False)
+                state, nh, flux_cap, pg, _press, _stages = _sub(
+                    state, nh, flux_cap, pg, False, False)
                 _check_substep_state(state, ctx, km, it, n_split,
                                      hydrostatic, remap_follows)
         else:
@@ -845,20 +889,20 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
             # press_out receives only the remap-step bundle.  Middle
             # stage payloads are dropped (see docstring).
             def _middle(carry, _):
-                st, nhc, capc = carry
-                st, nhc, capc, _press, _stages = _sub(
-                    st, nhc, capc, False, False)
-                return (st, nhc, capc), None
+                st, nhc, capc, pgc = carry
+                st, nhc, capc, pgc, _press, _stages = _sub(
+                    st, nhc, capc, pgc, False, False)
+                return (st, nhc, capc, pgc), None
 
-            (state, nh, flux_cap), _ = lax.scan(
-                _middle, (state, nh, flux_cap), None,
+            (state, nh, flux_cap, pg), _ = lax.scan(
+                _middle, (state, nh, flux_cap, pg), None,
                 length=n_split - 2)
 
     if n_split > 1:
         # --- sub-step n_split is peeled: remap_step=True is a different
         # program from the middle (pk snapshot; pe_halo on the NH tail).
-        state, nh, flux_cap, press, stages_last = _sub(
-            state, nh, flux_cap, False, True)
+        state, nh, flux_cap, pg, press, stages_last = _sub(
+            state, nh, flux_cap, pg, False, True)
         if check_state:
             _check_substep_state(state, ctx, km, n_split, n_split,
                                  hydrostatic, remap_follows)
@@ -871,7 +915,8 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
 def make_acoustic_loop_3d_jit(ctx, km, *, n_split, ptop, akap, cp_air,
                               cfg=None, check_state=False,
                               remap_follows=False, hydrostatic=True,
-                              use_logp=False, p_fac=0.05, a_imp=1.0):
+                              use_logp=False, p_fac=0.05, a_imp=1.0,
+                              beta: float = 0.0):
     """jit factory for acoustic_loop_3d (one per public routine).
 
     STATIC, captured here (a change recompiles): ctx, km, n_split (a
@@ -915,6 +960,6 @@ def make_acoustic_loop_3d_jit(ctx, km, *, n_split, ptop, akap, cp_air,
             akap=akap, cp_air=cp_air, cfg=cfg, check_state=False,
             remap_follows=remap_follows, hydrostatic=hydrostatic, nh=nh,
             p_fac=p_fac, a_imp=a_imp, dp0=dp0, use_logp=use_logp,
-            flux_cap=flux_cap)
+            flux_cap=flux_cap, beta=beta)
 
     return jax.jit(_loop)

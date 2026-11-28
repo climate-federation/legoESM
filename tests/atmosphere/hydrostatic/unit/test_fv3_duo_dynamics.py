@@ -393,6 +393,7 @@ class TestFV3DuoDynamicsModel:
             FV3DuoConfig,
             FV3DuoDynamicsModel,
             duo_sw_deck,
+            resolve_pgrad_beta,
         )
         from legoesm.core.fv3_dynamics import make_fv_dynamics_step_jit
         from legoesm.grids.fv3_native_gridstruct import (
@@ -422,7 +423,10 @@ class TestFV3DuoDynamicsModel:
             cfg=duo_sw_deck(**{k: getattr(wet.config, k) for k in (
                 "nord", "d4_bg", "sponge_del2_top_layers",
                 "sponge_del2_top_factor", "sponge_d2_top")}),
-            zvir=wet.zvir, sphum_index=0)
+            zvir=wet.zvir, sphum_index=0,
+            # the model's resolved PG off-centering (production 0.4,
+            # user approved 2026-11-28; FV3DuoConfig.beta)
+            beta=resolve_pgrad_beta(wet.config))
         ref = core(ic_w["state"], ic_w["press"], ic_w["q"], BDT,
                    ic_w["omga"], ic_w["nh"])
         for nm in ("delp", "pt", "u", "v"):
@@ -546,7 +550,12 @@ class TestComponentFactoryDispatch:
         oracle.validate_strict()
         model = create_atmosphere_dycore(oracle, create_cubed_sphere(N),
                                          create_sigma_coordinate(KM))
-        assert {k: getattr(model.config, k) for k in ORACLE_DAMPING} == ORACLE_DAMPING
+        # the five DAMPING fields; the driver has no PG-beta knob, so a
+        # driver-built model runs the production beta (0.4, user approved
+        # 2026-11-28), not the oracle deck's 0.0 -- asserted, not hidden
+        damping = {k: v for k, v in ORACLE_DAMPING.items() if k != "beta"}
+        assert {k: getattr(model.config, k) for k in damping} == damping
+        assert model.config.beta is None
         sponge = base._replace(dycore=base.dycore._replace(
             fv3_duo_sponge_layers=1, fv3_duo_sponge_factor=4.0,
             fv3_duo_sponge_d2_top=0.01))

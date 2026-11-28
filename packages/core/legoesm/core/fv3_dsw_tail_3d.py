@@ -70,6 +70,7 @@ from legoesm.core.fv3_native_state_3d import (
 from legoesm.core.fv3_nh_core import riem_solver3, update_dz_d
 from legoesm.core.fv3_pgrad import (
     geopk,
+    grad1_p_update,
     nh_p_grad,
     one_grad_p,
     pe_halo,
@@ -552,10 +553,34 @@ def make_dsw_tail_phase_3d_jit(ctx, km, *, cfg: SWConfig | None = None,
 # ============================================================================
 
 
+def require_pgrad_beta(fname, beta, beta_d, pg_prev):
+    """Screen FV3's hydrostatic PG off-centering knobs (dyn_core.F90:
+    1528, :440-444): ``beta`` (the namelist value, selects the
+    grad1_p_update arm when > 0) and ``beta_d`` (this sub-step's
+    weight: 0 on ``it == 1``, else ``beta``) are STATIC floats in
+    [0, 1]; ``pg_prev`` (``{"du", "dv"}``) is required iff beta > 0 and
+    must be None otherwise.  Returns ``(float(beta), float(beta_d))``."""
+    for _nm, _v in (("beta", beta), ("beta_d", beta_d)):
+        if isinstance(_v, (jax.Array, bool)) or not isinstance(
+                _v, (int, float)) or not (0.0 <= float(_v) <= 1.0):
+            raise ValueError(f"{fname}: {_nm} must be a static float in "
+                             f"[0, 1], got {_v!r}")
+    beta, beta_d = float(beta), float(beta_d)
+    if beta_d not in (0.0, beta):
+        raise ValueError(f"{fname}: beta_d must be 0 (it == 1) or beta "
+                         f"({beta}), got {beta_d}")
+    if (beta > 0.0) != (pg_prev is not None):
+        raise ValueError(f"{fname}: pg_prev (the previous sub-step's "
+                         f"du/dv) is required iff beta > 0; beta={beta}, "
+                         f"pg_prev is {'set' if pg_prev is not None else 'None'}")
+    return beta, beta_d
+
+
 def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
                             cp_air, a2b_ord=4, d_ext=0.0, remap_step=False,
                             remap_follows=False, batched=False,
-                            hydrostatic_logp=False):
+                            hydrostatic_logp=False, beta=0.0, beta_d=0.0,
+                            pg_prev=None):
     """D-grid ``geopk`` (dyn_core.F90:1401) then ``one_grad_p`` (:1531).
 
     JAX twin of the spec routine of the same name.  No numerics live
@@ -589,6 +614,16 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
     per face per sub-step on the OPTION path only (XLA can drop it where
     the returned ``pk`` is dead; no hydrostatic consumer reads it -- the
     remap takes ``pk_remap``).  ``pk_remap``/S16 are unchanged.
+
+    ``beta`` / ``beta_d`` / ``pg_prev`` (STATIC floats + a traced carry):
+    FV3's hydrostatic PG off-centering, dyn_core.F90:1528-1531 --
+    ``beta > 0`` dispatches ``grad1_p_update(..., beta_d)`` instead of
+    ``one_grad_p``; ``beta_d`` is 0 on sub-step ``it == 1`` and ``beta``
+    after (:440-444, the caller's cadence).  ``pg_prev`` is the stacked
+    ``{"du", "dv"}`` PG increment of the previous sub-step (zeros on
+    ``it == 1``, :304-309), required iff ``beta > 0``; the new increment
+    is returned as ``du``/``dv``.  ``beta = 0`` (default) is the
+    unchanged one_grad_p path and returns no ``du``/``dv``.
 
     Returns ONE face-stacked dict (C1; the spec returns a list of six
     per-face dicts), level axis at position 2:
@@ -625,6 +660,7 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
     require_bool(fname, "remap_follows", remap_follows)
     require_bool(fname, "batched", batched)
     require_bool(fname, "hydrostatic_logp", hydrostatic_logp)
+    beta, beta_d = require_pgrad_beta(fname, beta, beta_d, pg_prev)
     # Rule 5: a2b_ord is a static scheme selector; one_grad_p's arms
     # are a2b_ord2 (the d_ext branch) and _a2b_ord4_k -- any other
     # value selects no arm.
@@ -643,6 +679,12 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
                      what="dsw_outs (D-grid transport output, DSW1_OUT_2D keys)")
     validate_stacked(fname, tail_outs, ctx, km, ("u", "v"),
                      what="tail_outs (d_sw6 winds)")
+    if beta > 0.0 and (
+            jnp.shape(pg_prev["du"]) != jnp.shape(tail_outs["u"])
+            or jnp.shape(pg_prev["dv"]) != jnp.shape(tail_outs["v"])):
+        raise ValueError(f"{fname}: pg_prev du/dv must be stacked like the "
+                         f"winds {jnp.shape(tail_outs['u'])}/"
+                         f"{jnp.shape(tail_outs['v'])}")
     require_f64_jax(fname, {"delp": dsw_outs["delp"],
                             "pt": dsw_outs["pt"],
                             "u": tail_outs["u"],
@@ -659,7 +701,8 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
         return _dgrid_pressure_phase_3d_batched(
             ctx, dsw_outs, tail_outs, km, dt=dt, ptop=ptop, akap=akap,
             cp_air=cp_air, a2b_ord=a2b_ord, d_ext=d_ext,
-            remap_step=remap_step, hydrostatic_logp=hydrostatic_logp)
+            remap_step=remap_step, hydrostatic_logp=hydrostatic_logp,
+            beta=beta, beta_d=beta_d, pg_prev=pg_prev)
 
     per_face = []
     for t in range(batch_size(ctx)):
@@ -692,13 +735,22 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
         # divg2 freshly zero per face, exactly the spec's loop body.
         # dtype follows storage (fp32/fp64), from dsw_outs["delp"]
         divg2 = jnp.zeros((m + 1, m + 1), dtype=dsw_outs["delp"].dtype)
-        u_t, v_t, pk_t, gz_t = one_grad_p(
-            tail_outs["u"][t], tail_outs["v"][t],
-            got["lnp"] if hydrostatic_logp else got["pk"], got["gz"],
-            divg2, dsw_outs["delp"][t], ctx.gs6[t], bd,
-            npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
-            akap=akap, hydrostatic=True, a2b_ord=a2b_ord, d_ext=d_ext,
-            ng=ng, duogrid=True, logp=hydrostatic_logp)
+        if beta > 0.0:   # dyn_core.F90:1528-1529 (static dispatch)
+            u_t, v_t, pk_t, gz_t, du_t, dv_t = grad1_p_update(
+                divg2, tail_outs["u"][t], tail_outs["v"][t],
+                got["lnp"] if hydrostatic_logp else got["pk"], got["gz"],
+                pg_prev["du"][t], pg_prev["dv"][t], ctx.gs6[t], bd,
+                npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
+                akap=akap, beta=beta_d, a2b_ord=a2b_ord,
+                ng=ng, duogrid=True, logp=hydrostatic_logp)
+        else:            # :1531
+            u_t, v_t, pk_t, gz_t = one_grad_p(
+                tail_outs["u"][t], tail_outs["v"][t],
+                got["lnp"] if hydrostatic_logp else got["pk"], got["gz"],
+                divg2, dsw_outs["delp"][t], ctx.gs6[t], bd,
+                npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
+                akap=akap, hydrostatic=True, a2b_ord=a2b_ord, d_ext=d_ext,
+                ng=ng, duogrid=True, logp=hydrostatic_logp)
         if hydrostatic_logp:
             # the scratched plane was ln p: rebuild the contract's B-corner
             # pk with the option-off call (winds discarded; docstring)
@@ -715,6 +767,8 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
                 "gz_pre_onegradp": gz_pre}
         if remap_step:
             face["pk_remap"] = pk_remap           # spec's gating, kept exact
+        if beta > 0.0:
+            face["du"], face["dv"] = du_t, dv_t   # grad1_p_update carry
         per_face.append(face)
     return stack_faces(fname, per_face)
 
@@ -722,7 +776,8 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
 def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
                                      dt, ptop, akap, cp_air, a2b_ord,
                                      d_ext, remap_step,
-                                     hydrostatic_logp=False) -> dict:
+                                     hydrostatic_logp=False, beta=0.0,
+                                     beta_d=0.0, pg_prev=None) -> dict:
     """The vmap-over-faces arm of :func:`dgrid_pressure_phase_3d` (C2a).
 
     Entry gates already ran in the caller.  One ``jax.vmap`` replaces
@@ -747,7 +802,7 @@ def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
     hs_stack = (jnp.asarray(hs6) if hs6 is not None
                 else jnp.zeros((6, m, m), dtype=dsw_outs["delp"].dtype))
 
-    def one_face(delp_t, pt_t, hs_t, u_t, v_t, gs_t):
+    def one_face(delp_t, pt_t, hs_t, u_t, v_t, gs_t, du_t=None, dv_t=None):
         got = geopk(delp_t, pt_t, hs_t, bd, km=km, ptop=ptop,
                     akap=akap, cp_air=cp_air, cg=False, duogrid=True,
                     computehalo=False, npx=bd.ie + 1, npy=bd.je + 1,
@@ -756,12 +811,21 @@ def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
         pk_pre, gz_pre = got["pk"], got["gz"]
         # dtype follows storage (fp32/fp64), from delp_t
         divg2 = jnp.zeros((m + 1, m + 1), dtype=delp_t.dtype)
-        u_o, v_o, pk_t, gz_t = one_grad_p(
-            u_t, v_t, got["lnp"] if hydrostatic_logp else got["pk"],
-            got["gz"], divg2, delp_t, gs_t, bd,
-            npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
-            akap=akap, hydrostatic=True, a2b_ord=a2b_ord, d_ext=d_ext,
-            ng=ng, duogrid=True, logp=hydrostatic_logp)
+        if beta > 0.0:   # dyn_core.F90:1528-1529 (see the loop path)
+            u_o, v_o, pk_t, gz_t, du_o, dv_o = grad1_p_update(
+                divg2, u_t, v_t,
+                got["lnp"] if hydrostatic_logp else got["pk"], got["gz"],
+                du_t, dv_t, gs_t, bd,
+                npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
+                akap=akap, beta=beta_d, a2b_ord=a2b_ord,
+                ng=ng, duogrid=True, logp=hydrostatic_logp)
+        else:
+            u_o, v_o, pk_t, gz_t = one_grad_p(
+                u_t, v_t, got["lnp"] if hydrostatic_logp else got["pk"],
+                got["gz"], divg2, delp_t, gs_t, bd,
+                npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
+                akap=akap, hydrostatic=True, a2b_ord=a2b_ord, d_ext=d_ext,
+                ng=ng, duogrid=True, logp=hydrostatic_logp)
         if hydrostatic_logp:
             # B-corner pk for the contract (see the loop path)
             _, _, pk_t, _ = one_grad_p(
@@ -776,11 +840,15 @@ def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
                 "gz_pre_onegradp": gz_pre}
         if remap_step:   # static config value: stays a Python if
             face["pk_remap"] = pk_pre
+        if beta > 0.0:
+            face["du"], face["dv"] = du_o, dv_o
         return face
 
-    return jax.vmap(one_face, in_axes=(0,) * 6)(
-        dsw_outs["delp"], dsw_outs["pt"], hs_stack,
-        tail_outs["u"], tail_outs["v"], bview["gs"])
+    args = (dsw_outs["delp"], dsw_outs["pt"], hs_stack,
+            tail_outs["u"], tail_outs["v"], bview["gs"])
+    if beta > 0.0:
+        args = args + (pg_prev["du"], pg_prev["dv"])
+    return jax.vmap(one_face, in_axes=(0,) * len(args))(*args)
 
 
 # ---------------------------------------------------------------------------
