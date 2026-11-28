@@ -2852,7 +2852,7 @@ def test_o8_production_c1d_plants_fire(probe_module, monkeypatch, plant):
 
 
 def _forward_mode_patches(mp, bl_mod):
-    # Forward mode needs the undecorated tridiagonal solve and a fixed-count Picard loop.
+    # Forward mode needs the undecorated tridiagonal solve and fixed-count loops.
     mp.setattr(bl_mod, "thomas_solve", _thomas_solve_impl)
-    mp.setattr(bl_mod, "_bl99_early_exit_loop",
-               lambda body, init, n: jax.lax.fori_loop(0, n, body, init))
+    mp.setattr(bl_mod, "_early_exit_loop",
+               lambda n, more, body, init: jax.lax.fori_loop(0, n, body, init))

@@ -3455,9 +3455,9 @@ def _si3_ice_thd_sal4_core(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i,
             sal_min = jnp.where(active, sal_min_next, sal_min)
         return salinity, salt_flux, cfl_max, sal_min
 
-    sz_i, sfx_bri, cfl_drain, smin_drain = jax.lax.fori_loop(
-        0,
+    sz_i, sfx_bri, cfl_drain, smin_drain = _early_exit_loop(
         nn_drainage,
+        lambda s: s[0] < jnp.max(ndrain, initial=0),
         jax.checkpoint(drainage_body),
         (sz_i, sfx_bri, zero, zero),
     )
@@ -4303,14 +4303,23 @@ __all__ = tuple(dict.fromkeys(__all__ + (
 )))
 
 
-def _bl99_early_exit_loop(body, init, max_passes):
-    # ponytail: at file end so receipt line pins hold; post-convergence passes are no-ops.
+def _early_exit_loop(max_passes, more, body, init):
+    # ponytail: at file end so receipt line pins hold; passes once `more` is False must be no-ops.
+    import operator
+
     import equinox.internal as eqxi
 
+    max_passes = operator.index(max_passes)
+    if max_passes <= 0:
+        return init
     return eqxi.while_loop(
-        lambda s: (s[0] < max_passes) & ~jnp.all(s[1][9]),
+        lambda s: (s[0] < max_passes) & more(s),
         lambda s: (s[0] + 1, body(s[0], s[1])),
         (jnp.int32(0), init),
         kind="checkpointed",
         max_steps=max_passes,
     )[1]
+
+
+def _bl99_early_exit_loop(body, init, max_passes):
+    return _early_exit_loop(max_passes, lambda s: ~jnp.all(s[1][9]), body, init)
