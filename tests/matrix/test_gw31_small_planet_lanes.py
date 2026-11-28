@@ -242,7 +242,8 @@ def test_ico_lane_runs_the_small_planet(mm, monkeypatch, tmp_path):
     # the lane's other settings: the ordinary ico rows' (named)
     assert cfg.time_integrator == "ssp_rk3"      # the matrix ico default
     assert cfg.vert_advection_scheme == "sb"
-    assert cfg.nu_del2 == 0.0 and cfg.fix_mass and cfg.anchor_mass_to_initial
+    # fp64 matrix: no mass fixer (fp64 ICs conserve to roundoff, commit 4bcfab1aeb)
+    assert cfg.nu_del2 == 0.0 and not cfg.fix_mass and not cfg.anchor_mass_to_initial
     T_ref = np.asarray(gw.gravity_wave_init_mpas(mesh, sigma).T.data)
     np.testing.assert_array_equal(np.asarray(s["state"].T.data), T_ref)
     np.testing.assert_array_equal(
